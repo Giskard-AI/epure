@@ -1,0 +1,62 @@
+name: "EPURE Authorize Issue Command"
+description: "Pre-bundled TypeScript (Node.js 22+) Custom Action verifying effective collaborator permission (write/admin), ignoring bots, and scrubbing secrets before executing any issue command."
+author: "Giskard-AI"
+inputs:
+  repository:
+    description: "Target GitHub repository slug (<owner>/<repo>)"
+    required: true
+  issue_number:
+    description: "GitHub Issue number where the command was posted"
+    required: true
+  comment_body:
+    description: "Raw Markdown body of the issue comment"
+    required: true
+  actor:
+    description: "GitHub username (login) of the comment author"
+    required: true
+  actor_type:
+    description: "GitHub user type ('User' or 'Bot')"
+    required: false
+    default: "User"
+  author_association:
+    description: "Untrusted GitHub author_association field (logged for audit only, never used to grant access)"
+    required: false
+    default: "NONE"
+  issue_labels:
+    description: "Comma-separated issue labels (untrusted, never used to grant access)"
+    required: false
+    default: ""
+  effective_permission:
+    description: "Pre-fetched collaborator effective permission ('write', 'admin', 'maintain', 'read', 'triage', 'none') when github_token is not used"
+    required: false
+    default: ""
+  github_token:
+    description: "GitHub token used to query GET /repos/{owner}/{repo}/collaborators/{username}/permission when effective_permission is not pre-supplied"
+    required: false
+    default: ""
+outputs:
+  authorized:
+    description: "'true' if the command is authorized for execution, 'false' otherwise"
+  decision:
+    description: "Gate decision ('authorized', 'ignored_bot', 'ignored_no_command', 'denied_unsupported_command', 'denied_invalid_repository', 'denied_insufficient_permission')"
+  command:
+    description: "Parsed EPURE command ('status', 'plan', 'approve', 'cancel', or empty)"
+  command_args:
+    description: "Sanitized command arguments"
+  effective_permission:
+    description: "Verified effective permission on the target repository"
+  privileged_action_allowed:
+    description: "'true' if privileged repository actions are allowed, 'false' otherwise"
+  llm_call_allowed:
+    description: "'true' if LLM invocation is allowed, 'false' otherwise"
+  should_post_response:
+    description: "'true' if a diagnostic or refusal response should be posted, 'false' for ignored bots/non-commands"
+  error_code:
+    description: "Structured error code ('NONE', 'BOT_ACTOR_IGNORED', 'NO_COMMAND_FOUND', 'UNSUPPORTED_COMMAND', 'INVALID_REPOSITORY_SLUG', 'INSUFFICIENT_EFFECTIVE_PERMISSION', 'PERMISSION_CHECK_FAILED')"
+  error_message:
+    description: "Secret-scrubbed diagnostic message when denied"
+  response_markdown:
+    description: "Secret-scrubbed Markdown summary suitable for issue comment or check summary"
+runs:
+  using: "node22"
+  main: "../../dist/actions/authorize-command/index.mjs"
