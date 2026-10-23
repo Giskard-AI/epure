@@ -1,0 +1,29 @@
+name: "EPURE Run Sandboxed Command"
+description: "Executes untrusted consumer code or agent harness commands inside an isolated environment with a runner-side LLM proxy sidecar holding API keys in memory."
+author: "Giskard AI"
+inputs:
+  command:
+    description: "Executable command to run inside the sandbox"
+    required: true
+  args_json:
+    description: "JSON array of command arguments"
+    required: false
+    default: "[]"
+  isolation_available:
+    description: "Whether container/process sandbox isolation is available on the runner"
+    required: false
+    default: "true"
+outputs:
+  isolated:
+    description: "true when sandbox isolation and secret stripping succeeded"
+  error_code:
+    description: "NONE or structured error code (e.g., SANDBOX_ISOLATION_UNAVAILABLE)"
+  exit_code:
+    description: "Process exit code inside the sandbox"
+  stdout:
+    description: "Scrubbed stdout from the sandboxed command"
+  stderr:
+    description: "Scrubbed stderr from the sandboxed command"
+runs:
+  using: "node20"
+  main: "../../dist/actions/run-sandboxed/index.mjs"
