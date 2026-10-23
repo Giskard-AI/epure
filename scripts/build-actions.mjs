@@ -19,6 +19,10 @@ const actionTargets = [
     outFile: resolve(rootDir, "dist/actions/verify-app-role/index.mjs")
   },
   {
+    entryPoint: resolve(rootDir, "actions/publish-agent-output/index.ts"),
+    outFile: resolve(rootDir, "dist/actions/publish-agent-output/index.mjs")
+  },
+  {
     entryPoint: resolve(rootDir, "src/bootstrap/cli.ts"),
     outFile: resolve(rootDir, "dist/cli/setup-repo.mjs")
   }
