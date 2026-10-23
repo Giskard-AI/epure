@@ -1,6 +1,6 @@
 # EPURE (`Giskard-AI/epure`) — Spécification fonctionnelle et technique V1
 
-**Statut :** approuvée (`ready-for-agent`) — prête à publication sur l'issue tracker GitHub (`Giskard-AI/epure`).  
+**Statut :** publiée sur GitHub Issues ([#1](https://github.com/Giskard-AI/epure/issues/1)) avec le label `ready-for-agent`.  
 **Origine :** entretien `/grill-with-docs` (Q1–Q83), glossaire du domaine et ADR-0001 à ADR-0025.  
 **Périmètre :** framework open source GitHub-first de développement semi-automatisé (`EPURE` — *Engineered Planning, Unified Review & Execution* / *Élaboration de Plans, Usinage, Revue et Exécution*), distribué sous forme de Reusable Workflows, de Custom Actions TypeScript (Node.js 22+) et de skills.  
 **Frontière de test privilégiée :** événement GitHub → autorisation et état vérifiés (`refs/epure/state/*`) → exécution isolée → effets observables dans GitHub.

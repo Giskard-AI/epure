@@ -1,6 +1,6 @@
 # `/to-tickets` — Proposition de découpage V1 (`EPURE` / `Giskard-AI/epure`)
 
-**Statut :** approuvé (`ready-for-agent`) — découpage validé le 23 octobre 2026 ; prêt à publication sur GitHub (`Giskard-AI/epure`).
+**Statut :** approuvé et publié sur GitHub (`Giskard-AI/epure`) — spec parente [#1](https://github.com/Giskard-AI/epure/issues/1) et 38 sous-issues ([#2](https://github.com/Giskard-AI/epure/issues/2) à [#39](https://github.com/Giskard-AI/epure/issues/39), soit `#N = id_local + 1`) étiquetées `ready-for-agent` avec relations natives `sub_issues` et `blocked_by`.
 
 **Source :** spec V1 et ADR-0001 à ADR-0025 (Q1–Q83). **Approche :** tranches verticales testables, dépendances bloquantes minimales.
 

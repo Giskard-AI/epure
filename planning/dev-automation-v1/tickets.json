@@ -1,5 +1,7 @@
 {
-  "status": "ready-for-agent",
+  "status": "published-ready-for-agent",
+  "github_spec_issue": 1,
+  "github_ticket_issue_offset": 1,
   "source": "EPURE (Giskard-AI/epure) V1 spec (Q1-Q83, ADR-0001 to ADR-0025)",
   "tickets": [
     {
