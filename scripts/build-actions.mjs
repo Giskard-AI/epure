@@ -27,6 +27,10 @@ const actionTargets = [
     outFile: resolve(rootDir, "dist/actions/run-sandboxed/index.mjs")
   },
   {
+    entryPoint: resolve(rootDir, "actions/run-agent/index.ts"),
+    outFile: resolve(rootDir, "dist/actions/run-agent/index.mjs")
+  },
+  {
     entryPoint: resolve(rootDir, "src/bootstrap/cli.ts"),
     outFile: resolve(rootDir, "dist/cli/setup-repo.mjs")
   }
