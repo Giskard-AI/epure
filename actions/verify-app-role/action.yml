@@ -1,0 +1,52 @@
+name: "EPURE Verify GitHub App Role Separation"
+description: "Pre-bundled TypeScript (Node.js 22+) Custom Action enforcing strict privilege separation between the consumer Agent App and Release App, private key non-exposure, and human confirmation for elevated permission grants."
+author: "Giskard-AI"
+inputs:
+  app_role:
+    description: "GitHub App role being exercised ('agent' or 'release')"
+    required: true
+  operation:
+    description: "Operation requested ('issue_comment', 'push_branch', 'create_pull_request', 'create_check_run', 'promote_dev_to_main', 'create_release_tag', 'publish_github_release', 'grant_elevated_permission')"
+    required: true
+  target_ref:
+    description: "Target Git ref when pushing branches or tags (e.g., 'refs/heads/task/3-foo', 'refs/tags/v1.0.0')"
+    required: false
+    default: ""
+  workflow_path:
+    description: "Caller workflow path (e.g., '.github/workflows/release.yml')"
+    required: false
+    default: ""
+  environment_name:
+    description: "Deployment environment name (must be 'release' for Release App)"
+    required: false
+    default: ""
+  agent_app_id:
+    description: "Configured Agent App ID (to verify distinct identity from Release App)"
+    required: false
+    default: ""
+  release_app_id:
+    description: "Configured Release App ID (to verify distinct identity from Agent App)"
+    required: false
+    default: ""
+  human_confirmed:
+    description: "'true' when a human maintainer explicitly confirmed an elevated permission grant"
+    required: false
+    default: "false"
+  public_payload_text:
+    description: "Optional issue/comment/prompt payload scanned to guarantee no PEM private key is leaked"
+    required: false
+    default: ""
+outputs:
+  allowed:
+    description: "'true' if the App role is permitted to perform the operation, 'false' otherwise"
+  app_role:
+    description: "Normalized App role ('agent' or 'release')"
+  operation:
+    description: "Normalized operation name"
+  error_code:
+    description: "Structured error code ('NONE', 'PRIVATE_KEY_EXPOSED_IN_PUBLIC_PAYLOAD', 'IDENTICAL_APP_IDENTITY_FORBIDDEN', 'AGENT_APP_RELEASE_OPERATION_FORBIDDEN', 'AGENT_APP_PROTECTED_REF_FORBIDDEN', 'RELEASE_APP_OUTSIDE_RELEASE_WORKFLOW_FORBIDDEN', 'RELEASE_APP_NON_RELEASE_OPERATION_FORBIDDEN', 'HUMAN_CONFIRMATION_REQUIRED')"
+  error_message:
+    description: "Secret-scrubbed diagnostic message when blocked"
+runs:
+  using: "node22"
+  main: "../../dist/actions/verify-app-role/index.mjs"
