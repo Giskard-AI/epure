@@ -1,0 +1,86 @@
+flowchart LR
+  T01["01: Consommer un workflow et une action publ"]
+  T02["02: Rpondre  une commande dissue autorise"]
+  T03["03: Installer deux GitHub Apps  rles distinc"]
+  T04["04: Initialiser et reconfigurer un dpt avec "]
+  T05["05: Publier une proposition dagent sans lui "]
+  T06["06: Bloquer la lecture de credentials depuis"]
+  T07["07: Implmenter un premier ticket avec Pi"]
+  T08["08: Remplacer Pi par Codex sur le mme ticket"]
+  T09["09: Reprendre une conversation GitHub depuis"]
+  T10["10: Traiter les commentaires dans lordre une"]
+  T11["11: Router une issue vers les skills Matt Po"]
+  T12["12: Versionner les dcisions proposes et leur"]
+  T13["13: Transformer une spec en sous-issues dpen"]
+  T14["14: Approuver un graphe prcis sans autorisat"]
+  T15["15: Dtecter une spec devenue obsolte avant i"]
+  T16["16: Dmarrer uniquement les tickets prts sur "]
+  T17["17: Publier une review IA indpendante lie au"]
+  T18["18: Merger automatiquement un ticket ordinai"]
+  T19["19: Autoriser une base en retard uniquement "]
+  T20["20: Retenir les changements sensibles pour u"]
+  T21["21: Intgrer une feature termine  dev avec re"]
+  T22["22: Librer les tickets dpendants sur rsoluti"]
+  T23["23: Reprendre une orchestration sans doublon"]
+  T24["24: Grer checs rpts et rgressions de feature"]
+  T25["25: Respecter rate limits et quotas LLM sans"]
+  T26["26: Contrler les PR Renovate vers dev et leu"]
+  T27["27: Corriger une migration Renovate choue se"]
+  T28["28: Faire chouer une CI sur un workflow vuln"]
+  T29["29: Tracer un vnement dagent sans exposer se"]
+  T30["30: Auditer les autorisations de lorchestrat"]
+  T31["31: laborer un design Impeccable dans lentre"]
+  T32["32: Prototyper une incertitude sans rutilise"]
+  T33["33: Publier et nettoyer une preview statique"]
+  T34["34: Bloquer les nouvelles violations Impecca"]
+  T35["35: Comparer visuellement deux versions sans"]
+  T36["36: Promouvoir dev vers main par fast-forwar"]
+  T37["37: Reprendre une release partielle et rintg"]
+  T38["38: Publier une version SemVer et proposer s"]
+  T01 --> T02
+  T02 --> T03
+  T03 --> T04
+  T03 --> T05
+  T05 --> T06
+  T04 --> T07
+  T06 --> T07
+  T07 --> T08
+  T05 --> T09
+  T09 --> T10
+  T10 --> T11
+  T11 --> T12
+  T12 --> T13
+  T13 --> T14
+  T04 --> T14
+  T14 --> T15
+  T07 --> T16
+  T15 --> T16
+  T16 --> T17
+  T17 --> T18
+  T18 --> T19
+  T17 --> T20
+  T19 --> T21
+  T20 --> T21
+  T18 --> T22
+  T22 --> T23
+  T22 --> T24
+  T07 --> T25
+  T04 --> T26
+  T26 --> T27
+  T07 --> T27
+  T04 --> T28
+  T05 --> T29
+  T29 --> T30
+  T28 --> T30
+  T12 --> T31
+  T31 --> T32
+  T32 --> T33
+  T04 --> T33
+  T04 --> T34
+  T31 --> T34
+  T32 --> T35
+  T34 --> T35
+  T21 --> T36
+  T28 --> T36
+  T36 --> T37
+  T28 --> T38

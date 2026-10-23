@@ -1,0 +1,1051 @@
+{
+  "status": "ready-for-agent",
+  "source": "EPURE (Giskard-AI/epure) V1 spec (Q1-Q83, ADR-0001 to ADR-0025)",
+  "tickets": [
+    {
+      "id": 1,
+      "phase": "Distribution",
+      "title": "Consommer un workflow et une action publics",
+      "blocked": [],
+      "what": "Depuis un dépôt GitHub de démonstration, appeler indépendamment un Reusable Workflow et une Custom Action TypeScript pré-bundlée (Node.js 22+) distribués par Giskard-AI/epure et constater un résultat vérifiable, sans infrastructure centrale ni npm install à l'exécution chez le consommateur.",
+      "criteria": [
+        "Un dépôt consommateur public exécute le workflow réutilisable (Giskard-AI/epure/.github/workflows/...) sur son propre runner et obtient un check réussi.",
+        "Le même dépôt appelle séparément la Custom Action TypeScript pré-bundlée et observe une sortie documentée sans étape d'installation de dépendances.",
+        "Le paquet distribué contient une licence Apache-2.0, les attributions nécessaires et une documentation d’utilisation sans credentials partagés.",
+        "Le contrat public décrit les entrées, sorties, erreurs, permissions et la méthode de pinning par SHA complet."
+      ],
+      "stories": [
+        1,
+        2,
+        3,
+        14,
+        98
+      ],
+      "tests": [
+        32,
+        33
+      ],
+      "filename": "01-consommer-un-workflow-et-une-action-publics.md"
+    },
+    {
+      "id": 2,
+      "phase": "Sécurité & installation",
+      "title": "Répondre à une commande d’issue autorisée",
+      "blocked": [
+        1
+      ],
+      "what": "Un utilisateur disposant de la permission effective write lance une commande de diagnostic depuis une issue et reçoit une réponse GitHub ; un lecteur, un label ou un bot ne peuvent pas déclencher cette opération.",
+      "criteria": [
+        "Une commande d’un utilisateur write ou admin est acceptée après vérification de sa permission effective via GitHub.",
+        "Une commande d’un utilisateur read/triage, un rôle affiché ou un label trompeur ne provoque ni action privilégiée ni appel LLM.",
+        "Les commentaires des bots sont ignorés comme demandes humaines et ne créent aucune boucle.",
+        "Le résultat et le refus sont consultables depuis l’issue ou les checks sans divulguer de token."
+      ],
+      "stories": [
+        16,
+        17,
+        18,
+        23
+      ],
+      "tests": [
+        1,
+        2
+      ],
+      "filename": "02-repondre-a-une-commande-d-issue-autorisee.md"
+    },
+    {
+      "id": 3,
+      "phase": "Sécurité & installation",
+      "title": "Installer deux GitHub Apps à rôles distincts",
+      "blocked": [
+        2
+      ],
+      "what": "Un mainteneur équipe un dépôt consommateur de sa propre Agent App et Release App avec des permissions séparées, et vérifie qu’une identité de développement ne peut pas exercer le pouvoir de publication de release.",
+      "criteria": [
+        "L’assistant guide la création/installation des deux Apps, sans afficher leur clé privée dans une issue ou un prompt.",
+        "Un contrôle démontre que l’Agent App peut publier un commentaire autorisé mais pas pousser une release.",
+        "La Release App reste inaccessible aux agents ordinaires et est limitée au chemin de publication protégé.",
+        "Toute opération d’octroi de permission élevée requiert une confirmation humaine explicite."
+      ],
+      "stories": [
+        8,
+        9,
+        10,
+        97
+      ],
+      "tests": [
+        8,
+        31
+      ],
+      "filename": "03-installer-deux-github-apps-a-roles-distincts.md"
+    },
+    {
+      "id": 4,
+      "phase": "Sécurité & installation",
+      "title": "Initialiser et reconfigurer un dépôt avec setup-repo",
+      "blocked": [
+        3
+      ],
+      "what": "Un mainteneur exécute localement le skill setup-repo (et sa CLI TypeScript) sur un dépôt cible, prévisualise les changements, puis obtient un dépôt prêt à accueillir les agents (incluant .github/agents.yml avec les valeurs par défaut Q78 et les GitHub Repository Rulesets Q80) sans doublons lors d’un second passage.",
+      "criteria": [
+        "Le mode simulation présente les workflows, politiques, secrets attendus, Rulesets et protections sans rien modifier.",
+        "L’application guidée installe le minimum fonctionnel et signale les interventions humaines nécessaires.",
+        "La configuration locale (.github/agents.yml) choisit modèles, harness, concurrence et options (défauts : max_code_fix_attempts: 3, max_transient_api_retries: 4, job_timeout_minutes: 60 implémentation / 30 review, max_concurrent_tasks_per_feature: 3, trace_retention_days: 30) tout en respectant des restrictions de sécurité non affaiblissables.",
+        "Un second passage n’ajoute pas de ressource en double ; sans CI/protection minimale, l’auto-merge demeure désactivé.",
+        "Des secrets/variables d’organisation peuvent être utilisés dans un second dépôt sans lui déléguer plus de permissions."
+      ],
+      "stories": [
+        6,
+        7,
+        11,
+        12,
+        13
+      ],
+      "tests": [
+        31
+      ],
+      "filename": "04-initialiser-et-reconfigurer-un-depot-avec-setup-repo.md"
+    },
+    {
+      "id": 5,
+      "phase": "Sécurité & exécution",
+      "title": "Publier une proposition d’agent sans lui céder le token",
+      "blocked": [
+        3
+      ],
+      "what": "Un agent de démonstration propose une modification ou un commentaire ; un publisher isolé valide cette demande et l’applique avec un token d’installation temporaire et restreint.",
+      "criteria": [
+        "Le job agent ne reçoit aucune écriture GitHub et ne connaît pas la clé privée de l’App.",
+        "Le publisher refuse une opération hors périmètre, mal formée ou destinée à une branche protégée.",
+        "La proposition valide produit un commit/une PR ou un commentaire vérifiable, sans donner le token au processus agent.",
+        "Un token d’installation est limité au dépôt, aux permissions utiles et à la durée de publication."
+      ],
+      "stories": [
+        53
+      ],
+      "tests": [
+        8,
+        9
+      ],
+      "filename": "05-publier-une-proposition-d-agent-sans-lui-ceder-le-token.md"
+    },
+    {
+      "id": 6,
+      "phase": "Sécurité & exécution",
+      "title": "Bloquer la lecture de credentials depuis du code non fiable",
+      "blocked": [
+        5
+      ],
+      "what": "Un agent exécutant une commande ou un test provenant du dépôt consommateur tourne dans un conteneur isolé sans secret dans ses variables d'environnement et interroge le modèle via le proxy/sidecar LLM local sur le runner ; le code ou les tests ne peuvent jamais lire les credentials LLM, GitHub ou release.",
+      "criteria": [
+        "Un proxy/sidecar local sur le runner détient la clé LLM en mémoire pendant que l'agent et les sous-processus de test/build tournent dans un conteneur isolé sans secret dans process.env.",
+        "Un test adversarial tente d’exfiltrer les clés et échoue dans la sandbox réelle.",
+        "Les commandes de build/tests se terminent et leurs sorties utiles parviennent à l’agent hors des privilèges du publisher.",
+        "Si le runner ne fournit pas l’isolation exigée, l’exécution échoue fermée (fail-closed) plutôt que de continuer avec des secrets exposés."
+      ],
+      "stories": [
+        52
+      ],
+      "tests": [
+        9
+      ],
+      "filename": "06-bloquer-la-lecture-de-credentials-depuis-du-code-non-fiable.md"
+    },
+    {
+      "id": 7,
+      "phase": "Exécution IA",
+      "title": "Implémenter un premier ticket avec Pi",
+      "blocked": [
+        4,
+        6
+      ],
+      "what": "Sur un ticket de démonstration approuvé, Pi lit les critères du ticket, produit un changement de code et obtient une PR sur la branche de travail sans détenir de credential d’écriture.",
+      "criteria": [
+        "Le moteur Pi s’exécute sans interaction terminale sur le runner du dépôt appelant.",
+        "Le résultat est normalisé en artifacts structurés et vérifié avant publication.",
+        "Une PR reliée au ticket est produite via le publisher, sans écritures directes de l’agent sur dev ou main.",
+        "Le chemin est testé de bout en bout avec un modèle ou fournisseur de test reproductible."
+      ],
+      "stories": [
+        48,
+        51
+      ],
+      "tests": [
+        10
+      ],
+      "filename": "07-implementer-un-premier-ticket-avec-pi.md"
+    },
+    {
+      "id": 8,
+      "phase": "Exécution IA",
+      "title": "Remplacer Pi par Codex sur le même ticket",
+      "blocked": [
+        7
+      ],
+      "what": "Un mainteneur choisit Codex à la place de Pi pour un ticket équivalent et obtient le même contrat observable de résultats et de publication.",
+      "criteria": [
+        "Le dépôt appelant peut sélectionner Codex par sa configuration approuvée sans modifier le contrôleur.",
+        "Codex produit le même format de résultats validables et une PR liée au ticket.",
+        "Les permissions, la sandbox et le publisher restent identiques quel que soit le moteur."
+      ],
+      "stories": [
+        51
+      ],
+      "tests": [
+        10
+      ],
+      "filename": "08-remplacer-pi-par-codex-sur-le-meme-ticket.md"
+    },
+    {
+      "id": 9,
+      "phase": "Planification",
+      "title": "Reprendre une conversation GitHub depuis un état versionné",
+      "blocked": [
+        5
+      ],
+      "what": "Une personne autorisée engage un entretien sur une issue, répond dans un nouveau commentaire et retrouve les décisions conservées malgré l’arrêt du runner précédent (documents métiers sur plan/<issue>, état machine dans refs/epure/state/<issue-number> et tableau de bord Markdown synchronisé dans l'issue).",
+      "criteria": [
+        "Une première commande crée un échange, versionne les documents sur plan/<issue> et enregistre l'état machine dans refs/epure/state/<issue-number> sans polluer dev.",
+        "Une nouvelle réponse humaine reprend l’entretien sans obliger à répéter la commande initiale et met à jour l'encadré Markdown de statut dans l'issue.",
+        "La reconstruction utilise le contexte canonique et la révision documentée, sans supposer une session de runner persistante."
+      ],
+      "stories": [
+        19,
+        20,
+        26
+      ],
+      "tests": [
+        3
+      ],
+      "filename": "09-reprendre-une-conversation-github-depuis-un-etat-versionne.md"
+    },
+    {
+      "id": 10,
+      "phase": "Planification",
+      "title": "Traiter les commentaires dans l’ordre une fois chacun",
+      "blocked": [
+        9
+      ],
+      "what": "Sur une issue très active, plusieurs commentaires successifs ou événements GitHub répétés sont traités dans l’ordre sans perte ni écriture concurrente grâce à concurrency: issue-<N> et au rattrapage séquentiel en lot depuis le curseur last_processed_comment_id stocké dans refs/epure/state/<issue-number>.",
+      "criteria": [
+        "Trois commentaires rapides produisent un rattrapage séquentiel complet depuis last_processed_comment_id dans l’ordre logique de l’issue, même si GitHub Actions fusionne la file d'attente.",
+        "Un événement rediffusé ne crée ni nouvelle réponse ni nouvel effet de bord.",
+        "L’édition d’un ancien commentaire n’altère pas silencieusement des décisions déjà prises.",
+        "Des entretiens sur des issues différentes restent exécutables en parallèle."
+      ],
+      "stories": [
+        21,
+        22
+      ],
+      "tests": [
+        4
+      ],
+      "filename": "10-traiter-les-commentaires-dans-l-ordre-une-fois-chacun.md"
+    },
+    {
+      "id": 11,
+      "phase": "Planification",
+      "title": "Router une issue vers les skills Matt Pocock adaptés",
+      "blocked": [
+        10
+      ],
+      "what": "Depuis une même issue, un agent choisit clarification, exploration des décisions ou formalisation selon l’incertitude du besoin, tout en laissant visibles les questions auxquelles l’humain doit répondre.",
+      "criteria": [
+        "Les demandes floues passent par le parcours de clarification ou Wayfinder avant la rédaction de tickets.",
+        "Les réponses sont posées dans l’issue, reprennent le glossaire du domaine et ne réinterrogent pas une décision déjà établie.",
+        "Les versions des skills intégrés sont identifiables et leurs licences/attributions sont conservées."
+      ],
+      "stories": [
+        24,
+        25
+      ],
+      "tests": [
+        3
+      ],
+      "filename": "11-router-une-issue-vers-les-skills-matt-pocock-adaptes.md"
+    },
+    {
+      "id": 12,
+      "phase": "Planification",
+      "title": "Versionner les décisions proposées et leur état effectif",
+      "blocked": [
+        11
+      ],
+      "what": "Le travail de planification publie un glossaire, des ADR et un état architectural consultables sur une branche de plan, puis distingue ce qui est accepté de ce qui existe déjà dans le code.",
+      "criteria": [
+        "Une décision proposée peut être modifiée et discutée sans changer dev ou main.",
+        "Une PR documentaire est soumise à l’approbation humaine avant intégration dans dev ; main continue de représenter la dernière release.",
+        "Les documents indiquent décision proposée/acceptée et implémentation effective sans confondre les deux."
+      ],
+      "stories": [
+        27,
+        28,
+        35
+      ],
+      "tests": [
+        7
+      ],
+      "filename": "12-versionner-les-decisions-proposees-et-leur-etat-effectif.md"
+    },
+    {
+      "id": 13,
+      "phase": "Planification",
+      "title": "Transformer une spec en sous-issues dépendantes",
+      "blocked": [
+        12
+      ],
+      "what": "Une issue de planification aboutit à une spec et à un ensemble de tickets vérifiables individuellement, liés par les relations natives parent/enfant et bloqué-par de GitHub.",
+      "criteria": [
+        "La spec et les critères d’acceptation sont lisibles avant toute approbation d’implémentation.",
+        "Chaque ticket décrit une tranche verticale testable et référence ses dépendances natives, sans graphe privé concurrent.",
+        "Le graphe est acyclique, les tickets sans bloqueur sont reconnaissables et aucun ticket ne démarre encore.",
+        "Une relecture humaine peut modifier le découpage avant autorisation."
+      ],
+      "stories": [
+        31,
+        69
+      ],
+      "tests": [
+        5
+      ],
+      "filename": "13-transformer-une-spec-en-sous-issues-dependantes.md"
+    },
+    {
+      "id": 14,
+      "phase": "Planification",
+      "title": "Approuver un graphe précis sans autorisation illimitée",
+      "blocked": [
+        13,
+        4
+      ],
+      "what": "Un mainteneur write approuve la version exacte d’une spec et de ses tickets ; le mandat signé (spec_sha, approved_by, liste des tickets, statut active) est enregistré de façon atomique dans refs/epure/state/<issue-number> et synchronisé dans l'encadré de l'issue, débloquant les enchaînements autorisés sans extension tacite du périmètre.",
+      "criteria": [
+        "Un plan non approuvé ne déclenche aucune implémentation.",
+        "L’approbation enregistre dans refs/epure/state/<issue-number> une révision de spec (spec_sha) et de graphe et attribue un mandat vérifiable aux événements internes, sans polluer la branche dev.",
+        "Une modification significative d’ADR, de scope ou de dépendances suspend les tickets concernés jusqu’à nouvelle approbation.",
+        "Un événement technique non relié à un mandat actif ne peut pas créer une autorisation."
+      ],
+      "stories": [
+        32,
+        33
+      ],
+      "tests": [
+        5,
+        7
+      ],
+      "filename": "14-approuver-un-graphe-precis-sans-autorisation-illimitee.md"
+    },
+    {
+      "id": 15,
+      "phase": "Planification",
+      "title": "Détecter une spec devenue obsolète avant intégration",
+      "blocked": [
+        14
+      ],
+      "what": "Un ticket conserve la version documentaire approuvée et signale si de nouvelles décisions rendent ses hypothèses incompatibles avant l’intégration.",
+      "criteria": [
+        "L’agent reçoit une référence documentaire immuable pour commencer son ticket.",
+        "Une nouvelle décision contradictoire est détectée et bloque le ticket affecté, sans effacer sa référence initiale.",
+        "Une évolution documentaire sans incompatibilité n’impose pas artificiellement une réapprobation."
+      ],
+      "stories": [
+        29,
+        30
+      ],
+      "tests": [
+        7
+      ],
+      "filename": "15-detecter-une-spec-devenue-obsolete-avant-integration.md"
+    },
+    {
+      "id": 16,
+      "phase": "Intégration",
+      "title": "Démarrer uniquement les tickets prêts sur feature et task",
+      "blocked": [
+        7,
+        15
+      ],
+      "what": "Une feature approuvée démarre automatiquement ses tickets indépendants sur leurs branches task, tandis que les tickets dépendants attendent une résolution satisfaisante de leurs bloqueurs.",
+      "criteria": [
+        "Une feature possède sa propre base et chaque ticket actif produit une branche de travail et une PR associée.",
+        "Les tickets sans bloqueur peuvent s’exécuter en parallèle ; les bloqués ne consomment pas de run d’agent.",
+        "Aucune tâche ne démarre après annulation, retrait d’autorisation ou divergence de sa spec approuvée."
+      ],
+      "stories": [
+        48,
+        49,
+        70
+      ],
+      "tests": [
+        6
+      ],
+      "filename": "16-demarrer-uniquement-les-tickets-prets-sur-feature-et-task.md"
+    },
+    {
+      "id": 17,
+      "phase": "Intégration",
+      "title": "Publier une review IA indépendante liée au SHA",
+      "blocked": [
+        16
+      ],
+      "what": "Une PR de ticket reçoit une review par un second agent lisant spec, diff et checks, dont le verdict est publié comme GitHub Check sur la révision exacte.",
+      "criteria": [
+        "Le reviewer a une session propre, n’accède pas au raisonnement de l’implementer et ne peut ni pousser ni merger.",
+        "Le check ai-review est émis pour le SHA effectivement analysé, avec remarques actionnables sur la PR.",
+        "Un nouveau commit humain ou agent invalide l’ancien verdict et impose une nouvelle review."
+      ],
+      "stories": [
+        54,
+        55,
+        56,
+        63
+      ],
+      "tests": [
+        12,
+        15
+      ],
+      "filename": "17-publier-une-review-ia-independante-liee-au-sha.md"
+    },
+    {
+      "id": 18,
+      "phase": "Intégration",
+      "title": "Merger automatiquement un ticket ordinaire sans course",
+      "blocked": [
+        17
+      ],
+      "what": "Deux PR de tickets ordinaires validées pour une même feature sont intégrées l’une après l’autre, seulement si l’état combiné reste vert.",
+      "criteria": [
+        "Les required checks et ai-review verts sont vérifiés sur l’état effectivement intégré.",
+        "Une seule intégration vers la feature est active à la fois ; une seconde PR est revalidée contre la nouvelle cible.",
+        "GitHub Merge Queue est utilisée lorsque possible, avec mécanisme de repli sur les autres dépôts publics.",
+        "Le merge ne provoque aucune écriture directe sur dev ou main."
+      ],
+      "stories": [
+        50,
+        59,
+        60,
+        61
+      ],
+      "tests": [
+        11,
+        14
+      ],
+      "filename": "18-merger-automatiquement-un-ticket-ordinaire-sans-course.md"
+    },
+    {
+      "id": 19,
+      "phase": "Intégration",
+      "title": "Autoriser une base en retard uniquement si l’intégration est saine",
+      "blocked": [
+        18
+      ],
+      "what": "Un dépôt règle son mode strict ou relaxed et obtient un résultat de merge prévisible pour une PR dont la branche cible a avancé.",
+      "criteria": [
+        "Strict exige une actualisation de la branche et de ses validations selon la protection configurée.",
+        "Relaxed conserve la review du code inchangé si son SHA/diff reste valide, mais teste le résultat combiné avec la cible actuelle.",
+        "L’absence de conflit textuel sans checks combinés verts ne permet jamais un merge automatique."
+      ],
+      "stories": [
+        57,
+        58
+      ],
+      "tests": [
+        13
+      ],
+      "filename": "19-autoriser-une-base-en-retard-uniquement-si-l-integration-est-saine.md"
+    },
+    {
+      "id": 20,
+      "phase": "Intégration",
+      "title": "Retenir les changements sensibles pour une approbation humaine",
+      "blocked": [
+        17
+      ],
+      "what": "Une PR de ticket qui touche à la CI, aux privilèges, aux secrets ou à une migration destructrice n’est pas mergée automatiquement, même avec tous les checks verts.",
+      "criteria": [
+        "La classification de sensibilité est évaluée côté politique/publisher, et non déterminée librement par l’agent.",
+        "Les changements ordinaires conservent la possibilité d’auto-merge lorsque les protections sont satisfaites.",
+        "Une PR sensible exige une approbation humaine conforme à la politique GitHub avant intégration."
+      ],
+      "stories": [
+        62
+      ],
+      "tests": [
+        11
+      ],
+      "filename": "20-retenir-les-changements-sensibles-pour-une-approbation-humaine.md"
+    },
+    {
+      "id": 21,
+      "phase": "Intégration",
+      "title": "Intégrer une feature terminée à dev avec review humaine",
+      "blocked": [
+        19,
+        20
+      ],
+      "what": "Quand tous les tickets obligatoires sont achevés, une feature est présentée en PR vers dev, avec CI intégrée et approbation humaine obligatoire.",
+      "criteria": [
+        "Une feature incomplète ne peut ouvrir qu’une draft PR, même si les tickets terminés passent leurs checks.",
+        "La feature récupère les changements récents de dev et valide le résultat combiné avant intégration.",
+        "Un utilisateur autorisé effectue une véritable review GitHub avant le merge vers dev.",
+        "La documentation approuvée rejoint dev et les modifications non approuvées restent hors du merge."
+      ],
+      "stories": [
+        64,
+        65,
+        66
+      ],
+      "tests": [
+        16
+      ],
+      "filename": "21-integrer-une-feature-terminee-a-dev-avec-review-humaine.md"
+    },
+    {
+      "id": 22,
+      "phase": "Résilience",
+      "title": "Libérer les tickets dépendants sur résolution prouvée",
+      "blocked": [
+        18
+      ],
+      "what": "Après merge d’un ticket, le système recalcule les relations GitHub et ne lance que les tickets dont tous les bloqueurs sont réellement satisfaits.",
+      "criteria": [
+        "Un merge lié à une issue débloque les tâches dont toutes les dépendances sont satisfaites.",
+        "Fermer une issue comme abandonnée, en doublon ou sans preuve de résolution ne débloque pas ses dépendants.",
+        "Une réconciliation périodique restitue le même état si l’événement de merge a été manqué."
+      ],
+      "stories": [
+        69,
+        70,
+        71,
+        72,
+        75
+      ],
+      "tests": [
+        6,
+        18
+      ],
+      "filename": "22-liberer-les-tickets-dependants-sur-resolution-prouvee.md"
+    },
+    {
+      "id": 23,
+      "phase": "Résilience",
+      "title": "Reprendre une orchestration sans doublon et annuler un plan",
+      "blocked": [
+        22
+      ],
+      "what": "Une exécution interrompue entre création d’une ressource GitHub et enregistrement d’état reprend sans duplicata ; une annulation coupe les nouveaux effets de bord.",
+      "criteria": [
+        "Des retries identiques n’ouvrent pas deux fois la même issue, PR ou publication.",
+        "Après perte d’événement ou échec de job, l’état observable est reconstruit depuis GitHub.",
+        "L’annulation refuse les publications et merges ultérieurs, même si un ancien job se termine plus tard.",
+        "Les branches, issues et traces existantes restent disponibles pour audit ou reprise explicite."
+      ],
+      "stories": [
+        73,
+        74,
+        76,
+        77
+      ],
+      "tests": [
+        18,
+        19
+      ],
+      "filename": "23-reprendre-une-orchestration-sans-doublon-et-annuler-un-plan.md"
+    },
+    {
+      "id": 24,
+      "phase": "Résilience",
+      "title": "Gérer échecs répétés et régressions de feature",
+      "blocked": [
+        22
+      ],
+      "what": "Un ticket dont les corrections n’aboutissent pas est escaladé ; si une régression apparaît après un merge, la feature est gelée et un correctif est suivi sans réécriture d’historique.",
+      "criteria": [
+        "Au plus trois cycles de correction de code infructueux entraînent needs-human ; les tickets indépendants continuent.",
+        "Une régression après intégration suspend les futurs merges de la feature.",
+        "Une issue corrective est créée avec les observations de la régression, sans force-push de l’historique partagé."
+      ],
+      "stories": [
+        67,
+        68,
+        78
+      ],
+      "tests": [
+        17,
+        20
+      ],
+      "filename": "24-gerer-echecs-repetes-et-regressions-de-feature.md"
+    },
+    {
+      "id": 25,
+      "phase": "Résilience",
+      "title": "Respecter rate limits et quotas LLM sans basculement",
+      "blocked": [
+        7
+      ],
+      "what": "Une erreur temporaire LLM entraîne une reprise bornée, alors qu’une clé invalide ou des crédits épuisés suspendent le ticket et l’indiquent sur GitHub.",
+      "criteria": [
+        "Un rate limit transitoire déclenche backoff et retries plafonnés, distincts des tentatives de correction de code.",
+        "Une erreur de clé/quota/crédits suspend avec diagnostic exploitable.",
+        "Aucune seconde clé ou provider n’est choisi automatiquement et aucun coût monétaire n’est calculé par dev-automation."
+      ],
+      "stories": [
+        79,
+        80
+      ],
+      "tests": [
+        21
+      ],
+      "filename": "25-respecter-rate-limits-et-quotas-llm-sans-basculement.md"
+    },
+    {
+      "id": 26,
+      "phase": "Maintenance",
+      "title": "Contrôler les PR Renovate vers dev et leur origine",
+      "blocked": [
+        4
+      ],
+      "what": "Un dépôt équipé reçoit les PR de mise à jour dans dev, et l’orchestrateur reconnaît les vraies PR Renovate sans se laisser tromper par une PR imitant son nom.",
+      "criteria": [
+        "Renovate cible dev et produit une PR soumise à l’approbation humaine habituelle.",
+        "Le contrôleur vérifie identité/app, dépôt et PR réels plutôt que le seul nom ou label Renovate.",
+        "Une PR externe ressemblante n’accède pas au parcours privilégié de migration."
+      ],
+      "stories": [
+        81,
+        83,
+        85
+      ],
+      "tests": [
+        22
+      ],
+      "filename": "26-controler-les-pr-renovate-vers-dev-et-leur-origine.md"
+    },
+    {
+      "id": 27,
+      "phase": "Maintenance",
+      "title": "Corriger une migration Renovate échouée seulement si autorisée",
+      "blocked": [
+        26,
+        7
+      ],
+      "what": "Quand auto_migrate est activé par une configuration approuvée, une PR Renovate cassant le code peut être réparée par l’agent après analyse du guide de migration, sans auto-merge vers dev.",
+      "criteria": [
+        "Une panne de runner ou réseau provoque une relance bornée de CI, pas un patch de code.",
+        "Une incompatibilité documentée déclenche une proposition de correction sur la PR Renovate autorisée.",
+        "La PR corrigée reste soumise à la CI et à l’approbation humaine pour dev.",
+        "Si auto_migrate est désactivé ou la provenance incertaine, aucun agent privilégié n’est démarré."
+      ],
+      "stories": [
+        82,
+        84,
+        85
+      ],
+      "tests": [
+        23
+      ],
+      "filename": "27-corriger-une-migration-renovate-echouee-seulement-si-autorisee.md"
+    },
+    {
+      "id": 28,
+      "phase": "Maintenance",
+      "title": "Faire échouer une CI sur un workflow vulnérable selon zizmor",
+      "blocked": [
+        4
+      ],
+      "what": "Une PR contenant une configuration GitHub Actions dangereuse reçoit un diagnostic zizmor consultable, et la politique de protection empêche son intégration si la règle est bloquante.",
+      "criteria": [
+        "Une fixture de workflow vulnérable provoque le check attendu avec localisation et diagnostic.",
+        "Une fixture corrigée passe la vérification.",
+        "Le contrôle est installé sur les changements de workflows et ses versions sont épinglées."
+      ],
+      "stories": [
+        86
+      ],
+      "tests": [
+        25
+      ],
+      "filename": "28-faire-echouer-une-ci-sur-un-workflow-vulnerable-selon-zizmor.md"
+    },
+    {
+      "id": 29,
+      "phase": "Audit",
+      "title": "Tracer un événement d’agent sans exposer ses secrets",
+      "blocked": [
+        5
+      ],
+      "what": "Un mainteneur retrouve les identifiants, décisions d’autorisation, agent, modèle et version de workflow d’une opération, sans avoir accès aux credentials ou au raisonnement privé.",
+      "criteria": [
+        "Une commande autorisée et refusée émet une trace structurée vérifiable.",
+        "Un commentaire/une PR associe rôle, modèle, version et lien du run.",
+        "Les traces omettent secrets, prompts privés et valeurs sensibles ; leur durée de conservation est configurable et limitée."
+      ],
+      "stories": [
+        88,
+        89
+      ],
+      "tests": [
+        8
+      ],
+      "filename": "29-tracer-un-evenement-d-agent-sans-exposer-ses-secrets.md"
+    },
+    {
+      "id": 30,
+      "phase": "Audit",
+      "title": "Auditer les autorisations de l’orchestrateur avec iFixAi",
+      "blocked": [
+        29,
+        28
+      ],
+      "what": "Une PR modifiant les mécanismes de permissions ou de délégation est bloquée si l’audit déterministe iFixAi échoue sur les trajectoires de référence.",
+      "criteria": [
+        "Une trace avec escalade de permission interdite fait échouer le check d’audit.",
+        "Une trace valide passe sans consommer de tokens LLM.",
+        "Les tests adversariaux LLM peuvent être lancés explicitement, sans être requis pour chaque PR applicative.",
+        "La Custom Action d’audit est utilisable directement par un autre projet."
+      ],
+      "stories": [
+        87,
+        90
+      ],
+      "tests": [
+        25
+      ],
+      "filename": "30-auditer-les-autorisations-de-l-orchestrateur-avec-ifixai.md"
+    },
+    {
+      "id": 31,
+      "phase": "Design",
+      "title": "Élaborer un design Impeccable dans l’entretien de planification",
+      "blocked": [
+        12
+      ],
+      "what": "Une fonctionnalité frontend passe de la clarification fonctionnelle à Impeccable shape dans la même issue et produit des décisions UX et un design system versionnés.",
+      "criteria": [
+        "Le parcours UI garde les réponses déjà acquises et ne pose que les questions design encore ouvertes.",
+        "Le contexte produit, les décisions de surface et les règles de design sont versionnés et reliés à la spec.",
+        "Un parcours purement backend n’est pas forcé d’exécuter Impeccable."
+      ],
+      "stories": [
+        34,
+        35
+      ],
+      "tests": [
+        26
+      ],
+      "filename": "31-elaborer-un-design-impeccable-dans-l-entretien-de-planification.md"
+    },
+    {
+      "id": 32,
+      "phase": "Design",
+      "title": "Prototyper une incertitude sans réutiliser le code exploratoire",
+      "blocked": [
+        31
+      ],
+      "what": "Lorsqu’une question de design résiste à la discussion, un agent produit un prototype démontrable, des captures et une conclusion de conception à réinjecter dans la spec.",
+      "criteria": [
+        "Une question incertaine peut déclencher un prototype isolé ; un simple changement clair n’impose pas de prototype.",
+        "Les résultats sont liés à l’issue en artifacts/captures et accompagnés des décisions tirées des essais.",
+        "L’implémentation productrice démarre depuis la base approuvée, sans copier automatiquement le code du prototype."
+      ],
+      "stories": [
+        36,
+        37,
+        38,
+        39
+      ],
+      "tests": [
+        26
+      ],
+      "filename": "32-prototyper-une-incertitude-sans-reutiliser-le-code-exploratoire.md"
+    },
+    {
+      "id": 33,
+      "phase": "Design",
+      "title": "Publier et nettoyer une preview statique sûre",
+      "blocked": [
+        32,
+        4
+      ],
+      "what": "Un responsable produit peut voir une preview HTML via GitHub Pages ou son hébergeur existant, uniquement après opt-in, et la preview expire sans exposer production ni données sensibles.",
+      "criteria": [
+        "Sans consentement à Pages, seules les captures/artifacts sont utilisés.",
+        "Une preview valide se consulte sous une origine isolée de la production et expire après 14 jours par défaut, valeur configurable.",
+        "Une tentative de publication exposant secrets, données personnelles ou origine de production est refusée.",
+        "Un hébergeur de preview existant peut être réutilisé sans exiger Pages."
+      ],
+      "stories": [
+        40,
+        41,
+        42,
+        43
+      ],
+      "tests": [
+        27
+      ],
+      "filename": "33-publier-et-nettoyer-une-preview-statique-sure.md"
+    },
+    {
+      "id": 34,
+      "phase": "Design",
+      "title": "Bloquer les nouvelles violations Impeccable sur une PR frontend",
+      "blocked": [
+        4,
+        31
+      ],
+      "what": "Une PR frontend reçoit un check Impeccable : les nouvelles violations couvrant le socle objectif par défaut (accessibilité vérifiable WCAG/ARIA/contraste/clavier, cassures de layout/overflow responsive, états obligatoires loading/error/empty manquants) ainsi que toutes les règles et tokens ajoutés dans DESIGN.md et .impeccable/surfaces/*.md bloquent le merge, alors que les remarques purement esthétiques restent informatives.",
+      "criteria": [
+        "Une nouvelle violation bloquante (socle objectif par défaut ou règle ajoutée dans DESIGN.md / .impeccable/surfaces/*.md) produit un check rouge et un diagnostic actionnable.",
+        "La baseline existante n’entraîne pas artificiellement l’échec pour des problèmes anciens inchangés.",
+        "Un opt-out ou une exception approuvée et tracée est respecté.",
+        "La Custom Action peut être utilisée isolément dans une CI frontend tierce."
+      ],
+      "stories": [
+        45,
+        46,
+        47
+      ],
+      "tests": [
+        24
+      ],
+      "filename": "34-bloquer-les-nouvelles-violations-impeccable-sur-une-pr-frontend.md"
+    },
+    {
+      "id": 35,
+      "phase": "Design",
+      "title": "Comparer visuellement deux versions sans rendre le check obligatoire",
+      "blocked": [
+        32,
+        34
+      ],
+      "what": "Un dépôt frontend volontaire produit une comparaison visuelle desktop/mobile et peut approuver une mise à jour des références sans en faire une exigence globale V1.",
+      "criteria": [
+        "Une configuration opt-in active une comparaison reproductible à résolution desktop et mobile.",
+        "Les différences sont consultables en artifact ou commentaire PR.",
+        "Sans opt-in, aucun check de comparaison visuelle supplémentaire n’est exigé.",
+        "Une baseline mise à jour est traçable à une révision validée."
+      ],
+      "stories": [
+        44
+      ],
+      "tests": [
+        24
+      ],
+      "filename": "35-comparer-visuellement-deux-versions-sans-rendre-le-check-obligatoire.md"
+    },
+    {
+      "id": 36,
+      "phase": "Release",
+      "title": "Promouvoir dev vers main par fast-forward manuel",
+      "blocked": [
+        21,
+        28
+      ],
+      "what": "Un humain autorisé lance une release SemVer ; un workflow de release protégé par l'environnement release et s'exécutant sous la seule Release App (déclarée en Bypass Actor du GitHub Repository Ruleset sur main et refs/tags/v*) vérifie l’état exact de dev, avance main uniquement par fast-forward et publie le tag SemVer immuable et la GitHub Release au même SHA.",
+      "criteria": [
+        "Le lancement manuel requiert l’identité Release App (seule Bypass Actor du Ruleset sur main et refs/tags/v*) et les approbations de l'environnement GitHub release.",
+        "Le workflow refuse un main divergent, une CI manquante, un SHA dev changé ou un tag contradictoire.",
+        "La promotion est un vrai fast-forward (git push origin dev:main --ff-only) sans merge commit, rebase ni squash.",
+        "Le tag SemVer vMAJOR.MINOR.PATCH immuable et la GitHub Release désignent exactement le SHA promu ; la release englobe tout dev."
+      ],
+      "stories": [
+        91,
+        92,
+        93,
+        94,
+        97
+      ],
+      "tests": [
+        28,
+        29
+      ],
+      "filename": "36-promouvoir-dev-vers-main-par-fast-forward-manuel.md"
+    },
+    {
+      "id": 37,
+      "phase": "Release",
+      "title": "Reprendre une release partielle et réintégrer un hotfix",
+      "blocked": [
+        36
+      ],
+      "what": "Une publication interrompue après le fast-forward reprend de manière idempotente ; un hotfix manuel sur main peut ensuite être réintégré dans dev sans casser les prochaines promotions.",
+      "criteria": [
+        "Un retry après promotion sans publication recrée seulement l’objet manquant et pas un second tag ou release.",
+        "Un tag existant pour un autre SHA bloque explicitement l’opération.",
+        "Une procédure guidée réintègre les commits du hotfix depuis main vers dev et préserve la relation d’ascendance utile à la prochaine release."
+      ],
+      "stories": [
+        95,
+        96
+      ],
+      "tests": [
+        30
+      ],
+      "filename": "37-reprendre-une-release-partielle-et-reintegrer-un-hotfix.md"
+    },
+    {
+      "id": 38,
+      "phase": "Distribution",
+      "title": "Publier une version SemVer et proposer sa mise à jour",
+      "blocked": [
+        28
+      ],
+      "what": "Le mainteneur publie une version stable d'EPURE (Giskard-AI/epure) sous un tag SemVer vMAJOR.MINOR.PATCH strictement immuable (sans tag flottant v1), et un dépôt consommateur épinglé sur l’ancien SHA complet (uses: Giskard-AI/epure/.../@<sha> # vX.Y.Z) reçoit une PR Renovate pour adopter la nouvelle version après tests de compatibilité.",
+      "criteria": [
+        "Les contrats publics Reusable Workflows et Custom Actions de Giskard-AI/epure sont testés depuis un dépôt de consommation fixture.",
+        "Une release SemVer possède uniquement un tag vMAJOR.MINOR.PATCH strictement immuable protégé par Ruleset (aucun tag mobile v1), un changelog et des attributions tierces correctes.",
+        "Le dépôt consommateur peut garder son SHA ancien jusqu’à l’acceptation explicite de la PR Renovate.",
+        "Un changement incompatible d’interface échoue aux tests de compatibilité ou est réservé à une version majeure."
+      ],
+      "stories": [
+        4,
+        5,
+        15,
+        98
+      ],
+      "tests": [
+        32,
+        33
+      ],
+      "filename": "38-publier-une-version-semver-et-proposer-sa-mise-a-jour.md"
+    }
+  ],
+  "coverage": {
+    "stories": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60,
+      61,
+      62,
+      63,
+      64,
+      65,
+      66,
+      67,
+      68,
+      69,
+      70,
+      71,
+      72,
+      73,
+      74,
+      75,
+      76,
+      77,
+      78,
+      79,
+      80,
+      81,
+      82,
+      83,
+      84,
+      85,
+      86,
+      87,
+      88,
+      89,
+      90,
+      91,
+      92,
+      93,
+      94,
+      95,
+      96,
+      97,
+      98
+    ],
+    "tests": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33
+    ],
+    "missing_tests": []
+  }
+}

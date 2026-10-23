@@ -1,0 +1,120 @@
+# =====================================================================
+# gitattributes/gitattributes — Common.gitattributes + Web.gitattributes
+# =====================================================================
+
+# Auto detect text files and perform LF normalization
+*                 text=auto
+
+# Source code
+*.bash            text eol=lf
+*.bat             text eol=crlf
+*.cmd             text eol=crlf
+*.cjs             text eol=lf
+*.css             text diff=css
+*.htm             text diff=html
+*.html            text diff=html
+*.js              text eol=lf
+*.json            text eol=lf
+*.jsx             text eol=lf
+*.map             text -diff
+*.mjs             text eol=lf
+*.ps1             text eol=crlf
+*.py              text diff=python
+*.sh              text eol=lf
+.husky/*          text eol=lf
+*.sql             text
+*.ts              text eol=lf
+*.tsx             text eol=lf
+*.xml             text
+*.xhtml           text diff=html
+
+# Docker
+Dockerfile        text eol=lf
+
+# Documentation
+*.markdown        text diff=markdown
+*.md              text diff=markdown
+*.mdx             text diff=markdown
+*.mmd             text
+*.txt             text
+AUTHORS           text
+CHANGELOG         text
+CHANGES           text
+CONTRIBUTING      text
+COPYING           text
+INSTALL           text
+LICENSE           text
+NOTICE            text
+*README*          text
+TODO              text
+
+# Configs & Lockfiles
+*.cnf             text
+*.conf            text
+*.config          text
+.editorconfig     text
+*.env             text
+.gitattributes    text
+.gitconfig        text
+.gitignore        text
+*.lock            text -diff
+package.json      text eol=lf
+package-lock.json text eol=lf -diff
+pnpm-lock.yaml    text eol=lf -diff
+skills-lock.json  text eol=lf -diff
+yarn.lock         text -diff
+*.toml            text
+*.yaml            text eol=lf
+*.yml             text eol=lf
+Makefile          text
+makefile          text
+tsconfig.json     linguist-language=JSON-with-Comments
+
+# Graphics
+*.ai              binary
+*.bmp             binary
+*.eps             binary
+*.gif             binary
+*.ico             binary
+*.jpg             binary
+*.jpeg            binary
+*.pdf             diff=astextplain
+*.png             binary
+*.psd             binary
+*.svg             text
+*.svgz            binary
+*.tif             binary
+*.tiff            binary
+*.webp            binary
+
+# Archives
+*.7z              binary
+*.bz2             binary
+*.gz              binary
+*.jar             binary
+*.rar             binary
+*.tar             binary
+*.tgz             binary
+*.xz              binary
+*.zip             binary
+*.zst             binary
+
+# Fonts & Executables
+*.ttf             binary
+*.eot             binary
+*.otf             binary
+*.woff            binary
+*.woff2           binary
+*.exe             binary
+*.pyc             binary
+
+# Text files where line endings should be preserved
+*.patch           -text
+
+# Prevents massive diffs from built/bundled files while keeping them in Git for GitHub Actions
+dist/**           binary linguist-generated=true
+
+# Exclude files from git archive exporting
+.gitattributes    export-ignore
+.gitignore        export-ignore
+.gitkeep          export-ignore
