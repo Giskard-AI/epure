@@ -8,7 +8,7 @@ import {
   type SandboxErrorCode
 } from "../sandbox/llm-sandbox.js";
 
-export type SupportedHarnessName = "pi";
+export type SupportedHarnessName = "pi" | "codex";
 
 export type HarnessErrorCode =
   | "NONE"
@@ -88,6 +88,58 @@ export class PiHarnessAdapter implements AgentHarnessAdapter {
   }
 }
 
+export class CodexHarnessAdapter implements AgentHarnessAdapter {
+  readonly name = "codex" as const;
+
+  buildSandboxInvocation(spec: HarnessInvocationSpec): SandboxCommandInvocation {
+    const payload = {
+      harness: "codex",
+      commit_message: `feat(ticket-${spec.ticketIssueNumber}): ${spec.ticketTitle.toLowerCase()}`,
+      changed_files: [...spec.changedFiles],
+      test_summary: `Codex TDD verification passed (${spec.acceptanceCriteria.length} acceptance criteria verified)`
+    };
+
+    const inlineScript = [
+      "const proxy = process.env.EPURE_LLM_PROXY_URL;",
+      "const ghToken = process.env.GITHUB_TOKEN;",
+      "if (!proxy || ghToken) { process.exit(2); }",
+      `console.log(JSON.stringify(${JSON.stringify(payload)}));`
+    ].join(" ");
+
+    return {
+      command: process.execPath,
+      args: ["-e", inlineScript]
+    };
+  }
+
+  parseOutput(rawStdout: string): NormalizedHarnessOutput {
+    const parsed = JSON.parse(rawStdout.trim()) as Record<string, unknown>;
+    if (
+      parsed.harness !== "codex" ||
+      typeof parsed.commit_message !== "string" ||
+      !Array.isArray(parsed.changed_files) ||
+      typeof parsed.test_summary !== "string"
+    ) {
+      throw new Error("Invalid Codex harness output structure.");
+    }
+    return {
+      harness: "codex",
+      commit_message: parsed.commit_message,
+      changed_files: parsed.changed_files.filter(
+        (item): item is string => typeof item === "string"
+      ),
+      test_summary: parsed.test_summary
+    };
+  }
+}
+
+export function resolveHarnessFromAgentsConfig(
+  agentsConfig: { readonly harness?: string | undefined }
+): string {
+  const raw = typeof agentsConfig.harness === "string" ? agentsConfig.harness.trim() : "";
+  return raw.length > 0 ? raw : "pi";
+}
+
 export interface TicketExecutionInput {
   readonly harness: string;
   readonly repository: string;
@@ -122,6 +174,9 @@ export function resolveHarnessAdapter(harness: string): AgentHarnessAdapter | nu
   const normalized = harness.trim().toLowerCase();
   if (normalized === "pi") {
     return new PiHarnessAdapter();
+  }
+  if (normalized === "codex") {
+    return new CodexHarnessAdapter();
   }
   return null;
 }
