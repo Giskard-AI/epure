@@ -1,0 +1,42 @@
+name: "CI"
+
+on:
+  push:
+    branches: [main, dev, "feature/**", "task/**"]
+  pull_request:
+    branches: [main, dev, "feature/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: "Typecheck, Test & Verify Pre-bundled Actions"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.20.0"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run TypeScript typecheck
+        run: npm run typecheck
+
+      - name: Rebuild Custom Action bundles
+        run: npm run build
+
+      - name: Verify dist/ bundles are up to date
+        run: git diff --exit-code dist/
+
+      - name: Run test suite
+        run: npm test
