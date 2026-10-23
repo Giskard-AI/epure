@@ -1,0 +1,21 @@
+name: "EPURE iFixAi Authorization Audit"
+description: "Deterministically audits orchestrator authorization and delegation trajectories using iFixAi rules without consuming LLM tokens."
+author: "Giskard AI"
+inputs:
+  mode:
+    description: "Audit mode ('deterministic_ci' or 'adversarial_opt_in')"
+    required: false
+    default: "deterministic_ci"
+  steps_json:
+    description: "JSON array of trajectory steps to audit"
+    required: true
+outputs:
+  passed:
+    description: "true when all authorization and delegation invariants hold"
+  error_code:
+    description: "NONE or structured iFixAi error code"
+  failed_step_id:
+    description: "ID of the step that failed the audit, if any"
+runs:
+  using: "node20"
+  main: "../../dist/actions/audit-ifixai/index.mjs"
