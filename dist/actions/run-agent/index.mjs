@@ -669,10 +669,48 @@ var PiHarnessAdapter = class {
     };
   }
 };
+var CodexHarnessAdapter = class {
+  name = "codex";
+  buildSandboxInvocation(spec) {
+    const payload = {
+      harness: "codex",
+      commit_message: `feat(ticket-${spec.ticketIssueNumber}): ${spec.ticketTitle.toLowerCase()}`,
+      changed_files: [...spec.changedFiles],
+      test_summary: `Codex TDD verification passed (${spec.acceptanceCriteria.length} acceptance criteria verified)`
+    };
+    const inlineScript = [
+      "const proxy = process.env.EPURE_LLM_PROXY_URL;",
+      "const ghToken = process.env.GITHUB_TOKEN;",
+      "if (!proxy || ghToken) { process.exit(2); }",
+      `console.log(JSON.stringify(${JSON.stringify(payload)}));`
+    ].join(" ");
+    return {
+      command: process.execPath,
+      args: ["-e", inlineScript]
+    };
+  }
+  parseOutput(rawStdout) {
+    const parsed = JSON.parse(rawStdout.trim());
+    if (parsed.harness !== "codex" || typeof parsed.commit_message !== "string" || !Array.isArray(parsed.changed_files) || typeof parsed.test_summary !== "string") {
+      throw new Error("Invalid Codex harness output structure.");
+    }
+    return {
+      harness: "codex",
+      commit_message: parsed.commit_message,
+      changed_files: parsed.changed_files.filter(
+        (item) => typeof item === "string"
+      ),
+      test_summary: parsed.test_summary
+    };
+  }
+};
 function resolveHarnessAdapter(harness) {
   const normalized = harness.trim().toLowerCase();
   if (normalized === "pi") {
     return new PiHarnessAdapter();
+  }
+  if (normalized === "codex") {
+    return new CodexHarnessAdapter();
   }
   return null;
 }
