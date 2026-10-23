@@ -1,0 +1,28 @@
+name: "EPURE Public Contract Action"
+description: "Pre-bundled TypeScript (Node.js 22+) Custom Action verifying EPURE consumer contract, SHA pinning, and credential isolation with zero runtime dependency installation."
+author: "Giskard-AI"
+inputs:
+  repository:
+    description: "Consumer GitHub repository slug (<owner>/<repo>)"
+    required: true
+  pinned_ref:
+    description: "EPURE workflow or action reference pinned by 40-char Git SHA (or immutable SemVer tag when strict_sha_pinning is false)"
+    required: true
+  strict_sha_pinning:
+    description: "Require full 40-character Git SHA pinning ('true' or 'false')"
+    required: false
+    default: "true"
+outputs:
+  status:
+    description: "Execution status ('ok' or 'error')"
+  version:
+    description: "EPURE public interface version (SemVer)"
+  contract_valid:
+    description: "Whether the consumer invocation satisfies the EPURE V1 contract ('true' or 'false')"
+  error_code:
+    description: "Structured error code ('NONE', 'INVALID_REPOSITORY_SLUG', 'MUTABLE_FLOATING_TAG_FORBIDDEN', 'INVALID_SHA_PINNING', 'SHARED_MAINTAINER_CREDENTIAL_FORBIDDEN')"
+  error_message:
+    description: "Human-readable diagnostic message when status is 'error'"
+runs:
+  using: "node22"
+  main: "../../dist/actions/epure-contract/index.mjs"

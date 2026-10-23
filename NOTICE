@@ -1,0 +1,42 @@
+EPURE (Giskard-AI/epure)
+Copyright 2026 Giskard-AI and contributors
+
+This product includes original Reusable Workflows, TypeScript Custom Actions,
+and orchestration components licensed under the Apache License, Version 2.0
+(see LICENSE).
+
+==============================================================================
+Third-Party Attributions and Redistributed / Adapted Components (ADR-0018)
+==============================================================================
+
+1. Matt Pocock Agent Skills (`mattpocock/skills`)
+   - Upstream Repository: https://github.com/mattpocock/skills
+   - License: MIT License
+   - Provenance & Pinned Hashes: Tracked in `skills-lock.json` at repository root
+     (21 skills under `.agents/skills/*`, including `grill-with-docs`, `to-spec`,
+     `to-tickets`, `tdd`, `code-review`, `domain-modeling`, `pr` with credits to
+     Dex Horthy / Humanlayer `show-me`).
+   - Copyright Notice:
+     Copyright (c) Matt Pocock and contributors.
+     Permission is hereby granted, free of charge, to any person obtaining a copy
+     of this software and associated documentation files (the "Software"), to deal
+     in the Software without restriction, including without limitation the rights
+     to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+     copies of the Software, and to permit persons to whom the Software is
+     furnished to do so, subject to the following conditions:
+     The above copyright notice and this permission notice shall be included in
+     all copies or substantial portions of the Software.
+
+2. Impeccable Design & Frontend Quality Controls (`pbakaus/impeccable`)
+   - Upstream Repository: https://github.com/pbakaus/impeccable
+   - License: Apache License, Version 2.0
+   - Pinned Reference: `v1.0.0` (adapter contract and frontend quality specifications
+     referenced in `actions/impeccable` and ADR-0019 / ADR-0020 / ADR-0021).
+   - Copyright (c) Paul Bakaus and Impeccable contributors.
+
+3. iFixAi Trajectory & Authorization Auditor (`ifixai-ai/iFixAi`)
+   - Upstream Repository: https://github.com/ifixai-ai/iFixAi
+   - License: Apache License, Version 2.0
+   - Pinned Reference: `v1.0.0` (deterministic authorization trajectory audit
+     contract referenced in `actions/ifixai` and ADR-0019 / ADR-0020).
+   - Copyright (c) iFixAi contributors.

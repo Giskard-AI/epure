@@ -1,0 +1,35 @@
+name: "Consumer Demo — EPURE Public Workflow & Custom Action"
+
+on:
+  pull_request:
+    branches: [dev, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  consume-reusable-workflow:
+    name: "Invoke EPURE Reusable Workflow on Consumer Runner"
+    permissions:
+      contents: read
+    uses: Giskard-AI/epure/.github/workflows/epure-check.yml@a1b2c3d4e5f60718293a4b5c6d7e8f9012345678 # v1.0.0
+    with:
+      repository: ${{ github.repository }}
+      pinned_ref: "Giskard-AI/epure/.github/workflows/epure-check.yml@a1b2c3d4e5f60718293a4b5c6d7e8f9012345678 # v1.0.0"
+      strict_sha_pinning: true
+
+  consume-custom-action:
+    name: "Invoke EPURE Pre-bundled Custom Action Standalone"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Execute EPURE Custom Action without dependency installation
+        id: epure_action
+        uses: Giskard-AI/epure/actions/epure-contract@a1b2c3d4e5f60718293a4b5c6d7e8f9012345678 # v1.0.0
+        with:
+          repository: ${{ github.repository }}
+          pinned_ref: "Giskard-AI/epure/actions/epure-contract@a1b2c3d4e5f60718293a4b5c6d7e8f9012345678 # v1.0.0"
+          strict_sha_pinning: "true"
