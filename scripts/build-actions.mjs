@@ -31,6 +31,10 @@ const actionTargets = [
     outFile: resolve(rootDir, "dist/actions/run-agent/index.mjs")
   },
   {
+    entryPoint: resolve(rootDir, "actions/audit-ifixai/index.ts"),
+    outFile: resolve(rootDir, "dist/actions/audit-ifixai/index.mjs")
+  },
+  {
     entryPoint: resolve(rootDir, "src/bootstrap/cli.ts"),
     outFile: resolve(rootDir, "dist/cli/setup-repo.mjs")
   }
