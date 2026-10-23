@@ -8,6 +8,9 @@
   "engines": {
     "node": ">=22.0.0"
   },
+  "bin": {
+    "epure-setup-repo": "./dist/cli/setup-repo.mjs"
+  },
   "scripts": {
     "build": "node scripts/build-actions.mjs",
     "typecheck": "tsc --noEmit",

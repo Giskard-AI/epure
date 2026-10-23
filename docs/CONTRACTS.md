@@ -106,7 +106,17 @@ Enforces strict privilege separation between the consumer repository's two disti
 
 ---
 
-## 6. Consumer Example (`.github/workflows/consume-epure.yml`)
+## 6. Consumer Bootstrap CLI & `.github/agents.yml` Contract (`setup-repo`)
+
+Entrypoint: `dist/cli/setup-repo.mjs` (`bin: epure-setup-repo`) and local skill `.agents/skills/setup-repo/SKILL.md` ([ADR-0010](adr/0010-bootstrap-et-configuration-des-depots-consommateurs.md), [ADR-0023](adr/0023-sandbox-proxy-llm-et-stack-typescript.md), [ADR-0025](adr/0025-depot-public-epure-rulesets-et-tags-immuables.md)).
+
+- **Dry-Run (`--dry-run`) & Guided Apply (`--apply`)**: Previews or applies caller workflows pinned by 40-char SHA, `.github/agents.yml`, dual GitHub Apps, branch protections (`dev`, `feature/*`), and the `epure-release-immutability` Repository Ruleset on `main` & `refs/tags/v*` with `Release App` as sole Bypass Actor.
+- **Q78 Defaults**: `max_code_fix_attempts: 3`, `max_transient_api_retries: 4` (backoff `[5, 15, 45, 120]`), `job_timeout_minutes: 60` (review `30`), `max_concurrent_tasks_per_feature: 3`, `trace_retention_days: 30`, `preview_retention_days: 14`, `github_pages_previews: false`.
+- **Non-Weakenable Security Invariants**: Rejects any local override attempting to disable write permission checks, sandbox isolation, or release boundaries (`SECURITY_INVARIANT_VIOLATION`), forces `task_auto_merge_enabled: false` when required CI or branch protections are absent (`AUTO_MERGE_DISABLED_MISSING_PROTECTIONS`), and restricts org-shared secret tokens to the single target repository (`CROSS_REPO_TOKEN_SCOPE_FORBIDDEN`).
+
+---
+
+## 7. Consumer Example (`.github/workflows/consume-epure.yml`)
 
 ```yaml
 name: "Consumer Demo — EPURE Public Workflow & Custom Action"
