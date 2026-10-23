@@ -25,5 +25,5 @@ outputs:
   stderr:
     description: "Scrubbed stderr from the sandboxed command"
 runs:
-  using: "node20"
+  using: "node24"
   main: "../../dist/actions/run-sandboxed/index.mjs"

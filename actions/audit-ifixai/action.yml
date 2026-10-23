@@ -17,5 +17,5 @@ outputs:
   failed_step_id:
     description: "ID of the step that failed the audit, if any"
 runs:
-  using: "node20"
+  using: "node24"
   main: "../../dist/actions/audit-ifixai/index.mjs"

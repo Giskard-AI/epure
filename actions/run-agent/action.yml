@@ -47,5 +47,5 @@ outputs:
   pull_request_url:
     description: "URL of the opened Pull Request"
 runs:
-  using: "node20"
+  using: "node24"
   main: "../../dist/actions/run-agent/index.mjs"

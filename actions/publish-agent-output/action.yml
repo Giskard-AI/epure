@@ -1,5 +1,5 @@
 name: "EPURE Isolated Agent Output Publisher"
-description: "Pre-bundled TypeScript (Node.js 22+) Custom Action validating unprivileged agent output proposals and applying them via a short-lived, repository-scoped and permission-scoped GitHub App installation token."
+description: "Pre-bundled TypeScript (Node.js 24 LTS) Custom Action validating unprivileged agent output proposals and applying them via a short-lived, repository-scoped and permission-scoped GitHub App installation token."
 author: "Giskard-AI"
 inputs:
   repository:
@@ -42,5 +42,5 @@ outputs:
   error_message:
     description: "Secret-scrubbed diagnostic message when rejected"
 runs:
-  using: "node22"
+  using: "node24"
   main: "../../dist/actions/publish-agent-output/index.mjs"

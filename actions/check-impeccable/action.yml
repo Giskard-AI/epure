@@ -13,5 +13,5 @@ outputs:
   informational_count:
     description: "Number of informational aesthetic suggestions"
 runs:
-  using: "node20"
+  using: "node24"
   main: "../../dist/actions/check-impeccable/index.mjs"

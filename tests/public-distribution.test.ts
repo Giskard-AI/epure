@@ -89,7 +89,7 @@ function invokeBundledActionIsolated(inputs: Record<string, string>): ActionRunR
   }
 }
 
-describe("Public Custom Action contract (actions/epure-contract pre-bundled on Node 22+ without node_modules)", () => {
+describe("Public Custom Action contract (actions/epure-contract pre-bundled on Node 24 LTS without node_modules)", () => {
   it("bundles the custom action into dist/actions/epure-contract/index.mjs", () => {
     expect(existsSync(BUNDLED_ACTION_PATH)).toBe(true);
   });
@@ -215,10 +215,10 @@ describe("Public Reusable Workflow (.github/workflows/epure-check.yml) and Consu
       forbiddenSnippets: ["npm install", "npm ci", "repository_dispatch", "write-all"]
     },
     {
-      id: "custom-action-manifest-declares-node22-prebundled-entrypoint-and-contract-outputs",
+      id: "custom-action-manifest-declares-node24-prebundled-entrypoint-and-contract-outputs",
       targetPath: ACTION_MANIFEST_PATH,
       requiredSnippets: [
-        'using: "node22"',
+        'using: "node24"',
         'main: "../../dist/actions/epure-contract/index.mjs"',
         "repository:",
         "pinned_ref:",

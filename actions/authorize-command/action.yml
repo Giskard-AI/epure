@@ -1,5 +1,5 @@
 name: "EPURE Authorize Issue Command"
-description: "Pre-bundled TypeScript (Node.js 22+) Custom Action verifying effective collaborator permission (write/admin), ignoring bots, and scrubbing secrets before executing any issue command."
+description: "Pre-bundled TypeScript (Node.js 24 LTS) Custom Action verifying effective collaborator permission (write/admin), ignoring bots, and scrubbing secrets before executing any issue command."
 author: "Giskard-AI"
 inputs:
   repository:
@@ -58,5 +58,5 @@ outputs:
   response_markdown:
     description: "Secret-scrubbed Markdown summary suitable for issue comment or check summary"
 runs:
-  using: "node22"
+  using: "node24"
   main: "../../dist/actions/authorize-command/index.mjs"

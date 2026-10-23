@@ -1,5 +1,5 @@
 name: "EPURE Verify GitHub App Role Separation"
-description: "Pre-bundled TypeScript (Node.js 22+) Custom Action enforcing strict privilege separation between the consumer Agent App and Release App, private key non-exposure, and human confirmation for elevated permission grants."
+description: "Pre-bundled TypeScript (Node.js 24 LTS) Custom Action enforcing strict privilege separation between the consumer Agent App and Release App, private key non-exposure, and human confirmation for elevated permission grants."
 author: "Giskard-AI"
 inputs:
   app_role:
@@ -48,5 +48,5 @@ outputs:
   error_message:
     description: "Secret-scrubbed diagnostic message when blocked"
 runs:
-  using: "node22"
+  using: "node24"
   main: "../../dist/actions/verify-app-role/index.mjs"

@@ -2,11 +2,11 @@
   "name": "@giskard-ai/epure",
   "version": "1.0.0",
   "private": true,
-  "description": "EPURE (Giskard-AI/epure) — Public Reusable Workflows, TypeScript Custom Actions (Node.js 22+), and Agent Skills",
+  "description": "EPURE (Giskard-AI/epure) — Public Reusable Workflows, TypeScript Custom Actions (Node.js 24 LTS), and Agent Skills",
   "license": "Apache-2.0",
   "type": "module",
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=24.0.0"
   },
   "bin": {
     "epure-setup-repo": "./dist/cli/setup-repo.mjs"
@@ -17,9 +17,9 @@
     "test": "vitest run"
   },
   "devDependencies": {
-    "@types/node": "22.20.5",
+    "@types/node": "24.19.2",
     "esbuild": "0.28.2",
-    "typescript": "5.9.3",
-    "vitest": "3.2.7"
+    "typescript": "7.0.2",
+    "vitest": "5.0.5"
   }
 }

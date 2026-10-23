@@ -50,7 +50,7 @@ for (const target of actionTargets) {
     entryPoints: [target.entryPoint],
     bundle: true,
     platform: "node",
-    target: "node22",
+    target: "node24",
     format: "esm",
     outfile: target.outFile,
     minify: false,

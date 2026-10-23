@@ -1,6 +1,6 @@
 # EPURE Public Interfaces Contract (`V1`)
 
-This document specifies the public V1 contract for consuming **EPURE (`Giskard-AI/epure`)** Reusable Workflows and pre-bundled TypeScript Custom Actions (Node.js 22+) from a consumer repository without any central orchestration server or shared maintainer credentials ([ADR-0008](adr/0008-reusable-workflows-et-custom-actions-publics.md), [ADR-0018](adr/0018-licence-open-source-et-attributions.md), [ADR-0023](adr/0023-sandbox-proxy-llm-et-stack-typescript.md), [ADR-0025](adr/0025-depot-public-epure-rulesets-et-tags-immuables.md)).
+This document specifies the public V1 contract for consuming **EPURE (`Giskard-AI/epure`)** Reusable Workflows and pre-bundled TypeScript Custom Actions (Node.js 24 LTS) from a consumer repository without any central orchestration server or shared maintainer credentials ([ADR-0008](adr/0008-reusable-workflows-et-custom-actions-publics.md), [ADR-0018](adr/0018-licence-open-source-et-attributions.md), [ADR-0023](adr/0023-sandbox-proxy-llm-et-stack-typescript.md), [ADR-0025](adr/0025-depot-public-epure-rulesets-et-tags-immuables.md)).
 
 ---
 
@@ -13,7 +13,7 @@ This document specifies the public V1 contract for consuming **EPURE (`Giskard-A
   uses: Giskard-AI/epure/.github/workflows/epure-check.yml@a1b2c3d4e5f60718293a4b5c6d7e8f9012345678 # v1.0.0
   ```
 - **Immutable SemVer Tags Only**: Releases publish strictly immutable `vMAJOR.MINOR.PATCH` tags (`# v1.0.0`). Floating major/minor tags (`@v1`, `@v1.0`) are forbidden and rejected at runtime (`MUTABLE_FLOATING_TAG_FORBIDDEN`).
-- **Pre-bundled Node.js 22+ Custom Actions**: All Custom Actions are compiled into `dist/` so consumer jobs never run `npm install` or `npm ci` to execute an EPURE action.
+- **Pre-bundled Node.js 24 LTS Custom Actions**: All Custom Actions are compiled into `dist/` so consumer jobs never run `npm install` or `npm ci` to execute an EPURE action.
 - **Minimal Permissions**: Public contract verification requires only `contents: read`.
 
 ---
@@ -50,7 +50,7 @@ permissions:
 
 ## 3. Public Custom Action: `actions/epure-contract`
 
-Entrypoint: `actions/epure-contract/action.yml` (`runs.using: "node22"`, pre-bundled at `dist/actions/epure-contract/index.mjs`).
+Entrypoint: `actions/epure-contract/action.yml` (`runs.using: "node24"`, pre-bundled at `dist/actions/epure-contract/index.mjs`).
 
 ### Inputs
 
@@ -84,7 +84,7 @@ Entrypoint: `actions/epure-contract/action.yml` (`runs.using: "node22"`, pre-bun
 
 ## 4. Public Reusable Workflow: `.github/workflows/issue-command.yml` & Action `actions/authorize-command`
 
-Entrypoint: `actions/authorize-command/action.yml` (`runs.using: "node22"`, pre-bundled at `dist/actions/authorize-command/index.mjs`).
+Entrypoint: `actions/authorize-command/action.yml` (`runs.using: "node24"`, pre-bundled at `dist/actions/authorize-command/index.mjs`).
 
 Verifies that an issue comment command (`/epure status`, `/epure plan`, `/epure approve`, `/epure cancel`) is authored by a human actor holding effective `write` or `admin` permission on the target repository via `GET /repos/{owner}/{repo}/collaborators/{username}/permission` ([ADR-0004](adr/0004-separation-execution-et-publication.md), [ADR-0017](adr/0017-prevention-des-boucles-review-independante-et-reprises.md)).
 
@@ -96,7 +96,7 @@ Verifies that an issue comment command (`/epure status`, `/epure plan`, `/epure 
 
 ## 5. Public Custom Action: `actions/verify-app-role`
 
-Entrypoint: `actions/verify-app-role/action.yml` (`runs.using: "node22"`, pre-bundled at `dist/actions/verify-app-role/index.mjs`).
+Entrypoint: `actions/verify-app-role/action.yml` (`runs.using: "node24"`, pre-bundled at `dist/actions/verify-app-role/index.mjs`).
 
 Enforces strict privilege separation between the consumer repository's two distinct GitHub Apps ([ADR-0009](adr/0009-identite-github-app-des-consommateurs-et-skill-installation.md), [ADR-0010](adr/0010-bootstrap-et-configuration-des-depots-consommateurs.md)):
 
@@ -118,7 +118,7 @@ Entrypoint: `dist/cli/setup-repo.mjs` (`bin: epure-setup-repo`) and local skill 
 
 ## 7. Public Custom Action: `actions/publish-agent-output`
 
-Entrypoint: `actions/publish-agent-output/action.yml` (`runs.using: "node22"`, pre-bundled at `dist/actions/publish-agent-output/index.mjs`).
+Entrypoint: `actions/publish-agent-output/action.yml` (`runs.using: "node24"`, pre-bundled at `dist/actions/publish-agent-output/index.mjs`).
 
 Separates unprivileged agent execution from privileged GitHub writes ([ADR-0004](adr/0004-separation-execution-et-publication.md), [ADR-0023](adr/0023-sandbox-proxy-llm-et-stack-typescript.md)):
 
