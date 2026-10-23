@@ -13,6 +13,10 @@ const actionTargets = [
   {
     entryPoint: resolve(rootDir, "actions/authorize-command/index.ts"),
     outFile: resolve(rootDir, "dist/actions/authorize-command/index.mjs")
+  },
+  {
+    entryPoint: resolve(rootDir, "actions/verify-app-role/index.ts"),
+    outFile: resolve(rootDir, "dist/actions/verify-app-role/index.mjs")
   }
 ];
 

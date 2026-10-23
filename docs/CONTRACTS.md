@@ -82,7 +82,31 @@ Entrypoint: `actions/epure-contract/action.yml` (`runs.using: "node22"`, pre-bun
 
 ---
 
-## 4. Consumer Example (`.github/workflows/consume-epure.yml`)
+## 4. Public Reusable Workflow: `.github/workflows/issue-command.yml` & Action `actions/authorize-command`
+
+Entrypoint: `actions/authorize-command/action.yml` (`runs.using: "node22"`, pre-bundled at `dist/actions/authorize-command/index.mjs`).
+
+Verifies that an issue comment command (`/epure status`, `/epure plan`, `/epure approve`, `/epure cancel`) is authored by a human actor holding effective `write` or `admin` permission on the target repository via `GET /repos/{owner}/{repo}/collaborators/{username}/permission` ([ADR-0004](adr/0004-separation-execution-et-publication.md), [ADR-0017](adr/0017-prevention-des-boucles-review-independante-et-reprises.md)).
+
+- Ignores bot actors (`user.type === 'Bot'`, `*[bot]`, known automation apps) with `BOT_ACTOR_IGNORED` and `should_post_response: "false"` to prevent loops.
+- Rejects `read`, `triage`, or `none` effective permissions with `INSUFFICIENT_EFFECTIVE_PERMISSION`, regardless of `author_association` (`COLLABORATOR`, `CONTRIBUTOR`) or issue labels (`ready-for-agent`, `approved`).
+- Scrubs any token or secret from diagnostic outputs (`redactSecrets`).
+
+---
+
+## 5. Public Custom Action: `actions/verify-app-role`
+
+Entrypoint: `actions/verify-app-role/action.yml` (`runs.using: "node22"`, pre-bundled at `dist/actions/verify-app-role/index.mjs`).
+
+Enforces strict privilege separation between the consumer repository's two distinct GitHub Apps ([ADR-0009](adr/0009-identite-github-app-des-consommateurs-et-skill-installation.md), [ADR-0010](adr/0010-bootstrap-et-configuration-des-depots-consommateurs.md)):
+
+- **Agent App (`app_role: "agent"`)**: Allowed to perform `issue_comment`, `push_branch` (restricted to `plan/*`, `task/*`, `feature/*`), `create_pull_request`, and `create_check_run`. Forbidden from `promote_dev_to_main`, `create_release_tag`, and `publish_github_release` (`AGENT_APP_RELEASE_OPERATION_FORBIDDEN`).
+- **Release App (`app_role: "release"`)**: Restricted exclusively to `.github/workflows/release.yml` running inside the `release` environment (`RELEASE_APP_OUTSIDE_RELEASE_WORKFLOW_FORBIDDEN`).
+- **Human Confirmation & Key Hygiene**: Requires `human_confirmed: "true"` for `grant_elevated_permission` (`HUMAN_CONFIRMATION_REQUIRED`) and rejects/scrubs any PEM private key in public payloads (`PRIVATE_KEY_EXPOSED_IN_PUBLIC_PAYLOAD`).
+
+---
+
+## 6. Consumer Example (`.github/workflows/consume-epure.yml`)
 
 ```yaml
 name: "Consumer Demo — EPURE Public Workflow & Custom Action"
