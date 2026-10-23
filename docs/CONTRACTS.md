@@ -116,7 +116,19 @@ Entrypoint: `dist/cli/setup-repo.mjs` (`bin: epure-setup-repo`) and local skill 
 
 ---
 
-## 7. Consumer Example (`.github/workflows/consume-epure.yml`)
+## 7. Public Custom Action: `actions/publish-agent-output`
+
+Entrypoint: `actions/publish-agent-output/action.yml` (`runs.using: "node22"`, pre-bundled at `dist/actions/publish-agent-output/index.mjs`).
+
+Separates unprivileged agent execution from privileged GitHub writes ([ADR-0004](adr/0004-separation-execution-et-publication.md), [ADR-0023](adr/0023-sandbox-proxy-llm-et-stack-typescript.md)):
+
+- **Agent Job Isolation (`verifyAgentJobIsolation`)**: Rejects execution if the agent environment received a write-capable `GITHUB_TOKEN`, installation token, or App private key (`AGENT_ENV_PRIVATE_KEY_FORBIDDEN`, `AGENT_ENV_WRITE_TOKEN_FORBIDDEN`).
+- **Proposal Validation (`validateAgentProposal`)**: Validates structured JSON proposals (`comment_issue`, `push_task_branch`, `open_pull_request`, `publish_check_run`) and rejects malformed payloads (`MALFORMED_PROPOSAL_PAYLOAD`), protected branches (`main`, `dev`, `release/*` -> `PROTECTED_BRANCH_FORBIDDEN`), unassigned issues/branches (`OUT_OF_SCOPE_TARGET`), or unauthorized `.github/workflows/**` / `.github/agents.yml` edits (`SENSITIVE_PATH_OUT_OF_SCOPE`).
+- **Short-Lived Scoped Token Lifecycle (`publishAgentProposal`)**: Requests a repository-scoped (`repositoryIds: [repositoryId]`) and operation-minimal installation token, applies the validated operation, and revokes the token immediately in a `finally` path without ever exposing it to the agent process.
+
+---
+
+## 8. Consumer Example (`.github/workflows/consume-epure.yml`)
 
 ```yaml
 name: "Consumer Demo — EPURE Public Workflow & Custom Action"
