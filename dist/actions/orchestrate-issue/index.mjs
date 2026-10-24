@@ -1276,17 +1276,79 @@ ${existingFilesContext}` : "C'est le premier ticket : inclus un package.json com
           temperature: 0.1,
           fetchImpl: input.fetchImpl
         });
-        const impl = extractJsonObject(rawImpl);
+        let impl = extractJsonObject(rawImpl);
         for (const f of impl.files) {
           accumulatedFiles.set(f.path.replace(/^\/+/, ""), f.content);
         }
-        const allWorkspaceFiles = Array.from(accumulatedFiles.entries()).map(
-          ([path, content]) => ({ path, content })
-        );
-        const testCheck = await runTestsInIsolatedWorkspace({
-          files: allWorkspaceFiles,
+        let testCheck = await runTestsInIsolatedWorkspace({
+          files: Array.from(accumulatedFiles.entries()).map(
+            ([path, content]) => ({ path, content })
+          ),
           llmApiKey: input.llmApiKey
         });
+        let fixAttempt = 0;
+        while (!testCheck.passed && fixAttempt < 3) {
+          fixAttempt += 1;
+          const currentFilesContext = Array.from(accumulatedFiles.entries()).map(([p, c]) => `--- FILE: ${p} ---
+${c}`).join("\n\n");
+          const fixPrompt = [
+            `La suite de tests Vitest du Ticket #${ticket.ticketIssueNumber} (${ticket.title}) a \xE9chou\xE9 dans la sandbox avec la sortie suivante :`,
+            "```",
+            testCheck.output.slice(-6e3),
+            "```",
+            "",
+            "Fichiers actuels du workspace :",
+            currentFilesContext,
+            "",
+            "Corrige les fichiers en d\xE9faut (code ou assertions de test comme les espaces ins\xE9cables Unicode U+202F de toLocaleString('fr-FR')) pour que 100% des tests Vitest passent (`vitest run`).",
+            "Renvoie un objet JSON strictement valide respectant exactement ce sch\xE9ma :",
+            "{",
+            '  "commit_message": "feat(ticket-N): ...",',
+            '  "test_summary": "Vitest parameterized suite verified",',
+            '  "files": [',
+            '    { "path": "...", "content": "..." }',
+            "  ]",
+            "}"
+          ].join("\n");
+          const rawFix = await callGeminiGenerateContent({
+            apiKey: input.llmApiKey,
+            model,
+            prompt: fixPrompt,
+            responseMimeType: "application/json",
+            temperature: 0.1,
+            fetchImpl: input.fetchImpl
+          });
+          const fixedImpl = extractJsonObject(rawFix);
+          const mergedFilesMap = /* @__PURE__ */ new Map();
+          for (const f of impl.files) {
+            mergedFilesMap.set(f.path.replace(/^\/+/, ""), f.content);
+          }
+          for (const f of fixedImpl.files) {
+            const cleanPath = f.path.replace(/^\/+/, "");
+            mergedFilesMap.set(cleanPath, f.content);
+            accumulatedFiles.set(cleanPath, f.content);
+          }
+          impl = {
+            commit_message: fixedImpl.commit_message || impl.commit_message,
+            test_summary: fixedImpl.test_summary || impl.test_summary,
+            files: Array.from(mergedFilesMap.entries()).map(([path, content]) => ({
+              path,
+              content
+            }))
+          };
+          testCheck = await runTestsInIsolatedWorkspace({
+            files: Array.from(accumulatedFiles.entries()).map(
+              ([path, content]) => ({ path, content })
+            ),
+            llmApiKey: input.llmApiKey
+          });
+        }
+        if (!testCheck.passed) {
+          throw new Error(
+            `TDD sandbox verification failed for ticket #${ticket.ticketIssueNumber} after ${fixAttempt} auto-fix attempts:
+${testCheck.output.slice(-2e3)}`
+          );
+        }
         await gh.commitFilesToBranch({
           branch: taskBranch,
           fromBranch: featureBranch,

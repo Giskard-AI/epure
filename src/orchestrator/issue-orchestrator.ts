@@ -979,19 +979,88 @@ export async function orchestrateIssueCommand(
           fetchImpl: input.fetchImpl
         });
 
-        const impl = extractJsonObject<GeneratedTicketImplementation>(rawImpl);
+        let impl = extractJsonObject<GeneratedTicketImplementation>(rawImpl);
         for (const f of impl.files) {
           accumulatedFiles.set(f.path.replace(/^\/+/, ""), f.content);
         }
 
         // Verify tests inside the untrusted code sandbox (no secrets in process.env)
-        const allWorkspaceFiles = Array.from(accumulatedFiles.entries()).map(
-          ([path, content]) => ({ path, content })
-        );
-        const testCheck = await runTestsInIsolatedWorkspace({
-          files: allWorkspaceFiles,
+        // Loop up to 3 attempts (Q78 max_code_fix_attempts) if tests fail
+        let testCheck = await runTestsInIsolatedWorkspace({
+          files: Array.from(accumulatedFiles.entries()).map(
+            ([path, content]) => ({ path, content })
+          ),
           llmApiKey: input.llmApiKey
         });
+
+        let fixAttempt = 0;
+        while (!testCheck.passed && fixAttempt < 3) {
+          fixAttempt += 1;
+          const currentFilesContext = Array.from(accumulatedFiles.entries())
+            .map(([p, c]) => `--- FILE: ${p} ---\n${c}`)
+            .join("\n\n");
+
+          const fixPrompt = [
+            `La suite de tests Vitest du Ticket #${ticket.ticketIssueNumber} (${ticket.title}) a échoué dans la sandbox avec la sortie suivante :`,
+            "```",
+            testCheck.output.slice(-6000),
+            "```",
+            "",
+            "Fichiers actuels du workspace :",
+            currentFilesContext,
+            "",
+            "Corrige les fichiers en défaut (code ou assertions de test comme les espaces insécables Unicode U+202F de toLocaleString('fr-FR')) pour que 100% des tests Vitest passent (`vitest run`).",
+            "Renvoie un objet JSON strictement valide respectant exactement ce schéma :",
+            "{",
+            '  "commit_message": "feat(ticket-N): ...",',
+            '  "test_summary": "Vitest parameterized suite verified",',
+            '  "files": [',
+            '    { "path": "...", "content": "..." }',
+            "  ]",
+            "}"
+          ].join("\n");
+
+          const rawFix = await callGeminiGenerateContent({
+            apiKey: input.llmApiKey,
+            model,
+            prompt: fixPrompt,
+            responseMimeType: "application/json",
+            temperature: 0.1,
+            fetchImpl: input.fetchImpl
+          });
+
+          const fixedImpl = extractJsonObject<GeneratedTicketImplementation>(rawFix);
+          const mergedFilesMap = new Map<string, string>();
+          for (const f of impl.files) {
+            mergedFilesMap.set(f.path.replace(/^\/+/, ""), f.content);
+          }
+          for (const f of fixedImpl.files) {
+            const cleanPath = f.path.replace(/^\/+/, "");
+            mergedFilesMap.set(cleanPath, f.content);
+            accumulatedFiles.set(cleanPath, f.content);
+          }
+          impl = {
+            commit_message: fixedImpl.commit_message || impl.commit_message,
+            test_summary: fixedImpl.test_summary || impl.test_summary,
+            files: Array.from(mergedFilesMap.entries()).map(([path, content]) => ({
+              path,
+              content
+            }))
+          };
+
+          testCheck = await runTestsInIsolatedWorkspace({
+            files: Array.from(accumulatedFiles.entries()).map(
+              ([path, content]) => ({ path, content })
+            ),
+            llmApiKey: input.llmApiKey
+          });
+        }
+
+        if (!testCheck.passed) {
+          throw new Error(
+            `TDD sandbox verification failed for ticket #${ticket.ticketIssueNumber} after ${fixAttempt} auto-fix attempts:\n${testCheck.output.slice(-2000)}`
+          );
+        }
 
         await gh.commitFilesToBranch({
           branch: taskBranch,
