@@ -1,0 +1,39 @@
+name: Promote Dev to Main (Fast-Forward Release)
+
+on:
+  workflow_dispatch:
+    inputs:
+      semver_tag:
+        description: 'Immutable SemVer tag (vMAJOR.MINOR.PATCH)'
+        required: true
+        type: string
+      expected_dev_sha:
+        description: 'Exact commit SHA of dev to promote'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  promote-release:
+    runs-on: ubuntu-latest
+    environment: release
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository with full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify Release App role separation
+        uses: ./actions/verify-app-role
+        with:
+          app_role: release
+          operation: promote_dev_to_main
+          target_ref: refs/heads/main
+          workflow_path: .github/workflows/release-promote.yml
+          environment_name: release
+          agent_app_id: ${{ vars.EPURE_AGENT_APP_ID || '1001' }}
+          release_app_id: ${{ vars.EPURE_RELEASE_APP_ID || '2002' }}

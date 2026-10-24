@@ -6,7 +6,7 @@
 >
 > *(L'épure est le dessin d'architecture à l'échelle qui sert de plan d'exécution — du cadrage `/grill-with-docs` à la spécification `/to-spec`, au découpage `/to-tickets`, jusqu'à l'implémentation TDD isolée et la revue automatisée.)*
 
-Framework open-source de **workflows réutilisables GitHub Actions**, **Custom Actions TypeScript (Node.js 22+)** et **skills d'agents IA** permettant d'orchestrer le cycle complet de génie logiciel assisté par IA sur des dépôts consommateurs avec garanties déterministes, bac à sable sécurisé et contrôle humain sur GitHub.
+Framework open-source de **workflows réutilisables GitHub Actions**, **Custom Actions TypeScript (Node.js 24 LTS)** et **skills d'agents IA** permettant d'orchestrer le cycle complet de génie logiciel assisté par IA sur des dépôts consommateurs avec garanties déterministes, bac à sable sécurisé et contrôle humain sur GitHub.
 
 ---
 

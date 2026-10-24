@@ -1,0 +1,46 @@
+name: "EPURE Isolated Agent Output Publisher"
+description: "Pre-bundled TypeScript (Node.js 24 LTS) Custom Action validating unprivileged agent output proposals and applying them via a short-lived, repository-scoped and permission-scoped GitHub App installation token."
+author: "Giskard-AI"
+inputs:
+  repository:
+    description: "Target GitHub repository slug (<owner>/<repo>)"
+    required: true
+  repository_id:
+    description: "Numeric GitHub repository ID for installation token scoping"
+    required: true
+  assigned_issue_number:
+    description: "Assigned GitHub issue/ticket number authorizing the agent run"
+    required: true
+  assigned_branch_prefix:
+    description: "Allowed task branch prefix (e.g. 'task/6-')"
+    required: true
+  allowed_target_feature_branch:
+    description: "Target feature branch for PRs (e.g. 'feature/1-epure-v1')"
+    required: true
+  proposal_json:
+    description: "Structured JSON proposal produced by the unprivileged agent"
+    required: true
+  agent_env_json:
+    description: "Optional JSON snapshot of the agent environment variable names/values to verify zero write tokens and zero private keys"
+    required: false
+    default: "{}"
+  allow_workflow_or_config_edits:
+    description: "'true' only when a human maintainer explicitly authorized workflow/config modifications"
+    required: false
+    default: "false"
+outputs:
+  published:
+    description: "'true' when the proposal passed validation and was published, 'false' otherwise"
+  operation:
+    description: "Validated operation name ('comment_issue', 'push_task_branch', 'open_pull_request', 'publish_check_run')"
+  artifact_url:
+    description: "URL of the published comment, commit/branch, PR, or check run"
+  token_revoked:
+    description: "'true' when the short-lived installation token was revoked immediately after publication"
+  error_code:
+    description: "Structured error code ('NONE', 'AGENT_ENV_PRIVATE_KEY_FORBIDDEN', 'AGENT_ENV_WRITE_TOKEN_FORBIDDEN', 'MALFORMED_PROPOSAL_PAYLOAD', 'PRIVATE_KEY_EXPOSED_IN_PUBLIC_PAYLOAD', 'PROTECTED_BRANCH_FORBIDDEN', 'OUT_OF_SCOPE_TARGET', 'SENSITIVE_PATH_OUT_OF_SCOPE', 'PUBLISHER_API_ERROR')"
+  error_message:
+    description: "Secret-scrubbed diagnostic message when rejected"
+runs:
+  using: "node24"
+  main: "../../dist/actions/publish-agent-output/index.mjs"

@@ -1,0 +1,51 @@
+name: "EPURE Run Agent Harness"
+description: "Executes an approved ticket using the configured agent harness (Pi by default) inside the untrusted code sandbox and publishes the resulting PR via the isolated publisher."
+author: "Giskard AI"
+inputs:
+  harness:
+    description: "Agent harness name ('pi')"
+    required: false
+    default: "pi"
+  repository:
+    description: "Target repository '<owner>/<repo>'"
+    required: true
+  repository_id:
+    description: "Numeric GitHub repository ID"
+    required: true
+  plan_issue_number:
+    description: "Parent plan issue number"
+    required: true
+  ticket_issue_number:
+    description: "Ticket issue number"
+    required: true
+  ticket_slug:
+    description: "Short slug for the task branch"
+    required: true
+  ticket_title:
+    description: "Ticket title"
+    required: true
+  target_feature_branch:
+    description: "Target feature branch ('feature/<plan>-<slug>')"
+    required: true
+  approved_by_human:
+    description: "Whether the ticket was approved by an authorized human"
+    required: false
+    default: "true"
+  changed_files_json:
+    description: "JSON array of files changed"
+    required: false
+    default: '["src/index.ts"]'
+outputs:
+  completed:
+    description: "true when the harness completed and published the PR"
+  error_code:
+    description: "NONE or structured error code"
+  harness:
+    description: "Executed harness name"
+  task_branch:
+    description: "Task branch created"
+  pull_request_url:
+    description: "URL of the opened Pull Request"
+runs:
+  using: "node24"
+  main: "../../dist/actions/run-agent/index.mjs"

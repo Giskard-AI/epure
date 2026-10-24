@@ -1,0 +1,17 @@
+name: "EPURE Impeccable Frontend PR Gate"
+description: "Evaluates frontend PRs against the objective Impeccable baseline (WCAG/ARIA/contrast/keyboard, responsive layout, loading/error/empty states) and DESIGN.md/.impeccable/surfaces/*.md rules."
+author: "Giskard AI"
+inputs:
+  findings_json:
+    description: "JSON array of Impeccable findings"
+    required: true
+outputs:
+  conclusion:
+    description: "success or failure"
+  blocking_count:
+    description: "Number of blocking Impeccable findings"
+  informational_count:
+    description: "Number of informational aesthetic suggestions"
+runs:
+  using: "node24"
+  main: "../../dist/actions/check-impeccable/index.mjs"

@@ -1,7 +1,7 @@
 ---
 status: accepted
 ---
-# Sandbox par proxy LLM local, stack TypeScript Node.js 22+ et seuils opérationnels par défaut
+# Sandbox par proxy LLM local, stack TypeScript Node.js 24 LTS et seuils opérationnels par défaut
 
 ## Contexte
 
@@ -10,7 +10,7 @@ Lorsqu'un agent d'implémentation ou de migration Renovate travaille sur un dép
 ## Décisions (Q74, Q77, Q78, Q79)
 
 1. **Q74 — Isolation des secrets par proxy/sidecar LLM sur le runner** : la clé API LLM et les tokens GitHub App ne sont jamais injectés dans les variables d'environnement du processus qui exécute le code ou les tests du dépôt consommateur. Un proxy/sidecar local sur le runner détient la clé API en mémoire ; l'agent et les sous-processus de test/build tournent dans un conteneur isolé et communiquent uniquement via l'endpoint local du proxy. Si le mécanisme d'isolation est indisponible, le job échoue en mode fermé (*fail-closed*).
-2. **Q77 — Monorepo TypeScript strict sur Node.js 22+** : les Custom Actions et contrôleurs d'`EPURE` sont écrits en TypeScript strict (Node.js 22+) et pré-bundlés afin qu'aucun `npm install` ne soit requis au runtime chez les consommateurs. Le bootstrap `setup-repo` est fourni sous forme de CLI TypeScript invocables par le skill local, et les Composite Actions sont réservées à l'invocation de binaires externes épinglés (`pi`, `codex`, `zizmor`).
+2. **Q77 — Monorepo TypeScript strict sur Node.js 24 LTS** : les Custom Actions et contrôleurs d'`EPURE` sont écrits en TypeScript strict (Node.js 24 LTS) et pré-bundlés afin qu'aucun `npm install` ne soit requis au runtime chez les consommateurs. Le bootstrap `setup-repo` est fourni sous forme de CLI TypeScript invocables par le skill local, et les Composite Actions sont réservées à l'invocation de binaires externes épinglés (`pi`, `codex`, `zizmor`).
 3. **Q78 — Valeurs par défaut de `.github/agents.yml`** :
    - `max_code_fix_attempts`: **3**
    - `max_transient_api_retries`: **4** (backoff exponentiel 5s → 15s → 45s → 120s)

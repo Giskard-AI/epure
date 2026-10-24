@@ -1,6 +1,6 @@
 # 01: Consommer un workflow et une action publics
 
-**What to build:** Depuis un dépôt GitHub de démonstration, appeler indépendamment un Reusable Workflow et une Custom Action TypeScript pré-bundlée (Node.js 22+) distribués par `Giskard-AI/epure` et constater un résultat vérifiable, sans infrastructure centrale ni `npm install` à l'exécution chez le consommateur.
+**What to build:** Depuis un dépôt GitHub de démonstration, appeler indépendamment un Reusable Workflow et une Custom Action TypeScript pré-bundlée (Node.js 24 LTS) distribués par `Giskard-AI/epure` et constater un résultat vérifiable, sans infrastructure centrale ni `npm install` à l'exécution chez le consommateur.
 
 **Blocked by:** None (can start immediately)
 

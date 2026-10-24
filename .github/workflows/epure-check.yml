@@ -1,0 +1,58 @@
+name: "EPURE Public Reusable Workflow Check"
+
+on:
+  workflow_call:
+    inputs:
+      repository:
+        description: "Consumer repository slug (<owner>/<repo>)"
+        required: true
+        type: string
+      pinned_ref:
+        description: "Full 40-character Git SHA reference of Giskard-AI/epure invoked by the consumer"
+        required: true
+        type: string
+      strict_sha_pinning:
+        description: "Enforce full 40-character Git SHA pinning"
+        required: false
+        default: true
+        type: boolean
+    outputs:
+      status:
+        description: "Contract check status ('ok' or 'error')"
+        value: ${{ jobs.verify-contract.outputs.status }}
+      version:
+        description: "EPURE public interface version (SemVer)"
+        value: ${{ jobs.verify-contract.outputs.version }}
+      contract_valid:
+        description: "Whether the consumer invocation satisfies the EPURE V1 contract ('true' or 'false')"
+        value: ${{ jobs.verify-contract.outputs.contract_valid }}
+      error_code:
+        description: "Structured error code ('NONE' when valid)"
+        value: ${{ jobs.verify-contract.outputs.error_code }}
+
+permissions:
+  contents: read
+
+jobs:
+  verify-contract:
+    name: "Verify EPURE Consumer Contract"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      status: ${{ steps.contract.outputs.status }}
+      version: ${{ steps.contract.outputs.version }}
+      contract_valid: ${{ steps.contract.outputs.contract_valid }}
+      error_code: ${{ steps.contract.outputs.error_code }}
+    steps:
+      - name: Checkout EPURE distribution
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run pre-bundled EPURE contract action
+        id: contract
+        uses: ./actions/epure-contract
+        with:
+          repository: ${{ inputs.repository }}
+          pinned_ref: ${{ inputs.pinned_ref }}
+          strict_sha_pinning: ${{ inputs.strict_sha_pinning }}

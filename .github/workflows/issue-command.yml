@@ -1,0 +1,96 @@
+name: "EPURE Authorized Issue Command Gate"
+
+on:
+  workflow_call:
+    inputs:
+      repository:
+        description: "Consumer repository slug (<owner>/<repo>)"
+        required: true
+        type: string
+      issue_number:
+        description: "Issue number where the command comment was posted"
+        required: true
+        type: number
+      comment_body:
+        description: "Raw issue comment body"
+        required: true
+        type: string
+      actor:
+        description: "GitHub login of the comment author"
+        required: true
+        type: string
+      actor_type:
+        description: "GitHub user type ('User' or 'Bot')"
+        required: false
+        default: "User"
+        type: string
+      author_association:
+        description: "Untrusted author_association value from event payload"
+        required: false
+        default: "NONE"
+        type: string
+      issue_labels:
+        description: "Comma-separated issue labels (untrusted)"
+        required: false
+        default: ""
+        type: string
+    outputs:
+      authorized:
+        description: "'true' when the actor holds effective write/admin permission and command is valid"
+        value: ${{ jobs.authorize-command.outputs.authorized }}
+      decision:
+        description: "Gate decision"
+        value: ${{ jobs.authorize-command.outputs.decision }}
+      command:
+        description: "Authorized command ('status', 'plan', 'approve', 'cancel')"
+        value: ${{ jobs.authorize-command.outputs.command }}
+      effective_permission:
+        description: "Verified effective collaborator permission"
+        value: ${{ jobs.authorize-command.outputs.effective_permission }}
+      privileged_action_allowed:
+        description: "'true' if privileged actions are allowed"
+        value: ${{ jobs.authorize-command.outputs.privileged_action_allowed }}
+      llm_call_allowed:
+        description: "'true' if LLM invocation is allowed"
+        value: ${{ jobs.authorize-command.outputs.llm_call_allowed }}
+      error_code:
+        description: "Structured error code ('NONE' when authorized)"
+        value: ${{ jobs.authorize-command.outputs.error_code }}
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  authorize-command:
+    name: "Verify Collaborator Effective Permission & Command"
+    if: ${{ inputs.actor_type != 'Bot' && !endsWith(inputs.actor, '[bot]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: write
+    outputs:
+      authorized: ${{ steps.gate.outputs.authorized }}
+      decision: ${{ steps.gate.outputs.decision }}
+      command: ${{ steps.gate.outputs.command }}
+      effective_permission: ${{ steps.gate.outputs.effective_permission }}
+      privileged_action_allowed: ${{ steps.gate.outputs.privileged_action_allowed }}
+      llm_call_allowed: ${{ steps.gate.outputs.llm_call_allowed }}
+      error_code: ${{ steps.gate.outputs.error_code }}
+    steps:
+      - name: Checkout EPURE distribution
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run pre-bundled EPURE issue command gate
+        id: gate
+        uses: ./actions/authorize-command
+        with:
+          repository: ${{ inputs.repository }}
+          issue_number: ${{ inputs.issue_number }}
+          comment_body: ${{ inputs.comment_body }}
+          actor: ${{ inputs.actor }}
+          actor_type: ${{ inputs.actor_type }}
+          author_association: ${{ inputs.author_association }}
+          issue_labels: ${{ inputs.issue_labels }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}

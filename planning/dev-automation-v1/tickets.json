@@ -9,7 +9,7 @@
       "phase": "Distribution",
       "title": "Consommer un workflow et une action publics",
       "blocked": [],
-      "what": "Depuis un dépôt GitHub de démonstration, appeler indépendamment un Reusable Workflow et une Custom Action TypeScript pré-bundlée (Node.js 22+) distribués par Giskard-AI/epure et constater un résultat vérifiable, sans infrastructure centrale ni npm install à l'exécution chez le consommateur.",
+      "what": "Depuis un dépôt GitHub de démonstration, appeler indépendamment un Reusable Workflow et une Custom Action TypeScript pré-bundlée (Node.js 24 LTS) distribués par Giskard-AI/epure et constater un résultat vérifiable, sans infrastructure centrale ni npm install à l'exécution chez le consommateur.",
       "criteria": [
         "Un dépôt consommateur public exécute le workflow réutilisable (Giskard-AI/epure/.github/workflows/...) sur son propre runner et obtient un check réussi.",
         "Le même dépôt appelle séparément la Custom Action TypeScript pré-bundlée et observe une sortie documentée sans étape d'installation de dépendances.",
