@@ -148,6 +148,11 @@ describe("EPURE v1.1.0 — Real Orchestration Wiring (Q84–Q90, ADR-0026)", () 
         id: "extracts-json-from-markdown-code-fence",
         raw: 'Here is the plan:\n```json\n{"passed":true,"rationale":"clean"}\n```',
         expected: { passed: true, rationale: "clean" }
+      },
+      {
+        id: "sanitizes-unescaped-latex-or-regex-backslashes-in-json-strings",
+        raw: '{"formula":"T(B) = \\\\frac{B(B+1)}{2} and \\s+","ok":true}',
+        expected: { formula: "T(B) = \\frac{B(B+1)}{2} and \\s+", ok: true }
       }
     ])("$id", ({ raw, expected }) => {
       expect(extractJsonObject(raw)).toEqual(expected);
