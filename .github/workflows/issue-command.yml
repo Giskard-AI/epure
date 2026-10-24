@@ -56,9 +56,6 @@ on:
       EPURE_AGENT_APP_PRIVATE_KEY:
         description: "Consumer Agent App PEM private key"
         required: false
-      LLM_API_KEY:
-        description: "Optional explicit Gemini API key override (when not resolved via llm_environment)"
-        required: false
     outputs:
       authorized:
         description: "Whether the command is authorized ('true' or 'false')"
