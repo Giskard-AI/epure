@@ -210,6 +210,7 @@ describe("Public Reusable Workflow (.github/workflows/epure-check.yml) and Consu
         "contract_valid:",
         "permissions:",
         "contents: read",
+        "repository: Giskard-AI/epure",
         "uses: ./actions/epure-contract"
       ],
       forbiddenSnippets: ["npm install", "npm ci", "repository_dispatch", "write-all"]
