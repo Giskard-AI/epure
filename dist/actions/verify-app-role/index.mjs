@@ -43,7 +43,7 @@ var RELEASE_OPERATIONS = /* @__PURE__ */ new Set([
 ]);
 var AGENT_BRANCH_REF_PATTERN = /^(?:refs\/heads\/)?(?:plan|task|feature)\/[A-Za-z0-9._/-]+$/;
 var RELEASE_TAG_REF_PATTERN = /^(?:refs\/tags\/)?v\d+\.\d+\.\d+$/;
-var RELEASE_WORKFLOW_PATTERN = /(?:^|\/)release\.ya?ml$/;
+var RELEASE_WORKFLOW_PATTERN = /(?:^|\/)release(?:-promote)?\.ya?ml$/;
 function containsPrivateKeyMaterial(text) {
   return PRIVATE_KEY_DETECTION_PATTERN.test(text);
 }

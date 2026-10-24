@@ -62,7 +62,7 @@ describe('Partial release idempotent resume & hotfix reintegration (Ticket 37 / 
       expectedStrategy: 'FAST_FORWARD_DEV_TO_MAIN',
     },
     {
-      scenario: 'merges main into dev via true merge commit when both main (hotfix) and dev have new commits, preserving main ancestry for next fast-forward release',
+      scenario: 'rebases dev onto main via PR when both main (hotfix) and dev have new commits, preserving linear history and main ancestry without merge commits',
       input: {
         mainSha: 'sha-hotfix',
         devSha: 'sha-dev-next',
@@ -70,7 +70,7 @@ describe('Partial release idempotent resume & hotfix reintegration (Ticket 37 / 
         isDevAncestorOfMain: false,
       },
       expectedRequires: true,
-      expectedStrategy: 'MERGE_MAIN_INTO_DEV_PR',
+      expectedStrategy: 'REBASE_DEV_ONTO_MAIN_PR',
     },
   ])('$scenario', ({ input, expectedRequires, expectedStrategy }) => {
     const res = planHotfixReintegrationIntoDev(input);

@@ -60,7 +60,7 @@ export interface HotfixReintegrationInput {
 
 export interface HotfixReintegrationPlan {
   requiresReintegration: boolean;
-  strategy: 'NONE_NEEDED' | 'FAST_FORWARD_DEV_TO_MAIN' | 'MERGE_MAIN_INTO_DEV_PR';
+  strategy: 'NONE_NEEDED' | 'FAST_FORWARD_DEV_TO_MAIN' | 'REBASE_DEV_ONTO_MAIN_PR';
   commands: string[];
   preservesMainAncestryForNextRelease: boolean;
 }
@@ -88,10 +88,10 @@ export function planHotfixReintegrationIntoDev(
 
   return {
     requiresReintegration: true,
-    strategy: 'MERGE_MAIN_INTO_DEV_PR',
+    strategy: 'REBASE_DEV_ONTO_MAIN_PR',
     commands: [
       'git checkout -b task/reintegrate-main-hotfix origin/dev',
-      'git merge --no-ff origin/main -m "chore(release): reintegrate main hotfix into dev"',
+      'git rebase origin/main',
       'git push -u origin task/reintegrate-main-hotfix',
     ],
     preservesMainAncestryForNextRelease: true,

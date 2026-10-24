@@ -97,7 +97,7 @@ const RELEASE_OPERATIONS = new Set<EpureAppOperation>([
 const AGENT_BRANCH_REF_PATTERN =
   /^(?:refs\/heads\/)?(?:plan|task|feature)\/[A-Za-z0-9._/-]+$/;
 const RELEASE_TAG_REF_PATTERN = /^(?:refs\/tags\/)?v\d+\.\d+\.\d+$/;
-const RELEASE_WORKFLOW_PATTERN = /(?:^|\/)release\.ya?ml$/;
+const RELEASE_WORKFLOW_PATTERN = /(?:^|\/)release(?:-promote)?\.ya?ml$/;
 
 export function containsPrivateKeyMaterial(text: string): boolean {
   return PRIVATE_KEY_DETECTION_PATTERN.test(text);

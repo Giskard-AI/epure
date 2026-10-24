@@ -94,6 +94,8 @@ export interface BranchProtectionSpec {
   readonly requireStatusChecks: boolean;
   readonly requiredChecks: readonly string[];
   readonly requireHumanApproval: boolean;
+  readonly allowedMergeMethods: readonly ("squash" | "rebase")[];
+  readonly allowMergeCommit: false;
 }
 
 export interface RulesetBypassActorSpec {
@@ -361,9 +363,8 @@ function buildCallerWorkflows(pinnedSha: string): ReadonlyArray<{
         "    with:",
         "      repository: ${{ github.repository }}",
         "      issue_number: ${{ github.event.issue.number }}",
-        "      comment_id: ${{ github.event.comment.id }}",
         "      comment_body: ${{ github.event.comment.body }}",
-        "      actor_login: ${{ github.event.comment.user.login }}",
+        "      actor: ${{ github.event.comment.user.login }}",
         "      actor_type: ${{ github.event.comment.user.type }}",
         ""
       ].join("\n")
@@ -473,14 +474,18 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
       requirePullRequest: true,
       requireStatusChecks: true,
       requiredChecks: ["ci", "ai-review"],
-      requireHumanApproval: true
+      requireHumanApproval: true,
+      allowedMergeMethods: ["squash", "rebase"],
+      allowMergeCommit: false
     },
     {
       pattern: "feature/*",
       requirePullRequest: true,
       requireStatusChecks: true,
       requiredChecks: ["ci", "ai-review"],
-      requireHumanApproval: false
+      requireHumanApproval: false,
+      allowedMergeMethods: ["squash", "rebase"],
+      allowMergeCommit: false
     }
   ];
 

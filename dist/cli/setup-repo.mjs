@@ -212,9 +212,8 @@ function buildCallerWorkflows(pinnedSha) {
         "    with:",
         "      repository: ${{ github.repository }}",
         "      issue_number: ${{ github.event.issue.number }}",
-        "      comment_id: ${{ github.event.comment.id }}",
         "      comment_body: ${{ github.event.comment.body }}",
-        "      actor_login: ${{ github.event.comment.user.login }}",
+        "      actor: ${{ github.event.comment.user.login }}",
         "      actor_type: ${{ github.event.comment.user.type }}",
         ""
       ].join("\n")
@@ -314,14 +313,18 @@ function planAndApplyRepoSetup(input) {
       requirePullRequest: true,
       requireStatusChecks: true,
       requiredChecks: ["ci", "ai-review"],
-      requireHumanApproval: true
+      requireHumanApproval: true,
+      allowedMergeMethods: ["squash", "rebase"],
+      allowMergeCommit: false
     },
     {
       pattern: "feature/*",
       requirePullRequest: true,
       requireStatusChecks: true,
       requiredChecks: ["ci", "ai-review"],
-      requireHumanApproval: false
+      requireHumanApproval: false,
+      allowedMergeMethods: ["squash", "rebase"],
+      allowMergeCommit: false
     }
   ];
   const expectedSecrets = [

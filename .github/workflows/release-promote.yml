@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   promote-release:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     environment: release
     timeout-minutes: 15
     steps:
@@ -30,9 +30,10 @@ jobs:
       - name: Verify Release App role separation
         uses: ./actions/verify-app-role
         with:
-          role: release
-          operation: push_main_fast_forward
-          app_id: ${{ vars.EPURE_RELEASE_APP_ID || '2002' }}
+          app_role: release
+          operation: promote_dev_to_main
+          target_ref: refs/heads/main
+          workflow_path: .github/workflows/release-promote.yml
+          environment_name: release
           agent_app_id: ${{ vars.EPURE_AGENT_APP_ID || '1001' }}
           release_app_id: ${{ vars.EPURE_RELEASE_APP_ID || '2002' }}
-          release_environment_approved: 'true'
