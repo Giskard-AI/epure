@@ -333,3 +333,15 @@ _Éviter_ : se fier uniquement au payload `github.event.comment` du webhook déc
 **Référence Git d'état d'orchestration (`refs/epure/state/<issue-number>`, Q76)** : référence Git dédiée hors branches standard (`refs/heads/*`) stockant l'état machine d'orchestration (curseur `last_processed_comment_id`, mandat de plan approuvé avec `spec_sha`, `approved_by`, statut `active|cancelled`, compteurs de tentatives par ticket) avec *compare-and-swap* atomique Git, doublée d'un tableau de bord Markdown lisible synchronisé dans le corps de l'issue GitHub.
 _Éviter_ : polluer l'historique des branches applicatives `dev` et `main` avec des commits JSON d'état machine ou utiliser uniquement un commentaire d'issue sujet aux écrasements concurrents.
 
+## Orchestration réelle Gemini et Publisher GitHub App (Q84–Q90)
+
+**Continuité implicite de l'entretien de grill (Q84)** : traitement automatique de tout commentaire humain posté sur une issue de pilotage dont la référence `refs/epure/state/<issue-number>` est en phase `grilling` comme une réponse à l'entretien en cours, sans imposer de répéter une commande slash à chaque tour.
+_Éviter_ : rejeter les réponses humaines ordinaires sous prétexte qu'elles ne commencent pas par `/epure`.
+
+**Transition automatique Grill → Spec & Tickets (Q85)** : génération et publication sur `plan/<issue>-<slug>` des artefacts documentaires (`GLOSSARY.md`, `docs/adr/`, `docs/specs/`) suivies de la création des tickets GitHub (`blocked_by`, `ready-for-agent`) dès que les réponses humaines ont levé toutes les ambiguïtés du grill, avant de soumettre l'ensemble à `/epure approve`.
+_Éviter_ : démarrer l'implémentation applicative sans approbation explicite `/epure approve`.
+
+**Jeton d'installation GitHub App éphémère (Q87)** : jeton court obtenu en signant un JWT RS256 avec `EPURE_AGENT_APP_ID` et `EPURE_AGENT_APP_PRIVATE_KEY` puis en appelant l'API d'installation GitHub du dépôt cible, utilisé par le publisher isolé pour créer branches, commits, tickets, PRs et checks, puis révoqué immédiatement.
+_Éviter_ : exposer la clé privée PEM au processus agent ou partager un PAT personnel permanent.
+
+

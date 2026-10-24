@@ -177,7 +177,157 @@ export async function updateIssueStateWithCas(
     conflictsRecovered += 1;
   }
 
+  if ( conflictsRecovered > 0 ) {
+    // kept for TS
+  }
   throw new Error(
     `CAS conflict retry budget exhausted (${maxRetries}) on '${refName}'.`
   );
 }
+
+export interface GitApiRefStateStoreOptions {
+  readonly repository: string;
+  readonly githubToken: string;
+  readonly apiBaseUrl?: string | undefined;
+  readonly fetchImpl?: typeof fetch | undefined;
+}
+
+export function createGitHubApiRefStateStore(
+  options: GitApiRefStateStoreOptions
+): GitRefStateStore {
+  const [owner, repo] = options.repository.trim().split("/");
+  const baseUrl = (options.apiBaseUrl ?? "https://api.github.com").replace(
+    /\/+$/,
+    ""
+  );
+  const fetchFn = options.fetchImpl ?? fetch;
+
+  const headers = {
+    Authorization: `Bearer ${options.githubToken}`,
+    Accept: "application/vnd.github+json",
+    "Content-Type": "application/json",
+    "X-GitHub-Api-Version": "2022-11-28"
+  };
+
+  return {
+    readRef: async (refName: string): Promise<GitRefSnapshot> => {
+      const normalizedRef = refName.replace(/^refs\//, "");
+      const refResp = await fetchFn(
+        `${baseUrl}/repos/${owner}/${repo}/git/ref/${normalizedRef}`,
+        { method: "GET", headers }
+      );
+      if (refResp.status === 404) {
+        return { sha: null, state: null };
+      }
+      if (!refResp.ok) {
+        throw new Error(
+          `Failed to read Git ref '${refName}' (HTTP ${refResp.status}).`
+        );
+      }
+      const refData = (await refResp.json()) as {
+        object?: { sha?: string };
+      };
+      const blobSha = refData.object?.sha;
+      if (!blobSha) {
+        return { sha: null, state: null };
+      }
+
+      const blobResp = await fetchFn(
+        `${baseUrl}/repos/${owner}/${repo}/git/blobs/${blobSha}`,
+        { method: "GET", headers }
+      );
+      if (!blobResp.ok) {
+        return { sha: null, state: null };
+      }
+      const blobData = (await blobResp.json()) as {
+        content?: string;
+        encoding?: string;
+      };
+      const rawJson = Buffer.from(
+        blobData.content ?? "",
+        blobData.encoding === "base64" ? "base64" : "utf8"
+      ).toString("utf8");
+      const parsed = JSON.parse(rawJson) as EpureIssueState;
+      return { sha: blobSha, state: parsed };
+    },
+
+    compareAndSwapRef: async (
+      refName: string,
+      expectedOldSha: string | null,
+      nextState: EpureIssueState
+    ): Promise<{ readonly swapped: boolean; readonly newSha: string }> => {
+      const normalizedRef = refName.replace(/^refs\//, "");
+
+      // Verify current ref SHA matches expectedOldSha
+      const checkResp = await fetchFn(
+        `${baseUrl}/repos/${owner}/${repo}/git/ref/${normalizedRef}`,
+        { method: "GET", headers }
+      );
+      if (expectedOldSha === null) {
+        if (checkResp.status !== 404) {
+          return { swapped: false, newSha: "" };
+        }
+      } else {
+        if (!checkResp.ok) {
+          return { swapped: false, newSha: "" };
+        }
+        const currentRef = (await checkResp.json()) as {
+          object?: { sha?: string };
+        };
+        if (currentRef.object?.sha !== expectedOldSha) {
+          return { swapped: false, newSha: "" };
+        }
+      }
+
+      // Create blob for nextState
+      const createBlobResp = await fetchFn(
+        `${baseUrl}/repos/${owner}/${repo}/git/blobs`,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            content: JSON.stringify(nextState, null, 2),
+            encoding: "utf-8"
+          })
+        }
+      );
+      if (!createBlobResp.ok) {
+        return { swapped: false, newSha: "" };
+      }
+      const blobCreated = (await createBlobResp.json()) as { sha?: string };
+      const newSha = blobCreated.sha ?? "";
+      if (!newSha) {
+        return { swapped: false, newSha: "" };
+      }
+
+      if (expectedOldSha === null) {
+        const createRefResp = await fetchFn(
+          `${baseUrl}/repos/${owner}/${repo}/git/refs`,
+          {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              ref: refName.startsWith("refs/") ? refName : `refs/${refName}`,
+              sha: newSha
+            })
+          }
+        );
+        return { swapped: createRefResp.ok, newSha: createRefResp.ok ? newSha : "" };
+      }
+
+      const updateRefResp = await fetchFn(
+        `${baseUrl}/repos/${owner}/${repo}/git/refs/${normalizedRef}`,
+        {
+          method: "PATCH",
+          headers,
+          body: JSON.stringify({
+            sha: newSha,
+            force: true
+          })
+        }
+      );
+      return { swapped: updateRefResp.ok, newSha: updateRefResp.ok ? newSha : "" };
+    }
+  };
+}
+

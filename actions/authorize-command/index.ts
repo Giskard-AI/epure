@@ -46,6 +46,10 @@ async function run(): Promise<void> {
     process.env.GITHUB_TOKEN ??
     ""
   ).trim();
+  const allowImplicitPlanningReply =
+    (process.env.INPUT_ALLOW_IMPLICIT_PLANNING_REPLY ?? "false")
+      .trim()
+      .toLowerCase() === "true";
 
   const secretsToRedact = [githubToken].filter((val) => val.length > 0);
 
@@ -71,7 +75,8 @@ async function run(): Promise<void> {
               githubToken
             })
         : undefined,
-    secretsToRedact
+    secretsToRedact,
+    allowImplicitPlanningReply
   });
 
   writeGitHubOutputs({

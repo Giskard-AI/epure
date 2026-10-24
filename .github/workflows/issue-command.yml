@@ -1,16 +1,21 @@
-name: "EPURE Authorized Issue Command Gate"
+name: "EPURE Reusable Issue Command Gate & Orchestrator"
 
 on:
   workflow_call:
     inputs:
       repository:
-        description: "Consumer repository slug (<owner>/<repo>)"
+        description: "Target GitHub repository slug (<owner>/<repo>)"
         required: true
         type: string
       issue_number:
-        description: "Issue number where the command comment was posted"
+        description: "GitHub Issue number receiving the command"
         required: true
         type: number
+      comment_id:
+        description: "GitHub Issue Comment ID for cursor tracking"
+        required: false
+        type: number
+        default: 0
       comment_body:
         description: "Raw issue comment body"
         required: true
@@ -20,41 +25,64 @@ on:
         required: true
         type: string
       actor_type:
-        description: "GitHub user type ('User' or 'Bot')"
+        description: "GitHub actor type ('User', 'Bot', 'Organization')"
         required: false
+        type: string
         default: "User"
-        type: string
       author_association:
-        description: "Untrusted author_association value from event payload"
+        description: "Event author_association (informational only)"
         required: false
-        default: "NONE"
         type: string
-      issue_labels:
-        description: "Comma-separated issue labels (untrusted)"
-        required: false
         default: ""
+      issue_labels:
+        description: "Comma-separated issue labels (informational only)"
+        required: false
         type: string
+        default: ""
+      effective_permission:
+        description: "Optional pre-verified effective permission override for deterministic testing"
+        required: false
+        type: string
+        default: ""
+      llm_environment:
+        description: "GitHub Environment holding LLM_API_KEY (defaults to 'gemini')"
+        required: false
+        type: string
+        default: "gemini"
+    secrets:
+      EPURE_AGENT_APP_ID:
+        description: "Consumer Agent App ID"
+        required: false
+      EPURE_AGENT_APP_PRIVATE_KEY:
+        description: "Consumer Agent App PEM private key"
+        required: false
+      LLM_API_KEY:
+        description: "Gemini / LLM API key"
+        required: false
     outputs:
       authorized:
-        description: "'true' when the actor holds effective write/admin permission and command is valid"
+        description: "Whether the command is authorized ('true' or 'false')"
         value: ${{ jobs.authorize-command.outputs.authorized }}
       decision:
-        description: "Gate decision"
+        description: "Authorization decision code"
         value: ${{ jobs.authorize-command.outputs.decision }}
       command:
-        description: "Authorized command ('status', 'plan', 'approve', 'cancel')"
+        description: "Parsed EPURE command"
         value: ${{ jobs.authorize-command.outputs.command }}
+      command_args:
+        description: "Parsed EPURE command arguments"
+        value: ${{ jobs.authorize-command.outputs.command_args }}
       effective_permission:
-        description: "Verified effective collaborator permission"
+        description: "Verified repository permission level"
         value: ${{ jobs.authorize-command.outputs.effective_permission }}
       privileged_action_allowed:
-        description: "'true' if privileged actions are allowed"
+        description: "Whether privileged state/branch/PR actions may proceed"
         value: ${{ jobs.authorize-command.outputs.privileged_action_allowed }}
       llm_call_allowed:
-        description: "'true' if LLM invocation is allowed"
+        description: "Whether LLM execution may proceed"
         value: ${{ jobs.authorize-command.outputs.llm_call_allowed }}
       error_code:
-        description: "Structured error code ('NONE' when authorized)"
+        description: "Deterministic error code"
         value: ${{ jobs.authorize-command.outputs.error_code }}
 
 permissions:
@@ -63,10 +91,9 @@ permissions:
 
 jobs:
   authorize-command:
-    name: "Verify Collaborator Effective Permission & Command"
-    if: ${{ inputs.actor_type != 'Bot' && !endsWith(inputs.actor, '[bot]') }}
+    name: "Authorize /epure Issue Command"
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     permissions:
       contents: read
       issues: write
@@ -74,18 +101,20 @@ jobs:
       authorized: ${{ steps.gate.outputs.authorized }}
       decision: ${{ steps.gate.outputs.decision }}
       command: ${{ steps.gate.outputs.command }}
+      command_args: ${{ steps.gate.outputs.command_args }}
       effective_permission: ${{ steps.gate.outputs.effective_permission }}
       privileged_action_allowed: ${{ steps.gate.outputs.privileged_action_allowed }}
       llm_call_allowed: ${{ steps.gate.outputs.llm_call_allowed }}
       error_code: ${{ steps.gate.outputs.error_code }}
     steps:
-      - name: Checkout EPURE distribution
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Checkout EPURE framework bundle
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: Giskard-AI/epure
           ref: ${{ job.workflow_sha || 'main' }}
+          persist-credentials: false
 
-      - name: Run pre-bundled EPURE issue command gate
+      - name: Run pre-bundled EPURE authorization gate
         id: gate
         uses: ./actions/authorize-command
         with:
@@ -96,4 +125,44 @@ jobs:
           actor_type: ${{ inputs.actor_type }}
           author_association: ${{ inputs.author_association }}
           issue_labels: ${{ inputs.issue_labels }}
+          effective_permission: ${{ inputs.effective_permission }}
+          allow_implicit_planning_reply: "true"
           github_token: ${{ secrets.GITHUB_TOKEN }}
+
+  orchestrate-command:
+    name: "Orchestrate Authorized /epure Lifecycle"
+    needs: authorize-command
+    if: ${{ needs.authorize-command.outputs.authorized == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: ${{ inputs.llm_environment || 'gemini' }}
+    concurrency:
+      group: epure-issue-${{ inputs.issue_number }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      checks: write
+    steps:
+      - name: Checkout EPURE framework bundle
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: Giskard-AI/epure
+          ref: ${{ job.workflow_sha || 'main' }}
+          persist-credentials: false
+
+      - name: Run pre-bundled EPURE issue orchestrator
+        id: orchestrate
+        uses: ./actions/orchestrate-issue
+        with:
+          repository: ${{ inputs.repository }}
+          issue_number: ${{ inputs.issue_number }}
+          command: ${{ needs.authorize-command.outputs.command }}
+          command_args: ${{ needs.authorize-command.outputs.command_args }}
+          comment_id: ${{ inputs.comment_id }}
+          actor: ${{ inputs.actor }}
+          agent_app_id: ${{ secrets.EPURE_AGENT_APP_ID }}
+          agent_app_private_key: ${{ secrets.EPURE_AGENT_APP_PRIVATE_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          llm_api_key: ${{ secrets.LLM_API_KEY }}

@@ -55,7 +55,7 @@ describe("1. Dry-run simulation & guided application (planAndApplyRepoSetup)", (
       ]);
       for (const wf of result.planned_workflows) {
         expect(wf.action).toBe("create");
-        expect(wf.content).toContain(`@${DEFAULT_EPURE_PINNED_SHA} # v1.0.0`);
+        expect(wf.content).toContain(`@${DEFAULT_EPURE_PINNED_SHA} # v1.1.0`);
       }
 
       expect(result.expected_secrets.map((s) => s.name)).toEqual(

@@ -34,6 +34,10 @@ inputs:
     description: "GitHub token used to query GET /repos/{owner}/{repo}/collaborators/{username}/permission when effective_permission is not pre-supplied"
     required: false
     default: ""
+  allow_implicit_planning_reply:
+    description: "When 'true', ordinary comments without a slash command are parsed as 'reply' commands for active planning sessions"
+    required: false
+    default: "false"
 outputs:
   authorized:
     description: "'true' if the command is authorized for execution, 'false' otherwise"

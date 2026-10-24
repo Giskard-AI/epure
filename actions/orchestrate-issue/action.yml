@@ -1,0 +1,58 @@
+name: "EPURE Orchestrate Issue Lifecycle"
+description: "Pre-bundled TypeScript (Node.js 24 LTS) Custom Action executing authorized EPURE issue commands (/epure plan, human grill replies, /epure to-spec, /epure to-tickets, /epure approve, /epure status, /epure cancel) using Gemini API and scoped GitHub App installation tokens."
+author: "Giskard-AI"
+inputs:
+  repository:
+    description: "Target GitHub repository slug (<owner>/<repo>)"
+    required: true
+  issue_number:
+    description: "GitHub Issue number"
+    required: true
+  command:
+    description: "Authorized EPURE command ('status', 'plan', 'to-spec', 'to-tickets', 'approve', 'cancel', 'reply')"
+    required: true
+  command_args:
+    description: "Command arguments or human reply body"
+    required: false
+    default: ""
+  comment_id:
+    description: "GitHub issue comment ID for cursor tracking"
+    required: false
+    default: "0"
+  actor:
+    description: "Authorized human actor login"
+    required: true
+  agent_app_id:
+    description: "Consumer Agent App ID (EPURE_AGENT_APP_ID)"
+    required: false
+    default: ""
+  agent_app_private_key:
+    description: "Consumer Agent App PEM private key (EPURE_AGENT_APP_PRIVATE_KEY)"
+    required: false
+    default: ""
+  github_token:
+    description: "Fallback GITHUB_TOKEN when Agent App credentials are not supplied"
+    required: false
+    default: ""
+  llm_api_key:
+    description: "Gemini / LLM API key (LLM_API_KEY)"
+    required: false
+    default: ""
+  model:
+    description: "Gemini model name (defaults to gemini-2.5-flash)"
+    required: false
+    default: "gemini-2.5-flash"
+outputs:
+  executed:
+    description: "'true' if an orchestration transition executed, 'false' otherwise"
+  phase:
+    description: "Updated orchestration phase"
+  status:
+    description: "Updated orchestration status"
+  active_branch:
+    description: "Active plan or feature branch"
+  feature_pr_url:
+    description: "URL of the final feature->dev Pull Request when command is approve"
+runs:
+  using: "node24"
+  main: "../../dist/actions/orchestrate-issue/index.mjs"

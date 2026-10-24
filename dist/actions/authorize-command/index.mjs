@@ -6,8 +6,11 @@ var REPO_SLUG_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 var SUPPORTED_COMMANDS = /* @__PURE__ */ new Set([
   "status",
   "plan",
+  "to-spec",
+  "to-tickets",
   "approve",
-  "cancel"
+  "cancel",
+  "reply"
 ]);
 var AUTHORIZED_PERMISSIONS = /* @__PURE__ */ new Set(["write", "admin"]);
 var AUTHORIZED_ROLES = /* @__PURE__ */ new Set(["write", "maintain", "admin"]);
@@ -144,25 +147,34 @@ async function evaluateIssueCommandGate(input) {
     };
   }
   const rawSlash = extractRawSlashEpureLine(input.commentBody);
+  let parsedCommand = null;
   if (!rawSlash) {
-    return {
-      authorized: false,
-      decision: "ignored_no_command",
-      error_code: "NO_COMMAND_FOUND",
-      command: null,
-      command_args: "",
-      effective_permission: "not_checked",
-      privileged_action_allowed: false,
-      llm_call_allowed: false,
-      should_post_response: false,
-      error_message: "",
-      response_markdown: ""
-    };
+    if (input.allowImplicitPlanningReply && input.commentBody.trim().length > 0) {
+      parsedCommand = {
+        command: "reply",
+        args: input.commentBody.trim()
+      };
+    } else {
+      return {
+        authorized: false,
+        decision: "ignored_no_command",
+        error_code: "NO_COMMAND_FOUND",
+        command: null,
+        command_args: "",
+        effective_permission: "not_checked",
+        privileged_action_allowed: false,
+        llm_call_allowed: false,
+        should_post_response: false,
+        error_message: "",
+        response_markdown: ""
+      };
+    }
+  } else {
+    parsedCommand = parseEpureCommand(input.commentBody);
   }
-  const parsedCommand = parseEpureCommand(input.commentBody);
   if (!parsedCommand) {
     const errMsg = redactSecrets(
-      `Unsupported EPURE command '/epure ${rawSlash.subcommand}'. Supported commands: status, plan, approve, cancel.`,
+      `Unsupported EPURE command '/epure ${rawSlash?.subcommand ?? ""}'. Supported commands: status, plan, to-spec, to-tickets, approve, cancel.`,
       secrets
     );
     const md2 = redactSecrets(
@@ -281,7 +293,7 @@ async function evaluateIssueCommandGate(input) {
     };
   }
   const safeArgs = redactSecrets(parsedCommand.args, secrets);
-  const llmAllowed = parsedCommand.command === "plan" || parsedCommand.command === "approve";
+  const llmAllowed = parsedCommand.command === "plan" || parsedCommand.command === "to-spec" || parsedCommand.command === "to-tickets" || parsedCommand.command === "approve" || parsedCommand.command === "reply";
   const md = redactSecrets(
     [
       "### EPURE Command Authorized",
@@ -340,6 +352,7 @@ async function run() {
   const issueLabels = issueLabelsRaw.split(",").map((label) => label.trim()).filter(Boolean);
   const preFetchedPermission = (process.env.INPUT_EFFECTIVE_PERMISSION ?? "").trim();
   const githubToken = (process.env.INPUT_GITHUB_TOKEN ?? process.env.GITHUB_TOKEN ?? "").trim();
+  const allowImplicitPlanningReply = (process.env.INPUT_ALLOW_IMPLICIT_PLANNING_REPLY ?? "false").trim().toLowerCase() === "true";
   const secretsToRedact = [githubToken].filter((val) => val.length > 0);
   const result = await evaluateIssueCommandGate({
     repository,
@@ -357,7 +370,8 @@ async function run() {
       username,
       githubToken
     }) : void 0,
-    secretsToRedact
+    secretsToRedact,
+    allowImplicitPlanningReply
   });
   writeGitHubOutputs({
     authorized: String(result.authorized),

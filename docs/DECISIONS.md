@@ -203,3 +203,14 @@ Voir [ADR-0022](adr/0022-prototypes-previews-et-validation-du-plan.md).
 
 Voir [ADR-0023](adr/0023-sandbox-proxy-llm-et-stack-typescript.md), [ADR-0024](adr/0024-etat-orchestration-git-refs-et-batch-comments.md) et [ADR-0025](adr/0025-depot-public-epure-rulesets-et-tags-immuables.md).
 
+## Ronde 21 — Q84 à Q90 (validées — Câblage de l'orchestrateur réel V1.1)
+
+- **Q84 (validée)** : grammaire unifiée dans `issue-command-gate` et `skill-router` : `/epure plan` initialise la phase `grilling` dans `refs/epure/state/<issue>` ; tout commentaire humain ultérieur sur une issue en phase `grilling` est accepté comme réponse d'entretien sans exiger de commande slash ; les commandes `/epure to-spec`, `/epure to-tickets`, `/epure approve`, `/epure status` et `/epure cancel` sont également supportées explicitement.
+- **Q85 (validée)** : lorsque les réponses humaines au grill lèvent les ambiguïtés restantes, l'orchestrateur génère automatiquement dans la foulée sur `plan/<issue>-<slug>` les fichiers `GLOSSARY.md`, `docs/adr/0001-*.md`..`NNNN-*.md` et `docs/specs/<slug>.md`, crée les issues de tickets GitHub avec `blocked_by` et le label `ready-for-agent`, passe en statut `awaiting_human_approval` et invite l'humain à poster `/epure approve`.
+- **Q86 (validée)** : le proxy LLM de sandbox (`llm-sandbox.ts`) et l'orchestrateur appellent réellement l'API Gemini (`LLM_API_KEY` issu de l'environnement GitHub `gemini`) sans jamais exposer la clé aux sous-processus de test ou de build du dépôt consommateur.
+- **Q87 (validée)** : implémentation de `GitCliRefStateStore` (persistance Git réelle sur `refs/epure/state/<issue>`) et `GitHubAppPublisherClient` (signature JWT RS256 via `EPURE_AGENT_APP_ID` + `EPURE_AGENT_APP_PRIVATE_KEY` pour émettre des tokens d'installation éphémères scopés au dépôt cible), tout en préservant les stores en mémoire pour la suite de tests unitaires rapides.
+- **Q88 (validée)** : sur `/epure approve`, l'orchestrateur fusionne `plan/<issue>-<slug>` vers `dev`, crée `feature/<issue>-<slug>`, puis exécute séquentiellement le DAG des tickets prêts : création de `task/<ticket>-<slug>`, génération TDD (tests Vitest + code applicatif) via Gemini, exécution de `npm test` et `npm run build` dans la sandbox sans secrets, ouverture de la PR `task/* → feature/*`, publication du check `ai-review`, squash-merge, clôture du ticket et ouverture finale de la PR `feature/* → dev`.
+- **Q89 (validée)** : fourniture d'un wizard interactif `scripts/setup-github-apps-wizard.sh` en 5 étapes permettant à l'administrateur humain d'enregistrer et d'installer `Agent App` et `Release App` sur son organisation/dépôt et d'injecter `EPURE_AGENT_APP_ID`, `EPURE_AGENT_APP_PRIVATE_KEY`, `EPURE_RELEASE_APP_ID` et `EPURE_RELEASE_APP_PRIVATE_KEY`.
+- **Q90 (validée)** : publication du guide utilisateur `docs/EPURE-WORKFLOW.md` et de l'[ADR-0026](adr/0026-orchestration-reelle-gemini-et-github-publisher.md).
+
+

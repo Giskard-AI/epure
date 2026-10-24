@@ -1,4 +1,11 @@
-export type EpureCommandName = "status" | "plan" | "approve" | "cancel";
+export type EpureCommandName =
+  | "status"
+  | "plan"
+  | "to-spec"
+  | "to-tickets"
+  | "approve"
+  | "cancel"
+  | "reply";
 
 export interface ParsedEpureCommand {
   readonly command: EpureCommandName;
@@ -48,6 +55,7 @@ export interface IssueCommandGateInput {
       ) => Promise<CollaboratorPermissionResponse>)
     | undefined;
   readonly secretsToRedact?: readonly string[] | undefined;
+  readonly allowImplicitPlanningReply?: boolean | undefined;
 }
 
 export interface IssueCommandGateResult {
@@ -68,8 +76,11 @@ const REPO_SLUG_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const SUPPORTED_COMMANDS = new Set<EpureCommandName>([
   "status",
   "plan",
+  "to-spec",
+  "to-tickets",
   "approve",
-  "cancel"
+  "cancel",
+  "reply"
 ]);
 const AUTHORIZED_PERMISSIONS = new Set(["write", "admin"]);
 const AUTHORIZED_ROLES = new Set(["write", "maintain", "admin"]);
@@ -249,28 +260,38 @@ export async function evaluateIssueCommandGate(
     };
   }
 
-  // 2. Parse slash command
+  // 2. Parse slash command (or implicit reply when allowImplicitPlanningReply is enabled)
   const rawSlash = extractRawSlashEpureLine(input.commentBody);
+  let parsedCommand: ParsedEpureCommand | null = null;
+
   if (!rawSlash) {
-    return {
-      authorized: false,
-      decision: "ignored_no_command",
-      error_code: "NO_COMMAND_FOUND",
-      command: null,
-      command_args: "",
-      effective_permission: "not_checked",
-      privileged_action_allowed: false,
-      llm_call_allowed: false,
-      should_post_response: false,
-      error_message: "",
-      response_markdown: ""
-    };
+    if (input.allowImplicitPlanningReply && input.commentBody.trim().length > 0) {
+      parsedCommand = {
+        command: "reply",
+        args: input.commentBody.trim()
+      };
+    } else {
+      return {
+        authorized: false,
+        decision: "ignored_no_command",
+        error_code: "NO_COMMAND_FOUND",
+        command: null,
+        command_args: "",
+        effective_permission: "not_checked",
+        privileged_action_allowed: false,
+        llm_call_allowed: false,
+        should_post_response: false,
+        error_message: "",
+        response_markdown: ""
+      };
+    }
+  } else {
+    parsedCommand = parseEpureCommand(input.commentBody);
   }
 
-  const parsedCommand = parseEpureCommand(input.commentBody);
   if (!parsedCommand) {
     const errMsg = redactSecrets(
-      `Unsupported EPURE command '/epure ${rawSlash.subcommand}'. Supported commands: status, plan, approve, cancel.`,
+      `Unsupported EPURE command '/epure ${rawSlash?.subcommand ?? ""}'. Supported commands: status, plan, to-spec, to-tickets, approve, cancel.`,
       secrets
     );
     const md = redactSecrets(
@@ -399,7 +420,11 @@ export async function evaluateIssueCommandGate(
 
   const safeArgs = redactSecrets(parsedCommand.args, secrets);
   const llmAllowed =
-    parsedCommand.command === "plan" || parsedCommand.command === "approve";
+    parsedCommand.command === "plan" ||
+    parsedCommand.command === "to-spec" ||
+    parsedCommand.command === "to-tickets" ||
+    parsedCommand.command === "approve" ||
+    parsedCommand.command === "reply";
   const md = redactSecrets(
     [
       "### EPURE Command Authorized",
