@@ -4,11 +4,13 @@ import { planAndApplyRepoSetup } from "./setup-repo.js";
 function parseArgs(argv: readonly string[]): {
   repository: string;
   repoRootDir: string | undefined;
+  epurePinnedSha: string | undefined;
   dryRun: boolean;
   json: boolean;
 } {
   let repository = "";
   let repoRootDir: string | undefined;
+  let epurePinnedSha: string | undefined;
   let dryRun = true;
   let json = false;
 
@@ -17,8 +19,11 @@ function parseArgs(argv: readonly string[]): {
     if (arg === "--repo" && argv[i + 1]) {
       repository = argv[i + 1] ?? "";
       i += 1;
-    } else if (arg === "--dir" && argv[i + 1]) {
+    } else if ((arg === "--dir" || arg === "--repo-root") && argv[i + 1]) {
       repoRootDir = argv[i + 1];
+      i += 1;
+    } else if (arg === "--pinned-sha" && argv[i + 1]) {
+      epurePinnedSha = argv[i + 1];
       i += 1;
     } else if (arg === "--apply") {
       dryRun = false;
@@ -29,7 +34,7 @@ function parseArgs(argv: readonly string[]): {
     }
   }
 
-  return { repository, repoRootDir, dryRun, json };
+  return { repository, repoRootDir, epurePinnedSha, dryRun, json };
 }
 
 function main(): void {
@@ -37,6 +42,7 @@ function main(): void {
   const result = planAndApplyRepoSetup({
     repository: args.repository,
     repoRootDir: args.repoRootDir,
+    epurePinnedSha: args.epurePinnedSha,
     dryRun: args.dryRun
   });
 

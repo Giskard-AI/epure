@@ -57,7 +57,7 @@ on:
         description: "Consumer Agent App PEM private key"
         required: false
       LLM_API_KEY:
-        description: "Gemini / LLM API key"
+        description: "Optional explicit Gemini API key override (when not resolved via llm_environment)"
         required: false
     outputs:
       authorized:

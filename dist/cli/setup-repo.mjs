@@ -218,7 +218,9 @@ function buildCallerWorkflows(pinnedSha) {
         "      comment_body: ${{ github.event.comment.body }}",
         "      actor: ${{ github.event.comment.user.login }}",
         "      actor_type: ${{ github.event.comment.user.type }}",
-        "    secrets: inherit",
+        "    secrets:",
+        "      EPURE_AGENT_APP_ID: ${{ secrets.EPURE_AGENT_APP_ID }}",
+        "      EPURE_AGENT_APP_PRIVATE_KEY: ${{ secrets.EPURE_AGENT_APP_PRIVATE_KEY }}",
         ""
       ].join("\n")
     },
@@ -501,6 +503,7 @@ function planAndApplyRepoSetup(input) {
 function parseArgs(argv) {
   let repository = "";
   let repoRootDir;
+  let epurePinnedSha;
   let dryRun = true;
   let json = false;
   for (let i = 0; i < argv.length; i += 1) {
@@ -508,8 +511,11 @@ function parseArgs(argv) {
     if (arg === "--repo" && argv[i + 1]) {
       repository = argv[i + 1] ?? "";
       i += 1;
-    } else if (arg === "--dir" && argv[i + 1]) {
+    } else if ((arg === "--dir" || arg === "--repo-root") && argv[i + 1]) {
       repoRootDir = argv[i + 1];
+      i += 1;
+    } else if (arg === "--pinned-sha" && argv[i + 1]) {
+      epurePinnedSha = argv[i + 1];
       i += 1;
     } else if (arg === "--apply") {
       dryRun = false;
@@ -519,13 +525,14 @@ function parseArgs(argv) {
       json = true;
     }
   }
-  return { repository, repoRootDir, dryRun, json };
+  return { repository, repoRootDir, epurePinnedSha, dryRun, json };
 }
 function main() {
   const args = parseArgs(process.argv.slice(2));
   const result = planAndApplyRepoSetup({
     repository: args.repository,
     repoRootDir: args.repoRootDir,
+    epurePinnedSha: args.epurePinnedSha,
     dryRun: args.dryRun
   });
   if (args.json) {

@@ -369,7 +369,9 @@ function buildCallerWorkflows(pinnedSha: string): ReadonlyArray<{
         "      comment_body: ${{ github.event.comment.body }}",
         "      actor: ${{ github.event.comment.user.login }}",
         "      actor_type: ${{ github.event.comment.user.type }}",
-        "    secrets: inherit",
+        "    secrets:",
+        "      EPURE_AGENT_APP_ID: ${{ secrets.EPURE_AGENT_APP_ID }}",
+        "      EPURE_AGENT_APP_PRIVATE_KEY: ${{ secrets.EPURE_AGENT_APP_PRIVATE_KEY }}",
         ""
       ].join("\n")
     },
