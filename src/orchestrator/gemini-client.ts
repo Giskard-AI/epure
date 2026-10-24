@@ -11,7 +11,7 @@ export interface GeminiGenerateOptions {
 export async function callGeminiGenerateContent(
   options: GeminiGenerateOptions
 ): Promise<string> {
-  const model = (options.model ?? "gemini-2.5-flash").trim();
+  const model = (options.model ?? "gemini-3.8-flash").trim();
   const fetchFn = options.fetchImpl ?? fetch;
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
     model

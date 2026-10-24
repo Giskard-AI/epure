@@ -521,7 +521,7 @@ async function runTestsInIsolatedWorkspace(params: {
 export async function orchestrateIssueCommand(
   input: OrchestrateIssueInput
 ): Promise<OrchestrateIssueResult> {
-  const model = (input.model ?? "gemini-2.5-flash").trim();
+  const model = (input.model ?? "gemini-3.8-flash").trim();
   let mintedAppToken: string | null = null;
 
   try {

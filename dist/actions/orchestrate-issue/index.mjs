@@ -552,7 +552,7 @@ function createGitHubApiRefStateStore(options) {
 
 // src/orchestrator/gemini-client.ts
 async function callGeminiGenerateContent(options) {
-  const model = (options.model ?? "gemini-2.5-flash").trim();
+  const model = (options.model ?? "gemini-3.8-flash").trim();
   const fetchFn = options.fetchImpl ?? fetch;
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
     model
@@ -906,7 +906,7 @@ ${sandboxRun.stderr}`.trim()
   }
 }
 async function orchestrateIssueCommand(input) {
-  const model = (input.model ?? "gemini-2.5-flash").trim();
+  const model = (input.model ?? "gemini-3.8-flash").trim();
   let mintedAppToken = null;
   try {
     let activeToken = (input.fallbackGithubToken ?? "").trim();
@@ -1424,7 +1424,7 @@ async function run() {
   const agentAppPrivateKey = (process.env.INPUT_AGENT_APP_PRIVATE_KEY ?? process.env.EPURE_AGENT_APP_PRIVATE_KEY ?? "").trim();
   const fallbackGithubToken = (process.env.INPUT_GITHUB_TOKEN ?? process.env.GITHUB_TOKEN ?? "").trim();
   const llmApiKey = (process.env.INPUT_LLM_API_KEY ?? process.env.LLM_API_KEY ?? "").trim();
-  const model = (process.env.INPUT_MODEL ?? "gemini-2.5-flash").trim();
+  const model = (process.env.INPUT_MODEL ?? "gemini-3.8-flash").trim();
   const secrets = [agentAppPrivateKey, fallbackGithubToken, llmApiKey].filter(
     (s) => s.length >= 4
   );

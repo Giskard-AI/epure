@@ -52,7 +52,7 @@ async function run(): Promise<void> {
     process.env.LLM_API_KEY ??
     ""
   ).trim();
-  const model = (process.env.INPUT_MODEL ?? "gemini-2.5-flash").trim();
+  const model = (process.env.INPUT_MODEL ?? "gemini-3.8-flash").trim();
 
   const secrets = [agentAppPrivateKey, fallbackGithubToken, llmApiKey].filter(
     (s) => s.length >= 4

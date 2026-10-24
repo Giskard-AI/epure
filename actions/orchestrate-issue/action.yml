@@ -39,9 +39,9 @@ inputs:
     required: false
     default: ""
   model:
-    description: "Gemini model name (defaults to gemini-2.5-flash)"
+    description: "Gemini model name (defaults to gemini-3.8-flash)"
     required: false
-    default: "gemini-2.5-flash"
+    default: "gemini-3.8-flash"
 outputs:
   executed:
     description: "'true' if an orchestration transition executed, 'false' otherwise"
