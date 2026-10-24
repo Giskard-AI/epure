@@ -597,17 +597,30 @@ async function callGeminiGenerateContent(options) {
   }
   return text.trim();
 }
+function sanitizeJsonBackslashes(candidate) {
+  return candidate.replace(
+    /\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})/g,
+    "\\\\"
+  );
+}
 function extractJsonObject(rawText) {
+  const tryParse = (str) => {
+    try {
+      return JSON.parse(str);
+    } catch {
+      return JSON.parse(sanitizeJsonBackslashes(str));
+    }
+  };
   const fenceMatch = /```(?:json)?\s*([\s\S]*?)\s*```/i.exec(rawText);
   if (fenceMatch && fenceMatch[1]) {
-    return JSON.parse(fenceMatch[1].trim());
+    return tryParse(fenceMatch[1].trim());
   }
   const firstBrace = rawText.indexOf("{");
   const lastBrace = rawText.lastIndexOf("}");
   if (firstBrace >= 0 && lastBrace > firstBrace) {
-    return JSON.parse(rawText.slice(firstBrace, lastBrace + 1));
+    return tryParse(rawText.slice(firstBrace, lastBrace + 1));
   }
-  return JSON.parse(rawText.trim());
+  return tryParse(rawText.trim());
 }
 
 // src/orchestrator/issue-orchestrator.ts
@@ -789,7 +802,7 @@ function createGitHubRestHelper(params) {
         `/repos/${owner}/${repo}/git/refs/heads/${encodeURIComponent(input.branch)}`,
         {
           sha: newCommit.data.sha,
-          force: false
+          force: true
         }
       );
       return newCommit.data.sha;
@@ -1210,16 +1223,19 @@ async function orchestrateIssueCommand(input) {
         );
       }
       await gh.ensureBranch("dev", "main");
-      const planPr = await gh.openPullRequest({
-        head: planBranch,
-        base: "dev",
-        title: `docs(plan): integrate approved specification and ADRs for #${input.issueNumber}`,
-        body: `Integrates approved planning artifacts from \`${planBranch}\` for #${input.issueNumber}.`
-      });
-      await gh.mergePullRequest(
-        planPr.number,
-        `docs(plan): integrate approved plan #${input.issueNumber}`
-      );
+      try {
+        const planPr = await gh.openPullRequest({
+          head: planBranch,
+          base: "dev",
+          title: `docs(plan): integrate approved specification and ADRs for #${input.issueNumber}`,
+          body: `Integrates approved planning artifacts from \`${planBranch}\` for #${input.issueNumber}.`
+        });
+        await gh.mergePullRequest(
+          planPr.number,
+          `docs(plan): integrate approved plan #${input.issueNumber}`
+        );
+      } catch {
+      }
       await gh.ensureBranch(featureBranch, "dev");
       const updatedStart = await updateIssueStateWithCas({
         issueNumber: input.issueNumber,

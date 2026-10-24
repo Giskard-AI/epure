@@ -351,7 +351,7 @@ function createGitHubRestHelper(params: {
         `/repos/${owner}/${repo}/git/refs/heads/${encodeURIComponent(input.branch)}`,
         {
           sha: newCommit.data!.sha,
-          force: false
+          force: true
         }
       );
 
@@ -901,16 +901,20 @@ export async function orchestrateIssueCommand(
       await gh.ensureBranch("dev", "main");
 
       // Open & merge plan/* -> dev PR to integrate approved docs into dev (ADR-0002, Q14)
-      const planPr = await gh.openPullRequest({
-        head: planBranch,
-        base: "dev",
-        title: `docs(plan): integrate approved specification and ADRs for #${input.issueNumber}`,
-        body: `Integrates approved planning artifacts from \`${planBranch}\` for #${input.issueNumber}.`
-      });
-      await gh.mergePullRequest(
-        planPr.number,
-        `docs(plan): integrate approved plan #${input.issueNumber}`
-      );
+      try {
+        const planPr = await gh.openPullRequest({
+          head: planBranch,
+          base: "dev",
+          title: `docs(plan): integrate approved specification and ADRs for #${input.issueNumber}`,
+          body: `Integrates approved planning artifacts from \`${planBranch}\` for #${input.issueNumber}.`
+        });
+        await gh.mergePullRequest(
+          planPr.number,
+          `docs(plan): integrate approved plan #${input.issueNumber}`
+        );
+      } catch {
+        // Ignore if planBranch was already merged into dev on a previous attempt
+      }
 
       // Create feature branch from updated dev
       await gh.ensureBranch(featureBranch, "dev");

@@ -75,15 +75,31 @@ export async function callGeminiGenerateContent(
   return text.trim();
 }
 
+function sanitizeJsonBackslashes(candidate: string): string {
+  // Replace invalid JSON escape sequences (where \ is not followed by ", \, /, b, f, n, r, t, or uXXXX)
+  return candidate.replace(
+    /\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})/g,
+    "\\\\"
+  );
+}
+
 export function extractJsonObject<T>(rawText: string): T {
+  const tryParse = (str: string): T => {
+    try {
+      return JSON.parse(str) as T;
+    } catch {
+      return JSON.parse(sanitizeJsonBackslashes(str)) as T;
+    }
+  };
+
   const fenceMatch = /```(?:json)?\s*([\s\S]*?)\s*```/i.exec(rawText);
   if (fenceMatch && fenceMatch[1]) {
-    return JSON.parse(fenceMatch[1].trim()) as T;
+    return tryParse(fenceMatch[1].trim());
   }
   const firstBrace = rawText.indexOf("{");
   const lastBrace = rawText.lastIndexOf("}");
   if (firstBrace >= 0 && lastBrace > firstBrace) {
-    return JSON.parse(rawText.slice(firstBrace, lastBrace + 1)) as T;
+    return tryParse(rawText.slice(firstBrace, lastBrace + 1));
   }
-  return JSON.parse(rawText.trim()) as T;
+  return tryParse(rawText.trim());
 }
