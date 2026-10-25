@@ -617,6 +617,27 @@ async function runTestsInIsolatedWorkspace(params: {
       timeout: 180_000
     });
 
+    if (existsSync(join(workDir, "tsconfig.json"))) {
+      const tscRun = await runInUntrustedCodeSandbox({
+        isolationAvailable: true,
+        runnerEnv: {
+          PATH: process.env.PATH,
+          HOME: process.env.HOME,
+          LLM_API_KEY: params.llmApiKey
+        },
+        command: "npx",
+        args: ["tsc", "--noEmit"],
+        cwd: workDir,
+        timeoutMs: 60_000
+      });
+      if (!tscRun.isolated || tscRun.exit_code !== 0) {
+        return {
+          passed: false,
+          output: `TypeScript strict typecheck (tsc --noEmit) failed:\n${tscRun.stdout}\n${tscRun.stderr}`.trim()
+        };
+      }
+    }
+
     const sandboxRun = await runInUntrustedCodeSandbox({
       isolationAvailable: true,
       runnerEnv: {
