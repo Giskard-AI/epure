@@ -733,7 +733,8 @@ ${PROMPT_INJECTION_IMMUNITY_CLAUSE}` : PROMPT_INJECTION_IMMUNITY_CLAUSE;
   for (let round = 0; round <= maxToolRounds; round += 1) {
     const allowToolsThisRound = hasTools && round < maxToolRounds;
     const generationConfig = {
-      temperature: options.temperature ?? 0.2
+      temperature: options.temperature ?? 0.2,
+      maxOutputTokens: 65536
     };
     if (effectiveThinkingLevel && /^gemini-3/i.test(model)) {
       generationConfig.thinkingConfig = {
@@ -826,18 +827,65 @@ ${PROMPT_INJECTION_IMMUNITY_CLAUSE}` : PROMPT_INJECTION_IMMUNITY_CLAUSE;
     `Gemini API exceeded maximum tool rounds (${maxToolRounds}) for model '${model}'.`
   );
 }
-function sanitizeJsonBackslashes(candidate) {
-  return candidate.replace(
-    /\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})/g,
-    "\\\\"
-  );
+function sanitizeJsonStringLiterals(candidate) {
+  let out = "";
+  let inString = false;
+  for (let i = 0; i < candidate.length; i += 1) {
+    const ch = candidate[i];
+    if (!inString) {
+      if (ch === '"') {
+        inString = true;
+      }
+      out += ch;
+      continue;
+    }
+    if (ch === '"') {
+      inString = false;
+      out += ch;
+      continue;
+    }
+    if (ch === "\\") {
+      const next = candidate[i + 1];
+      if (next === void 0) {
+        out += "\\\\";
+        continue;
+      }
+      if (next === '"' || next === "\\" || next === "/" || next === "b" || next === "f" || next === "n" || next === "r" || next === "t") {
+        out += ch + next;
+        i += 1;
+        continue;
+      }
+      if (next === "u" && /^[0-9a-fA-F]{4}$/.test(candidate.slice(i + 2, i + 6))) {
+        out += candidate.slice(i, i + 6);
+        i += 5;
+        continue;
+      }
+      out += "\\\\";
+      continue;
+    }
+    const code = ch.charCodeAt(0);
+    if (code < 32) {
+      if (ch === "\n") {
+        out += "\\n";
+      } else if (ch === "\r") {
+        out += "\\r";
+      } else if (ch === "	") {
+        out += "\\t";
+      } else {
+        out += `\\u${code.toString(16).padStart(4, "0")}`;
+      }
+      continue;
+    }
+    out += ch;
+  }
+  return out;
 }
 function extractJsonObject(rawText) {
   const tryParse = (str) => {
     try {
       return JSON.parse(str);
     } catch {
-      return JSON.parse(sanitizeJsonBackslashes(str));
+      return JSON.parse(sanitizeJsonStringLiterals(str));
     }
   };
   const fenceMatch = /```(?:json)?\s*([\s\S]*?)\s*```/i.exec(rawText);
@@ -2517,7 +2565,8 @@ function createGitHubRestHelper(params) {
       return {
         number: data?.number ?? issueNumber,
         title: data?.title ?? `Issue #${issueNumber}`,
-        body: data?.body ?? ""
+        body: data?.body ?? "",
+        state: data?.state ?? "open"
       };
     },
     async listIssueComments(issueNumber) {
@@ -2579,6 +2628,42 @@ function createGitHubRestHelper(params) {
         true
       );
       return res.data?.object?.sha ?? null;
+    },
+    async readBranchWorkspaceFiles(branch) {
+      const filesMap = /* @__PURE__ */ new Map();
+      try {
+        const treeRes = await apiRequest(
+          "GET",
+          `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
+          void 0,
+          true
+        );
+        const entries = treeRes.data?.tree ?? [];
+        for (const entry of entries) {
+          if (entry.type !== "blob" || !entry.path || !entry.sha) {
+            continue;
+          }
+          const p = entry.path;
+          if (p.startsWith(".github/") || p.startsWith(".cursor/") || p.startsWith("docs/") || p === ".gitignore" || p === "renovate.json" || p === "GLOSSARY.md") {
+            continue;
+          }
+          const blobRes = await apiRequest(
+            "GET",
+            `/repos/${owner}/${repo}/git/blobs/${entry.sha}`,
+            void 0,
+            true
+          );
+          if (blobRes.data?.content && blobRes.data.encoding === "base64") {
+            const decoded = Buffer.from(
+              blobRes.data.content.replace(/\s+/g, ""),
+              "base64"
+            ).toString("utf8");
+            filesMap.set(p, decoded);
+          }
+        }
+      } catch {
+      }
+      return filesMap;
     },
     async ensureBranch(branch, fromBranch = "main") {
       const existingSha = await this.getDefaultBranchSha(branch);
@@ -3395,9 +3480,22 @@ Refs #${input.issueNumber}`
           last_processed_comment_id: input.commentId ?? prev.last_processed_comment_id
         })
       });
-      const accumulatedFiles = /* @__PURE__ */ new Map();
+      const accumulatedFiles = await gh.readBranchWorkspaceFiles(featureBranch);
       const completedTicketsSummary = [];
       for (const ticket of ticketsManifest) {
+        const ticketIssueMeta = await gh.getIssue(ticket.ticketIssueNumber);
+        if (ticketIssueMeta.state === "closed" && accumulatedFiles.size > 0) {
+          if (process.env.GITHUB_ACTIONS === "true") {
+            process.stdout.write(
+              `[EPURE][Ticket #${ticket.ticketIssueNumber}] Already merged & closed on ${featureBranch} \u2014 skipping
+`
+            );
+          }
+          completedTicketsSummary.push(
+            `- **#${ticket.ticketIssueNumber}** (${ticket.title}) \u2014 previously squash-merged into \`${featureBranch}\``
+          );
+          continue;
+        }
         const taskBranch = `task/${ticket.ticketIssueNumber}-${ticket.slug}`;
         if (process.env.GITHUB_ACTIONS === "true") {
           process.stdout.write(

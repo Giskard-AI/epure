@@ -111,7 +111,8 @@ export async function callGeminiGenerateContent(
   for (let round = 0; round <= maxToolRounds; round += 1) {
     const allowToolsThisRound = hasTools && round < maxToolRounds;
     const generationConfig: Record<string, unknown> = {
-      temperature: options.temperature ?? 0.2
+      temperature: options.temperature ?? 0.2,
+      maxOutputTokens: 65536
     };
     if (effectiveThinkingLevel && /^gemini-3/i.test(model)) {
       generationConfig.thinkingConfig = {
@@ -232,12 +233,78 @@ export async function callGeminiGenerateContent(
   );
 }
 
-function sanitizeJsonBackslashes(candidate: string): string {
-  // Replace invalid JSON escape sequences (where \ is not followed by ", \, /, b, f, n, r, t, or uXXXX)
-  return candidate.replace(
-    /\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})/g,
-    "\\\\"
-  );
+function sanitizeJsonStringLiterals(candidate: string): string {
+  // Walk the JSON candidate character-by-character so we only repair invalid
+  // escape sequences and unescaped control characters inside JSON string literals,
+  // while preserving valid escape pairs like `\\s` or `\"`.
+  let out = "";
+  let inString = false;
+  for (let i = 0; i < candidate.length; i += 1) {
+    const ch = candidate[i]!;
+    if (!inString) {
+      if (ch === '"') {
+        inString = true;
+      }
+      out += ch;
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = false;
+      out += ch;
+      continue;
+    }
+
+    if (ch === "\\") {
+      const next = candidate[i + 1];
+      if (next === undefined) {
+        out += "\\\\";
+        continue;
+      }
+      if (
+        next === '"' ||
+        next === "\\" ||
+        next === "/" ||
+        next === "b" ||
+        next === "f" ||
+        next === "n" ||
+        next === "r" ||
+        next === "t"
+      ) {
+        out += ch + next;
+        i += 1;
+        continue;
+      }
+      if (
+        next === "u" &&
+        /^[0-9a-fA-F]{4}$/.test(candidate.slice(i + 2, i + 6))
+      ) {
+        out += candidate.slice(i, i + 6);
+        i += 5;
+        continue;
+      }
+      // Invalid escape sequence (e.g. \' or \s or \d): double the backslash
+      out += "\\\\";
+      continue;
+    }
+
+    const code = ch.charCodeAt(0);
+    if (code < 0x20) {
+      if (ch === "\n") {
+        out += "\\n";
+      } else if (ch === "\r") {
+        out += "\\r";
+      } else if (ch === "\t") {
+        out += "\\t";
+      } else {
+        out += `\\u${code.toString(16).padStart(4, "0")}`;
+      }
+      continue;
+    }
+
+    out += ch;
+  }
+  return out;
 }
 
 export function extractJsonObject<T>(rawText: string): T {
@@ -245,7 +312,7 @@ export function extractJsonObject<T>(rawText: string): T {
     try {
       return JSON.parse(str) as T;
     } catch {
-      return JSON.parse(sanitizeJsonBackslashes(str)) as T;
+      return JSON.parse(sanitizeJsonStringLiterals(str)) as T;
     }
   };
 

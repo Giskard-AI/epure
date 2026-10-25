@@ -392,5 +392,17 @@ describe("EPURE v1.1.0 — Real Orchestration Wiring (Q84–Q90, ADR-0026)", () 
         expect(postedComments.length).toBe(1);
       }
     );
+
+    it("repairs invalid escape sequences and raw newlines inside JSON string literals without corrupting valid \\\\s escapes", () => {
+      const rawMalformedJson =
+        '{"commit_message":"feat: test","files":[{"path":"src/App.tsx","content":"const re = /\\\\s+/g;\\nconst label = \\"L\\\'Enclume\nAstrale\\";"}]}';
+      const parsed = extractJsonObject<{
+        commit_message: string;
+        files: Array<{ path: string; content: string }>;
+      }>(rawMalformedJson);
+      expect(parsed.commit_message).toBe("feat: test");
+      expect(parsed.files[0]?.content).toContain("\\s+");
+      expect(parsed.files[0]?.content).toContain("L\\'Enclume\nAstrale");
+    });
   });
 });

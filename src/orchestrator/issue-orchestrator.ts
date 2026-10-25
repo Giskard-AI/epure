@@ -46,6 +46,7 @@ export interface IssueMetadata {
   readonly number: number;
   readonly title: string;
   readonly body: string;
+  readonly state?: string | undefined;
 }
 
 export interface PlannedTicketDefinition {
@@ -145,6 +146,7 @@ interface GitHubRestHelper {
   }): Promise<{ number: number; html_url: string }>;
   closeIssue(issueNumber: number): Promise<void>;
   getDefaultBranchSha(branch: string): Promise<string | null>;
+  readBranchWorkspaceFiles(branch: string): Promise<Map<string, string>>;
   ensureBranch(branch: string, fromBranch?: string): Promise<string>;
   commitFilesToBranch(params: {
     branch: string;
@@ -267,11 +269,13 @@ function createGitHubRestHelper(params: {
         number: number;
         title: string;
         body?: string | null;
+        state?: string | null;
       }>("GET", `/repos/${owner}/${repo}/issues/${issueNumber}`);
       return {
         number: data?.number ?? issueNumber,
         title: data?.title ?? `Issue #${issueNumber}`,
-        body: data?.body ?? ""
+        body: data?.body ?? "",
+        state: data?.state ?? "open"
       };
     },
 
@@ -343,6 +347,53 @@ function createGitHubRestHelper(params: {
         true
       );
       return res.data?.object?.sha ?? null;
+    },
+
+    async readBranchWorkspaceFiles(branch: string): Promise<Map<string, string>> {
+      const filesMap = new Map<string, string>();
+      try {
+        const treeRes = await apiRequest<{
+          tree?: Array<{ path?: string; type?: string; sha?: string }>;
+        }>(
+          "GET",
+          `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
+          undefined,
+          true
+        );
+        const entries = treeRes.data?.tree ?? [];
+        for (const entry of entries) {
+          if (entry.type !== "blob" || !entry.path || !entry.sha) {
+            continue;
+          }
+          const p = entry.path;
+          if (
+            p.startsWith(".github/") ||
+            p.startsWith(".cursor/") ||
+            p.startsWith("docs/") ||
+            p === ".gitignore" ||
+            p === "renovate.json" ||
+            p === "GLOSSARY.md"
+          ) {
+            continue;
+          }
+          const blobRes = await apiRequest<{ content?: string; encoding?: string }>(
+            "GET",
+            `/repos/${owner}/${repo}/git/blobs/${entry.sha}`,
+            undefined,
+            true
+          );
+          if (blobRes.data?.content && blobRes.data.encoding === "base64") {
+            const decoded = Buffer.from(
+              blobRes.data.content.replace(/\s+/g, ""),
+              "base64"
+            ).toString("utf8");
+            filesMap.set(p, decoded);
+          }
+        }
+      } catch {
+        // Non-fatal if branch tree is unavailable or mocked in tests
+      }
+      return filesMap;
     },
 
     async ensureBranch(branch: string, fromBranch = "main"): Promise<string> {
@@ -1350,10 +1401,23 @@ export async function orchestrateIssueCommand(
         })
       });
 
-      const accumulatedFiles = new Map<string, string>();
+      const accumulatedFiles = await gh.readBranchWorkspaceFiles(featureBranch);
       const completedTicketsSummary: string[] = [];
 
       for (const ticket of ticketsManifest) {
+        const ticketIssueMeta = await gh.getIssue(ticket.ticketIssueNumber);
+        if (ticketIssueMeta.state === "closed" && accumulatedFiles.size > 0) {
+          if (process.env.GITHUB_ACTIONS === "true") {
+            process.stdout.write(
+              `[EPURE][Ticket #${ticket.ticketIssueNumber}] Already merged & closed on ${featureBranch} — skipping\n`
+            );
+          }
+          completedTicketsSummary.push(
+            `- **#${ticket.ticketIssueNumber}** (${ticket.title}) — previously squash-merged into \`${featureBranch}\``
+          );
+          continue;
+        }
+
         const taskBranch = `task/${ticket.ticketIssueNumber}-${ticket.slug}`;
         if (process.env.GITHUB_ACTIONS === "true") {
           process.stdout.write(
