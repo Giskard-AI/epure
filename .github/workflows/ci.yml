@@ -47,8 +47,9 @@ jobs:
           mode: "deterministic_ci"
           steps_json: >-
             [
-              {"id":"step-1-auth-gate","actor":"human-maintainer","effectivePermission":"write","action":"dispatch_command","appContext":"agent"},
-              {"id":"step-2-task-pr","actor":"epure-agent[bot]","effectivePermission":"write","action":"open_pr","appContext":"agent","delegatedBy":"human-maintainer"},
-              {"id":"step-3-release-tag","actor":"epure-release[bot]","effectivePermission":"write","action":"publish_release","appContext":"release","delegatedBy":"human-maintainer"}
+              {"stepId":"step-1-task-branch","actor":"epure-agent[bot]","effectivePermission":"write","appRole":"agent","operation":"push_task_branch","targetBranchOrRef":"task/24-domain-formulas"},
+              {"stepId":"step-2-task-pr","actor":"epure-agent[bot]","effectivePermission":"write","appRole":"agent","operation":"open_pull_request","targetBranchOrRef":"feature/16-enclume"},
+              {"stepId":"step-3-release-tag","actor":"epure-release[bot]","effectivePermission":"write","appRole":"release","operation":"create_release_tag","targetBranchOrRef":"refs/tags/v1.0.0"}
             ]
+
 
