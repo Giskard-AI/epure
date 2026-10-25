@@ -2,10 +2,17 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { buildConsumerAppManifests } from "../auth/github-apps.js";
 import { EPURE_PUBLIC_VERSION } from "../contract/epure-contract.js";
+import {
+  buildDefaultReviewerRosterFiles,
+  type ReviewerAgentName
+} from "../review/reviewer-roster.js";
 
 export const DEFAULT_EPURE_PINNED_SHA =
   "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
 export { EPURE_PUBLIC_VERSION };
+
+export const CONVENTIONAL_COMMIT_PATTERN_REGEX =
+  "^(feat|fix|docs|style|refactor|perf|test|chore|ci|build|revert)(\\([a-z0-9/-]+\\))?(!)?: .+";
 
 export type AgentHarness = "pi" | "codex";
 export type StaleBaseMergePolicy = "strict" | "relaxed";
@@ -88,20 +95,37 @@ export interface PlannedWorkflowFile {
   readonly content: string;
 }
 
+export interface PlannedReviewerRosterFile {
+  readonly name: ReviewerAgentName;
+  readonly path: string;
+  readonly action: ResourcePlanAction;
+  readonly content: string;
+}
+
+export interface RepositoryMergeSettingsSpec {
+  readonly allow_squash_merge: true;
+  readonly allow_merge_commit: false;
+  readonly allow_rebase_merge: false;
+  readonly delete_branch_on_merge: true;
+  readonly squash_merge_commit_title: "PR_TITLE";
+  readonly squash_merge_commit_message: "PR_BODY";
+}
+
 export interface BranchProtectionSpec {
   readonly pattern: string;
   readonly requirePullRequest: boolean;
   readonly requireStatusChecks: boolean;
   readonly requiredChecks: readonly string[];
   readonly requireHumanApproval: boolean;
-  readonly allowedMergeMethods: readonly ("squash" | "rebase")[];
+  readonly allowedMergeMethods: readonly "squash"[];
   readonly allowMergeCommit: false;
+  readonly allowRebaseMerge: false;
 }
 
 export interface RulesetBypassActorSpec {
-  readonly appRole: "release";
+  readonly appRole: "agent" | "release";
   readonly appName: string;
-  readonly mode: "always";
+  readonly mode: "always" | "pull_request";
 }
 
 export interface RepositoryRulesetSpec {
@@ -111,6 +135,11 @@ export interface RepositoryRulesetSpec {
   readonly blockDirectPushes: boolean;
   readonly blockForcePushes: boolean;
   readonly blockDeletions: boolean;
+  readonly requiredLinearHistory?: boolean | undefined;
+  readonly allowedMergeMethods?: readonly "squash"[] | undefined;
+  readonly requiredApprovingReviewCount?: number | undefined;
+  readonly requiredStatusChecks?: readonly string[] | undefined;
+  readonly commitMessagePattern?: string | undefined;
   readonly bypassActors: readonly RulesetBypassActorSpec[];
 }
 
@@ -141,6 +170,7 @@ export interface SetupRepoInput {
   readonly repoRootDir?: string | undefined;
   readonly dryRun?: boolean | undefined;
   readonly epurePinnedSha?: string | undefined;
+  readonly requirePrApprovalsOnDev?: number | undefined;
   readonly agentsOverrides?: AgentsConfigOverrides | undefined;
   readonly existingState?: ExistingRepositoryState | undefined;
 }
@@ -154,9 +184,12 @@ export interface SetupRepoResult {
   readonly agents_config: AgentsConfig;
   readonly agents_config_action: ResourcePlanAction;
   readonly planned_workflows: readonly PlannedWorkflowFile[];
+  readonly planned_reviewer_roster: readonly PlannedReviewerRosterFile[];
   readonly expected_secrets: readonly ExpectedSecretSpec[];
+  readonly repository_merge_settings: RepositoryMergeSettingsSpec;
   readonly branch_protections: readonly BranchProtectionSpec[];
   readonly ruleset_spec: RepositoryRulesetSpec;
+  readonly governance_rulesets: readonly RepositoryRulesetSpec[];
   readonly ruleset_action: ResourcePlanAction;
   readonly apps_action: ResourcePlanAction;
   readonly release_environment: ReleaseEnvironmentSpec;
@@ -165,6 +198,25 @@ export interface SetupRepoResult {
   readonly human_interventions: readonly HumanInterventionStep[];
   readonly mutated_files: readonly string[];
   readonly summary_markdown: string;
+}
+
+export interface ApplyGitHubRepositoryGovernanceInput {
+  readonly repository: string;
+  readonly githubToken: string;
+  readonly governanceRulesets: readonly RepositoryRulesetSpec[];
+  readonly agentAppIntegrationId?: number | undefined;
+  readonly releaseAppIntegrationId?: number | undefined;
+  readonly fetchImpl?: typeof fetch | undefined;
+}
+
+export interface ApplyGitHubRepositoryGovernanceResult {
+  readonly applied: boolean;
+  readonly merge_settings_updated: boolean;
+  readonly rulesets_applied: ReadonlyArray<{
+    readonly name: string;
+    readonly action: "created" | "updated";
+    readonly id: number;
+  }>;
 }
 
 export interface OrgSecretSharingInput {
@@ -200,6 +252,15 @@ export const DEFAULT_AGENTS_CONFIG: AgentsConfig = {
   trace_retention_days: 30,
   preview_retention_days: 14,
   github_pages_previews: false
+};
+
+export const DEFAULT_REPOSITORY_MERGE_SETTINGS: RepositoryMergeSettingsSpec = {
+  allow_squash_merge: true,
+  allow_merge_commit: false,
+  allow_rebase_merge: false,
+  delete_branch_on_merge: true,
+  squash_merge_commit_title: "PR_TITLE",
+  squash_merge_commit_message: "PR_BODY"
 };
 
 const REPO_SLUG_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -438,6 +499,35 @@ function buildCallerWorkflows(pinnedSha: string): ReadonlyArray<{
       ].join("\n")
     },
     {
+      path: ".github/workflows/pr-title.yml",
+      content: [
+        `# Managed by Giskard-AI/epure@${pinnedSha} # v1.1.0`,
+        'name: "Conventional Commit PR Title"',
+        "on:",
+        "  pull_request:",
+        "    types: [opened, edited, synchronize, reopened]",
+        "    branches: [dev, main, 'feature/**']",
+        "permissions:",
+        "  contents: read",
+        "jobs:",
+        "  pr-title:",
+        '    name: "PR title"',
+        "    runs-on: ubuntu-latest",
+        "    timeout-minutes: 5",
+        "    steps:",
+        "      - name: Validate Conventional Commit PR title",
+        "        env:",
+        "          PR_TITLE: ${{ github.event.pull_request.title }}",
+        "        run: |",
+        `          PATTERN='${CONVENTIONAL_COMMIT_PATTERN_REGEX}'`,
+        '          if [[ ! "$PR_TITLE" =~ $PATTERN ]]; then',
+        '            echo "::error::PR title must follow Conventional Commits: $PATTERN (got: $PR_TITLE)"',
+        "            exit 1",
+        "          fi",
+        ""
+      ].join("\n")
+    },
+    {
       path: ".github/workflows/release.yml",
       content: [
         'name: "EPURE Controlled Release (dev -> main)"',
@@ -486,16 +576,59 @@ function computeFilePlanAction(
   return existing === desiredContent ? "noop" : "update";
 }
 
-export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
-  const repository = input.repository.trim();
-  const dryRun = input.dryRun ?? true;
-  const pinnedSha = (input.epurePinnedSha ?? DEFAULT_EPURE_PINNED_SHA).trim();
+export function buildGovernanceRulesets(params: {
+  readonly agentAppName: string;
+  readonly releaseAppName: string;
+  readonly requirePrApprovalsOnDev?: number | undefined;
+}): {
+  readonly featureGovernance: RepositoryRulesetSpec;
+  readonly devGovernance: RepositoryRulesetSpec;
+  readonly releaseImmutability: RepositoryRulesetSpec;
+  readonly all: readonly RepositoryRulesetSpec[];
+} {
+  const requiredChecks = [
+    "verify-contract / Verify EPURE Consumer Contract",
+    "PR title",
+    "ai-review"
+  ] as const;
 
-  const resolvedConfig = resolveAgentsConfig(input.agentsOverrides);
-  const ownerSlug = repository.split("/")[0] ?? "consumer";
-  const manifests = buildConsumerAppManifests({ ownerSlug, repository });
+  const featureGovernance: RepositoryRulesetSpec = {
+    name: "epure-feature-governance",
+    enforcement: "active",
+    targetRefs: ["refs/heads/feature/*"],
+    blockDirectPushes: true,
+    blockForcePushes: true,
+    blockDeletions: true,
+    requiredLinearHistory: true,
+    allowedMergeMethods: ["squash"],
+    requiredApprovingReviewCount: 0,
+    requiredStatusChecks: requiredChecks,
+    commitMessagePattern: CONVENTIONAL_COMMIT_PATTERN_REGEX,
+    bypassActors: [
+      {
+        appRole: "agent",
+        appName: params.agentAppName,
+        mode: "pull_request"
+      }
+    ]
+  };
 
-  const rulesetSpec: RepositoryRulesetSpec = {
+  const devGovernance: RepositoryRulesetSpec = {
+    name: "epure-dev-governance",
+    enforcement: "active",
+    targetRefs: ["refs/heads/dev"],
+    blockDirectPushes: true,
+    blockForcePushes: true,
+    blockDeletions: true,
+    requiredLinearHistory: true,
+    allowedMergeMethods: ["squash"],
+    requiredApprovingReviewCount: params.requirePrApprovalsOnDev ?? 0,
+    requiredStatusChecks: requiredChecks,
+    commitMessagePattern: CONVENTIONAL_COMMIT_PATTERN_REGEX,
+    bypassActors: []
+  };
+
+  const releaseImmutability: RepositoryRulesetSpec = {
     name: "epure-release-immutability",
     enforcement: "active",
     targetRefs: ["refs/heads/main", "refs/tags/v*"],
@@ -505,11 +638,36 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
     bypassActors: [
       {
         appRole: "release",
-        appName: manifests.releaseApp.name,
+        appName: params.releaseAppName,
         mode: "always"
       }
     ]
   };
+
+  return {
+    featureGovernance,
+    devGovernance,
+    releaseImmutability,
+    all: [featureGovernance, devGovernance, releaseImmutability]
+  };
+}
+
+export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
+  const repository = input.repository.trim();
+  const dryRun = input.dryRun ?? true;
+  const pinnedSha = (input.epurePinnedSha ?? DEFAULT_EPURE_PINNED_SHA).trim();
+
+  const resolvedConfig = resolveAgentsConfig(input.agentsOverrides);
+  const ownerSlug = repository.split("/")[0] ?? "consumer";
+  const manifests = buildConsumerAppManifests({ ownerSlug, repository });
+
+  const rulesetBundle = buildGovernanceRulesets({
+    agentAppName: manifests.agentApp.name,
+    releaseAppName: manifests.releaseApp.name,
+    requirePrApprovalsOnDev: input.requirePrApprovalsOnDev
+  });
+  const rulesetSpec = rulesetBundle.releaseImmutability;
+  const governanceRulesets = rulesetBundle.all;
 
   const releaseEnvironment: ReleaseEnvironmentSpec = {
     name: "release",
@@ -522,19 +680,21 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
       pattern: "dev",
       requirePullRequest: true,
       requireStatusChecks: true,
-      requiredChecks: ["ci", "ai-review"],
+      requiredChecks: ["verify-contract", "PR title", "ai-review"],
       requireHumanApproval: true,
-      allowedMergeMethods: ["squash", "rebase"],
-      allowMergeCommit: false
+      allowedMergeMethods: ["squash"],
+      allowMergeCommit: false,
+      allowRebaseMerge: false
     },
     {
       pattern: "feature/*",
       requirePullRequest: true,
       requireStatusChecks: true,
-      requiredChecks: ["ci", "ai-review"],
+      requiredChecks: ["verify-contract", "PR title", "ai-review"],
       requireHumanApproval: false,
-      allowedMergeMethods: ["squash", "rebase"],
-      allowMergeCommit: false
+      allowedMergeMethods: ["squash"],
+      allowMergeCommit: false,
+      allowRebaseMerge: false
     }
   ];
 
@@ -576,9 +736,12 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
       agents_config: resolvedConfig.config,
       agents_config_action: "noop",
       planned_workflows: [],
+      planned_reviewer_roster: [],
       expected_secrets: expectedSecrets,
+      repository_merge_settings: DEFAULT_REPOSITORY_MERGE_SETTINGS,
       branch_protections: branchProtections,
       ruleset_spec: rulesetSpec,
+      governance_rulesets: governanceRulesets,
       ruleset_action: "noop",
       apps_action: "noop",
       release_environment: releaseEnvironment,
@@ -600,9 +763,12 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
       agents_config: resolvedConfig.config,
       agents_config_action: "noop",
       planned_workflows: [],
+      planned_reviewer_roster: [],
       expected_secrets: expectedSecrets,
+      repository_merge_settings: DEFAULT_REPOSITORY_MERGE_SETTINGS,
       branch_protections: branchProtections,
       ruleset_spec: rulesetSpec,
+      governance_rulesets: governanceRulesets,
       ruleset_action: "noop",
       apps_action: "noop",
       release_environment: releaseEnvironment,
@@ -638,6 +804,16 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
     content: wf.content
   }));
 
+  const rosterTemplates = buildDefaultReviewerRosterFiles({ repository });
+  const plannedReviewerRoster: PlannedReviewerRosterFile[] = rosterTemplates.map(
+    (item) => ({
+      name: item.name,
+      path: item.path,
+      action: computeFilePlanAction(input.repoRootDir, item.path, item.content),
+      content: item.content
+    })
+  );
+
   const existingApps = new Set(input.existingState?.existingAppNames ?? []);
   const appsAction: ResourcePlanAction =
     existingApps.has(manifests.agentApp.name) &&
@@ -670,6 +846,14 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
         mutatedFiles.push(wf.path);
       }
     }
+    for (const agentFile of plannedReviewerRoster) {
+      if (agentFile.action !== "noop") {
+        const targetPath = join(input.repoRootDir, agentFile.path);
+        mkdirSync(dirname(targetPath), { recursive: true });
+        writeFileSync(targetPath, agentFile.content, "utf8");
+        mutatedFiles.push(agentFile.path);
+      }
+    }
   }
 
   const humanInterventions: HumanInterventionStep[] = [
@@ -686,17 +870,19 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
     },
     {
       id: "apply_branch_protections_and_release_ruleset",
-      title: "Confirm branch protections on dev/feature/* and Repository Ruleset on main & refs/tags/v*",
-      details: `Ensure only '${manifests.releaseApp.name}' is listed as Bypass Actor on '${rulesetSpec.name}' and configure required reviewers on the 'release' environment.`
+      title: "Confirm 3 Repository Rulesets (feature/*, dev, main+v*) and squash-only merge settings",
+      details: `Run 'setup-repo --apply --apply-github-settings' to enforce squash-only merges and provision 'epure-feature-governance', 'epure-dev-governance', and '${rulesetSpec.name}'.`
     }
   ];
 
   const summaryMarkdown = [
     `### EPURE setup-repo (${dryRun ? "Dry-Run Simulation" : "Guided Application"})`,
     `- **Repository**: \`${repository}\``,
+    `- **Merge Governance**: \`squash-only\` (\`allow_merge_commit=false\`, \`allow_rebase_merge=false\`, \`delete_branch_on_merge=true\`)`,
     `- **Agents Config (\`.github/agents.yml\`)**: \`${agentsConfigAction}\` (harness=\`${resolvedConfig.config.harness}\`, merge_policy=\`${resolvedConfig.config.merge_policy}\`)`,
+    `- **Reviewer Roster (\`.cursor/agents/*.md\`)**: \`${plannedReviewerRoster.length}\` agents (specialists + cross-cutting + \`user-advocate\`)`,
     `- **Task Auto-Merge Enabled**: \`${taskAutoMergeEnabled}\` (${autoMergeWarningCode})`,
-    `- **Ruleset (\`${rulesetSpec.name}\`)**: \`${rulesetAction}\` on \`main\` & \`refs/tags/v*\` (Bypass Actor: \`${manifests.releaseApp.name}\`)`,
+    `- **Governance Rulesets**: ${governanceRulesets.map((r) => `\`${r.name}\``).join(", ")}`,
     `- **Mutated Files**: ${mutatedFiles.length > 0 ? mutatedFiles.map((f) => `\`${f}\``).join(", ") : "none"}`
   ].join("\n");
 
@@ -709,9 +895,12 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
     agents_config: resolvedConfig.config,
     agents_config_action: agentsConfigAction,
     planned_workflows: plannedWorkflows,
+    planned_reviewer_roster: plannedReviewerRoster,
     expected_secrets: expectedSecrets,
+    repository_merge_settings: DEFAULT_REPOSITORY_MERGE_SETTINGS,
     branch_protections: branchProtections,
     ruleset_spec: rulesetSpec,
+    governance_rulesets: governanceRulesets,
     ruleset_action: rulesetAction,
     apps_action: appsAction,
     release_environment: releaseEnvironment,
@@ -720,6 +909,195 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
     human_interventions: humanInterventions,
     mutated_files: mutatedFiles,
     summary_markdown: summaryMarkdown
+  };
+}
+
+function buildGitHubRulesetApiPayload(
+  spec: RepositoryRulesetSpec,
+  appIntegrationIds: {
+    readonly agentAppIntegrationId?: number | undefined;
+    readonly releaseAppIntegrationId?: number | undefined;
+  }
+): Record<string, unknown> {
+  const bypassActors: Array<Record<string, unknown>> = [];
+  for (const actor of spec.bypassActors) {
+    const actorId =
+      actor.appRole === "agent"
+        ? appIntegrationIds.agentAppIntegrationId
+        : appIntegrationIds.releaseAppIntegrationId;
+    if (typeof actorId === "number" && actorId > 0) {
+      bypassActors.push({
+        actor_id: actorId,
+        actor_type: "Integration",
+        bypass_mode: actor.mode
+      });
+    }
+  }
+
+  const rules: Array<Record<string, unknown>> = [];
+  if (spec.blockDeletions) {
+    rules.push({ type: "deletion" });
+  }
+  if (spec.blockForcePushes) {
+    rules.push({ type: "non_fast_forward" });
+  }
+  if (spec.requiredLinearHistory) {
+    rules.push({ type: "required_linear_history" });
+  }
+  if (spec.blockDirectPushes) {
+    rules.push({
+      type: "pull_request",
+      parameters: {
+        allowed_merge_methods: spec.allowedMergeMethods ?? ["squash"],
+        dismiss_stale_reviews_on_push: true,
+        require_code_owner_review: false,
+        require_last_push_approval: false,
+        required_approving_review_count: spec.requiredApprovingReviewCount ?? 0,
+        required_review_thread_resolution: true
+      }
+    });
+  }
+  if (spec.commitMessagePattern) {
+    rules.push({
+      type: "commit_message_pattern",
+      parameters: {
+        name: "Conventional Commit format",
+        negate: false,
+        operator: "regex",
+        pattern: spec.commitMessagePattern
+      }
+    });
+  }
+
+  return {
+    name: spec.name,
+    target: "branch",
+    enforcement: spec.enforcement,
+    bypass_actors: bypassActors,
+    conditions: {
+      ref_name: {
+        include: [...spec.targetRefs],
+        exclude: []
+      }
+    },
+    rules
+  };
+}
+
+export async function applyGitHubRepositoryGovernance(
+  input: ApplyGitHubRepositoryGovernanceInput
+): Promise<ApplyGitHubRepositoryGovernanceResult> {
+  const [owner, repo] = input.repository.trim().split("/");
+  if (!owner || !repo) {
+    throw new Error(`Invalid repository slug '${input.repository}'.`);
+  }
+
+  const fetchFn = input.fetchImpl ?? fetch;
+  const baseUrl = "https://api.github.com";
+  const headers = {
+    Authorization: `Bearer ${input.githubToken.trim()}`,
+    Accept: "application/vnd.github+json",
+    "Content-Type": "application/json",
+    "X-GitHub-Api-Version": "2022-11-28"
+  };
+
+  // 1. Configure Squash-Only & automatic head branch deletion on the repository
+  const patchRepoResp = await fetchFn(`${baseUrl}/repos/${owner}/${repo}`, {
+    method: "PATCH",
+    headers,
+    body: JSON.stringify(DEFAULT_REPOSITORY_MERGE_SETTINGS)
+  });
+  if (!patchRepoResp.ok) {
+    const errText = await patchRepoResp.text();
+    throw new Error(
+      `Failed to configure squash-only settings on ${input.repository} (HTTP ${patchRepoResp.status}): ${errText}`
+    );
+  }
+
+  // 2. Fetch existing rulesets for idempotent create-or-update
+  const listRulesetsResp = await fetchFn(
+    `${baseUrl}/repos/${owner}/${repo}/rulesets`,
+    {
+      method: "GET",
+      headers
+    }
+  );
+  if (!listRulesetsResp.ok) {
+    const errText = await listRulesetsResp.text();
+    throw new Error(
+      `Failed to list rulesets on ${input.repository} (HTTP ${listRulesetsResp.status}): ${errText}`
+    );
+  }
+  const existingRulesets = (await listRulesetsResp.json()) as Array<{
+    id: number;
+    name: string;
+  }>;
+  const existingByName = new Map<string, number>();
+  for (const r of existingRulesets) {
+    existingByName.set(r.name, r.id);
+  }
+
+  const rulesetsApplied: Array<{
+    name: string;
+    action: "created" | "updated";
+    id: number;
+  }> = [];
+
+  for (const spec of input.governanceRulesets) {
+    const payload = buildGitHubRulesetApiPayload(spec, {
+      agentAppIntegrationId: input.agentAppIntegrationId,
+      releaseAppIntegrationId: input.releaseAppIntegrationId
+    });
+    const existingId = existingByName.get(spec.name);
+
+    if (typeof existingId === "number") {
+      const updateResp = await fetchFn(
+        `${baseUrl}/repos/${owner}/${repo}/rulesets/${existingId}`,
+        {
+          method: "PUT",
+          headers,
+          body: JSON.stringify(payload)
+        }
+      );
+      if (!updateResp.ok) {
+        const errText = await updateResp.text();
+        throw new Error(
+          `Failed to update ruleset '${spec.name}' on ${input.repository} (HTTP ${updateResp.status}): ${errText}`
+        );
+      }
+      rulesetsApplied.push({
+        name: spec.name,
+        action: "updated",
+        id: existingId
+      });
+    } else {
+      const createResp = await fetchFn(
+        `${baseUrl}/repos/${owner}/${repo}/rulesets`,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify(payload)
+        }
+      );
+      if (!createResp.ok) {
+        const errText = await createResp.text();
+        throw new Error(
+          `Failed to create ruleset '${spec.name}' on ${input.repository} (HTTP ${createResp.status}): ${errText}`
+        );
+      }
+      const createdData = (await createResp.json()) as { id?: number };
+      rulesetsApplied.push({
+        name: spec.name,
+        action: "created",
+        id: createdData.id ?? 0
+      });
+    }
+  }
+
+  return {
+    applied: true,
+    merge_settings_updated: true,
+    rulesets_applied: rulesetsApplied
   };
 }
 

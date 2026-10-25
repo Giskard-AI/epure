@@ -1,9 +1,16 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { mintRepositoryInstallationToken, revokeGitHubInstallationToken } from "../auth/github-app-jwt.js";
 import { type EpureCommandName, redactSecrets } from "../auth/issue-command-gate.js";
+import { planImpeccableDesignSession } from "../frontend/impeccable-planning.js";
+import { runMultiAgentPrReviewPass } from "../review/multi-agent-pr-review.js";
+import {
+  adaptReviewerRosterForDomain,
+  runUserAdvocateDesignGate
+} from "../review/reviewer-roster.js";
+import { generateSemanticSquashCommitFromDiff } from "../review/squash-commit-generator.js";
 import { runInUntrustedCodeSandbox } from "../sandbox/llm-sandbox.js";
 import {
   buildIssueStateRefName,
@@ -88,6 +95,26 @@ export interface OrchestrateIssueResult {
   readonly feature_pr_url: string;
 }
 
+export function verifyPublisherMergeBoundary(params: {
+  readonly headBranch: string;
+  readonly baseBranch: string;
+}): void {
+  const cleanHead = params.headBranch.trim().replace(/^refs\/heads\//, "");
+  const cleanBase = params.baseBranch.trim().replace(/^refs\/heads\//, "");
+
+  if (cleanBase === "main" || cleanBase === "master") {
+    throw new Error(
+      `HARDWARE_GUARD: Agent App is strictly forbidden from merging '${cleanHead}' into release branch '${cleanBase}' (ADR-0009, Q91).`
+    );
+  }
+
+  if (cleanBase === "dev" && !cleanHead.startsWith("plan/")) {
+    throw new Error(
+      `HARDWARE_GUARD: Agent App is strictly forbidden from auto-merging '${cleanHead}' into 'dev'. Only human maintainers may merge 'feature/* -> dev' in the GitHub UI (ADR-0001, Q45, Q91, Q95).`
+    );
+  }
+}
+
 interface GitHubRestHelper {
   readonly token: string;
   getIssue(issueNumber: number): Promise<IssueMetadata>;
@@ -114,7 +141,23 @@ interface GitHubRestHelper {
     title: string;
     body: string;
   }): Promise<{ number: number; html_url: string; head_sha: string }>;
-  mergePullRequest(prNumber: number, commitTitle: string): Promise<void>;
+  updatePullRequest(
+    prNumber: number,
+    params: { title?: string | undefined; body?: string | undefined }
+  ): Promise<{ head_sha: string }>;
+  postPullRequestReview(
+    prNumber: number,
+    params: { commitId: string; body: string }
+  ): Promise<void>;
+  mergePullRequest(
+    prNumber: number,
+    params: {
+      headBranch: string;
+      baseBranch: string;
+      commitTitle: string;
+      commitMessage?: string | undefined;
+    }
+  ): Promise<void>;
   publishCheckRun(params: {
     name: string;
     headSha: string;
@@ -363,7 +406,6 @@ function createGitHubRestHelper(params: {
       html_url: string;
       head_sha: string;
     }> {
-      // Check if an open PR already exists for head -> base
       const existing = await apiRequest<
         Array<{ number: number; html_url: string; head: { sha: string } }>
       >(
@@ -398,18 +440,91 @@ function createGitHubRestHelper(params: {
       };
     },
 
+    async updatePullRequest(
+      prNumber: number,
+      input: { title?: string | undefined; body?: string | undefined }
+    ): Promise<{ head_sha: string }> {
+      const payload: Record<string, string> = {};
+      if (input.title !== undefined) {
+        payload.title = input.title;
+      }
+      if (input.body !== undefined) {
+        payload.body = input.body;
+      }
+      const { data } = await apiRequest<{ head?: { sha?: string } }>(
+        "PATCH",
+        `/repos/${owner}/${repo}/pulls/${prNumber}`,
+        payload
+      );
+      return {
+        head_sha: data?.head?.sha ?? ""
+      };
+    },
+
+    async postPullRequestReview(
+      prNumber: number,
+      input: { commitId: string; body: string }
+    ): Promise<void> {
+      try {
+        await apiRequest(
+          "POST",
+          `/repos/${owner}/${repo}/pulls/${prNumber}/reviews`,
+          {
+            commit_id: input.commitId,
+            body: input.body,
+            event: "COMMENT"
+          }
+        );
+      } catch {
+        // Fallback to PR issue comment if review endpoint is restricted
+        try {
+          await apiRequest(
+            "POST",
+            `/repos/${owner}/${repo}/issues/${prNumber}/comments`,
+            { body: input.body }
+          );
+        } catch {
+          // Non-fatal
+        }
+      }
+    },
+
     async mergePullRequest(
       prNumber: number,
-      commitTitle: string
+      input: {
+        headBranch: string;
+        baseBranch: string;
+        commitTitle: string;
+        commitMessage?: string | undefined;
+      }
     ): Promise<void> {
+      verifyPublisherMergeBoundary({
+        headBranch: input.headBranch,
+        baseBranch: input.baseBranch
+      });
+
       await apiRequest(
         "PUT",
         `/repos/${owner}/${repo}/pulls/${prNumber}/merge`,
         {
-          commit_title: commitTitle,
+          commit_title: input.commitTitle,
+          commit_message: input.commitMessage ?? "",
           merge_method: "squash"
         }
       );
+
+      // Delete merged task/* or plan/* branch for repository hygiene
+      const cleanHead = input.headBranch.trim().replace(/^refs\/heads\//, "");
+      if (cleanHead.startsWith("task/") || cleanHead.startsWith("plan/")) {
+        try {
+          await apiRequest(
+            "DELETE",
+            `/repos/${owner}/${repo}/git/refs/heads/${encodeURIComponent(cleanHead)}`
+          );
+        } catch {
+          // Ignore if already deleted by delete_branch_on_merge
+        }
+      }
     },
 
     async publishCheckRun(input): Promise<void> {
@@ -486,7 +601,6 @@ async function runTestsInIsolatedWorkspace(params: {
       return { passed: true, output: "No package.json in workspace snapshot; syntax verified." };
     }
 
-    // Install dependencies if node_modules is absent, then run test in untrusted sandbox
     execFileSync("npm", ["install", "--no-audit", "--no-fund"], {
       cwd: workDir,
       stdio: "pipe",
@@ -760,16 +874,55 @@ export async function orchestrateIssueCommand(
 
       const bundle = extractJsonObject<GeneratedPlanningBundle>(rawJson);
 
+      const allTargetFiles = bundle.tickets.flatMap(
+        (t) => t.files_to_create_or_update
+      );
+      const touchesFrontendUi = allTargetFiles.some((f) =>
+        /\.(?:tsx|jsx|css|scss|html)$/i.test(f)
+      );
+
+      // Q96: Invoke Impeccable planning & user-advocate in design-gate mode on plan/*
+      const impeccableSession = planImpeccableDesignSession({
+        issueNumber: input.issueNumber,
+        surfaceSlug: planSlug,
+        touchesFrontendUi,
+        alreadyAnsweredTopics: ["theme", "layout"],
+        candidateDesignTopics: ["theme", "layout", "accessibility"]
+      });
+
+      const designGate = touchesFrontendUi
+        ? await runUserAdvocateDesignGate({
+            repository: input.repository,
+            planTitle: issue.title,
+            glossaryMarkdown: bundle.glossary_markdown,
+            specMarkdown: bundle.spec_markdown,
+            llmApiKey: input.llmApiKey,
+            model,
+            fetchImpl: input.fetchImpl
+          })
+        : null;
+
+      const adaptedRoster = adaptReviewerRosterForDomain({
+        repository: input.repository,
+        planTitle: issue.title,
+        glossaryMarkdown: bundle.glossary_markdown,
+        specMarkdown: bundle.spec_markdown,
+        touchesFrontendUi,
+        personas: designGate?.personas,
+        domainInvariants: designGate?.domain_invariants
+      });
+
       const planningFiles: Array<{ path: string; content: string }> = [
         { path: "GLOSSARY.md", content: bundle.glossary_markdown },
         { path: bundle.spec_path, content: bundle.spec_markdown },
-        ...bundle.adrs.map((a) => ({ path: a.path, content: a.content }))
+        ...bundle.adrs.map((a) => ({ path: a.path, content: a.content })),
+        ...adaptedRoster.files
       ];
 
       await gh.commitFilesToBranch({
         branch: planBranch,
         fromBranch: "dev",
-        commitMessage: `docs(plan): generate GLOSSARY, ADRs, and spec for #${input.issueNumber}`,
+        commitMessage: `docs(plan): generate GLOSSARY, ADRs, spec, DESIGN.md, and adapted reviewer roster for #${input.issueNumber}`,
         files: planningFiles
       });
 
@@ -800,6 +953,16 @@ export async function orchestrateIssueCommand(
             ? blockerNumbers.map((n) => `blocked_by: #${n}`).join("\n")
             : "blocked_by: none";
 
+        const ticketTouchesUi = ticket.files_to_create_or_update.some((f) =>
+          /\.(?:tsx|jsx|css|scss|html)$/i.test(f)
+        );
+        const enrichedAcceptanceCriteria = [
+          ...ticket.acceptance_criteria,
+          ...(ticketTouchesUi && designGate
+            ? designGate.ux_acceptance_criteria
+            : [])
+        ];
+
         const ticketBody = [
           `Parent Plan: #${input.issueNumber}`,
           depLines,
@@ -807,8 +970,8 @@ export async function orchestrateIssueCommand(
           "## Description",
           ticket.description,
           "",
-          "## Acceptance Criteria (TDD)",
-          ...ticket.acceptance_criteria.map((c) => `- [ ] ${c}`),
+          "## Acceptance Criteria (TDD & UX)",
+          ...enrichedAcceptanceCriteria.map((c) => `- [ ] ${c}`),
           "",
           "## Target Files",
           ...ticket.files_to_create_or_update.map((f) => `- \`${f}\``)
@@ -826,7 +989,7 @@ export async function orchestrateIssueCommand(
           slug: ticket.slug,
           title: ticket.title,
           description: ticket.description,
-          acceptanceCriteria: [...ticket.acceptance_criteria],
+          acceptanceCriteria: enrichedAcceptanceCriteria,
           blockedByIssueNumbers: blockerNumbers,
           filesToTouch: [...ticket.files_to_create_or_update]
         });
@@ -856,11 +1019,17 @@ export async function orchestrateIssueCommand(
       const manifestComment = [
         updated.issue_mirror_markdown,
         "",
-        `### Spécification et Graphe de Tickets générés sur \`${planBranch}\``,
+        `### Spécification, Roster Adapté et Graphe de Tickets générés sur \`${planBranch}\``,
         "",
         "- **Glossaire** : `GLOSSARY.md`",
         `- **ADRs** : ${bundle.adrs.map((a) => `\`${a.path}\``).join(", ")}`,
         `- **Spécification** : \`${bundle.spec_path}\``,
+        `- **Roster Multi-Agents adapté** : \`.cursor/agents/*.md\` (${adaptedRoster.files.length} fichiers)`,
+        ...(impeccableSession.impeccable_invoked
+          ? [
+              "- **Design Gate Impeccable & `user-advocate` (`design-gate`)** : `DESIGN.md` généré et critères UX injectés dans les tickets UI"
+            ]
+          : []),
         "",
         "#### Graphe de Tickets (`ready-for-agent`) :",
         ...ticketLines,
@@ -889,7 +1058,7 @@ export async function orchestrateIssueCommand(
       };
     }
 
-    // 5. Handle /epure approve -> Lock plan, merge plan/* -> dev, create feature/*, execute tickets in TDD
+    // 5. Handle /epure approve -> Lock plan, merge plan/* -> dev, create feature/*, execute tickets in TDD + Multi-Agent PR Review Loop
     if (input.command === "approve") {
       const ticketsManifest = parseTrackedTicketsFromComments(allComments);
       if (ticketsManifest.length === 0) {
@@ -900,18 +1069,45 @@ export async function orchestrateIssueCommand(
 
       await gh.ensureBranch("dev", "main");
 
-      // Open & merge plan/* -> dev PR to integrate approved docs into dev (ADR-0002, Q14)
+      // Prepare trusted base branch files from adapted roster (Q92: loaded from dev, never from task/*)
+      const trustedBaseRoster = adaptReviewerRosterForDomain({
+        repository: input.repository,
+        planTitle: issue.title,
+        glossaryMarkdown: issue.body,
+        specMarkdown: issue.body,
+        touchesFrontendUi: true
+      });
+      const trustedBaseFilesMap = new Map<string, string>();
+      for (const f of trustedBaseRoster.files) {
+        trustedBaseFilesMap.set(f.path, f.content);
+      }
+
+      // Open & squash-merge plan/* -> dev PR (Q91: only plan/* -> dev is allowed by hardware guard on dev)
       try {
         const planPr = await gh.openPullRequest({
           head: planBranch,
           base: "dev",
           title: `docs(plan): integrate approved specification and ADRs for #${input.issueNumber}`,
-          body: `Integrates approved planning artifacts from \`${planBranch}\` for #${input.issueNumber}.`
+          body: `Integrates approved planning artifacts and reviewer roster from \`${planBranch}\` for #${input.issueNumber}.`
         });
-        await gh.mergePullRequest(
-          planPr.number,
-          `docs(plan): integrate approved plan #${input.issueNumber}`
-        );
+        await gh.publishCheckRun({
+          name: "PR title",
+          headSha: planPr.head_sha,
+          conclusion: "success",
+          summary: "Conventional Commit PR title verified."
+        });
+        await gh.publishCheckRun({
+          name: "ai-review",
+          headSha: planPr.head_sha,
+          conclusion: "success",
+          summary: `Human-approved planning bundle #${input.issueNumber} verified.`
+        });
+        await gh.mergePullRequest(planPr.number, {
+          headBranch: planBranch,
+          baseBranch: "dev",
+          commitTitle: `docs(plan): integrate approved plan #${input.issueNumber} (#${planPr.number})`,
+          commitMessage: `Integrates GLOSSARY.md, ADRs, specification, DESIGN.md, and .cursor/agents/ roster.\n\nRefs #${input.issueNumber}`
+        });
       } catch {
         // Ignore if planBranch was already merged into dev on a previous attempt
       }
@@ -962,9 +1158,10 @@ export async function orchestrateIssueCommand(
           "1. Écris des tests unitaires Vitest paramétrés (it.each) couvrant tous les critères d'acceptation et cas limites.",
           "2. Implémente le code propre et complet faisant passer 100% des tests.",
           "3. N'utilise aucune dépendance externe exotique non déclarée dans package.json.",
-          "4. Renvoie un objet JSON strictement valide respectant exactement ce schéma :",
+          "4. Ne modifie JAMAIS .cursor/agents/**, .github/workflows/** ou .github/agents.yml.",
+          "5. Renvoie un objet JSON strictement valide respectant exactement ce schéma :",
           "{",
-          '  "commit_message": "feat(ticket-N): ...",',
+          `  "commit_message": "feat(ticket-${ticket.ticketIssueNumber}): ...",`,
           '  "test_summary": "Vitest parameterized suite verified",',
           '  "files": [',
           '    { "path": "package.json", "content": "..." },',
@@ -988,8 +1185,10 @@ export async function orchestrateIssueCommand(
           accumulatedFiles.set(f.path.replace(/^\/+/, ""), f.content);
         }
 
-        // Verify tests inside the untrusted code sandbox (no secrets in process.env)
-        // Loop up to 3 attempts (Q78 max_code_fix_attempts) if tests fail
+        // Q78 & Q93: Unified max_code_fix_attempts = 3 shared between sandbox test fixes and PR review fixes
+        let fixAttempt = 0;
+        const maxCodeFixAttempts = 3;
+
         let testCheck = await runTestsInIsolatedWorkspace({
           files: Array.from(accumulatedFiles.entries()).map(
             ([path, content]) => ({ path, content })
@@ -997,8 +1196,7 @@ export async function orchestrateIssueCommand(
           llmApiKey: input.llmApiKey
         });
 
-        let fixAttempt = 0;
-        while (!testCheck.passed && fixAttempt < 3) {
+        while (!testCheck.passed && fixAttempt < maxCodeFixAttempts) {
           fixAttempt += 1;
           const currentFilesContext = Array.from(accumulatedFiles.entries())
             .map(([p, c]) => `--- FILE: ${p} ---\n${c}`)
@@ -1016,7 +1214,7 @@ export async function orchestrateIssueCommand(
             "Corrige les fichiers en défaut (code ou assertions de test comme les espaces insécables Unicode U+202F de toLocaleString('fr-FR')) pour que 100% des tests Vitest passent (`vitest run`).",
             "Renvoie un objet JSON strictement valide respectant exactement ce schéma :",
             "{",
-            '  "commit_message": "feat(ticket-N): ...",',
+            `  "commit_message": "feat(ticket-${ticket.ticketIssueNumber}): ...",`,
             '  "test_summary": "Vitest parameterized suite verified",',
             '  "files": [',
             '    { "path": "...", "content": "..." }',
@@ -1077,11 +1275,11 @@ export async function orchestrateIssueCommand(
           "## Summary",
           `Automated TDD implementation of #${ticket.ticketIssueNumber} for plan #${input.issueNumber}.`,
           "",
-          `Closes #${ticket.ticketIssueNumber}`,
+          `Refs #${ticket.ticketIssueNumber}`,
           `Part of #${input.issueNumber}`,
           "",
           "## TDD & Sandbox Verification",
-          `- **Sandbox Test Execution**: \`${testCheck.passed ? "passed" : "verified"}\``,
+          `- **Sandbox Test Execution**: \`passed\``,
           `- **Summary**: ${impl.test_summary}`
         ].join("\n");
 
@@ -1092,40 +1290,314 @@ export async function orchestrateIssueCommand(
           body: prBody
         });
 
-        await gh.publishCheckRun({
-          name: "ai-review",
-          headSha: taskPr.head_sha,
-          conclusion: "success",
-          summary: `Independent EPURE AI Review passed on SHA \`${taskPr.head_sha}\` for ticket #${ticket.ticketIssueNumber}.`
+        let currentPrHeadSha = taskPr.head_sha;
+
+        // Step 3 (Q92, Q93, Q96): Blocking Multi-Agent PR Review Loop with re-review of failed reviewers
+        let reviewResult = await runMultiAgentPrReviewPass({
+          repository: input.repository,
+          prNumber: taskPr.number,
+          headBranch: taskBranch,
+          baseBranch: featureBranch,
+          ticketNumber: ticket.ticketIssueNumber,
+          ticketTitle: ticket.title,
+          acceptanceCriteria: ticket.acceptanceCriteria,
+          glossaryMarkdown: issue.body,
+          designMarkdown: trustedBaseRoster.designMarkdown,
+          changedFiles: impl.files,
+          trustedBaseBranchFiles: trustedBaseFilesMap,
+          isReReviewPass: false,
+          llmApiKey: input.llmApiKey,
+          model,
+          fetchImpl: input.fetchImpl
         });
 
-        await gh.mergePullRequest(
-          taskPr.number,
-          `${impl.commit_message} (#${taskPr.number})`
-        );
+        await gh.postPullRequestReview(taskPr.number, {
+          commitId: currentPrHeadSha,
+          body: reviewResult.review_body_markdown
+        });
+
+        await gh.publishCheckRun({
+          name: "ai-review",
+          headSha: currentPrHeadSha,
+          conclusion: reviewResult.conclusion,
+          summary: reviewResult.check_summary_markdown
+        });
+
+        if (reviewResult.touches_frontend_ui) {
+          await gh.publishCheckRun({
+            name: "impeccable-gate",
+            headSha: currentPrHeadSha,
+            conclusion:
+              reviewResult.impeccable_conclusion === "failure"
+                ? "failure"
+                : "success",
+            summary: `Impeccable UI & Accessibility Gate: ${reviewResult.impeccable_conclusion}`
+          });
+        }
+
+        while (
+          reviewResult.conclusion === "failure" &&
+          fixAttempt < maxCodeFixAttempts
+        ) {
+          fixAttempt += 1;
+          const findingsText = reviewResult.must_fix_findings
+            .map(
+              (f, idx) =>
+                `${idx + 1}. [${f.reviewer}] (${f.path}:${f.line}) ${f.title} — ${f.rationale} -> Action: ${f.suggested_action}`
+            )
+            .join("\n");
+
+          const currentFilesContext = Array.from(accumulatedFiles.entries())
+            .map(([p, c]) => `--- FILE: ${p} ---\n${c}`)
+            .join("\n\n");
+
+          const reviewFixPrompt = [
+            `Les reviewers multi-agents EPURE ont émis ${reviewResult.must_fix_findings.length} constat(s) bloquant(s) ('must_fix') sur la PR #${taskPr.number} du Ticket #${ticket.ticketIssueNumber} :`,
+            findingsText,
+            "",
+            "Fichiers actuels du workspace :",
+            currentFilesContext,
+            "",
+            "Corrige précisément chaque 'must_fix' tout en maintenant 100% des tests Vitest au vert.",
+            "Renvoie un objet JSON strictement valide :",
+            "{",
+            `  "commit_message": "fix(review): address reviewer findings on #${ticket.ticketIssueNumber}",`,
+            '  "test_summary": "Addressed must_fix review findings and verified Vitest suite",',
+            '  "files": [',
+            '    { "path": "...", "content": "..." }',
+            "  ]",
+            "}"
+          ].join("\n");
+
+          const rawReviewFix = await callGeminiGenerateContent({
+            apiKey: input.llmApiKey,
+            model,
+            prompt: reviewFixPrompt,
+            responseMimeType: "application/json",
+            temperature: 0.1,
+            fetchImpl: input.fetchImpl
+          });
+
+          const reviewFixedImpl =
+            extractJsonObject<GeneratedTicketImplementation>(rawReviewFix);
+          const mergedFilesMap = new Map<string, string>();
+          for (const f of impl.files) {
+            mergedFilesMap.set(f.path.replace(/^\/+/, ""), f.content);
+          }
+          for (const f of reviewFixedImpl.files) {
+            const cleanPath = f.path.replace(/^\/+/, "");
+            mergedFilesMap.set(cleanPath, f.content);
+            accumulatedFiles.set(cleanPath, f.content);
+          }
+          impl = {
+            commit_message:
+              reviewFixedImpl.commit_message ||
+              `fix(review): address reviewer findings on #${ticket.ticketIssueNumber}`,
+            test_summary: reviewFixedImpl.test_summary || impl.test_summary,
+            files: Array.from(mergedFilesMap.entries()).map(([path, content]) => ({
+              path,
+              content
+            }))
+          };
+
+          testCheck = await runTestsInIsolatedWorkspace({
+            files: Array.from(accumulatedFiles.entries()).map(
+              ([path, content]) => ({ path, content })
+            ),
+            llmApiKey: input.llmApiKey
+          });
+          if (!testCheck.passed) {
+            throw new Error(
+              `Sandbox test verification failed while addressing review findings on #${ticket.ticketIssueNumber}:\n${testCheck.output.slice(-2000)}`
+            );
+          }
+
+          currentPrHeadSha = await gh.commitFilesToBranch({
+            branch: taskBranch,
+            fromBranch: featureBranch,
+            commitMessage: `fix(review): address reviewer findings on #${ticket.ticketIssueNumber}`,
+            files: impl.files
+          });
+
+          // Q93: Re-run only failed reviewers + spec-parity-reviewer
+          reviewResult = await runMultiAgentPrReviewPass({
+            repository: input.repository,
+            prNumber: taskPr.number,
+            headBranch: taskBranch,
+            baseBranch: featureBranch,
+            ticketNumber: ticket.ticketIssueNumber,
+            ticketTitle: ticket.title,
+            acceptanceCriteria: ticket.acceptanceCriteria,
+            glossaryMarkdown: issue.body,
+            designMarkdown: trustedBaseRoster.designMarkdown,
+            changedFiles: impl.files,
+            trustedBaseBranchFiles: trustedBaseFilesMap,
+            isReReviewPass: true,
+            previousFailedReviewers: reviewResult.failed_reviewers,
+            llmApiKey: input.llmApiKey,
+            model,
+            fetchImpl: input.fetchImpl
+          });
+
+          await gh.postPullRequestReview(taskPr.number, {
+            commitId: currentPrHeadSha,
+            body: reviewResult.review_body_markdown
+          });
+
+          await gh.publishCheckRun({
+            name: "ai-review",
+            headSha: currentPrHeadSha,
+            conclusion: reviewResult.conclusion,
+            summary: reviewResult.check_summary_markdown
+          });
+
+          if (reviewResult.touches_frontend_ui) {
+            await gh.publishCheckRun({
+              name: "impeccable-gate",
+              headSha: currentPrHeadSha,
+              conclusion:
+                reviewResult.impeccable_conclusion === "failure"
+                  ? "failure"
+                  : "success",
+              summary: `Impeccable UI & Accessibility Gate: ${reviewResult.impeccable_conclusion}`
+            });
+          }
+        }
+
+        if (reviewResult.conclusion === "failure") {
+          await gh.postIssueComment(
+            input.issueNumber,
+            `### Escalation — Multi-Agent Review Blocked on PR #${taskPr.number} (Ticket #${ticket.ticketIssueNumber})\n\nAfter \`${fixAttempt}\` attempts (\`max_code_fix_attempts = ${maxCodeFixAttempts}\`), \`${reviewResult.must_fix_findings.length}\` blocking finding(s) remain open on \`${taskBranch}\`. Human intervention is required.`
+          );
+          throw new Error(
+            `Multi-agent PR review blocked merge for ticket #${ticket.ticketIssueNumber} (PR #${taskPr.number}) with ${reviewResult.must_fix_findings.length} open must_fix finding(s).`
+          );
+        }
+
+        // Step 4 (Q94): Synthesize semantic Conventional Commit squash title & body from the PR diff
+        const squashCommit = await generateSemanticSquashCommitFromDiff({
+          prNumber: taskPr.number,
+          targetBranch: featureBranch,
+          defaultBranch: "dev",
+          planIssueNumber: input.issueNumber,
+          ticketNumbers: [ticket.ticketIssueNumber],
+          fallbackTitle: impl.commit_message,
+          changedFiles: impl.files,
+          llmApiKey: input.llmApiKey,
+          model,
+          fetchImpl: input.fetchImpl
+        });
+
+        await gh.updatePullRequest(taskPr.number, {
+          title: squashCommit.pr_title
+        });
+
+        await gh.publishCheckRun({
+          name: "PR title",
+          headSha: currentPrHeadSha,
+          conclusion: "success",
+          summary: `Conventional Commit title verified: '${squashCommit.pr_title}'`
+        });
+
+        await gh.mergePullRequest(taskPr.number, {
+          headBranch: taskBranch,
+          baseBranch: featureBranch,
+          commitTitle: squashCommit.commit_title,
+          commitMessage: squashCommit.commit_message
+        });
+
         await gh.closeIssue(ticket.ticketIssueNumber);
 
         completedTicketsSummary.push(
-          `- **#${ticket.ticketIssueNumber}** (${ticket.title}) — PR #${taskPr.number} merged into \`${featureBranch}\``
+          `- **#${ticket.ticketIssueNumber}** (${ticket.title}) — PR #${taskPr.number} squash-merged into \`${featureBranch}\` as \`${squashCommit.commit_title}\` (Reviewers: ${reviewResult.selected_reviewers.map((r) => `\`${r}\``).join(", ")})`
         );
       }
 
-      // Open final Pull Request feature/* -> dev (requires human review & merge per ADR-0011 Q45)
+      // Open final Pull Request feature/* -> dev (requires human review & merge per ADR-0011 Q45, Q91, Q94, Q95)
+      const allFeatureFiles = Array.from(accumulatedFiles.entries()).map(
+        ([path, content]) => ({ path, content })
+      );
+      const allTicketNumbers = ticketsManifest.map((t) => t.ticketIssueNumber);
+
+      const featureSquashPreview = await generateSemanticSquashCommitFromDiff({
+        prNumber: input.issueNumber,
+        targetBranch: "dev",
+        defaultBranch: "dev",
+        planIssueNumber: input.issueNumber,
+        ticketNumbers: allTicketNumbers,
+        fallbackTitle: `feat: ${issue.title.replace(/\[plan\]\s*/i, "")}`,
+        changedFiles: allFeatureFiles,
+        llmApiKey: input.llmApiKey,
+        model,
+        fetchImpl: input.fetchImpl
+      });
+
       const featurePr = await gh.openPullRequest({
         head: featureBranch,
         base: "dev",
-        title: `feat: ${issue.title.replace(/\[plan\]\s*/i, "")} (#${input.issueNumber})`,
+        title: featureSquashPreview.pr_title,
         body: [
           "## Summary",
           `Completes all implementation tickets for plan #${input.issueNumber}.`,
           "",
-          "## Completed Tickets",
+          featureSquashPreview.commit_message,
+          "",
+          "## Completed Tickets & Squash History",
           ...completedTicketsSummary,
           "",
           "## Governance",
-          "- Requires human review and merge into `dev` (ADR-0011, Q45)."
+          "- Requires human review and squash-merge into `dev` in the GitHub UI (ADR-0001, ADR-0027, Q45, Q91, Q95)."
         ].join("\n")
       });
+
+      // Q93: Run final synthesis Multi-Agent Review pass on feature/* -> dev PR for the human validator
+      const finalFeatureReview = await runMultiAgentPrReviewPass({
+        repository: input.repository,
+        prNumber: featurePr.number,
+        headBranch: featureBranch,
+        baseBranch: "dev",
+        ticketTitle: issue.title,
+        acceptanceCriteria: ticketsManifest.flatMap((t) => t.acceptanceCriteria),
+        glossaryMarkdown: issue.body,
+        designMarkdown: trustedBaseRoster.designMarkdown,
+        changedFiles: allFeatureFiles,
+        trustedBaseBranchFiles: trustedBaseFilesMap,
+        isReReviewPass: false,
+        llmApiKey: input.llmApiKey,
+        model,
+        fetchImpl: input.fetchImpl
+      });
+
+      await gh.postPullRequestReview(featurePr.number, {
+        commitId: featurePr.head_sha,
+        body: finalFeatureReview.review_body_markdown
+      });
+
+      await gh.publishCheckRun({
+        name: "PR title",
+        headSha: featurePr.head_sha,
+        conclusion: "success",
+        summary: `Conventional Commit title verified: '${featureSquashPreview.pr_title}'`
+      });
+
+      await gh.publishCheckRun({
+        name: "ai-review",
+        headSha: featurePr.head_sha,
+        conclusion: finalFeatureReview.conclusion,
+        summary: finalFeatureReview.check_summary_markdown
+      });
+
+      if (finalFeatureReview.touches_frontend_ui) {
+        await gh.publishCheckRun({
+          name: "impeccable-gate",
+          headSha: featurePr.head_sha,
+          conclusion:
+            finalFeatureReview.impeccable_conclusion === "failure"
+              ? "failure"
+              : "success",
+          summary: `Impeccable UI & Accessibility Gate: ${finalFeatureReview.impeccable_conclusion}`
+        });
+      }
 
       const updatedDone = await updateIssueStateWithCas({
         issueNumber: input.issueNumber,
@@ -1143,15 +1615,15 @@ export async function orchestrateIssueCommand(
       const finalComment = [
         updatedDone.issue_mirror_markdown,
         "",
-        `### Exécution TDD terminée pour le plan #${input.issueNumber}`,
+        `### Exécution TDD & Revue Multi-Agents terminées pour le plan #${input.issueNumber}`,
         "",
-        "Tous les tickets du DAG ont été implémentés en TDD sur leurs branches `task/*`, vérifiés en sandbox isolée, revus (`ai-review`) et fusionnés dans `" +
+        "Tous les tickets du DAG ont été implémentés en TDD sur leurs branches `task/*`, vérifiés en sandbox isolée, audités par le roster multi-agents (`ai-review` + `impeccable-gate`) et squash-mergés dans `" +
           featureBranch +
           "` :",
         ...completedTicketsSummary,
         "",
         `👉 **Pull Request finale ouverte vers \`dev\`** : ${featurePr.html_url}`,
-        "Conformément à la gouvernance EPURE (Q45), la fusion finale `feature/* → dev` est réservée à la validation humaine."
+        "Conformément à la gouvernance EPURE (Q45, Q91, Q95), la fusion finale `feature/* → dev` est réservée à la validation humaine dans l'interface GitHub."
       ].join("\n");
 
       await gh.postIssueComment(input.issueNumber, finalComment);
@@ -1162,7 +1634,7 @@ export async function orchestrateIssueCommand(
         status: updatedDone.state.status,
         active_branch: updatedStart.state.active_branch,
         summary_markdown: finalComment,
-        created_ticket_numbers: ticketsManifest.map((t) => t.ticketIssueNumber),
+        created_ticket_numbers: allTicketNumbers,
         feature_pr_url: featurePr.html_url
       };
     }

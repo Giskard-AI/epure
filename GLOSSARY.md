@@ -344,4 +344,19 @@ _Éviter_ : démarrer l'implémentation applicative sans approbation explicite `
 **Jeton d'installation GitHub App éphémère (Q87)** : jeton court obtenu en signant un JWT RS256 avec `EPURE_AGENT_APP_ID` et `EPURE_AGENT_APP_PRIVATE_KEY` puis en appelant l'API d'installation GitHub du dépôt cible, utilisé par le publisher isolé pour créer branches, commits, tickets, PRs et checks, puis révoqué immédiatement.
 _Éviter_ : exposer la clé privée PEM au processus agent ou partager un PAT personnel permanent.
 
+## Gouvernance Rulesets, Roster de Review Multi-Agents et Squash Sémantique par IA (Q91–Q96)
+
+**Séparation des trois Rulesets de gouvernance (`epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`, Q91 & Q95)** : découpage explicite des règles GitHub Repository Rulesets en trois périmètres distincts (`refs/heads/feature/*` avec `Agent App` en bypass PR pour le squash-merge autonome des tâches validées ; `refs/heads/dev` exigeant un merge humain dans l'interface GitHub, exception faite de la fusion documentaire `plan/* -> dev` déclenchée par `/epure approve`, avec `required_approving_review_count: 0` par défaut pour la compatibilité mainteneur solo et configurable via `--require-pr-approvals <N>` ; `refs/heads/main` et `refs/tags/v*` réservés à `Release App`).
+_Éviter_ : mutualiser `dev` et `feature/*` dans un unique Ruleset qui autoriserait l'Agent App à fusionner du code applicatif dans `dev` sans validation humaine, ou bloquer un mainteneur solo sur ses propres PRs.
+
+**Roster de reviewers spécialisés et transverses (`.cursor/agents/*`, Q92 & Q93)** : ensemble de définitions de rôles d'audit en lecture seule initialisé par `setup-repo` dans le dépôt consommateur (spécialistes `domain-backend-reviewer`, `frontend-reviewer`, `infra-reviewer` ; transverses `architecture-reviewer`, `security-reviewer`, `spec-parity-reviewer`, `standards-reviewer`, `accessibility-reviewer`, `design-reviewer` ; et `user-advocate`), enrichi lors de `/epure plan` avec les personas et invariants du domaine, mais toujours chargé à l'exécution depuis la branche de base de confiance (`dev`) avec repli sur les templates embarqués d'EPURE, et classé comme chemin sensible interdisant toute auto-modification sur `task/*`.
+_Éviter_ : charger un prompt de reviewer depuis la branche non fiable `task/*` inspectée (risque d'auto-approbation par injection de prompt) ou dépasser le plafond de 4 reviewers pertinents sélectionnés par diff.
+
+**Porte UX orientée personas (`user-advocate`, modes `design-gate` et `implementation-review`, Q96)** : sous-agent évaluant le produit selon les personas d'utilisateurs finaux propres au domaine ; intervient d'abord en mode `design-gate` à l'issue du Grill sur `plan/*` (conjointement à `DESIGN.md`) pour enrichir les critères d'acceptation UX des tickets avant `/epure approve`, puis en mode `implementation-review` (conjointement au check `impeccable-gate`) comme contrôle bloquant sur les PRs touchant l'interface.
+_Éviter_ : reporter toute la validation UX et d'accessibilité après le codage ou ignorer les impasses de parcours multi-rôles.
+
+**Synthèse de message de squash sémantique par IA (Q94)** : génération juste avant chaque squash-merge, par un modèle léger à température nulle inspectant le diff consolidé de la PR, d'un titre Conventional Commit (`type(scope): summary (#PR)`) synchronisé sur la PR et d'un corps concis listant les changements effectifs, en utilisant `Refs #<ticket>` lors de l'intégration `task/* -> feature/*` et `Closes #<issue>` / `Closes #<ticket>` uniquement lors de l'atterrissage sur la branche par défaut `dev`.
+_Éviter_ : conserver des messages de commits intermédiaires de debug dans l'historique de `feature/*` ou `dev`, ou supposer que `Closes #N` sur une branche non-default ferme automatiquement le ticket GitHub.
+
+
 

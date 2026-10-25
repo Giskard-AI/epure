@@ -47,7 +47,7 @@ var FORBIDDEN_WRITE_TOKEN_ENV_NAMES = [
   "EPURE_WRITE_TOKEN"
 ];
 var PROTECTED_BRANCH_PATTERN = /^(?:refs\/heads\/)?(?:main|master|dev|release\/.*)$/i;
-var SENSITIVE_FILE_PATH_PATTERN = /^(?:\.github\/workflows\/|\.github\/agents\.ya?ml$|\.env)/i;
+var SENSITIVE_FILE_PATH_PATTERN = /^(?:\.github\/workflows\/|\.github\/agents\.ya?ml$|\.cursor\/agents\/|\.env)/i;
 function normalizeBranchName(ref) {
   return ref.trim().replace(/^refs\/heads\//, "");
 }

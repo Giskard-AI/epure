@@ -6,9 +6,9 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_AGENTS_CONFIG,
-   DEFAULT_EPURE_PINNED_SHA,
+  DEFAULT_EPURE_PINNED_SHA,
   planAndApplyRepoSetup,
-   resolveAgentsConfig,
+  resolveAgentsConfig,
   validateOrgSecretSharingScope
 } from "../src/bootstrap/setup-repo.js";
 
@@ -28,7 +28,7 @@ const SETUP_REPO_SKILL_PATH = join(
 );
 
 describe("1. Dry-run simulation & guided application (planAndApplyRepoSetup)", () => {
-  it("previews workflows, policies, secrets, rulesets, and protections in dry-run mode without mutating disk", () => {
+  it("previews workflows, policies, secrets, 3 governance rulesets, reviewer roster, and protections in dry-run mode without mutating disk", () => {
     const tempRepoDir = mkdtempSync(join(tmpdir(), "epure-setup-dryrun-"));
     try {
       const result = planAndApplyRepoSetup({
@@ -47,16 +47,34 @@ describe("1. Dry-run simulation & guided application (planAndApplyRepoSetup)", (
       expect(result.mutated_files).toHaveLength(0);
       expect(existsSync(join(tempRepoDir, ".github", "agents.yml"))).toBe(false);
 
-      // Verify planned items cover workflows, agents.yml, secrets, branch protections, ruleset, and release environment
       expect(result.planned_workflows.map((w) => w.path)).toEqual([
         ".github/workflows/epure-issue-command.yml",
         ".github/workflows/epure-check.yml",
+        ".github/workflows/pr-title.yml",
         ".github/workflows/release.yml"
       ]);
       for (const wf of result.planned_workflows) {
         expect(wf.action).toBe("create");
         expect(wf.content).toContain(`@${DEFAULT_EPURE_PINNED_SHA} # v1.1.0`);
       }
+
+      expect(result.planned_reviewer_roster).toHaveLength(10);
+      expect(
+        result.planned_reviewer_roster.map((r) => r.name)
+      ).toEqual(
+        expect.arrayContaining([
+          "domain-backend-reviewer",
+          "frontend-reviewer",
+          "infra-reviewer",
+          "architecture-reviewer",
+          "security-reviewer",
+          "spec-parity-reviewer",
+          "standards-reviewer",
+          "accessibility-reviewer",
+          "design-reviewer",
+          "user-advocate"
+        ])
+      );
 
       expect(result.expected_secrets.map((s) => s.name)).toEqual(
         expect.arrayContaining([
@@ -68,7 +86,12 @@ describe("1. Dry-run simulation & guided application (planAndApplyRepoSetup)", (
         ])
       );
 
-      // Verify Q80 Repository Ruleset on main & refs/tags/v* with Release App as sole Bypass Actor
+      // Verify Q80 & Q91 3 Repository Rulesets
+      expect(result.governance_rulesets.map((r) => r.name)).toEqual([
+        "epure-feature-governance",
+        "epure-dev-governance",
+        "epure-release-immutability"
+      ]);
       expect(result.ruleset_spec.targetRefs).toEqual([
         "refs/heads/main",
         "refs/tags/v*"
@@ -89,12 +112,20 @@ describe("1. Dry-run simulation & guided application (planAndApplyRepoSetup)", (
         "dev",
         "feature/*"
       ]);
+      expect(result.repository_merge_settings).toEqual({
+        allow_squash_merge: true,
+        allow_merge_commit: false,
+        allow_rebase_merge: false,
+        delete_branch_on_merge: true,
+        squash_merge_commit_title: "PR_TITLE",
+        squash_merge_commit_message: "PR_BODY"
+      });
     } finally {
       rmSync(tempRepoDir, { recursive: true, force: true });
     }
   });
 
-  it("applies the minimal functional setup on disk and reports required human interventions when dryRun is false", () => {
+  it("applies the minimal functional setup and .cursor/agents/ roster on disk and reports required human interventions when dryRun is false", () => {
     const tempRepoDir = mkdtempSync(join(tmpdir(), "epure-setup-apply-"));
     try {
       const result = planAndApplyRepoSetup({
@@ -110,12 +141,18 @@ describe("1. Dry-run simulation & guided application (planAndApplyRepoSetup)", (
 
       expect(result.status).toBe("applied");
       expect(result.dry_run).toBe(false);
-      expect(result.mutated_files).toEqual([
-        ".github/agents.yml",
-        ".github/workflows/epure-issue-command.yml",
-        ".github/workflows/epure-check.yml",
-        ".github/workflows/release.yml"
-      ]);
+      expect(result.mutated_files).toEqual(
+        expect.arrayContaining([
+          ".github/agents.yml",
+          ".github/workflows/epure-issue-command.yml",
+          ".github/workflows/epure-check.yml",
+          ".github/workflows/pr-title.yml",
+          ".github/workflows/release.yml",
+          ".cursor/agents/domain-backend-reviewer.md",
+          ".cursor/agents/frontend-reviewer.md",
+          ".cursor/agents/user-advocate.md"
+        ])
+      );
 
       const agentsYmlPath = join(tempRepoDir, ".github", "agents.yml");
       expect(existsSync(agentsYmlPath)).toBe(true);
@@ -262,7 +299,8 @@ describe("3. Idempotent second pass & fail-safe auto-merge disabling", () => {
           existingRulesetNames: []
         }
       });
-      expect(firstPass.mutated_files).toHaveLength(4);
+      // 1 agents.yml + 4 workflows + 10 reviewer roster files = 15 files
+      expect(firstPass.mutated_files).toHaveLength(15);
 
       const secondPass = planAndApplyRepoSetup({
         repository: "acme-org/payments",
@@ -282,6 +320,7 @@ describe("3. Idempotent second pass & fail-safe auto-merge disabling", () => {
 
       expect(secondPass.mutated_files).toHaveLength(0);
       expect(secondPass.planned_workflows.every((w) => w.action === "noop")).toBe(true);
+      expect(secondPass.planned_reviewer_roster.every((r) => r.action === "noop")).toBe(true);
       expect(secondPass.agents_config_action).toBe("noop");
       expect(secondPass.ruleset_action).toBe("noop");
       expect(secondPass.apps_action).toBe("noop");

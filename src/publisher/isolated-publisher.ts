@@ -141,7 +141,7 @@ const PROTECTED_BRANCH_PATTERN =
   /^(?:refs\/heads\/)?(?:main|master|dev|release\/.*)$/i;
 
 const SENSITIVE_FILE_PATH_PATTERN =
-  /^(?:\.github\/workflows\/|\.github\/agents\.ya?ml$|\.env)/i;
+  /^(?:\.github\/workflows\/|\.github\/agents\.ya?ml$|\.cursor\/agents\/|\.env)/i;
 
 function normalizeBranchName(ref: string): string {
   return ref.trim().replace(/^refs\/heads\//, "");

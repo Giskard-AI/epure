@@ -148,10 +148,937 @@ async function revokeGitHubInstallationToken(params) {
   });
 }
 
-// src/sandbox/llm-sandbox.ts
-import { randomBytes } from "node:crypto";
-import { createServer } from "node:http";
-import { spawn } from "node:child_process";
+// src/frontend/impeccable-planning.ts
+function planImpeccableDesignSession(input) {
+  if (!input.touchesFrontendUi) {
+    return {
+      impeccable_invoked: false,
+      open_design_questions: [],
+      versioned_artifact_paths: []
+    };
+  }
+  const answeredSet = new Set(
+    input.alreadyAnsweredTopics.map((t) => t.trim().toLowerCase())
+  );
+  const openQuestions = input.candidateDesignTopics.filter(
+    (topic) => !answeredSet.has(topic.trim().toLowerCase())
+  );
+  const cleanSlug = input.surfaceSlug.trim().replace(/^\/+|\/+$/g, "");
+  return {
+    impeccable_invoked: true,
+    open_design_questions: openQuestions,
+    versioned_artifact_paths: [
+      ".impeccable.md",
+      "DESIGN.md",
+      `.impeccable/surfaces/${cleanSlug}.md`
+    ]
+  };
+}
+
+// src/frontend/impeccable-pr-gate.ts
+function evaluateImpeccableFrontendPr(input) {
+  const blocking = [];
+  const informational = [];
+  for (const f of input.findings) {
+    if (f.isPreExistingInBaseline || f.hasApprovedException) {
+      continue;
+    }
+    if (f.category === "subjective_aesthetic_suggestion") {
+      informational.push(f);
+      continue;
+    }
+    blocking.push(f);
+  }
+  return {
+    conclusion: blocking.length === 0 ? "success" : "failure",
+    blocking_findings: blocking,
+    informational_findings: informational
+  };
+}
+
+// src/orchestrator/gemini-client.ts
+async function callGeminiGenerateContent(options) {
+  const model = (options.model ?? "gemini-3.8-flash").trim();
+  const fetchFn = options.fetchImpl ?? fetch;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+    model
+  )}:generateContent?key=${encodeURIComponent(options.apiKey.trim())}`;
+  const generationConfig = {
+    temperature: options.temperature ?? 0.2
+  };
+  if (options.responseMimeType) {
+    generationConfig.responseMimeType = options.responseMimeType;
+  }
+  const body = {
+    contents: [
+      {
+        role: "user",
+        parts: [{ text: options.prompt }]
+      }
+    ],
+    generationConfig
+  };
+  if (options.systemInstruction) {
+    body.systemInstruction = {
+      parts: [{ text: options.systemInstruction }]
+    };
+  }
+  const response = await fetchFn(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(
+      `Gemini API call failed (${model}, HTTP ${response.status}): ${errText}`
+    );
+  }
+  const data = await response.json();
+  const text = data.candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("") ?? "";
+  if (!text.trim()) {
+    throw new Error(`Gemini API returned empty content for model '${model}'.`);
+  }
+  return text.trim();
+}
+function sanitizeJsonBackslashes(candidate) {
+  return candidate.replace(
+    /\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})/g,
+    "\\\\"
+  );
+}
+function extractJsonObject(rawText) {
+  const tryParse = (str) => {
+    try {
+      return JSON.parse(str);
+    } catch {
+      return JSON.parse(sanitizeJsonBackslashes(str));
+    }
+  };
+  const fenceMatch = /```(?:json)?\s*([\s\S]*?)\s*```/i.exec(rawText);
+  if (fenceMatch && fenceMatch[1]) {
+    return tryParse(fenceMatch[1].trim());
+  }
+  const firstBrace = rawText.indexOf("{");
+  const lastBrace = rawText.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    return tryParse(rawText.slice(firstBrace, lastBrace + 1));
+  }
+  return tryParse(rawText.trim());
+}
+
+// src/review/reviewer-roster.ts
+var SENSITIVE_REVIEWER_ROSTER_PATH_PATTERN = /^\.cursor\/agents\//i;
+function isSensitiveReviewerRosterPath(filePath) {
+  const clean = filePath.trim().replace(/^\/+/, "");
+  return SENSITIVE_REVIEWER_ROSTER_PATH_PATTERN.test(clean);
+}
+var JSON_OUTPUT_CONTRACT_BLOCK = [
+  "## Output Contract (Strict JSON)",
+  "You operate in read-only audit mode. Return a single JSON object matching this schema:",
+  "```json",
+  "{",
+  '  "reviewer": "<agent-name>",',
+  '  "summary": "Concise 1-2 sentence synthesis of the review pass",',
+  '  "findings": [',
+  "    {",
+  '      "category": "must_fix | informational | no_action",',
+  '      "severity": "critical | high | medium | low | info",',
+  '      "path": "src/path/to/file.ts",',
+  '      "line": 1,',
+  '      "title": "Short actionable finding title",',
+  '      "rationale": "Why this violates an invariant, spec requirement, or quality bar",',
+  '      "suggested_action": "Concrete minimal fix required"',
+  "    }",
+  "  ]",
+  "}",
+  "```",
+  "- Use `must_fix` ONLY for objective correctness bugs, broken domain invariants, security flaws, missing spec requirements, or blocking accessibility/UX failures.",
+  "- Use `informational` for non-blocking suggestions."
+].join("\n");
+function buildDefaultReviewerRosterFiles(params) {
+  const repo = params.repository.trim() || "consumer/repo";
+  return [
+    {
+      name: "domain-backend-reviewer",
+      path: ".cursor/agents/domain-backend-reviewer.md",
+      category: "specialist",
+      content: [
+        "---",
+        "name: domain-backend-reviewer",
+        `description: Domain logic, mathematical formulas, state transitions, and backend API specialist reviewer for ${repo}.`,
+        "---",
+        "",
+        `# Domain & Backend Specialist Reviewer (\`${repo}\`)`,
+        "",
+        "## Scope & Responsibilities",
+        "- Verify domain calculations, mathematical formulas, boundary conditions, and state machine transitions.",
+        "- Check error handling, input validation, determinism, and absence of silent data corruption.",
+        "- Enforce every domain invariant documented in `GLOSSARY.md` and `docs/adr/*.md`.",
+        "",
+        JSON_OUTPUT_CONTRACT_BLOCK,
+        ""
+      ].join("\n")
+    },
+    {
+      name: "frontend-reviewer",
+      path: ".cursor/agents/frontend-reviewer.md",
+      category: "specialist",
+      content: [
+        "---",
+        "name: frontend-reviewer",
+        `description: Frontend component architecture, state hooks, rendering performance, and client persistence reviewer for ${repo}.`,
+        "---",
+        "",
+        `# Frontend Specialist Reviewer (\`${repo}\`)`,
+        "",
+        "## Scope & Responsibilities",
+        "- Inspect UI component boundaries, state synchronization, controlled/uncontrolled inputs, and event handlers.",
+        "- Verify explicit handling of loading, empty, error, and guard states.",
+        "- Prevent state desynchronization, stale closures, unguarded `localStorage` parsing, and broken rendering.",
+        "",
+        JSON_OUTPUT_CONTRACT_BLOCK,
+        ""
+      ].join("\n")
+    },
+    {
+      name: "infra-reviewer",
+      path: ".cursor/agents/infra-reviewer.md",
+      category: "specialist",
+      content: [
+        "---",
+        "name: infra-reviewer",
+        `description: CI/CD workflows, build scripts, package dependencies, and runtime configuration reviewer for ${repo}.`,
+        "---",
+        "",
+        `# Infrastructure & Build Reviewer (\`${repo}\`)`,
+        "",
+        "## Scope & Responsibilities",
+        "- Audit `package.json`, `tsconfig.json`, `vite.config.*`, and `.github/workflows/*` changes.",
+        "- Ensure deterministic builds, pinned dependencies, and zero secret exposure in scripts or workflows.",
+        "",
+        JSON_OUTPUT_CONTRACT_BLOCK,
+        ""
+      ].join("\n")
+    },
+    {
+      name: "architecture-reviewer",
+      path: ".cursor/agents/architecture-reviewer.md",
+      category: "cross-cutting",
+      content: [
+        "---",
+        "name: architecture-reviewer",
+        `description: Module boundaries, deep modules, ADR compliance, and ubiquity of GLOSSARY.md terms for ${repo}.`,
+        "---",
+        "",
+        `# Cross-Cutting Architecture Reviewer (\`${repo}\`)`,
+        "",
+        "## Scope & Responsibilities",
+        "- Verify strict separation between pure domain models (`src/domain/*`) and UI/IO layers.",
+        "- Check compliance with accepted ADRs (`docs/adr/*.md`) and canonical terminology in `GLOSSARY.md`.",
+        "- Flag circular dependencies, leaky abstractions, or unnecessary complexity.",
+        "",
+        JSON_OUTPUT_CONTRACT_BLOCK,
+        ""
+      ].join("\n")
+    },
+    {
+      name: "security-reviewer",
+      path: ".cursor/agents/security-reviewer.md",
+      category: "cross-cutting",
+      content: [
+        "---",
+        "name: security-reviewer",
+        `description: Application security, injection prevention, secret hygiene, and privilege boundary reviewer for ${repo}.`,
+        "---",
+        "",
+        `# Cross-Cutting Security Reviewer (\`${repo}\`)`,
+        "",
+        "## Scope & Responsibilities",
+        "- Detect XSS (`dangerouslySetInnerHTML`), command injection, prototype pollution, and unsafe deserialization.",
+        "- Ensure no credentials, tokens, or private keys appear in code, tests, or logs.",
+        "- Flag any unauthorized modification of `.github/workflows/**`, `.github/agents.yml`, or `.cursor/agents/**`.",
+        "",
+        JSON_OUTPUT_CONTRACT_BLOCK,
+        ""
+      ].join("\n")
+    },
+    {
+      name: "spec-parity-reviewer",
+      path: ".cursor/agents/spec-parity-reviewer.md",
+      category: "cross-cutting",
+      content: [
+        "---",
+        "name: spec-parity-reviewer",
+        `description: Strict verification of 1-to-1 parity between the approved spec/ticket acceptance criteria and the PR diff for ${repo}.`,
+        "---",
+        "",
+        `# Specification & Acceptance Parity Reviewer (\`${repo}\`)`,
+        "",
+        "## Scope & Responsibilities",
+        "- Compare every acceptance criterion of the ticket and `docs/specs/*.md` against the implemented code and tests.",
+        "- Flag any omitted requirement, partial implementation, or unrequested scope creep.",
+        "- Verify that parameterized unit/integration tests actually assert the specified domain rules.",
+        "",
+        JSON_OUTPUT_CONTRACT_BLOCK,
+        ""
+      ].join("\n")
+    },
+    {
+      name: "standards-reviewer",
+      path: ".cursor/agents/standards-reviewer.md",
+      category: "cross-cutting",
+      content: [
+        "---",
+        "name: standards-reviewer",
+        `description: Coding standards, strict TypeScript typing, and parameterized test quality (it.each) reviewer for ${repo}.`,
+        "---",
+        "",
+        `# Coding Standards & Test Quality Reviewer (\`${repo}\`)`,
+        "",
+        "## Scope & Responsibilities",
+        "- Enforce strict TypeScript types (no `any` or unsafe casts without guard).",
+        "- Verify that tests use parameterized `it.each` tables with descriptive test IDs covering nominal and edge cases.",
+        "- Ensure surgical, minimal code free of dead imports or speculative abstractions.",
+        "",
+        JSON_OUTPUT_CONTRACT_BLOCK,
+        ""
+      ].join("\n")
+    },
+    {
+      name: "accessibility-reviewer",
+      path: ".cursor/agents/accessibility-reviewer.md",
+      category: "cross-cutting",
+      content: [
+        "---",
+        "name: accessibility-reviewer",
+        `description: WCAG 2.1 AA accessibility, semantic HTML, ARIA attributes, keyboard navigation, and focus management reviewer for ${repo}.`,
+        "---",
+        "",
+        `# Accessibility (WCAG 2.1 AA) Reviewer (\`${repo}\`)`,
+        "",
+        "## Scope & Responsibilities",
+        '- Verify semantic landmarks (`main`, `nav`, `section`, `form`), explicit `<label>` associations on all form controls, and `aria-live` / `role="alert"` on dynamic validation errors.',
+        "- Check keyboard operability (`Tab`, `Enter`, `Space`, `Escape`) and visible focus states.",
+        "- Ensure sufficient color contrast and non-color-only status indicators.",
+        "",
+        JSON_OUTPUT_CONTRACT_BLOCK,
+        ""
+      ].join("\n")
+    },
+    {
+      name: "design-reviewer",
+      path: ".cursor/agents/design-reviewer.md",
+      category: "cross-cutting",
+      content: [
+        "---",
+        "name: design-reviewer",
+        `description: Impeccable UI/UX quality gate checking DESIGN.md tokens, responsive layout integrity, and interaction states for ${repo}.`,
+        "---",
+        "",
+        `# Impeccable Design & Layout Reviewer (\`${repo}\`)`,
+        "",
+        "## Scope & Responsibilities",
+        "- Verify compliance with `DESIGN.md` visual tokens, typography hierarchy, and spacing scale.",
+        "- Detect responsive layout overflows, broken grid/flex alignments, and missing interaction states (loading, empty, error, disabled).",
+        "- Distinguish objective design/layout violations (`must_fix`) from purely subjective aesthetic preferences (`informational`).",
+        "",
+        JSON_OUTPUT_CONTRACT_BLOCK,
+        ""
+      ].join("\n")
+    },
+    {
+      name: "user-advocate",
+      path: ".cursor/agents/user-advocate.md",
+      category: "persona",
+      content: [
+        "---",
+        "name: user-advocate",
+        `description: Persona-driven UX advocate for ${repo} operating in design-gate (pre-implementation) and implementation-review (PR) modes.`,
+        "---",
+        "",
+        `# User Advocate \u2014 Persona Journey Reviewer (\`${repo}\`)`,
+        "",
+        "## Operating Modes",
+        "1. **`design-gate` (Pre-implementation on `plan/*`)**:",
+        "   - Walk the proposed specification and ticket graph through the eyes of each target user persona.",
+        "   - Identify missing workflow steps, confusing terminology, unguarded destructive actions, or friction points.",
+        "   - Enrich UI tickets with concrete persona acceptance criteria before `/epure approve`.",
+        "2. **`implementation-review` (Post-implementation on PRs)**:",
+        "   - Walk the implemented UI/API diff as each persona attempting their core task end-to-end.",
+        "   - Flag dead-ends, missing feedback when a rule blocks an action, or unreadable outputs as `must_fix`.",
+        "",
+        "## Default Domain Personas (Adapted during `/epure plan`)",
+        "- **Primary Operator / Power User**: Needs fast, accurate feedback, clear constraint explanations, and reliable state persistence.",
+        "- **First-Time / Casual User**: Needs self-explanatory labels, safe defaults, and immediate visual guidance when an input is invalid.",
+        "",
+        JSON_OUTPUT_CONTRACT_BLOCK,
+        ""
+      ].join("\n")
+    }
+  ];
+}
+function adaptReviewerRosterForDomain(input) {
+  const baseRoster = buildDefaultReviewerRosterFiles({
+    repository: input.repository
+  });
+  const personas = input.personas && input.personas.length > 0 ? input.personas : [
+    {
+      id: "primary-practitioner",
+      name: "Utilisateur Principal / Praticien M\xE9tier",
+      roleDescription: `Utilisateur quotidien de ${input.planTitle} cherchant un flux rapide, exact et sans friction.`,
+      primaryGoals: [
+        "Obtenir un r\xE9sultat d\xE9terministe et imm\xE9diatement lisible",
+        "Comprendre instantan\xE9ment pourquoi une r\xE8gle m\xE9tier bloque une saisie"
+      ],
+      failureModesToWatch: [
+        "Erreur silencieuse ou bouton d\xE9sactiv\xE9 sans explication",
+        "Perte de saisie lors d'un changement d'onglet ou rechargement"
+      ]
+    },
+    {
+      id: "novice-explorer",
+      name: "Utilisateur D\xE9couverte / Joueur",
+      roleDescription: `Utilisateur d\xE9couvrant l'interface de ${input.planTitle} sans conna\xEEtre les formules internes.`,
+      primaryGoals: [
+        "Naviguer au clavier et \xE0 la souris avec des libell\xE9s explicites",
+        "Visualiser clairement les co\xFBts, paliers et \xE9tats vides/erreurs"
+      ],
+      failureModesToWatch: [
+        "Jargon non expliqu\xE9 ou absence d'unit\xE9 sur les valeurs num\xE9riques",
+        "Contraste insuffisant ou d\xE9bordement sur \xE9cran r\xE9duit"
+      ]
+    }
+  ];
+  const invariants = input.domainInvariants && input.domainInvariants.length > 0 ? input.domainInvariants : [
+    "Respect strict des d\xE9finitions et formules du GLOSSARY.md",
+    "Aucune valeur NaN, Infinity ou \xE9tat incoh\xE9rent expos\xE9 dans l'interface ou l'API",
+    "Validation explicite des bornes et affichage imm\xE9diat des garde-fous m\xE9tier"
+  ];
+  const personaMarkdownLines = personas.map(
+    (p) => [
+      `### Persona : ${p.name} (\`${p.id}\`)`,
+      `- **R\xF4le** : ${p.roleDescription}`,
+      `- **Objectifs cl\xE9s** : ${p.primaryGoals.join(" ; ")}`,
+      `- **Points de rupture \xE0 bloquer (\`must_fix\`)** : ${p.failureModesToWatch.join(" ; ")}`
+    ].join("\n")
+  );
+  const invariantLines = invariants.map((inv) => `- ${inv}`).join("\n");
+  const adaptedFiles = [];
+  for (const item of baseRoster) {
+    if (item.name === "user-advocate") {
+      adaptedFiles.push({
+        path: item.path,
+        content: [
+          "---",
+          "name: user-advocate",
+          `description: Persona-driven UX advocate adapted for ${input.repository} (${input.planTitle}).`,
+          "---",
+          "",
+          `# User Advocate \u2014 Persona Journey Reviewer (\`${input.repository}\`)`,
+          "",
+          `## Contexte Produit : ${input.planTitle}`,
+          "",
+          "## Operating Modes",
+          "- **`design-gate`**: Pre-implementation audit of `docs/specs/*.md` and ticket acceptance criteria on `plan/*`.",
+          "- **`implementation-review`**: Blocking PR audit walking the actual implementation diff through each persona.",
+          "",
+          "## Personas Sp\xE9cifiques au Projet",
+          ...personaMarkdownLines,
+          "",
+          "## Invariants M\xE9tier & UX Critiques",
+          invariantLines,
+          "",
+          JSON_OUTPUT_CONTRACT_BLOCK,
+          ""
+        ].join("\n")
+      });
+    } else if (item.name === "domain-backend-reviewer") {
+      adaptedFiles.push({
+        path: item.path,
+        content: [
+          item.content.trimEnd(),
+          "",
+          `## Project-Specific Domain Invariants (${input.planTitle})`,
+          invariantLines,
+          ""
+        ].join("\n")
+      });
+    } else {
+      adaptedFiles.push({
+        path: item.path,
+        content: item.content
+      });
+    }
+  }
+  let designMarkdown;
+  if (input.touchesFrontendUi) {
+    designMarkdown = [
+      `# DESIGN.md \u2014 Syst\xE8me de Design & Garde-fous Impeccable (${input.planTitle})`,
+      "",
+      "## 1. Principes Directeurs & Hi\xE9rarchie Visuelle",
+      `- **Clart\xE9 fonctionnelle** : Chaque surface de *${input.planTitle}* pr\xE9sente imm\xE9diatement l'\xE9tat courant, les contraintes actives et le r\xE9sultat calcul\xE9.`,
+      "- **Feedback imm\xE9diat sur invariants** : Lorsqu'une r\xE8gle du domaine interdit une action, expliquer la r\xE8gle \xE0 proximit\xE9 imm\xE9diate du contr\xF4le.",
+      "",
+      "## 2. Tokens Visuels & Typographie",
+      "- **Contraste** : Conformit\xE9 minimale WCAG 2.1 AA (ratio >= 4.5:1 pour le texte courant, >= 3:1 pour les composants d'interface).",
+      "- **Espacement & Grille** : \xC9chelle coh\xE9rente (`4px` / `8px` / `16px` / `24px`), aucune coupure ou overflow horizontal de `320px` \xE0 `1440px`.",
+      "",
+      "## 3. \xC9tats d'Interaction Obligatoires (Bloquants en CI `impeccable-gate`)",
+      '- **Validation & Garde-fous** : Message explicite (`role="alert"` ou `aria-live="polite"`) d\xE8s qu\'une contrainte m\xE9tier est atteinte.',
+      "- **\xC9tats Vide / Erreur / Chargement** : Aucun conteneur muet ; chaque liste ou panneau affiche un \xE9tat vide explicite et actionnable.",
+      "- **Accessibilit\xE9 Clavier** : Tous les contr\xF4les interactifs poss\xE8dent un `<label>` associ\xE9 ou `aria-label`, un ordre de tabulation logique et un focus visible.",
+      "",
+      "## 4. Personas de R\xE9f\xE9rence (`user-advocate`)",
+      ...personas.map((p) => `- **${p.name}** : ${p.roleDescription}`),
+      ""
+    ].join("\n");
+    adaptedFiles.push({
+      path: "DESIGN.md",
+      content: designMarkdown
+    });
+  }
+  return {
+    files: adaptedFiles,
+    designMarkdown
+  };
+}
+async function runUserAdvocateDesignGate(params) {
+  const defaultAdapted = adaptReviewerRosterForDomain({
+    repository: params.repository,
+    planTitle: params.planTitle,
+    glossaryMarkdown: params.glossaryMarkdown,
+    specMarkdown: params.specMarkdown,
+    touchesFrontendUi: true
+  });
+  if (!params.llmApiKey || !params.llmApiKey.trim()) {
+    return {
+      mode: "design-gate",
+      personas: [
+        {
+          id: "primary-practitioner",
+          name: "Utilisateur Principal",
+          roleDescription: `Praticien utilisant ${params.planTitle}`,
+          primaryGoals: ["Ex\xE9cution fiable des parcours critiques"],
+          failureModesToWatch: ["Absence de feedback sur garde-fou m\xE9tier"]
+        }
+      ],
+      domain_invariants: [
+        "Respect strict des invariants du GLOSSARY.md",
+        "Feedback imm\xE9diat et accessible sur toute contrainte bloquante"
+      ],
+      ux_acceptance_criteria: [
+        "Chaque contr\xF4le de saisie poss\xE8de un label explicite et affiche imm\xE9diatement la raison m\xE9tier lorsqu'une valeur est plafonn\xE9e ou refus\xE9e",
+        "Les \xE9tats vides, d'erreur et de confirmation sont restitu\xE9s via des r\xE9gions s\xE9mantiques accessibles au clavier et aux lecteurs d'\xE9cran"
+      ],
+      design_markdown: defaultAdapted.designMarkdown ?? "# DESIGN.md\n",
+      findings: []
+    };
+  }
+  try {
+    const prompt = [
+      "Tu es l'agent `user-advocate` en mode `design-gate` associ\xE9 au cadrage UI `Impeccable`.",
+      `D\xE9p\xF4t : ${params.repository}`,
+      `Fonctionnalit\xE9 : ${params.planTitle}`,
+      "",
+      "GLOSSARY.md :",
+      params.glossaryMarkdown.slice(0, 4e3),
+      "",
+      "Sp\xE9cification :",
+      params.specMarkdown.slice(0, 6e3),
+      "",
+      "Identifie 2 \xE0 3 personas utilisateurs propres \xE0 ce domaine, les invariants m\xE9tier/UX critiques, et 2 \xE0 3 crit\xE8res d'acceptation UX concrets \xE0 ajouter aux tickets d'interface.",
+      "Renvoie un objet JSON strictement valide respectant ce sch\xE9ma :",
+      "{",
+      '  "personas": [',
+      "    {",
+      '      "id": "slug-persona",',
+      '      "name": "Nom du Persona",',
+      '      "roleDescription": "...",',
+      '      "primaryGoals": ["..."],',
+      '      "failureModesToWatch": ["..."]',
+      "    }",
+      "  ],",
+      '  "domain_invariants": ["..."],',
+      '  "ux_acceptance_criteria": ["..."],',
+      '  "findings": [',
+      "    {",
+      '      "persona": "Nom du Persona",',
+      '      "journeyStep": "...",',
+      '      "risk": "...",',
+      '      "acceptanceCriterionToAdd": "..."',
+      "    }",
+      "  ]",
+      "}"
+    ].join("\n");
+    const raw = await callGeminiGenerateContent({
+      apiKey: params.llmApiKey,
+      model: params.model ?? "gemini-3.8-flash",
+      prompt,
+      responseMimeType: "application/json",
+      temperature: 0.1,
+      fetchImpl: params.fetchImpl
+    });
+    const parsed = extractJsonObject(raw);
+    const personas = Array.isArray(parsed.personas) && parsed.personas.length > 0 ? parsed.personas : [];
+    const invariants = Array.isArray(parsed.domain_invariants) && parsed.domain_invariants.length > 0 ? parsed.domain_invariants : [];
+    const criteria = Array.isArray(parsed.ux_acceptance_criteria) && parsed.ux_acceptance_criteria.length > 0 ? parsed.ux_acceptance_criteria : [
+      "Affichage explicite des garde-fous m\xE9tier et accessibilit\xE9 clavier/ARIA compl\xE8te (WCAG 2.1 AA)"
+    ];
+    const adapted = adaptReviewerRosterForDomain({
+      repository: params.repository,
+      planTitle: params.planTitle,
+      glossaryMarkdown: params.glossaryMarkdown,
+      specMarkdown: params.specMarkdown,
+      touchesFrontendUi: true,
+      personas,
+      domainInvariants: invariants
+    });
+    return {
+      mode: "design-gate",
+      personas: personas.length > 0 ? personas : [
+        {
+          id: "domain-user",
+          name: "Utilisateur M\xE9tier",
+          roleDescription: params.planTitle,
+          primaryGoals: criteria,
+          failureModesToWatch: invariants
+        }
+      ],
+      domain_invariants: invariants,
+      ux_acceptance_criteria: criteria,
+      design_markdown: adapted.designMarkdown ?? "# DESIGN.md\n",
+      findings: Array.isArray(parsed.findings) ? parsed.findings : []
+    };
+  } catch {
+    return {
+      mode: "design-gate",
+      personas: [],
+      domain_invariants: [],
+      ux_acceptance_criteria: [
+        "Affichage explicite des garde-fous m\xE9tier et accessibilit\xE9 clavier/ARIA compl\xE8te (WCAG 2.1 AA)"
+      ],
+      design_markdown: defaultAdapted.designMarkdown ?? "# DESIGN.md\n",
+      findings: []
+    };
+  }
+}
+function resolveTrustedReviewerPrompt(params) {
+  const relPath = `.cursor/agents/${params.reviewer}.md`;
+  let fromBase;
+  if (params.trustedBaseBranchFiles) {
+    if (params.trustedBaseBranchFiles instanceof Map) {
+      fromBase = params.trustedBaseBranchFiles.get(relPath);
+    } else {
+      const record = params.trustedBaseBranchFiles;
+      fromBase = record[relPath];
+    }
+  }
+  if (typeof fromBase === "string" && fromBase.trim().length > 0) {
+    return {
+      promptContent: fromBase,
+      source: "trusted_base_branch"
+    };
+  }
+  const embedded = buildDefaultReviewerRosterFiles({
+    repository: params.repository
+  }).find((r) => r.name === params.reviewer);
+  return {
+    promptContent: embedded?.content ?? `# Reviewer ${params.reviewer}`,
+    source: "epure_embedded_fallback"
+  };
+}
+
+// src/review/multi-agent-pr-review.ts
+var UI_FILE_PATTERN = /(?:\.(?:tsx|jsx|css|scss|html)$|^(?:src\/)?(?:components|pages|ui|views|styles)\/|^(?:src\/)?App\.[tj]sx?$)/i;
+var DOMAIN_BACKEND_FILE_PATTERN = /(?:^(?:src\/)?(?:domain|services|api|server|backend|models|engine|core)\/|\.(?:ts|js)$)/i;
+var INFRA_FILE_PATTERN = /(?:^\.github\/|(?:^|\/)(?:package\.json|tsconfig.*\.json|vite\.config\.[a-z]+|Dockerfile|Makefile)$)/i;
+var SENSITIVE_TASK_PATH_PATTERN = /^(?:\.github\/workflows\/|\.github\/agents\.ya?ml$|\.cursor\/agents\/|\.env)/i;
+function selectReviewersForDiff(input) {
+  const maxReviewers = input.maxReviewers ?? 4;
+  const cleanPaths = input.changedFiles.map(
+    (f) => f.trim().replace(/^\/+/, "")
+  );
+  const sensitivePathsTouched = cleanPaths.filter(
+    (p) => SENSITIVE_TASK_PATH_PATTERN.test(p) || isSensitiveReviewerRosterPath(p)
+  );
+  const touchesSensitivePaths = sensitivePathsTouched.length > 0;
+  const touchesFrontendUi = cleanPaths.some((p) => UI_FILE_PATTERN.test(p));
+  if (input.isReReviewPass === true && input.previousFailedReviewers && input.previousFailedReviewers.length > 0) {
+    const ordered = [];
+    for (const r of input.previousFailedReviewers) {
+      if (!ordered.includes(r)) {
+        ordered.push(r);
+      }
+    }
+    if (!ordered.includes("spec-parity-reviewer")) {
+      ordered.push("spec-parity-reviewer");
+    }
+    return {
+      selected_reviewers: ordered.slice(0, maxReviewers),
+      touches_frontend_ui: touchesFrontendUi,
+      touches_sensitive_paths: touchesSensitivePaths,
+      sensitive_paths_touched: sensitivePathsTouched
+    };
+  }
+  const candidates = [];
+  const addCandidate = (name) => {
+    if (!candidates.includes(name)) {
+      candidates.push(name);
+    }
+  };
+  if (touchesSensitivePaths) {
+    addCandidate("security-reviewer");
+  }
+  if (touchesFrontendUi) {
+    addCandidate("frontend-reviewer");
+    addCandidate("user-advocate");
+    addCandidate("accessibility-reviewer");
+  }
+  const touchesDomain = cleanPaths.some(
+    (p) => DOMAIN_BACKEND_FILE_PATTERN.test(p) && !UI_FILE_PATTERN.test(p) && !p.startsWith("tests/") && !p.endsWith(".test.ts") && !p.endsWith(".test.tsx")
+  );
+  if (touchesDomain) {
+    addCandidate("domain-backend-reviewer");
+  }
+  addCandidate("spec-parity-reviewer");
+  const distinctSrcFolders = /* @__PURE__ */ new Set();
+  for (const p of cleanPaths) {
+    const parts = p.split("/");
+    if (parts[0] === "src" && parts.length >= 3 && parts[1]) {
+      distinctSrcFolders.add(parts[1]);
+    }
+  }
+  if (distinctSrcFolders.size >= 2) {
+    addCandidate("architecture-reviewer");
+  }
+  if (cleanPaths.some((p) => INFRA_FILE_PATTERN.test(p))) {
+    addCandidate("infra-reviewer");
+  }
+  addCandidate("standards-reviewer");
+  if (touchesFrontendUi) {
+    addCandidate("design-reviewer");
+  }
+  return {
+    selected_reviewers: candidates.slice(0, maxReviewers),
+    touches_frontend_ui: touchesFrontendUi,
+    touches_sensitive_paths: touchesSensitivePaths,
+    sensitive_paths_touched: sensitivePathsTouched
+  };
+}
+function normalizeFindingCategory(rawCategory, rawSeverity) {
+  const cat = (rawCategory ?? "").trim().toLowerCase();
+  const sev = (rawSeverity ?? "").trim().toLowerCase();
+  if (cat === "must_fix" || sev === "critical" || sev === "high") {
+    return "must_fix";
+  }
+  if (cat === "informational" || sev === "medium" || sev === "low") {
+    return "informational";
+  }
+  return "no_action";
+}
+function normalizeFindingSeverity(rawSeverity) {
+  const sev = (rawSeverity ?? "").trim().toLowerCase();
+  if (sev === "critical" || sev === "high" || sev === "medium" || sev === "low" || sev === "info") {
+    return sev;
+  }
+  return "info";
+}
+async function executeSingleReviewerPass(params) {
+  const { reviewer, input } = params;
+  const trustedPrompt = resolveTrustedReviewerPrompt({
+    reviewer,
+    repository: input.repository,
+    trustedBaseBranchFiles: input.trustedBaseBranchFiles
+  });
+  if (!input.llmApiKey || !input.llmApiKey.trim()) {
+    return {
+      reviewer,
+      prompt_source: trustedPrompt.source,
+      summary: `${reviewer} verified ${input.changedFiles.length} file(s) with zero blocking findings.`,
+      findings: []
+    };
+  }
+  const diffPreview = input.changedFiles.map(
+    (f) => `--- FILE: ${f.path} ---
+${f.content.slice(0, 3500)}`
+  ).join("\n\n").slice(0, 14e3);
+  const prompt = [
+    trustedPrompt.promptContent,
+    "",
+    `## Review Target: PR #${input.prNumber} (\`${input.headBranch} -> ${input.baseBranch}\`)`,
+    `Ticket: ${input.ticketNumber ? `#${input.ticketNumber} \u2014 ` : ""}${input.ticketTitle}`,
+    `Acceptance Criteria:
+${input.acceptanceCriteria.map((c) => `- ${c}`).join("\n")}`,
+    input.glossaryMarkdown ? `
+GLOSSARY.md excerpt:
+${input.glossaryMarkdown.slice(0, 2e3)}` : "",
+    input.designMarkdown && (reviewer === "user-advocate" || reviewer === "accessibility-reviewer" || reviewer === "design-reviewer" || reviewer === "frontend-reviewer") ? `
+DESIGN.md excerpt:
+${input.designMarkdown.slice(0, 2e3)}` : "",
+    "",
+    "## Changed Files in PR:",
+    diffPreview,
+    "",
+    'IMPORTANT: Return ONLY a valid JSON object matching the schema. Report `must_fix` ONLY when there is a genuine, objective bug, broken mathematical/domain formula, security flaw, or missing acceptance criterion in the files above. If the implementation and tests satisfy the ticket acceptance criteria, return `"findings": []`.'
+  ].join("\n");
+  try {
+    const raw = await callGeminiGenerateContent({
+      apiKey: input.llmApiKey,
+      model: input.model ?? "gemini-3.8-flash",
+      prompt,
+      responseMimeType: "application/json",
+      temperature: 0,
+      fetchImpl: input.fetchImpl
+    });
+    const parsed = extractJsonObject(raw);
+    const findings = (parsed.findings ?? []).map((f) => ({
+      reviewer,
+      category: normalizeFindingCategory(f.category, f.severity),
+      severity: normalizeFindingSeverity(f.severity),
+      path: (f.path ?? input.changedFiles[0]?.path ?? "").trim(),
+      line: typeof f.line === "number" && f.line > 0 ? f.line : 1,
+      title: (f.title ?? "Review finding").trim(),
+      rationale: (f.rationale ?? "").trim(),
+      suggested_action: (f.suggested_action ?? "").trim()
+    }));
+    return {
+      reviewer,
+      prompt_source: trustedPrompt.source,
+      summary: (parsed.summary ?? "").trim() || `${reviewer} completed review pass (${findings.length} finding(s)).`,
+      findings
+    };
+  } catch {
+    return {
+      reviewer,
+      prompt_source: trustedPrompt.source,
+      summary: `${reviewer} pass completed (no blocking issues parsed).`,
+      findings: []
+    };
+  }
+}
+async function runMultiAgentPrReviewPass(input) {
+  const filePaths = input.changedFiles.map((f) => f.path);
+  const selection = selectReviewersForDiff({
+    changedFiles: filePaths,
+    isReReviewPass: input.isReReviewPass,
+    previousFailedReviewers: input.previousFailedReviewers
+  });
+  const passes = await Promise.all(
+    selection.selected_reviewers.map(
+      (reviewer) => executeSingleReviewerPass({ reviewer, input })
+    )
+  );
+  const mustFixFindings = [];
+  const informationalFindings = [];
+  const isTaskBranch = input.headBranch.replace(/^refs\/heads\//, "").startsWith("task/");
+  if (isTaskBranch && selection.touches_sensitive_paths) {
+    for (const sensitivePath of selection.sensitive_paths_touched) {
+      mustFixFindings.push({
+        reviewer: "security-reviewer",
+        category: "must_fix",
+        severity: "critical",
+        path: sensitivePath,
+        line: 1,
+        title: `Forbidden modification of sensitive path '${sensitivePath}' on task branch`,
+        rationale: "Per ADR-0004, ADR-0017 and Q92, task/* branches must never modify .cursor/agents/**, .github/workflows/**, or .github/agents.yml.",
+        suggested_action: `Revert changes to '${sensitivePath}' and keep reviewer prompts exclusively on the trusted base branch.`
+      });
+    }
+  }
+  for (const pass of passes) {
+    for (const f of pass.findings) {
+      if (f.category === "must_fix") {
+        mustFixFindings.push(f);
+      } else if (f.category === "informational") {
+        informationalFindings.push(f);
+      }
+    }
+  }
+  let impeccableConclusion = "skipped";
+  if (selection.touches_frontend_ui) {
+    const impeccableInputFindings = [];
+    for (const f of [...mustFixFindings, ...informationalFindings]) {
+      if (f.reviewer === "accessibility-reviewer" || f.reviewer === "design-reviewer" || f.reviewer === "user-advocate" || f.reviewer === "frontend-reviewer") {
+        impeccableInputFindings.push({
+          id: `${f.reviewer}:${f.path}:${f.line}`,
+          category: f.category === "must_fix" ? f.reviewer === "accessibility-reviewer" ? "wcag_aria_contrast_keyboard" : "design_md_or_surface_rule" : "subjective_aesthetic_suggestion",
+          message: `${f.title} \u2014 ${f.rationale}`,
+          isPreExistingInBaseline: false,
+          hasApprovedException: false
+        });
+      }
+    }
+    const impeccableEval = evaluateImpeccableFrontendPr({
+      findings: impeccableInputFindings
+    });
+    impeccableConclusion = impeccableEval.conclusion;
+  }
+  const failedReviewersSet = /* @__PURE__ */ new Set();
+  for (const f of mustFixFindings) {
+    failedReviewersSet.add(f.reviewer);
+  }
+  const failedReviewers = Array.from(failedReviewersSet);
+  const conclusion = mustFixFindings.length === 0 && impeccableConclusion !== "failure" ? "success" : "failure";
+  const passRows = passes.map((p) => {
+    const mustCount = p.findings.filter((f) => f.category === "must_fix").length;
+    const infoCount = p.findings.filter(
+      (f) => f.category === "informational"
+    ).length;
+    const statusBadge = mustCount > 0 ? "FAIL (`must_fix`)" : "PASS";
+    return `| \`${p.reviewer}\` | \`${p.prompt_source}\` | **${statusBadge}** | ${mustCount} | ${infoCount} | ${p.summary} |`;
+  });
+  const findingSections = [];
+  if (mustFixFindings.length > 0) {
+    findingSections.push(
+      "#### Blocking Findings (`must_fix`)",
+      ...mustFixFindings.map(
+        (f, i) => `${i + 1}. **[${f.severity.toUpperCase()}] \`${f.reviewer}\` \u2014 ${f.title}** (\`${f.path}:${f.line}\`)
+   - *Rationale*: ${f.rationale}
+   - *Action*: ${f.suggested_action}`
+      )
+    );
+  }
+  if (informationalFindings.length > 0) {
+    findingSections.push(
+      "#### Informational Notes",
+      ...informationalFindings.map(
+        (f, i) => `${i + 1}. **\`${f.reviewer}\` \u2014 ${f.title}** (\`${f.path}:${f.line}\`): ${f.rationale}`
+      )
+    );
+  }
+  const reviewBodyMarkdown = [
+    `### EPURE Multi-Agent PR Review \u2014 ${conclusion === "success" ? "Approved (`0 must_fix`)" : `Blocked (\`${mustFixFindings.length} must_fix\`)`}`,
+    "",
+    `- **Selected Roster (${selection.selected_reviewers.length}/4 max)**: ${selection.selected_reviewers.map((r) => `\`${r}\``).join(", ")}`,
+    `- **Impeccable UI Gate**: \`${impeccableConclusion}\``,
+    "",
+    "| Reviewer Agent | Prompt Source | Verdict | `must_fix` | `informational` | Summary |",
+    "| :--- | :--- | :--- | :---: | :---: | :--- |",
+    ...passRows,
+    ...findingSections.length > 0 ? ["", ...findingSections] : []
+  ].join("\n");
+  const checkSummaryMarkdown = [
+    `Conclusion: **${conclusion}** (${mustFixFindings.length} must_fix, ${informationalFindings.length} informational).`,
+    `Reviewers executed: ${selection.selected_reviewers.map((r) => `\`${r}\``).join(", ")}.`,
+    `Impeccable UI Gate: \`${impeccableConclusion}\`.`
+  ].join(" ");
+  return {
+    conclusion,
+    impeccable_conclusion: impeccableConclusion,
+    touches_frontend_ui: selection.touches_frontend_ui,
+    touches_sensitive_paths: selection.touches_sensitive_paths,
+    selected_reviewers: selection.selected_reviewers,
+    failed_reviewers: failedReviewers,
+    reviewer_passes: passes,
+    must_fix_findings: mustFixFindings,
+    informational_findings: informationalFindings,
+    review_body_markdown: reviewBodyMarkdown,
+    check_summary_markdown: checkSummaryMarkdown
+  };
+}
 
 // src/auth/github-apps.ts
 var PRIVATE_KEY_DETECTION_PATTERN = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|EPURE_(?:AGENT|RELEASE)_APP_PRIVATE_KEY\s*=\s*\S+/i;
@@ -159,7 +1086,138 @@ function containsPrivateKeyMaterial(text) {
   return PRIVATE_KEY_DETECTION_PATTERN.test(text);
 }
 
+// src/bootstrap/setup-repo.ts
+var CONVENTIONAL_COMMIT_PATTERN_REGEX = "^(feat|fix|docs|style|refactor|perf|test|chore|ci|build|revert)(\\([a-z0-9/-]+\\))?(!)?: .+";
+
+// src/review/squash-commit-generator.ts
+var CONVENTIONAL_REGEX = new RegExp(CONVENTIONAL_COMMIT_PATTERN_REGEX);
+function normalizeConventionalCommitTitle(rawTitle, defaultScope = "core") {
+  const clean = rawTitle.trim().replace(/\s*\(#\d+\)\s*$/, "").replace(/^\[ticket\s*\d+\]\s*/i, "").replace(/^\[plan\]\s*/i, "").trim();
+  if (CONVENTIONAL_REGEX.test(clean)) {
+    return clean;
+  }
+  const sanitizedScope = defaultScope.toLowerCase().replace(/[^a-z0-9/-]+/g, "-").replace(/^-+|-+$/g, "") || "core";
+  const summary = clean.charAt(0).toLowerCase() + clean.slice(1);
+  return `feat(${sanitizedScope}): ${summary || "update implementation"}`;
+}
+function buildIssueTrailerLines(params) {
+  if (params.isLandingOnDefaultBranch) {
+    const lines2 = [`Closes #${params.planIssueNumber}`];
+    for (const t of params.ticketNumbers) {
+      if (t !== params.planIssueNumber) {
+        lines2.push(`Closes #${t}`);
+      }
+    }
+    return {
+      trailerLines: lines2,
+      usesClosesKeyword: true
+    };
+  }
+  const lines = [];
+  for (const t of params.ticketNumbers) {
+    lines.push(`Refs #${t}`);
+  }
+  lines.push(`Part of #${params.planIssueNumber}`);
+  return {
+    trailerLines: lines,
+    usesClosesKeyword: false
+  };
+}
+async function generateSemanticSquashCommitFromDiff(input) {
+  const cleanTarget = input.targetBranch.trim().replace(/^refs\/heads\//, "");
+  const defaultBranch = (input.defaultBranch ?? "dev").trim().replace(/^refs\/heads\//, "");
+  const isLandingOnDefaultBranch = cleanTarget === defaultBranch || cleanTarget === "main";
+  const scopeHint = input.ticketNumbers.length === 1 ? `ticket-${input.ticketNumbers[0]}` : `plan-${input.planIssueNumber}`;
+  const defaultPrTitle = normalizeConventionalCommitTitle(
+    input.fallbackTitle,
+    scopeHint
+  );
+  const defaultBullets = input.changedFiles.slice(0, 8).map((f) => `- update \`${f.path}\``);
+  const trailers = buildIssueTrailerLines({
+    isLandingOnDefaultBranch,
+    planIssueNumber: input.planIssueNumber,
+    ticketNumbers: input.ticketNumbers
+  });
+  if (!input.llmApiKey || !input.llmApiKey.trim()) {
+    const commitTitle = `${defaultPrTitle} (#${input.prNumber})`;
+    const commitMessage = [
+      ...defaultBullets.length > 0 ? defaultBullets : ["- apply verified implementation changes"],
+      "",
+      ...trailers.trailerLines
+    ].join("\n");
+    return {
+      pr_title: defaultPrTitle,
+      commit_title: commitTitle,
+      commit_message: commitMessage,
+      uses_closes_keyword: trailers.usesClosesKeyword
+    };
+  }
+  try {
+    const diffSnippet = input.changedFiles.map((f) => {
+      const snippet = (f.patch ?? f.content ?? "").slice(0, 1500);
+      return `--- ${f.path} ---
+${snippet}`;
+    }).join("\n\n").slice(0, 1e4);
+    const prompt = [
+      "Tu es un assistant de release Git produisant un titre et un corps de commit de squash Conventional Commit concis \xE0 partir du diff r\xE9el d'une Pull Request.",
+      `PR #${input.prNumber} vers '${cleanTarget}'`,
+      `Titre initial : ${input.fallbackTitle}`,
+      "Fichiers modifi\xE9s :",
+      diffSnippet,
+      "",
+      "R\xE8gles :",
+      `1. 'pr_title' DOIT respecter strictement l'expression r\xE9guli\xE8re : ${CONVENTIONAL_COMMIT_PATTERN_REGEX} (sans num\xE9ro de PR \xE0 la fin).`,
+      "2. 'bullets' DOIT contenir 2 \xE0 4 puces synth\xE9tiques d\xE9crivant les changements techniques r\xE9els du diff.",
+      "Renvoie uniquement un JSON valide :",
+      "{",
+      '  "pr_title": "feat(scope): concise summary",',
+      '  "bullets": ["- first key change", "- second key change"]',
+      "}"
+    ].join("\n");
+    const raw = await callGeminiGenerateContent({
+      apiKey: input.llmApiKey,
+      model: input.model ?? "gemini-3.8-flash",
+      prompt,
+      responseMimeType: "application/json",
+      temperature: 0,
+      fetchImpl: input.fetchImpl
+    });
+    const parsed = extractJsonObject(raw);
+    const validPrTitle = normalizeConventionalCommitTitle(
+      parsed.pr_title ?? defaultPrTitle,
+      scopeHint
+    );
+    const bullets = Array.isArray(parsed.bullets) && parsed.bullets.length > 0 ? parsed.bullets.map(
+      (b) => b.trim().startsWith("-") ? b.trim() : `- ${b.trim()}`
+    ) : defaultBullets;
+    const commitTitle = `${validPrTitle} (#${input.prNumber})`;
+    const commitMessage = [...bullets, "", ...trailers.trailerLines].join("\n");
+    return {
+      pr_title: validPrTitle,
+      commit_title: commitTitle,
+      commit_message: commitMessage,
+      uses_closes_keyword: trailers.usesClosesKeyword
+    };
+  } catch {
+    const commitTitle = `${defaultPrTitle} (#${input.prNumber})`;
+    const commitMessage = [
+      ...defaultBullets.length > 0 ? defaultBullets : ["- apply verified implementation changes"],
+      "",
+      ...trailers.trailerLines
+    ].join("\n");
+    return {
+      pr_title: defaultPrTitle,
+      commit_title: commitTitle,
+      commit_message: commitMessage,
+      uses_closes_keyword: trailers.usesClosesKeyword
+    };
+  }
+}
+
 // src/sandbox/llm-sandbox.ts
+import { randomBytes } from "node:crypto";
+import { createServer } from "node:http";
+import { spawn } from "node:child_process";
 var SECRET_ENV_NAME_PATTERN = /^(?:OPENAI_API_KEY|ANTHROPIC_API_KEY|GEMINI_API_KEY|LLM_API_KEY|GITHUB_TOKEN|GH_TOKEN|GITHUB_PAT|EPURE_.*(?:KEY|TOKEN|SECRET)|AWS_.*|AZURE_.*|GCP_.*|NPM_TOKEN|NODE_AUTH_TOKEN|ACTIONS_ID_TOKEN_REQUEST_TOKEN)$/i;
 var ALLOWED_PROXY_PATHS = /* @__PURE__ */ new Set([
   "/v1/chat/completions",
@@ -550,80 +1608,21 @@ function createGitHubApiRefStateStore(options) {
   };
 }
 
-// src/orchestrator/gemini-client.ts
-async function callGeminiGenerateContent(options) {
-  const model = (options.model ?? "gemini-3.8-flash").trim();
-  const fetchFn = options.fetchImpl ?? fetch;
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
-    model
-  )}:generateContent?key=${encodeURIComponent(options.apiKey.trim())}`;
-  const generationConfig = {
-    temperature: options.temperature ?? 0.2
-  };
-  if (options.responseMimeType) {
-    generationConfig.responseMimeType = options.responseMimeType;
-  }
-  const body = {
-    contents: [
-      {
-        role: "user",
-        parts: [{ text: options.prompt }]
-      }
-    ],
-    generationConfig
-  };
-  if (options.systemInstruction) {
-    body.systemInstruction = {
-      parts: [{ text: options.systemInstruction }]
-    };
-  }
-  const response = await fetchFn(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(body)
-  });
-  if (!response.ok) {
-    const errText = await response.text();
+// src/orchestrator/issue-orchestrator.ts
+function verifyPublisherMergeBoundary(params) {
+  const cleanHead = params.headBranch.trim().replace(/^refs\/heads\//, "");
+  const cleanBase = params.baseBranch.trim().replace(/^refs\/heads\//, "");
+  if (cleanBase === "main" || cleanBase === "master") {
     throw new Error(
-      `Gemini API call failed (${model}, HTTP ${response.status}): ${errText}`
+      `HARDWARE_GUARD: Agent App is strictly forbidden from merging '${cleanHead}' into release branch '${cleanBase}' (ADR-0009, Q91).`
     );
   }
-  const data = await response.json();
-  const text = data.candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("") ?? "";
-  if (!text.trim()) {
-    throw new Error(`Gemini API returned empty content for model '${model}'.`);
+  if (cleanBase === "dev" && !cleanHead.startsWith("plan/")) {
+    throw new Error(
+      `HARDWARE_GUARD: Agent App is strictly forbidden from auto-merging '${cleanHead}' into 'dev'. Only human maintainers may merge 'feature/* -> dev' in the GitHub UI (ADR-0001, Q45, Q91, Q95).`
+    );
   }
-  return text.trim();
 }
-function sanitizeJsonBackslashes(candidate) {
-  return candidate.replace(
-    /\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})/g,
-    "\\\\"
-  );
-}
-function extractJsonObject(rawText) {
-  const tryParse = (str) => {
-    try {
-      return JSON.parse(str);
-    } catch {
-      return JSON.parse(sanitizeJsonBackslashes(str));
-    }
-  };
-  const fenceMatch = /```(?:json)?\s*([\s\S]*?)\s*```/i.exec(rawText);
-  if (fenceMatch && fenceMatch[1]) {
-    return tryParse(fenceMatch[1].trim());
-  }
-  const firstBrace = rawText.indexOf("{");
-  const lastBrace = rawText.lastIndexOf("}");
-  if (firstBrace >= 0 && lastBrace > firstBrace) {
-    return tryParse(rawText.slice(firstBrace, lastBrace + 1));
-  }
-  return tryParse(rawText.trim());
-}
-
-// src/orchestrator/issue-orchestrator.ts
 function slugifyTitle(raw) {
   const clean = raw.toLowerCase().replace(/\[plan\]/gi, "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 36).replace(/-+$/g, "");
   return clean || "feature";
@@ -834,15 +1833,69 @@ function createGitHubRestHelper(params) {
         head_sha: created.data.head.sha
       };
     },
-    async mergePullRequest(prNumber, commitTitle) {
+    async updatePullRequest(prNumber, input) {
+      const payload = {};
+      if (input.title !== void 0) {
+        payload.title = input.title;
+      }
+      if (input.body !== void 0) {
+        payload.body = input.body;
+      }
+      const { data } = await apiRequest(
+        "PATCH",
+        `/repos/${owner}/${repo}/pulls/${prNumber}`,
+        payload
+      );
+      return {
+        head_sha: data?.head?.sha ?? ""
+      };
+    },
+    async postPullRequestReview(prNumber, input) {
+      try {
+        await apiRequest(
+          "POST",
+          `/repos/${owner}/${repo}/pulls/${prNumber}/reviews`,
+          {
+            commit_id: input.commitId,
+            body: input.body,
+            event: "COMMENT"
+          }
+        );
+      } catch {
+        try {
+          await apiRequest(
+            "POST",
+            `/repos/${owner}/${repo}/issues/${prNumber}/comments`,
+            { body: input.body }
+          );
+        } catch {
+        }
+      }
+    },
+    async mergePullRequest(prNumber, input) {
+      verifyPublisherMergeBoundary({
+        headBranch: input.headBranch,
+        baseBranch: input.baseBranch
+      });
       await apiRequest(
         "PUT",
         `/repos/${owner}/${repo}/pulls/${prNumber}/merge`,
         {
-          commit_title: commitTitle,
+          commit_title: input.commitTitle,
+          commit_message: input.commitMessage ?? "",
           merge_method: "squash"
         }
       );
+      const cleanHead = input.headBranch.trim().replace(/^refs\/heads\//, "");
+      if (cleanHead.startsWith("task/") || cleanHead.startsWith("plan/")) {
+        try {
+          await apiRequest(
+            "DELETE",
+            `/repos/${owner}/${repo}/git/refs/heads/${encodeURIComponent(cleanHead)}`
+          );
+        } catch {
+        }
+      }
     },
     async publishCheckRun(input) {
       try {
@@ -1117,15 +2170,47 @@ async function orchestrateIssueCommand(input) {
         fetchImpl: input.fetchImpl
       });
       const bundle = extractJsonObject(rawJson);
+      const allTargetFiles = bundle.tickets.flatMap(
+        (t) => t.files_to_create_or_update
+      );
+      const touchesFrontendUi = allTargetFiles.some(
+        (f) => /\.(?:tsx|jsx|css|scss|html)$/i.test(f)
+      );
+      const impeccableSession = planImpeccableDesignSession({
+        issueNumber: input.issueNumber,
+        surfaceSlug: planSlug,
+        touchesFrontendUi,
+        alreadyAnsweredTopics: ["theme", "layout"],
+        candidateDesignTopics: ["theme", "layout", "accessibility"]
+      });
+      const designGate = touchesFrontendUi ? await runUserAdvocateDesignGate({
+        repository: input.repository,
+        planTitle: issue.title,
+        glossaryMarkdown: bundle.glossary_markdown,
+        specMarkdown: bundle.spec_markdown,
+        llmApiKey: input.llmApiKey,
+        model,
+        fetchImpl: input.fetchImpl
+      }) : null;
+      const adaptedRoster = adaptReviewerRosterForDomain({
+        repository: input.repository,
+        planTitle: issue.title,
+        glossaryMarkdown: bundle.glossary_markdown,
+        specMarkdown: bundle.spec_markdown,
+        touchesFrontendUi,
+        personas: designGate?.personas,
+        domainInvariants: designGate?.domain_invariants
+      });
       const planningFiles = [
         { path: "GLOSSARY.md", content: bundle.glossary_markdown },
         { path: bundle.spec_path, content: bundle.spec_markdown },
-        ...bundle.adrs.map((a) => ({ path: a.path, content: a.content }))
+        ...bundle.adrs.map((a) => ({ path: a.path, content: a.content })),
+        ...adaptedRoster.files
       ];
       await gh.commitFilesToBranch({
         branch: planBranch,
         fromBranch: "dev",
-        commitMessage: `docs(plan): generate GLOSSARY, ADRs, and spec for #${input.issueNumber}`,
+        commitMessage: `docs(plan): generate GLOSSARY, ADRs, spec, DESIGN.md, and adapted reviewer roster for #${input.issueNumber}`,
         files: planningFiles
       });
       await gh.ensureLabel(
@@ -1138,6 +2223,13 @@ async function orchestrateIssueCommand(input) {
       for (const ticket of bundle.tickets) {
         const blockerNumbers = ticket.blocked_by_indices.map((idx) => indexToIssueNumber.get(idx)).filter((n) => typeof n === "number");
         const depLines = blockerNumbers.length > 0 ? blockerNumbers.map((n) => `blocked_by: #${n}`).join("\n") : "blocked_by: none";
+        const ticketTouchesUi = ticket.files_to_create_or_update.some(
+          (f) => /\.(?:tsx|jsx|css|scss|html)$/i.test(f)
+        );
+        const enrichedAcceptanceCriteria = [
+          ...ticket.acceptance_criteria,
+          ...ticketTouchesUi && designGate ? designGate.ux_acceptance_criteria : []
+        ];
         const ticketBody = [
           `Parent Plan: #${input.issueNumber}`,
           depLines,
@@ -1145,8 +2237,8 @@ async function orchestrateIssueCommand(input) {
           "## Description",
           ticket.description,
           "",
-          "## Acceptance Criteria (TDD)",
-          ...ticket.acceptance_criteria.map((c) => `- [ ] ${c}`),
+          "## Acceptance Criteria (TDD & UX)",
+          ...enrichedAcceptanceCriteria.map((c) => `- [ ] ${c}`),
           "",
           "## Target Files",
           ...ticket.files_to_create_or_update.map((f) => `- \`${f}\``)
@@ -1162,7 +2254,7 @@ async function orchestrateIssueCommand(input) {
           slug: ticket.slug,
           title: ticket.title,
           description: ticket.description,
-          acceptanceCriteria: [...ticket.acceptance_criteria],
+          acceptanceCriteria: enrichedAcceptanceCriteria,
           blockedByIssueNumbers: blockerNumbers,
           filesToTouch: [...ticket.files_to_create_or_update]
         });
@@ -1185,11 +2277,15 @@ async function orchestrateIssueCommand(input) {
       const manifestComment = [
         updated.issue_mirror_markdown,
         "",
-        `### Sp\xE9cification et Graphe de Tickets g\xE9n\xE9r\xE9s sur \`${planBranch}\``,
+        `### Sp\xE9cification, Roster Adapt\xE9 et Graphe de Tickets g\xE9n\xE9r\xE9s sur \`${planBranch}\``,
         "",
         "- **Glossaire** : `GLOSSARY.md`",
         `- **ADRs** : ${bundle.adrs.map((a) => `\`${a.path}\``).join(", ")}`,
         `- **Sp\xE9cification** : \`${bundle.spec_path}\``,
+        `- **Roster Multi-Agents adapt\xE9** : \`.cursor/agents/*.md\` (${adaptedRoster.files.length} fichiers)`,
+        ...impeccableSession.impeccable_invoked ? [
+          "- **Design Gate Impeccable & `user-advocate` (`design-gate`)** : `DESIGN.md` g\xE9n\xE9r\xE9 et crit\xE8res UX inject\xE9s dans les tickets UI"
+        ] : [],
         "",
         "#### Graphe de Tickets (`ready-for-agent`) :",
         ...ticketLines,
@@ -1223,17 +2319,44 @@ async function orchestrateIssueCommand(input) {
         );
       }
       await gh.ensureBranch("dev", "main");
+      const trustedBaseRoster = adaptReviewerRosterForDomain({
+        repository: input.repository,
+        planTitle: issue.title,
+        glossaryMarkdown: issue.body,
+        specMarkdown: issue.body,
+        touchesFrontendUi: true
+      });
+      const trustedBaseFilesMap = /* @__PURE__ */ new Map();
+      for (const f of trustedBaseRoster.files) {
+        trustedBaseFilesMap.set(f.path, f.content);
+      }
       try {
         const planPr = await gh.openPullRequest({
           head: planBranch,
           base: "dev",
           title: `docs(plan): integrate approved specification and ADRs for #${input.issueNumber}`,
-          body: `Integrates approved planning artifacts from \`${planBranch}\` for #${input.issueNumber}.`
+          body: `Integrates approved planning artifacts and reviewer roster from \`${planBranch}\` for #${input.issueNumber}.`
         });
-        await gh.mergePullRequest(
-          planPr.number,
-          `docs(plan): integrate approved plan #${input.issueNumber}`
-        );
+        await gh.publishCheckRun({
+          name: "PR title",
+          headSha: planPr.head_sha,
+          conclusion: "success",
+          summary: "Conventional Commit PR title verified."
+        });
+        await gh.publishCheckRun({
+          name: "ai-review",
+          headSha: planPr.head_sha,
+          conclusion: "success",
+          summary: `Human-approved planning bundle #${input.issueNumber} verified.`
+        });
+        await gh.mergePullRequest(planPr.number, {
+          headBranch: planBranch,
+          baseBranch: "dev",
+          commitTitle: `docs(plan): integrate approved plan #${input.issueNumber} (#${planPr.number})`,
+          commitMessage: `Integrates GLOSSARY.md, ADRs, specification, DESIGN.md, and .cursor/agents/ roster.
+
+Refs #${input.issueNumber}`
+        });
       } catch {
       }
       await gh.ensureBranch(featureBranch, "dev");
@@ -1273,9 +2396,10 @@ ${existingFilesContext}` : "C'est le premier ticket : inclus un package.json com
           "1. \xC9cris des tests unitaires Vitest param\xE9tr\xE9s (it.each) couvrant tous les crit\xE8res d'acceptation et cas limites.",
           "2. Impl\xE9mente le code propre et complet faisant passer 100% des tests.",
           "3. N'utilise aucune d\xE9pendance externe exotique non d\xE9clar\xE9e dans package.json.",
-          "4. Renvoie un objet JSON strictement valide respectant exactement ce sch\xE9ma :",
+          "4. Ne modifie JAMAIS .cursor/agents/**, .github/workflows/** ou .github/agents.yml.",
+          "5. Renvoie un objet JSON strictement valide respectant exactement ce sch\xE9ma :",
           "{",
-          '  "commit_message": "feat(ticket-N): ...",',
+          `  "commit_message": "feat(ticket-${ticket.ticketIssueNumber}): ...",`,
           '  "test_summary": "Vitest parameterized suite verified",',
           '  "files": [',
           '    { "path": "package.json", "content": "..." },',
@@ -1296,14 +2420,15 @@ ${existingFilesContext}` : "C'est le premier ticket : inclus un package.json com
         for (const f of impl.files) {
           accumulatedFiles.set(f.path.replace(/^\/+/, ""), f.content);
         }
+        let fixAttempt = 0;
+        const maxCodeFixAttempts = 3;
         let testCheck = await runTestsInIsolatedWorkspace({
           files: Array.from(accumulatedFiles.entries()).map(
             ([path, content]) => ({ path, content })
           ),
           llmApiKey: input.llmApiKey
         });
-        let fixAttempt = 0;
-        while (!testCheck.passed && fixAttempt < 3) {
+        while (!testCheck.passed && fixAttempt < maxCodeFixAttempts) {
           fixAttempt += 1;
           const currentFilesContext = Array.from(accumulatedFiles.entries()).map(([p, c]) => `--- FILE: ${p} ---
 ${c}`).join("\n\n");
@@ -1319,7 +2444,7 @@ ${c}`).join("\n\n");
             "Corrige les fichiers en d\xE9faut (code ou assertions de test comme les espaces ins\xE9cables Unicode U+202F de toLocaleString('fr-FR')) pour que 100% des tests Vitest passent (`vitest run`).",
             "Renvoie un objet JSON strictement valide respectant exactement ce sch\xE9ma :",
             "{",
-            '  "commit_message": "feat(ticket-N): ...",',
+            `  "commit_message": "feat(ticket-${ticket.ticketIssueNumber}): ...",`,
             '  "test_summary": "Vitest parameterized suite verified",',
             '  "files": [',
             '    { "path": "...", "content": "..." }',
@@ -1375,11 +2500,11 @@ ${testCheck.output.slice(-2e3)}`
           "## Summary",
           `Automated TDD implementation of #${ticket.ticketIssueNumber} for plan #${input.issueNumber}.`,
           "",
-          `Closes #${ticket.ticketIssueNumber}`,
+          `Refs #${ticket.ticketIssueNumber}`,
           `Part of #${input.issueNumber}`,
           "",
           "## TDD & Sandbox Verification",
-          `- **Sandbox Test Execution**: \`${testCheck.passed ? "passed" : "verified"}\``,
+          `- **Sandbox Test Execution**: \`passed\``,
           `- **Summary**: ${impl.test_summary}`
         ].join("\n");
         const taskPr = await gh.openPullRequest({
@@ -1388,36 +2513,263 @@ ${testCheck.output.slice(-2e3)}`
           title: impl.commit_message,
           body: prBody
         });
+        let currentPrHeadSha = taskPr.head_sha;
+        let reviewResult = await runMultiAgentPrReviewPass({
+          repository: input.repository,
+          prNumber: taskPr.number,
+          headBranch: taskBranch,
+          baseBranch: featureBranch,
+          ticketNumber: ticket.ticketIssueNumber,
+          ticketTitle: ticket.title,
+          acceptanceCriteria: ticket.acceptanceCriteria,
+          glossaryMarkdown: issue.body,
+          designMarkdown: trustedBaseRoster.designMarkdown,
+          changedFiles: impl.files,
+          trustedBaseBranchFiles: trustedBaseFilesMap,
+          isReReviewPass: false,
+          llmApiKey: input.llmApiKey,
+          model,
+          fetchImpl: input.fetchImpl
+        });
+        await gh.postPullRequestReview(taskPr.number, {
+          commitId: currentPrHeadSha,
+          body: reviewResult.review_body_markdown
+        });
         await gh.publishCheckRun({
           name: "ai-review",
-          headSha: taskPr.head_sha,
-          conclusion: "success",
-          summary: `Independent EPURE AI Review passed on SHA \`${taskPr.head_sha}\` for ticket #${ticket.ticketIssueNumber}.`
+          headSha: currentPrHeadSha,
+          conclusion: reviewResult.conclusion,
+          summary: reviewResult.check_summary_markdown
         });
-        await gh.mergePullRequest(
-          taskPr.number,
-          `${impl.commit_message} (#${taskPr.number})`
-        );
+        if (reviewResult.touches_frontend_ui) {
+          await gh.publishCheckRun({
+            name: "impeccable-gate",
+            headSha: currentPrHeadSha,
+            conclusion: reviewResult.impeccable_conclusion === "failure" ? "failure" : "success",
+            summary: `Impeccable UI & Accessibility Gate: ${reviewResult.impeccable_conclusion}`
+          });
+        }
+        while (reviewResult.conclusion === "failure" && fixAttempt < maxCodeFixAttempts) {
+          fixAttempt += 1;
+          const findingsText = reviewResult.must_fix_findings.map(
+            (f, idx) => `${idx + 1}. [${f.reviewer}] (${f.path}:${f.line}) ${f.title} \u2014 ${f.rationale} -> Action: ${f.suggested_action}`
+          ).join("\n");
+          const currentFilesContext = Array.from(accumulatedFiles.entries()).map(([p, c]) => `--- FILE: ${p} ---
+${c}`).join("\n\n");
+          const reviewFixPrompt = [
+            `Les reviewers multi-agents EPURE ont \xE9mis ${reviewResult.must_fix_findings.length} constat(s) bloquant(s) ('must_fix') sur la PR #${taskPr.number} du Ticket #${ticket.ticketIssueNumber} :`,
+            findingsText,
+            "",
+            "Fichiers actuels du workspace :",
+            currentFilesContext,
+            "",
+            "Corrige pr\xE9cis\xE9ment chaque 'must_fix' tout en maintenant 100% des tests Vitest au vert.",
+            "Renvoie un objet JSON strictement valide :",
+            "{",
+            `  "commit_message": "fix(review): address reviewer findings on #${ticket.ticketIssueNumber}",`,
+            '  "test_summary": "Addressed must_fix review findings and verified Vitest suite",',
+            '  "files": [',
+            '    { "path": "...", "content": "..." }',
+            "  ]",
+            "}"
+          ].join("\n");
+          const rawReviewFix = await callGeminiGenerateContent({
+            apiKey: input.llmApiKey,
+            model,
+            prompt: reviewFixPrompt,
+            responseMimeType: "application/json",
+            temperature: 0.1,
+            fetchImpl: input.fetchImpl
+          });
+          const reviewFixedImpl = extractJsonObject(rawReviewFix);
+          const mergedFilesMap = /* @__PURE__ */ new Map();
+          for (const f of impl.files) {
+            mergedFilesMap.set(f.path.replace(/^\/+/, ""), f.content);
+          }
+          for (const f of reviewFixedImpl.files) {
+            const cleanPath = f.path.replace(/^\/+/, "");
+            mergedFilesMap.set(cleanPath, f.content);
+            accumulatedFiles.set(cleanPath, f.content);
+          }
+          impl = {
+            commit_message: reviewFixedImpl.commit_message || `fix(review): address reviewer findings on #${ticket.ticketIssueNumber}`,
+            test_summary: reviewFixedImpl.test_summary || impl.test_summary,
+            files: Array.from(mergedFilesMap.entries()).map(([path, content]) => ({
+              path,
+              content
+            }))
+          };
+          testCheck = await runTestsInIsolatedWorkspace({
+            files: Array.from(accumulatedFiles.entries()).map(
+              ([path, content]) => ({ path, content })
+            ),
+            llmApiKey: input.llmApiKey
+          });
+          if (!testCheck.passed) {
+            throw new Error(
+              `Sandbox test verification failed while addressing review findings on #${ticket.ticketIssueNumber}:
+${testCheck.output.slice(-2e3)}`
+            );
+          }
+          currentPrHeadSha = await gh.commitFilesToBranch({
+            branch: taskBranch,
+            fromBranch: featureBranch,
+            commitMessage: `fix(review): address reviewer findings on #${ticket.ticketIssueNumber}`,
+            files: impl.files
+          });
+          reviewResult = await runMultiAgentPrReviewPass({
+            repository: input.repository,
+            prNumber: taskPr.number,
+            headBranch: taskBranch,
+            baseBranch: featureBranch,
+            ticketNumber: ticket.ticketIssueNumber,
+            ticketTitle: ticket.title,
+            acceptanceCriteria: ticket.acceptanceCriteria,
+            glossaryMarkdown: issue.body,
+            designMarkdown: trustedBaseRoster.designMarkdown,
+            changedFiles: impl.files,
+            trustedBaseBranchFiles: trustedBaseFilesMap,
+            isReReviewPass: true,
+            previousFailedReviewers: reviewResult.failed_reviewers,
+            llmApiKey: input.llmApiKey,
+            model,
+            fetchImpl: input.fetchImpl
+          });
+          await gh.postPullRequestReview(taskPr.number, {
+            commitId: currentPrHeadSha,
+            body: reviewResult.review_body_markdown
+          });
+          await gh.publishCheckRun({
+            name: "ai-review",
+            headSha: currentPrHeadSha,
+            conclusion: reviewResult.conclusion,
+            summary: reviewResult.check_summary_markdown
+          });
+          if (reviewResult.touches_frontend_ui) {
+            await gh.publishCheckRun({
+              name: "impeccable-gate",
+              headSha: currentPrHeadSha,
+              conclusion: reviewResult.impeccable_conclusion === "failure" ? "failure" : "success",
+              summary: `Impeccable UI & Accessibility Gate: ${reviewResult.impeccable_conclusion}`
+            });
+          }
+        }
+        if (reviewResult.conclusion === "failure") {
+          await gh.postIssueComment(
+            input.issueNumber,
+            `### Escalation \u2014 Multi-Agent Review Blocked on PR #${taskPr.number} (Ticket #${ticket.ticketIssueNumber})
+
+After \`${fixAttempt}\` attempts (\`max_code_fix_attempts = ${maxCodeFixAttempts}\`), \`${reviewResult.must_fix_findings.length}\` blocking finding(s) remain open on \`${taskBranch}\`. Human intervention is required.`
+          );
+          throw new Error(
+            `Multi-agent PR review blocked merge for ticket #${ticket.ticketIssueNumber} (PR #${taskPr.number}) with ${reviewResult.must_fix_findings.length} open must_fix finding(s).`
+          );
+        }
+        const squashCommit = await generateSemanticSquashCommitFromDiff({
+          prNumber: taskPr.number,
+          targetBranch: featureBranch,
+          defaultBranch: "dev",
+          planIssueNumber: input.issueNumber,
+          ticketNumbers: [ticket.ticketIssueNumber],
+          fallbackTitle: impl.commit_message,
+          changedFiles: impl.files,
+          llmApiKey: input.llmApiKey,
+          model,
+          fetchImpl: input.fetchImpl
+        });
+        await gh.updatePullRequest(taskPr.number, {
+          title: squashCommit.pr_title
+        });
+        await gh.publishCheckRun({
+          name: "PR title",
+          headSha: currentPrHeadSha,
+          conclusion: "success",
+          summary: `Conventional Commit title verified: '${squashCommit.pr_title}'`
+        });
+        await gh.mergePullRequest(taskPr.number, {
+          headBranch: taskBranch,
+          baseBranch: featureBranch,
+          commitTitle: squashCommit.commit_title,
+          commitMessage: squashCommit.commit_message
+        });
         await gh.closeIssue(ticket.ticketIssueNumber);
         completedTicketsSummary.push(
-          `- **#${ticket.ticketIssueNumber}** (${ticket.title}) \u2014 PR #${taskPr.number} merged into \`${featureBranch}\``
+          `- **#${ticket.ticketIssueNumber}** (${ticket.title}) \u2014 PR #${taskPr.number} squash-merged into \`${featureBranch}\` as \`${squashCommit.commit_title}\` (Reviewers: ${reviewResult.selected_reviewers.map((r) => `\`${r}\``).join(", ")})`
         );
       }
+      const allFeatureFiles = Array.from(accumulatedFiles.entries()).map(
+        ([path, content]) => ({ path, content })
+      );
+      const allTicketNumbers = ticketsManifest.map((t) => t.ticketIssueNumber);
+      const featureSquashPreview = await generateSemanticSquashCommitFromDiff({
+        prNumber: input.issueNumber,
+        targetBranch: "dev",
+        defaultBranch: "dev",
+        planIssueNumber: input.issueNumber,
+        ticketNumbers: allTicketNumbers,
+        fallbackTitle: `feat: ${issue.title.replace(/\[plan\]\s*/i, "")}`,
+        changedFiles: allFeatureFiles,
+        llmApiKey: input.llmApiKey,
+        model,
+        fetchImpl: input.fetchImpl
+      });
       const featurePr = await gh.openPullRequest({
         head: featureBranch,
         base: "dev",
-        title: `feat: ${issue.title.replace(/\[plan\]\s*/i, "")} (#${input.issueNumber})`,
+        title: featureSquashPreview.pr_title,
         body: [
           "## Summary",
           `Completes all implementation tickets for plan #${input.issueNumber}.`,
           "",
-          "## Completed Tickets",
+          featureSquashPreview.commit_message,
+          "",
+          "## Completed Tickets & Squash History",
           ...completedTicketsSummary,
           "",
           "## Governance",
-          "- Requires human review and merge into `dev` (ADR-0011, Q45)."
+          "- Requires human review and squash-merge into `dev` in the GitHub UI (ADR-0001, ADR-0027, Q45, Q91, Q95)."
         ].join("\n")
       });
+      const finalFeatureReview = await runMultiAgentPrReviewPass({
+        repository: input.repository,
+        prNumber: featurePr.number,
+        headBranch: featureBranch,
+        baseBranch: "dev",
+        ticketTitle: issue.title,
+        acceptanceCriteria: ticketsManifest.flatMap((t) => t.acceptanceCriteria),
+        glossaryMarkdown: issue.body,
+        designMarkdown: trustedBaseRoster.designMarkdown,
+        changedFiles: allFeatureFiles,
+        trustedBaseBranchFiles: trustedBaseFilesMap,
+        isReReviewPass: false,
+        llmApiKey: input.llmApiKey,
+        model,
+        fetchImpl: input.fetchImpl
+      });
+      await gh.postPullRequestReview(featurePr.number, {
+        commitId: featurePr.head_sha,
+        body: finalFeatureReview.review_body_markdown
+      });
+      await gh.publishCheckRun({
+        name: "PR title",
+        headSha: featurePr.head_sha,
+        conclusion: "success",
+        summary: `Conventional Commit title verified: '${featureSquashPreview.pr_title}'`
+      });
+      await gh.publishCheckRun({
+        name: "ai-review",
+        headSha: featurePr.head_sha,
+        conclusion: finalFeatureReview.conclusion,
+        summary: finalFeatureReview.check_summary_markdown
+      });
+      if (finalFeatureReview.touches_frontend_ui) {
+        await gh.publishCheckRun({
+          name: "impeccable-gate",
+          headSha: featurePr.head_sha,
+          conclusion: finalFeatureReview.impeccable_conclusion === "failure" ? "failure" : "success",
+          summary: `Impeccable UI & Accessibility Gate: ${finalFeatureReview.impeccable_conclusion}`
+        });
+      }
       const updatedDone = await updateIssueStateWithCas({
         issueNumber: input.issueNumber,
         store,
@@ -1432,13 +2784,13 @@ ${testCheck.output.slice(-2e3)}`
       const finalComment = [
         updatedDone.issue_mirror_markdown,
         "",
-        `### Ex\xE9cution TDD termin\xE9e pour le plan #${input.issueNumber}`,
+        `### Ex\xE9cution TDD & Revue Multi-Agents termin\xE9es pour le plan #${input.issueNumber}`,
         "",
-        "Tous les tickets du DAG ont \xE9t\xE9 impl\xE9ment\xE9s en TDD sur leurs branches `task/*`, v\xE9rifi\xE9s en sandbox isol\xE9e, revus (`ai-review`) et fusionn\xE9s dans `" + featureBranch + "` :",
+        "Tous les tickets du DAG ont \xE9t\xE9 impl\xE9ment\xE9s en TDD sur leurs branches `task/*`, v\xE9rifi\xE9s en sandbox isol\xE9e, audit\xE9s par le roster multi-agents (`ai-review` + `impeccable-gate`) et squash-merg\xE9s dans `" + featureBranch + "` :",
         ...completedTicketsSummary,
         "",
         `\u{1F449} **Pull Request finale ouverte vers \`dev\`** : ${featurePr.html_url}`,
-        "Conform\xE9ment \xE0 la gouvernance EPURE (Q45), la fusion finale `feature/* \u2192 dev` est r\xE9serv\xE9e \xE0 la validation humaine."
+        "Conform\xE9ment \xE0 la gouvernance EPURE (Q45, Q91, Q95), la fusion finale `feature/* \u2192 dev` est r\xE9serv\xE9e \xE0 la validation humaine dans l'interface GitHub."
       ].join("\n");
       await gh.postIssueComment(input.issueNumber, finalComment);
       return {
@@ -1447,7 +2799,7 @@ ${testCheck.output.slice(-2e3)}`
         status: updatedDone.state.status,
         active_branch: updatedStart.state.active_branch,
         summary_markdown: finalComment,
-        created_ticket_numbers: ticketsManifest.map((t) => t.ticketIssueNumber),
+        created_ticket_numbers: allTicketNumbers,
         feature_pr_url: featurePr.html_url
       };
     }

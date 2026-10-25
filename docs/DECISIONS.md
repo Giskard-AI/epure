@@ -213,4 +213,18 @@ Voir [ADR-0023](adr/0023-sandbox-proxy-llm-et-stack-typescript.md), [ADR-0024](a
 - **Q89 (validée)** : fourniture d'un wizard interactif `scripts/setup-github-apps-wizard.sh` en 5 étapes permettant à l'administrateur humain d'enregistrer et d'installer `Agent App` et `Release App` sur son organisation/dépôt et d'injecter `EPURE_AGENT_APP_ID`, `EPURE_AGENT_APP_PRIVATE_KEY`, `EPURE_RELEASE_APP_ID` et `EPURE_RELEASE_APP_PRIVATE_KEY`.
 - **Q90 (validée)** : publication du guide utilisateur `docs/EPURE-WORKFLOW.md` et de l'[ADR-0026](adr/0026-orchestration-reelle-gemini-et-github-publisher.md).
 
+## Ronde 22 & 23 — Q91 à Q96 (validées — Rulesets Squash-Only, Roster de Review Multi-Agents et Squash Sémantique par IA V1.2)
+
+- **Q91 & Q95 (validées)** : `setup-repo` configure le dépôt en **squash-only** (`allow_merge_commit: false`, `allow_rebase_merge: false`, `allow_squash_merge: true`, `delete_branch_on_merge: true`) et provisionne **3 Repository Rulesets séparés** :
+  1. `epure-feature-governance` (`refs/heads/feature/*`) avec l'`Agent App` en `bypass_actors` (`pull_request`) pour le squash-merge autonome des PRs `task/* -> feature/*` une fois `verify-contract`, `PR title` et `ai-review` au vert.
+  2. `epure-dev-governance` (`refs/heads/dev`) avec `required_approving_review_count: 0` par défaut (compatible mainteneur solo, configurable via `--require-pr-approvals <N>`) et interdiction matérielle dans le publisher de tout auto-merge par l'`Agent App` sur `dev` en dehors de la PR documentaire `plan/* -> dev` après `/epure approve`.
+  3. `epure-release-immutability` (`refs/heads/main` et `refs/tags/v*`) avec la seule `Release App` en `bypass_actors`.
+- **Q92 (validée)** : les fichiers `.cursor/agents/*.md` initialisés par `setup-repo` et adaptés au domaine lors de `/epure plan` sont chargés à l'exécution **exclusivement depuis la branche de base de confiance (`dev`)** avec repli sur les templates embarqués d'`EPURE` (jamais depuis `task/*`), et `.cursor/agents/**` est classé comme chemin sensible interdisant l'auto-merge sur `task/*`.
+- **Q93 (validée)** : sélection dynamique plafonnée à **4 reviewers maximum par PR** selon les fichiers du diff ; compteur global `max_code_fix_attempts = 3` (Q78) partagé entre tests sandbox et review IA ; lors des tours 2 et 3, ré-exécution ciblée des seuls reviewers ayant émis un `must_fix` (+ `spec-parity-reviewer`) ; exécution d'une passe complète de synthèse sur la PR finale `feature/* -> dev`.
+- **Q94 (validée)** : synthèse par IA (`gemini-3.8-flash`, température `0.0`) sur le diff consolidé de la PR d'un `commit_title` Conventional Commit synchronisé via `PATCH` sur la PR et d'un `commit_message` concis utilisant `Refs #<ticket>` sur `task/* -> feature/*` (avec clôture explicite du ticket par l'orchestrateur) et `Closes #<plan_issue> / Closes #<tickets>` sur `feature/* -> dev`.
+- **Q96 (validée)** : à la fin du Grill (`/epure plan`), si le projet comporte une UI, génération de `DESIGN.md` et exécution de `user-advocate` en mode **`design-gate`** pour enrichir les critères d'acceptation UX des tickets avant `/epure approve`, puis exécution bloquante de `user-advocate` (`implementation-review`) et `impeccable-gate` sur toutes les PRs touchant l'UI.
+
+Voir [ADR-0027](adr/0027-rulesets-roster-review-multi-agents-et-squash-ia.md).
+
+
 
