@@ -269,6 +269,11 @@ function buildZizmorConfigYaml() {
       "      - epure-issue-command.yml",
       "      - epure-check.yml",
       "      - release.yml",
+      "  stale-action-refs:",
+      "    ignore:",
+      "      - epure-issue-command.yml",
+      "      - epure-check.yml",
+      "      - release.yml",
       ""
     ].join("\n")
   };
