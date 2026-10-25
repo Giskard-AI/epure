@@ -5,6 +5,12 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  buildRenovateConfigJson,
+  buildStackAwareCiWorkflowYaml,
+  buildZizmorConfigYaml,
+  detectRepositoryStack
+} from "../src/bootstrap/ci-and-renovate.js";
+import {
   DEFAULT_AGENTS_CONFIG,
   DEFAULT_EPURE_PINNED_SHA,
   planAndApplyRepoSetup,
@@ -51,6 +57,7 @@ describe("1. Dry-run simulation & guided application (planAndApplyRepoSetup)", (
         ".github/workflows/epure-issue-command.yml",
         ".github/workflows/epure-check.yml",
         ".github/workflows/pr-title.yml",
+        ".github/workflows/ci.yml",
         ".github/workflows/release.yml"
       ]);
       for (const wf of result.planned_workflows) {
@@ -299,8 +306,11 @@ describe("3. Idempotent second pass & fail-safe auto-merge disabling", () => {
           existingRulesetNames: []
         }
       });
-      // 1 agents.yml + 4 workflows + 10 reviewer roster files = 15 files
-      expect(firstPass.mutated_files).toHaveLength(15);
+      // 1 agents.yml + 1 zizmor.yml + 1 renovate.json + 5 workflows + 10 reviewer roster files = 18 files
+      expect(firstPass.mutated_files).toHaveLength(18);
+      expect(existsSync(join(tempRepoDir, "renovate.json"))).toBe(true);
+      expect(existsSync(join(tempRepoDir, ".github", "zizmor.yml"))).toBe(true);
+      expect(existsSync(join(tempRepoDir, ".github", "workflows", "ci.yml"))).toBe(true);
 
       const secondPass = planAndApplyRepoSetup({
         repository: "acme-org/payments",
@@ -452,4 +462,71 @@ describe("5. Pre-bundled CLI (dist/cli/setup-repo.mjs) & skill (.agents/skills/s
       "refs/tags/v*"
     ]);
   });
+
+  it.each([
+    {
+      id: "detects-node-typescript-react-stack-and-emits-npm-renovate-cooldowns-and-ci",
+      targetFilesHint: ["package.json", "tsconfig.json", "src/App.tsx", "e2e/smoke.e2e.ts"],
+      expectedKind: "node",
+      expectedHasE2e: true,
+      expectedCiSubstring: "Quality (Format, Lint, Typecheck, Test & Build)",
+      expectedRenovateSubstring: "npm-minor-and-patch"
+    },
+    {
+      id: "detects-python-stack-and-emits-pypi-renovate-cooldowns-and-ruff-pytest-ci",
+      targetFilesHint: ["pyproject.toml", "src/engine.py"],
+      expectedKind: "python",
+      expectedHasE2e: false,
+      expectedCiSubstring: "ruff check .",
+      expectedRenovateSubstring: "python-minor-and-patch"
+    },
+    {
+      id: "detects-rust-stack-and-emits-cargo-renovate-cooldowns-and-clippy-ci",
+      targetFilesHint: ["Cargo.toml", "src/lib.rs"],
+      expectedKind: "rust",
+      expectedHasE2e: false,
+      expectedCiSubstring: "cargo clippy",
+      expectedRenovateSubstring: "cargo-minor-and-patch"
+    },
+    {
+      id: "detects-go-stack-and-emits-gomod-renovate-cooldowns-and-govet-ci",
+      targetFilesHint: ["go.mod", "cmd/main.go"],
+      expectedKind: "go",
+      expectedHasE2e: false,
+      expectedCiSubstring: "go vet ./...",
+      expectedRenovateSubstring: "gomod-minor-and-patch"
+    }
+  ])(
+    "$id",
+    ({
+      targetFilesHint,
+      expectedKind,
+      expectedHasE2e,
+      expectedCiSubstring,
+      expectedRenovateSubstring
+    }) => {
+      const stack = detectRepositoryStack({ targetFilesHint });
+      expect(stack.kind).toBe(expectedKind);
+      expect(stack.hasPlaywrightOrE2e).toBe(expectedHasE2e);
+
+      const zizmor = buildZizmorConfigYaml();
+      expect(zizmor.path).toBe(".github/zizmor.yml");
+      expect(zizmor.content).toContain("rules: {}");
+
+      const renovate = buildRenovateConfigJson(stack);
+      expect(renovate.path).toBe("renovate.json");
+      expect(renovate.content).toContain('"baseBranchPatterns": [\n    "dev"\n  ]');
+      expect(renovate.content).toContain("helpers:pinGitHubActionDigests");
+      expect(renovate.content).toContain(expectedRenovateSubstring);
+
+      const ci = buildStackAwareCiWorkflowYaml({
+        pinnedSha: DEFAULT_EPURE_PINNED_SHA,
+        stack
+      });
+      expect(ci.path).toBe(".github/workflows/ci.yml");
+      expect(ci.content).toContain("zizmorcore/zizmor-action@");
+      expect(ci.content).toContain("persona: pedantic");
+      expect(ci.content).toContain(expectedCiSubstring);
+    }
+  );
 });

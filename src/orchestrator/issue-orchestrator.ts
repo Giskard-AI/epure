@@ -4,6 +4,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { mintRepositoryInstallationToken, revokeGitHubInstallationToken } from "../auth/github-app-jwt.js";
 import { type EpureCommandName, redactSecrets } from "../auth/issue-command-gate.js";
+import {
+  buildRenovateConfigJson,
+  buildStackAwareCiWorkflowYaml,
+  buildZizmorConfigYaml,
+  detectRepositoryStack
+} from "../bootstrap/ci-and-renovate.js";
 import { planImpeccableDesignSession } from "../frontend/impeccable-planning.js";
 import { runMultiAgentPrReviewPass } from "../review/multi-agent-pr-review.js";
 import {
@@ -928,11 +934,24 @@ export async function orchestrateIssueCommand(
         domainInvariants: designGate?.domain_invariants
       });
 
+      const plannedStack = detectRepositoryStack({
+        targetFilesHint: allTargetFiles
+      });
+      const zizmorFile = buildZizmorConfigYaml();
+      const renovateFile = buildRenovateConfigJson(plannedStack);
+      const ciFile = buildStackAwareCiWorkflowYaml({
+        pinnedSha: "main",
+        stack: plannedStack
+      });
+
       const planningFiles: Array<{ path: string; content: string }> = [
         { path: "GLOSSARY.md", content: bundle.glossary_markdown },
         { path: bundle.spec_path, content: bundle.spec_markdown },
         ...bundle.adrs.map((a) => ({ path: a.path, content: a.content })),
-        ...adaptedRoster.files
+        ...adaptedRoster.files,
+        zizmorFile,
+        renovateFile,
+        ciFile
       ];
 
       await gh.commitFilesToBranch({

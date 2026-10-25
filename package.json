@@ -1,6 +1,6 @@
 {
   "name": "@giskard-ai/epure",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "private": true,
   "description": "EPURE (Giskard-AI/epure) — Public Reusable Workflows, TypeScript Custom Actions (Node.js 24 LTS), and Agent Skills",
   "license": "Apache-2.0",

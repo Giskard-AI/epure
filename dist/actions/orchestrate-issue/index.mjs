@@ -30,9 +30,9 @@ function redactSecrets(text, extraSecrets = []) {
 
 // src/orchestrator/issue-orchestrator.ts
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync as existsSync2, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join as join2 } from "node:path";
 
 // src/auth/github-app-jwt.ts
 import { createSign } from "node:crypto";
@@ -146,6 +146,382 @@ async function revokeGitHubInstallationToken(params) {
       "X-GitHub-Api-Version": "2022-11-28"
     }
   });
+}
+
+// src/bootstrap/ci-and-renovate.ts
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+var PINNED_ACTIONS_CHECKOUT_SHA = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1";
+var PINNED_ACTIONS_SETUP_NODE_SHA = "actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0";
+var PINNED_ACTIONS_SETUP_PYTHON_SHA = "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0";
+var PINNED_ACTIONS_SETUP_GO_SHA = "actions/setup-go@41dfa10bad2bb2ae585af6ee5bb4d7d973ad74ed # v5.5.0";
+var PINNED_ZIZMOR_ACTION_SHA = "zizmorcore/zizmor-action@85b2b9fb8e3325e7a23d7d0a9d7ba5ae0f999e3e # v0.7.1";
+function parseMakefileTargets(makefileContent) {
+  const targets = /* @__PURE__ */ new Set();
+  for (const line of makefileContent.split("\n")) {
+    const match = /^([a-zA-Z0-9_-]+)\s*:/.exec(line);
+    if (match && match[1] && !match[1].startsWith(".")) {
+      targets.add(match[1]);
+    }
+  }
+  return Array.from(targets);
+}
+function detectRepositoryStack(params) {
+  const root = params.repoRootDir;
+  const hints = (params.targetFilesHint ?? []).map(
+    (f) => f.trim().replace(/^\/+/, "")
+  );
+  const fileExists = (relPath) => {
+    if (hints.includes(relPath)) {
+      return true;
+    }
+    if (root && existsSync(join(root, relPath))) {
+      return true;
+    }
+    return false;
+  };
+  const readFileSafe = (relPath) => {
+    if (root && existsSync(join(root, relPath))) {
+      try {
+        return readFileSync(join(root, relPath), "utf8");
+      } catch {
+        return void 0;
+      }
+    }
+    return void 0;
+  };
+  const makefileContent = readFileSafe("Makefile");
+  const hasMakefile = Boolean(makefileContent) || fileExists("Makefile");
+  const makeTargets = makefileContent ? parseMakefileTargets(makefileContent) : [];
+  const hasDockerfile = fileExists("Dockerfile") || hints.some((f) => f.endsWith("/Dockerfile"));
+  const hasDockerCompose = fileExists("docker-compose.yml") || fileExists("docker-compose.yaml") || fileExists("compose.yml");
+  const subprojects = [];
+  if (fileExists("frontend/package.json")) {
+    subprojects.push("frontend");
+  }
+  if (fileExists("backend/package.json")) {
+    subprojects.push("backend");
+  }
+  let nodePackageManager = "npm";
+  if (fileExists("pnpm-lock.yaml")) {
+    nodePackageManager = "pnpm";
+  } else if (fileExists("yarn.lock")) {
+    nodePackageManager = "yarn";
+  }
+  let nodeScripts = {};
+  let hasPlaywrightOrE2e = hints.some(
+    (f) => f.includes("playwright.config") || f.includes("cypress.config") || f.startsWith("e2e/") || f.includes(".e2e.")
+  );
+  const pkgContent = readFileSafe("package.json");
+  if (pkgContent) {
+    try {
+      const parsed = JSON.parse(pkgContent);
+      nodeScripts = parsed.scripts ?? {};
+      const allDeps = {
+        ...parsed.dependencies ?? {},
+        ...parsed.devDependencies ?? {}
+      };
+      if (Boolean(nodeScripts["test:e2e"]) || Boolean(nodeScripts["e2e"]) || "@playwright/test" in allDeps || "playwright" in allDeps || "cypress" in allDeps) {
+        hasPlaywrightOrE2e = true;
+      }
+    } catch {
+    }
+  }
+  const isNode = Boolean(pkgContent) || fileExists("package.json") || subprojects.length > 0 || hints.some((f) => /\.(?:ts|tsx|js|jsx|mjs)$/.test(f));
+  const isPython = fileExists("pyproject.toml") || fileExists("requirements.txt") || hints.some((f) => f.endsWith(".py"));
+  const isRust = fileExists("Cargo.toml") || hints.some((f) => f.endsWith(".rs"));
+  const isGo = fileExists("go.mod") || hints.some((f) => f.endsWith(".go"));
+  let kind = "generic";
+  if (isNode) {
+    kind = "node";
+  } else if (isPython) {
+    kind = "python";
+  } else if (isRust) {
+    kind = "rust";
+  } else if (isGo) {
+    kind = "go";
+  }
+  return {
+    kind,
+    nodePackageManager,
+    hasMakefile,
+    makeTargets,
+    hasDockerfile,
+    hasDockerCompose,
+    hasPlaywrightOrE2e,
+    nodeScripts,
+    subprojects
+  };
+}
+function buildZizmorConfigYaml() {
+  return {
+    path: ".github/zizmor.yml",
+    content: [
+      "# zizmor static analysis config for GitHub Actions workflows (ADR-0017).",
+      "# https://docs.zizmor.sh/",
+      "rules: {}",
+      ""
+    ].join("\n")
+  };
+}
+function buildRenovateConfigJson(stack) {
+  const packageRules = [
+    {
+      description: "Actions and container image cooldown (7 days)",
+      matchManagers: ["github-actions", "dockerfile", "docker-compose"],
+      minimumReleaseAge: "7 days"
+    },
+    {
+      description: "Group GitHub Actions digest & version updates",
+      groupName: "github-actions",
+      matchManagers: ["github-actions"]
+    }
+  ];
+  if (stack.hasDockerfile || stack.hasDockerCompose) {
+    packageRules.push({
+      description: "Group Docker and compose image updates",
+      groupName: "docker",
+      matchManagers: ["dockerfile", "docker-compose"]
+    });
+  }
+  if (stack.kind === "node") {
+    packageRules.push(
+      {
+        description: "npm patch cooldown (hijacked publish window protection)",
+        matchDatasources: ["npm"],
+        matchUpdateTypes: ["patch"],
+        minimumReleaseAge: "3 days"
+      },
+      {
+        description: "npm minor cooldown",
+        matchDatasources: ["npm"],
+        matchUpdateTypes: ["minor"],
+        minimumReleaseAge: "7 days"
+      },
+      {
+        description: "npm major cooldown",
+        matchDatasources: ["npm"],
+        matchUpdateTypes: ["major"],
+        minimumReleaseAge: "14 days"
+      }
+    );
+    if (stack.subprojects.length > 0) {
+      for (const sub of stack.subprojects) {
+        packageRules.push({
+          description: `Group ${sub} npm minor, patch, and pin`,
+          groupName: `${sub}-minor-and-patch`,
+          matchFileNames: [`${sub}/package.json`],
+          matchUpdateTypes: ["minor", "patch", "pin"]
+        });
+      }
+    } else {
+      packageRules.push({
+        description: "Group npm minor, patch, and pin updates",
+        groupName: "npm-minor-and-patch",
+        matchDatasources: ["npm"],
+        matchUpdateTypes: ["minor", "patch", "pin"]
+      });
+    }
+  } else if (stack.kind === "python") {
+    packageRules.push(
+      {
+        description: "PyPI patch cooldown (3 days)",
+        matchDatasources: ["pypi"],
+        matchUpdateTypes: ["patch"],
+        minimumReleaseAge: "3 days"
+      },
+      {
+        description: "PyPI minor/major cooldown (7 days)",
+        matchDatasources: ["pypi"],
+        matchUpdateTypes: ["minor", "major"],
+        minimumReleaseAge: "7 days"
+      },
+      {
+        description: "Group Python minor and patch updates",
+        groupName: "python-minor-and-patch",
+        matchDatasources: ["pypi"],
+        matchUpdateTypes: ["minor", "patch", "pin"]
+      }
+    );
+  } else if (stack.kind === "rust") {
+    packageRules.push({
+      description: "Crates.io cooldown and grouping",
+      groupName: "cargo-minor-and-patch",
+      matchDatasources: ["crate"],
+      matchUpdateTypes: ["minor", "patch", "pin"],
+      minimumReleaseAge: "3 days"
+    });
+  } else if (stack.kind === "go") {
+    packageRules.push({
+      description: "Go modules cooldown and grouping",
+      groupName: "gomod-minor-and-patch",
+      matchDatasources: ["go"],
+      matchUpdateTypes: ["minor", "patch", "pin"],
+      minimumReleaseAge: "3 days"
+    });
+  }
+  const configObject = {
+    $schema: "https://docs.renovatebot.com/renovate-schema.json",
+    extends: [
+      "config:recommended",
+      "helpers:pinGitHubActionDigests",
+      ":pinAllExceptPeerDependencies",
+      "docker:pinDigests"
+    ],
+    baseBranchPatterns: ["dev"],
+    schedule: ["before 6am on monday"],
+    labels: ["dependencies"],
+    semanticCommits: "enabled",
+    prHourlyLimit: 2,
+    prConcurrentLimit: 5,
+    packageRules
+  };
+  return {
+    path: "renovate.json",
+    content: `${JSON.stringify(configObject, null, 2)}
+`
+  };
+}
+function buildQualityJobStepsForStack(stack) {
+  if (stack.kind === "python") {
+    return [
+      `      - uses: ${PINNED_ACTIONS_CHECKOUT_SHA}`,
+      "        with:",
+      "          persist-credentials: false",
+      `      - uses: ${PINNED_ACTIONS_SETUP_PYTHON_SHA}`,
+      "        with:",
+      '          python-version: "3.12"',
+      "      - name: Install dependencies",
+      "        run: |",
+      "          python -m pip install --upgrade pip",
+      "          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi",
+      "          if [ -f pyproject.toml ]; then pip install -e . || pip install .; fi",
+      "      - name: Format & Lint (ruff / flake8)",
+      "        run: |",
+      "          if command -v ruff >/dev/null 2>&1; then ruff check . && ruff format --check .; fi",
+      "      - name: Unit & Integration Tests (pytest)",
+      "        run: |",
+      "          if command -v pytest >/dev/null 2>&1; then pytest -q; else python -m unittest discover; fi"
+    ];
+  }
+  if (stack.kind === "rust") {
+    return [
+      `      - uses: ${PINNED_ACTIONS_CHECKOUT_SHA}`,
+      "        with:",
+      "          persist-credentials: false",
+      "      - name: Format check (cargo fmt)",
+      "        run: cargo fmt --all -- --check",
+      "      - name: Lint check (cargo clippy)",
+      "        run: cargo clippy --all-targets --all-features -- -D warnings",
+      "      - name: Tests (cargo test)",
+      "        run: cargo test --all-targets"
+    ];
+  }
+  if (stack.kind === "go") {
+    return [
+      `      - uses: ${PINNED_ACTIONS_CHECKOUT_SHA}`,
+      "        with:",
+      "          persist-credentials: false",
+      `      - uses: ${PINNED_ACTIONS_SETUP_GO_SHA}`,
+      "        with:",
+      '          go-version: "1.24"',
+      "      - name: Format & Vet (gofmt + go vet)",
+      "        run: |",
+      '          test -z "$(gofmt -l .)"',
+      "          go vet ./...",
+      "      - name: Tests (go test)",
+      "        run: go test -v ./..."
+    ];
+  }
+  return [
+    `      - uses: ${PINNED_ACTIONS_CHECKOUT_SHA}`,
+    "        with:",
+    "          persist-credentials: false",
+    `      - uses: ${PINNED_ACTIONS_SETUP_NODE_SHA}`,
+    "        with:",
+    '          node-version: "24"',
+    "      - name: Install dependencies",
+    "        run: |",
+    "          if [ -f package-lock.json ]; then npm ci; elif [ -f package.json ]; then npm install; else echo 'No package.json yet (bootstrap branch)'; fi",
+    "      - name: Format check (if present)",
+    "        run: |",
+    `          if [ -f package.json ] && node -e 'const p=require("./package.json"); process.exit(p.scripts && (p.scripts["format:check"] || p.scripts.format) ? 0 : 1)'; then`,
+    "            npm run format:check --if-present || npm run format --if-present",
+    "          fi",
+    "      - name: Lint & Typecheck (strict)",
+    "        run: |",
+    "          if [ -f package.json ]; then",
+    "            npm run lint --if-present",
+    `            if node -e 'const p=require("./package.json"); process.exit(p.scripts && p.scripts.typecheck ? 0 : 1)'; then`,
+    "              npm run typecheck",
+    "            elif [ -f tsconfig.json ]; then",
+    "              npx tsc --noEmit",
+    "            fi",
+    "          fi",
+    "      - name: Unit & Integration Tests",
+    "        run: |",
+    `          if [ -f package.json ] && node -e 'const p=require("./package.json"); process.exit(p.scripts && p.scripts.test ? 0 : 1)'; then`,
+    "            npx vitest run 2>/dev/null || npm test",
+    "          fi",
+    "      - name: Production Build",
+    "        run: |",
+    "          if [ -f package.json ]; then npm run build --if-present; fi",
+    "      - name: End-to-End Tests (if configured)",
+    "        run: |",
+    `          if [ -f package.json ] && node -e 'const p=require("./package.json"); process.exit(p.scripts && (p.scripts["test:e2e"] || p.scripts.e2e) ? 0 : 1)'; then`,
+    "            npx playwright install --with-deps chromium",
+    "            npm run test:e2e --if-present || npm run e2e --if-present",
+    "          fi"
+  ];
+}
+function buildStackAwareCiWorkflowYaml(params) {
+  const qualitySteps = buildQualityJobStepsForStack(params.stack);
+  return {
+    path: ".github/workflows/ci.yml",
+    content: [
+      `# Managed by Giskard-AI/epure@${params.pinnedSha} # v1.1.0`,
+      "# Continuous Integration: Zizmor workflow security audit + Stack-aware Format, Lint/Typecheck, Tests, Build & E2E.",
+      'name: "CI"',
+      "",
+      "on:",
+      "  push:",
+      "    branches: [dev, main]",
+      "  pull_request:",
+      "    branches: [dev, main, 'feature/**']",
+      "",
+      "concurrency:",
+      "  group: ${{ github.workflow }}-${{ github.ref }}",
+      "  cancel-in-progress: true",
+      "",
+      "permissions:",
+      "  contents: read",
+      "",
+      "jobs:",
+      "  quality:",
+      '    name: "Quality (Format, Lint, Typecheck, Test & Build)"',
+      "    runs-on: ubuntu-latest",
+      "    timeout-minutes: 20",
+      "    steps:",
+      ...qualitySteps,
+      "",
+      "  zizmor:",
+      '    name: "Zizmor"',
+      "    runs-on: ubuntu-latest",
+      "    timeout-minutes: 10",
+      "    permissions:",
+      "      contents: read",
+      "      actions: read",
+      "    steps:",
+      `      - uses: ${PINNED_ACTIONS_CHECKOUT_SHA}`,
+      "        with:",
+      "          persist-credentials: false",
+      `      - uses: ${PINNED_ZIZMOR_ACTION_SHA}`,
+      "        with:",
+      "          persona: pedantic",
+      "          advanced-security: false",
+      ""
+    ].join("\n")
+  };
 }
 
 // src/frontend/impeccable-planning.ts
@@ -2315,15 +2691,15 @@ function parseTrackedTicketsFromComments(comments) {
   return [];
 }
 async function runTestsInIsolatedWorkspace(params) {
-  const workDir = mkdtempSync(join(tmpdir(), "epure-task-sandbox-"));
+  const workDir = mkdtempSync(join2(tmpdir(), "epure-task-sandbox-"));
   try {
     for (const file of params.files) {
-      const target = join(workDir, file.path.replace(/^\/+/, ""));
+      const target = join2(workDir, file.path.replace(/^\/+/, ""));
       mkdirSync(dirname(target), { recursive: true });
       writeFileSync(target, file.content, "utf8");
     }
-    const pkgJsonPath = join(workDir, "package.json");
-    if (!existsSync(pkgJsonPath)) {
+    const pkgJsonPath = join2(workDir, "package.json");
+    if (!existsSync2(pkgJsonPath)) {
       return { passed: true, output: "No package.json in workspace snapshot; syntax verified." };
     }
     execFileSync("npm", ["install", "--no-audit", "--no-fund"], {
@@ -2601,11 +2977,23 @@ ${issue.body}`
         personas: designGate?.personas,
         domainInvariants: designGate?.domain_invariants
       });
+      const plannedStack = detectRepositoryStack({
+        targetFilesHint: allTargetFiles
+      });
+      const zizmorFile = buildZizmorConfigYaml();
+      const renovateFile = buildRenovateConfigJson(plannedStack);
+      const ciFile = buildStackAwareCiWorkflowYaml({
+        pinnedSha: "main",
+        stack: plannedStack
+      });
       const planningFiles = [
         { path: "GLOSSARY.md", content: bundle.glossary_markdown },
         { path: bundle.spec_path, content: bundle.spec_markdown },
         ...bundle.adrs.map((a) => ({ path: a.path, content: a.content })),
-        ...adaptedRoster.files
+        ...adaptedRoster.files,
+        zizmorFile,
+        renovateFile,
+        ciFile
       ];
       await gh.commitFilesToBranch({
         branch: planBranch,

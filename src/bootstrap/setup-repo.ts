@@ -6,6 +6,13 @@ import {
   buildDefaultReviewerRosterFiles,
   type ReviewerAgentName
 } from "../review/reviewer-roster.js";
+import {
+  buildRenovateConfigJson,
+  buildStackAwareCiWorkflowYaml,
+  buildZizmorConfigYaml,
+  detectRepositoryStack,
+  type DetectedStackProfile
+} from "./ci-and-renovate.js";
 
 export const DEFAULT_EPURE_PINNED_SHA =
   "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
@@ -403,10 +410,14 @@ export function serializeAgentsConfigYaml(
   ].join("\n");
 }
 
-function buildCallerWorkflows(pinnedSha: string): ReadonlyArray<{
+function buildCallerWorkflows(
+  pinnedSha: string,
+  stack: DetectedStackProfile
+): ReadonlyArray<{
   readonly path: string;
   readonly content: string;
 }> {
+  const ciWorkflow = buildStackAwareCiWorkflowYaml({ pinnedSha, stack });
   return [
     {
       path: ".github/workflows/epure-issue-command.yml",
@@ -527,6 +538,7 @@ function buildCallerWorkflows(pinnedSha: string): ReadonlyArray<{
         ""
       ].join("\n")
     },
+    ciWorkflow,
     {
       path: ".github/workflows/release.yml",
       content: [
@@ -589,7 +601,9 @@ export function buildGovernanceRulesets(params: {
   const requiredChecks = [
     "verify-contract / Verify EPURE Consumer Contract",
     "PR title",
-    "ai-review"
+    "ai-review",
+    "Quality (Format, Lint, Typecheck, Test & Build)",
+    "Zizmor"
   ] as const;
 
   const featureGovernance: RepositoryRulesetSpec = {
@@ -680,7 +694,7 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
       pattern: "dev",
       requirePullRequest: true,
       requireStatusChecks: true,
-      requiredChecks: ["verify-contract", "PR title", "ai-review"],
+      requiredChecks: ["verify-contract", "PR title", "ai-review", "Quality (Format, Lint, Typecheck, Test & Build)", "Zizmor"],
       requireHumanApproval: true,
       allowedMergeMethods: ["squash"],
       allowMergeCommit: false,
@@ -690,7 +704,7 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
       pattern: "feature/*",
       requirePullRequest: true,
       requireStatusChecks: true,
-      requiredChecks: ["verify-contract", "PR title", "ai-review"],
+      requiredChecks: ["verify-contract", "PR title", "ai-review", "Quality (Format, Lint, Typecheck, Test & Build)", "Zizmor"],
       requireHumanApproval: false,
       allowedMergeMethods: ["squash"],
       allowMergeCommit: false,
@@ -797,7 +811,23 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
     agentsYamlContent
   );
 
-  const workflowTemplates = buildCallerWorkflows(pinnedSha);
+  const detectedStack = detectRepositoryStack({
+    repoRootDir: input.repoRootDir
+  });
+  const zizmorConfig = buildZizmorConfigYaml();
+  const renovateConfig = buildRenovateConfigJson(detectedStack);
+  const zizmorAction = computeFilePlanAction(
+    input.repoRootDir,
+    zizmorConfig.path,
+    zizmorConfig.content
+  );
+  const renovateAction = computeFilePlanAction(
+    input.repoRootDir,
+    renovateConfig.path,
+    renovateConfig.content
+  );
+
+  const workflowTemplates = buildCallerWorkflows(pinnedSha, detectedStack);
   const plannedWorkflows: PlannedWorkflowFile[] = workflowTemplates.map((wf) => ({
     path: wf.path,
     action: computeFilePlanAction(input.repoRootDir, wf.path, wf.content),
@@ -837,6 +867,18 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
       mkdirSync(dirname(targetPath), { recursive: true });
       writeFileSync(targetPath, agentsYamlContent, "utf8");
       mutatedFiles.push(".github/agents.yml");
+    }
+    if (zizmorAction !== "noop") {
+      const targetPath = join(input.repoRootDir, zizmorConfig.path);
+      mkdirSync(dirname(targetPath), { recursive: true });
+      writeFileSync(targetPath, zizmorConfig.content, "utf8");
+      mutatedFiles.push(zizmorConfig.path);
+    }
+    if (renovateAction !== "noop") {
+      const targetPath = join(input.repoRootDir, renovateConfig.path);
+      mkdirSync(dirname(targetPath), { recursive: true });
+      writeFileSync(targetPath, renovateConfig.content, "utf8");
+      mutatedFiles.push(renovateConfig.path);
     }
     for (const wf of plannedWorkflows) {
       if (wf.action !== "noop") {
