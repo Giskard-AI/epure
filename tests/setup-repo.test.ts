@@ -511,7 +511,7 @@ describe("5. Pre-bundled CLI (dist/cli/setup-repo.mjs) & skill (.agents/skills/s
 
       const zizmor = buildZizmorConfigYaml();
       expect(zizmor.path).toBe(".github/zizmor.yml");
-      expect(zizmor.content).toContain("rules: {}");
+      expect(zizmor.content).toContain("dangerous-triggers:");
 
       const renovate = buildRenovateConfigJson(stack);
       expect(renovate.path).toBe("renovate.json");

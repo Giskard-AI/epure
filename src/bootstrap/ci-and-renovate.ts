@@ -187,7 +187,16 @@ export function buildZizmorConfigYaml(): GeneratedRepoGovernanceFile {
     content: [
       "# zizmor static analysis config for GitHub Actions workflows (ADR-0017).",
       "# https://docs.zizmor.sh/",
-      "rules: {}",
+      "rules:",
+      "  dangerous-triggers:",
+      "    ignore:",
+      "      # EPURE Issue Command Gate enforces write-permission verification before any privileged execution (ADR-0004).",
+      "      - epure-issue-command.yml",
+      "  ref-version-mismatch:",
+      "    ignore:",
+      "      - epure-issue-command.yml",
+      "      - epure-check.yml",
+      "      - release.yml",
       ""
     ].join("\n")
   };
@@ -454,8 +463,8 @@ export function buildStackAwareCiWorkflowYaml(params: {
       "    runs-on: ubuntu-latest",
       "    timeout-minutes: 10",
       "    permissions:",
-      "      contents: read",
-      "      actions: read",
+      "      contents: read # checkout the workflows zizmor audits",
+      "      actions: read # zizmor reads action metadata for online audits",
       "    steps:",
       `      - uses: ${PINNED_ACTIONS_CHECKOUT_SHA}`,
       "        with:",
