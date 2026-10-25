@@ -4043,25 +4043,70 @@ ${c}`).join("\n\n");
           fetchImpl: input.fetchImpl
         });
         const parsedFeatureFix = extractJsonObject(rawFeatureFix);
-        const changedFixFiles = [];
+        const changedFixFilesMap = /* @__PURE__ */ new Map();
         for (const f of parsedFeatureFix.files) {
           const cleanPath = f.path.replace(/^\/+/, "");
           accumulatedFiles.set(cleanPath, f.content);
-          changedFixFiles.push({ path: cleanPath, content: f.content });
+          changedFixFilesMap.set(cleanPath, f.content);
         }
-        const featureTestCheck = await runTestsInIsolatedWorkspace({
+        let featureTestCheck = await runTestsInIsolatedWorkspace({
           files: Array.from(accumulatedFiles.entries()).map(
             ([path, content]) => ({ path, content })
           ),
           llmApiKey: input.llmApiKey,
           label: `Feature PR #${featurePr.number} review-fix iteration ${featureReviewFixAttempt}/${maxFeatureReviewFixAttempts}`
         });
+        let featureTestRetry = 0;
+        while (!featureTestCheck.passed && featureTestRetry < 2) {
+          featureTestRetry += 1;
+          const retryFilesContext = Array.from(accumulatedFiles.entries()).map(([p, c]) => `--- FILE: ${p} ---
+${c}`).join("\n\n");
+          const rawRetryFeatureFix = await callGeminiGenerateContent({
+            apiKey: input.llmApiKey,
+            model,
+            thinkingLevel: "HIGH",
+            logLabel: `feature-review-test-retry:#PR${featurePr.number}/iter-${featureReviewFixAttempt}-retry-${featureTestRetry}`,
+            systemInstruction: featureFixSystemInstruction,
+            prompt: [
+              `La correction de review finale a \xE9chou\xE9 \xE0 la v\xE9rification TypeScript/Vitest (tentative ${featureTestRetry}/2) :`,
+              wrapUntrustedContent(
+                "untrusted_test_output",
+                featureTestCheck.output.slice(-6e3)
+              ),
+              "",
+              "Constats must_fix \xE0 maintenir corrig\xE9s :",
+              wrapUntrustedContent("untrusted_issue_content", findingsText),
+              "",
+              "Fichiers actuels du workspace :",
+              wrapUntrustedContent("untrusted_workspace_files", retryFilesContext)
+            ].join("\n"),
+            responseMimeType: "application/json",
+            temperature: 0.1,
+            fetchImpl: input.fetchImpl
+          });
+          const retryParsed = extractJsonObject(rawRetryFeatureFix);
+          for (const f of retryParsed.files) {
+            const cleanPath = f.path.replace(/^\/+/, "");
+            accumulatedFiles.set(cleanPath, f.content);
+            changedFixFilesMap.set(cleanPath, f.content);
+          }
+          featureTestCheck = await runTestsInIsolatedWorkspace({
+            files: Array.from(accumulatedFiles.entries()).map(
+              ([path, content]) => ({ path, content })
+            ),
+            llmApiKey: input.llmApiKey,
+            label: `Feature PR #${featurePr.number} review-fix iteration ${featureReviewFixAttempt} test retry ${featureTestRetry}/2`
+          });
+        }
         if (!featureTestCheck.passed) {
           throw new Error(
             `Sandbox test verification failed while addressing final feature review findings on PR #${featurePr.number}:
 ${featureTestCheck.output.slice(-2e3)}`
           );
         }
+        const changedFixFiles = Array.from(changedFixFilesMap.entries()).map(
+          ([path, content]) => ({ path, content })
+        );
         currentFeaturePrHeadSha = await gh.commitFilesToBranch({
           branch: featureBranch,
           fromBranch: "dev",
