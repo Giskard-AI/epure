@@ -20,6 +20,8 @@ export type GeminiToolHandler = (
 export interface GeminiGenerateOptions {
   readonly apiKey: string;
   readonly model?: string | undefined;
+  readonly thinkingLevel?: "LOW" | "MEDIUM" | "HIGH" | undefined;
+  readonly logLabel?: string | undefined;
   readonly systemInstruction?: string | undefined;
   readonly prompt: string;
   readonly responseMimeType?: "text/plain" | "application/json" | undefined;
@@ -102,11 +104,20 @@ export async function callGeminiGenerateContent(
       : new Error(String(lastError));
   }
 
+  const effectiveThinkingLevel =
+    options.thinkingLevel ??
+    (/^gemini-3/i.test(model) ? "HIGH" : undefined);
+
   for (let round = 0; round <= maxToolRounds; round += 1) {
     const allowToolsThisRound = hasTools && round < maxToolRounds;
     const generationConfig: Record<string, unknown> = {
       temperature: options.temperature ?? 0.2
     };
+    if (effectiveThinkingLevel && /^gemini-3/i.test(model)) {
+      generationConfig.thinkingConfig = {
+        thinkingLevel: effectiveThinkingLevel
+      };
+    }
     // Gemini v1beta does not allow responseMimeType: "application/json" simultaneously with functionDeclarations
     if (options.responseMimeType && !allowToolsThisRound) {
       generationConfig.responseMimeType = options.responseMimeType;
@@ -168,6 +179,12 @@ export async function callGeminiGenerateContent(
 
       const responseParts: GeminiContentPart[] = [];
       for (const call of functionCalls) {
+        if (options.logLabel || process.env.GITHUB_ACTIONS === "true") {
+          const prefix = options.logLabel ? `[EPURE][${options.logLabel}]` : "[EPURE][Tool]";
+          process.stdout.write(
+            `${prefix} tool_call ${call.name}(${JSON.stringify(call.args ?? {})})\n`
+          );
+        }
         const handler = options.toolHandlers[call.name];
         let resultPayload: Record<string, unknown>;
         if (!handler) {

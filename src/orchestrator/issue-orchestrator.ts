@@ -1552,11 +1552,15 @@ export async function orchestrateIssueCommand(
           });
         }
 
+        let reviewFixAttempt = 0;
         while (
           reviewResult.conclusion === "failure" &&
-          fixAttempt < maxCodeFixAttempts
+          reviewFixAttempt < maxCodeFixAttempts
         ) {
-          fixAttempt += 1;
+          reviewFixAttempt += 1;
+          process.stdout.write(
+            `[EPURE][Ticket #${ticket.ticketIssueNumber}][PR #${taskPr.number}] Multi-agent review fix iteration ${reviewFixAttempt}/${maxCodeFixAttempts} (${reviewResult.must_fix_findings.length} must_fix finding(s))\n`
+          );
           const findingsText = reviewResult.must_fix_findings
             .map(
               (f, idx) =>
@@ -1597,6 +1601,8 @@ export async function orchestrateIssueCommand(
           const rawReviewFix = await callGeminiGenerateContent({
             apiKey: input.llmApiKey,
             model,
+            thinkingLevel: "HIGH",
+            logLabel: `review-fix:#${ticket.ticketIssueNumber}/iter-${reviewFixAttempt}`,
             systemInstruction: reviewFixSystemInstruction,
             prompt: reviewFixPrompt,
             responseMimeType: "application/json",
@@ -1632,6 +1638,52 @@ export async function orchestrateIssueCommand(
             ),
             llmApiKey: input.llmApiKey
           });
+          let reviewTestRetry = 0;
+          while (!testCheck.passed && reviewTestRetry < 2) {
+            reviewTestRetry += 1;
+            const retryFilesContext = Array.from(accumulatedFiles.entries())
+              .map(([p, c]) => `--- FILE: ${p} ---\n${c}`)
+              .join("\n\n");
+            const rawRetryFix = await callGeminiGenerateContent({
+              apiKey: input.llmApiKey,
+              model,
+              thinkingLevel: "HIGH",
+              systemInstruction: reviewFixSystemInstruction,
+              prompt: [
+                `La correction de review a fait échouer la suite de tests Vitest/TypeScript (tentative ${reviewTestRetry}/2) :`,
+                wrapUntrustedContent("untrusted_test_output", testCheck.output.slice(-6000)),
+                "",
+                "Constats must_fix à maintenir corrigés :",
+                wrapUntrustedContent("untrusted_issue_content", findingsText),
+                "",
+                "Fichiers actuels du workspace :",
+                wrapUntrustedContent("untrusted_workspace_files", retryFilesContext)
+              ].join("\n"),
+              responseMimeType: "application/json",
+              temperature: 0.1,
+              fetchImpl: input.fetchImpl
+            });
+            const retryImpl = extractJsonObject<GeneratedTicketImplementation>(rawRetryFix);
+            for (const f of retryImpl.files) {
+              const cleanPath = f.path.replace(/^\/+/, "");
+              mergedFilesMap.set(cleanPath, f.content);
+              accumulatedFiles.set(cleanPath, f.content);
+            }
+            impl = {
+              commit_message: impl.commit_message,
+              test_summary: retryImpl.test_summary || impl.test_summary,
+              files: Array.from(mergedFilesMap.entries()).map(([path, content]) => ({
+                path,
+                content
+              }))
+            };
+            testCheck = await runTestsInIsolatedWorkspace({
+              files: Array.from(accumulatedFiles.entries()).map(
+                ([path, content]) => ({ path, content })
+              ),
+              llmApiKey: input.llmApiKey
+            });
+          }
           if (!testCheck.passed) {
             throw new Error(
               `Sandbox test verification failed while addressing review findings on #${ticket.ticketIssueNumber}:\n${testCheck.output.slice(-2000)}`

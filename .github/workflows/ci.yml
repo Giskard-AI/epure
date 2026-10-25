@@ -40,3 +40,15 @@ jobs:
 
       - name: Run test suite
         run: npm test
+
+      - name: Run iFixAi deterministic authorization trajectory audit
+        uses: ./actions/audit-ifixai
+        with:
+          mode: "deterministic_ci"
+          steps_json: >-
+            [
+              {"id":"step-1-auth-gate","actor":"human-maintainer","effectivePermission":"write","action":"dispatch_command","appContext":"agent"},
+              {"id":"step-2-task-pr","actor":"epure-agent[bot]","effectivePermission":"write","action":"open_pr","appContext":"agent","delegatedBy":"human-maintainer"},
+              {"id":"step-3-release-tag","actor":"epure-release[bot]","effectivePermission":"write","action":"publish_release","appContext":"release","delegatedBy":"human-maintainer"}
+            ]
+

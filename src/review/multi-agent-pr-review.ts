@@ -500,6 +500,8 @@ async function executeSingleReviewerPass(params: {
     const raw = await callGeminiGenerateContent({
       apiKey: input.llmApiKey,
       model: input.model ?? "gemini-3.8-flash",
+      thinkingLevel: "HIGH",
+      logLabel: `review:${reviewer}#PR${input.prNumber}`,
       systemInstruction,
       prompt,
       responseMimeType: "application/json",

@@ -729,11 +729,17 @@ ${PROMPT_INJECTION_IMMUNITY_CLAUSE}` : PROMPT_INJECTION_IMMUNITY_CLAUSE;
     }
     throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
+  const effectiveThinkingLevel = options.thinkingLevel ?? (/^gemini-3/i.test(model) ? "HIGH" : void 0);
   for (let round = 0; round <= maxToolRounds; round += 1) {
     const allowToolsThisRound = hasTools && round < maxToolRounds;
     const generationConfig = {
       temperature: options.temperature ?? 0.2
     };
+    if (effectiveThinkingLevel && /^gemini-3/i.test(model)) {
+      generationConfig.thinkingConfig = {
+        thinkingLevel: effectiveThinkingLevel
+      };
+    }
     if (options.responseMimeType && !allowToolsThisRound) {
       generationConfig.responseMimeType = options.responseMimeType;
     }
@@ -774,6 +780,13 @@ ${PROMPT_INJECTION_IMMUNITY_CLAUSE}` : PROMPT_INJECTION_IMMUNITY_CLAUSE;
       });
       const responseParts = [];
       for (const call of functionCalls) {
+        if (options.logLabel || process.env.GITHUB_ACTIONS === "true") {
+          const prefix = options.logLabel ? `[EPURE][${options.logLabel}]` : "[EPURE][Tool]";
+          process.stdout.write(
+            `${prefix} tool_call ${call.name}(${JSON.stringify(call.args ?? {})})
+`
+          );
+        }
         const handler = options.toolHandlers[call.name];
         let resultPayload;
         if (!handler) {
@@ -1694,6 +1707,8 @@ ${wrapUntrustedContent("untrusted_spec_content", input.designMarkdown)}` : "",
     const raw = await callGeminiGenerateContent({
       apiKey: input.llmApiKey,
       model: input.model ?? "gemini-3.8-flash",
+      thinkingLevel: "HIGH",
+      logLabel: `review:${reviewer}#PR${input.prNumber}`,
       systemInstruction,
       prompt,
       responseMimeType: "application/json",
@@ -3524,8 +3539,13 @@ ${testCheck.output.slice(-2e3)}`
             summary: `Impeccable UI & Accessibility Gate: ${reviewResult.impeccable_conclusion}`
           });
         }
-        while (reviewResult.conclusion === "failure" && fixAttempt < maxCodeFixAttempts) {
-          fixAttempt += 1;
+        let reviewFixAttempt = 0;
+        while (reviewResult.conclusion === "failure" && reviewFixAttempt < maxCodeFixAttempts) {
+          reviewFixAttempt += 1;
+          process.stdout.write(
+            `[EPURE][Ticket #${ticket.ticketIssueNumber}][PR #${taskPr.number}] Multi-agent review fix iteration ${reviewFixAttempt}/${maxCodeFixAttempts} (${reviewResult.must_fix_findings.length} must_fix finding(s))
+`
+          );
           const findingsText = reviewResult.must_fix_findings.map(
             (f, idx) => `${idx + 1}. [${f.reviewer}] (${f.path}:${f.line}) ${f.title} \u2014 ${f.rationale} -> Action: ${f.suggested_action}`
           ).join("\n");
@@ -3558,6 +3578,8 @@ ${c}`).join("\n\n");
           const rawReviewFix = await callGeminiGenerateContent({
             apiKey: input.llmApiKey,
             model,
+            thinkingLevel: "HIGH",
+            logLabel: `review-fix:#${ticket.ticketIssueNumber}/iter-${reviewFixAttempt}`,
             systemInstruction: reviewFixSystemInstruction,
             prompt: reviewFixPrompt,
             responseMimeType: "application/json",
@@ -3588,6 +3610,51 @@ ${c}`).join("\n\n");
             ),
             llmApiKey: input.llmApiKey
           });
+          let reviewTestRetry = 0;
+          while (!testCheck.passed && reviewTestRetry < 2) {
+            reviewTestRetry += 1;
+            const retryFilesContext = Array.from(accumulatedFiles.entries()).map(([p, c]) => `--- FILE: ${p} ---
+${c}`).join("\n\n");
+            const rawRetryFix = await callGeminiGenerateContent({
+              apiKey: input.llmApiKey,
+              model,
+              thinkingLevel: "HIGH",
+              systemInstruction: reviewFixSystemInstruction,
+              prompt: [
+                `La correction de review a fait \xE9chouer la suite de tests Vitest/TypeScript (tentative ${reviewTestRetry}/2) :`,
+                wrapUntrustedContent("untrusted_test_output", testCheck.output.slice(-6e3)),
+                "",
+                "Constats must_fix \xE0 maintenir corrig\xE9s :",
+                wrapUntrustedContent("untrusted_issue_content", findingsText),
+                "",
+                "Fichiers actuels du workspace :",
+                wrapUntrustedContent("untrusted_workspace_files", retryFilesContext)
+              ].join("\n"),
+              responseMimeType: "application/json",
+              temperature: 0.1,
+              fetchImpl: input.fetchImpl
+            });
+            const retryImpl = extractJsonObject(rawRetryFix);
+            for (const f of retryImpl.files) {
+              const cleanPath = f.path.replace(/^\/+/, "");
+              mergedFilesMap.set(cleanPath, f.content);
+              accumulatedFiles.set(cleanPath, f.content);
+            }
+            impl = {
+              commit_message: impl.commit_message,
+              test_summary: retryImpl.test_summary || impl.test_summary,
+              files: Array.from(mergedFilesMap.entries()).map(([path, content]) => ({
+                path,
+                content
+              }))
+            };
+            testCheck = await runTestsInIsolatedWorkspace({
+              files: Array.from(accumulatedFiles.entries()).map(
+                ([path, content]) => ({ path, content })
+              ),
+              llmApiKey: input.llmApiKey
+            });
+          }
           if (!testCheck.passed) {
             throw new Error(
               `Sandbox test verification failed while addressing review findings on #${ticket.ticketIssueNumber}:
