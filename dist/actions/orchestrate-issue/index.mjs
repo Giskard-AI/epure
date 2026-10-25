@@ -3954,7 +3954,8 @@ After \`${fixAttempt}\` attempts (\`max_code_fix_attempts = ${maxCodeFixAttempts
           "- Requires human review and squash-merge into `dev` in the GitHub UI (ADR-0001, ADR-0027, Q45, Q91, Q95)."
         ].join("\n")
       });
-      const finalFeatureReview = await runMultiAgentPrReviewPass({
+      let currentFeaturePrHeadSha = featurePr.head_sha;
+      let finalFeatureReview = await runMultiAgentPrReviewPass({
         repository: input.repository,
         prNumber: featurePr.number,
         headBranch: featureBranch,
@@ -3963,7 +3964,9 @@ After \`${fixAttempt}\` attempts (\`max_code_fix_attempts = ${maxCodeFixAttempts
         acceptanceCriteria: ticketsManifest.flatMap((t) => t.acceptanceCriteria),
         glossaryMarkdown: issue.body,
         designMarkdown: trustedBaseRoster.designMarkdown,
-        changedFiles: allFeatureFiles,
+        changedFiles: Array.from(accumulatedFiles.entries()).map(
+          ([path, content]) => ({ path, content })
+        ),
         workspaceFiles: accumulatedFiles,
         trustedBaseBranchFiles: trustedBaseFilesMap,
         isReReviewPass: false,
@@ -3972,28 +3975,145 @@ After \`${fixAttempt}\` attempts (\`max_code_fix_attempts = ${maxCodeFixAttempts
         fetchImpl: input.fetchImpl
       });
       await gh.postPullRequestReview(featurePr.number, {
-        commitId: featurePr.head_sha,
+        commitId: currentFeaturePrHeadSha,
         body: finalFeatureReview.review_body_markdown
       });
       await gh.publishCheckRun({
         name: "PR title",
-        headSha: featurePr.head_sha,
+        headSha: currentFeaturePrHeadSha,
         conclusion: "success",
         summary: `Conventional Commit title verified: '${featureSquashPreview.pr_title}'`
       });
       await gh.publishCheckRun({
         name: "ai-review",
-        headSha: featurePr.head_sha,
+        headSha: currentFeaturePrHeadSha,
         conclusion: finalFeatureReview.conclusion,
         summary: finalFeatureReview.check_summary_markdown
       });
       if (finalFeatureReview.touches_frontend_ui) {
         await gh.publishCheckRun({
           name: "impeccable-gate",
-          headSha: featurePr.head_sha,
+          headSha: currentFeaturePrHeadSha,
           conclusion: finalFeatureReview.impeccable_conclusion === "failure" ? "failure" : "success",
           summary: `Impeccable UI & Accessibility Gate: ${finalFeatureReview.impeccable_conclusion}`
         });
+      }
+      let featureReviewFixAttempt = 0;
+      const maxFeatureReviewFixAttempts = 3;
+      while (finalFeatureReview.conclusion === "failure" && featureReviewFixAttempt < maxFeatureReviewFixAttempts) {
+        featureReviewFixAttempt += 1;
+        process.stdout.write(
+          `[EPURE][Feature PR #${featurePr.number}] Multi-agent synthesis review fix iteration ${featureReviewFixAttempt}/${maxFeatureReviewFixAttempts} (${finalFeatureReview.must_fix_findings.length} must_fix finding(s))
+`
+        );
+        const findingsText = finalFeatureReview.must_fix_findings.map(
+          (f, idx) => `${idx + 1}. [${f.reviewer}] (${f.path}:${f.line}) ${f.title} \u2014 ${f.rationale} -> Action: ${f.suggested_action}`
+        ).join("\n");
+        const currentFilesContext = Array.from(accumulatedFiles.entries()).map(([p, c]) => `--- FILE: ${p} ---
+${c}`).join("\n\n");
+        const featureFixSystemInstruction = [
+          "Tu es un ing\xE9nieur TDD EPURE corrigeant les constats bloquants ('must_fix') \xE9mis par le roster de revue multi-agents sur la PR finale de feature.",
+          PROMPT_INJECTION_IMMUNITY_CLAUSE,
+          "Corrige pr\xE9cis\xE9ment chaque 'must_fix' tout en maintenant 100% des tests Vitest et TypeScript au vert.",
+          "Ne modifie JAMAIS .cursor/agents/**, .github/workflows/** ou .github/agents.yml.",
+          "Renvoie un objet JSON strictement valide :",
+          "{",
+          `  "commit_message": "fix(review): address final feature review findings on #${input.issueNumber}",`,
+          '  "test_summary": "Addressed final feature review findings and verified Vitest suite",',
+          '  "files": [',
+          '    { "path": "...", "content": "..." }',
+          "  ]",
+          "}"
+        ].join("\n");
+        const rawFeatureFix = await callGeminiGenerateContent({
+          apiKey: input.llmApiKey,
+          model,
+          thinkingLevel: "HIGH",
+          logLabel: `feature-review-fix:#PR${featurePr.number}/iter-${featureReviewFixAttempt}`,
+          systemInstruction: featureFixSystemInstruction,
+          prompt: [
+            `Les reviewers multi-agents EPURE ont \xE9mis ${finalFeatureReview.must_fix_findings.length} constat(s) bloquant(s) ('must_fix') sur la PR finale #${featurePr.number} (\`${featureBranch} -> dev\`) :`,
+            wrapUntrustedContent("untrusted_issue_content", findingsText),
+            "",
+            "Fichiers actuels du workspace :",
+            wrapUntrustedContent("untrusted_workspace_files", currentFilesContext)
+          ].join("\n"),
+          responseMimeType: "application/json",
+          temperature: 0.1,
+          fetchImpl: input.fetchImpl
+        });
+        const parsedFeatureFix = extractJsonObject(rawFeatureFix);
+        const changedFixFiles = [];
+        for (const f of parsedFeatureFix.files) {
+          const cleanPath = f.path.replace(/^\/+/, "");
+          accumulatedFiles.set(cleanPath, f.content);
+          changedFixFiles.push({ path: cleanPath, content: f.content });
+        }
+        const featureTestCheck = await runTestsInIsolatedWorkspace({
+          files: Array.from(accumulatedFiles.entries()).map(
+            ([path, content]) => ({ path, content })
+          ),
+          llmApiKey: input.llmApiKey,
+          label: `Feature PR #${featurePr.number} review-fix iteration ${featureReviewFixAttempt}/${maxFeatureReviewFixAttempts}`
+        });
+        if (!featureTestCheck.passed) {
+          throw new Error(
+            `Sandbox test verification failed while addressing final feature review findings on PR #${featurePr.number}:
+${featureTestCheck.output.slice(-2e3)}`
+          );
+        }
+        currentFeaturePrHeadSha = await gh.commitFilesToBranch({
+          branch: featureBranch,
+          fromBranch: "dev",
+          commitMessage: parsedFeatureFix.commit_message || `fix(review): address final feature review findings on #${input.issueNumber}`,
+          files: changedFixFiles
+        });
+        finalFeatureReview = await runMultiAgentPrReviewPass({
+          repository: input.repository,
+          prNumber: featurePr.number,
+          headBranch: featureBranch,
+          baseBranch: "dev",
+          ticketTitle: issue.title,
+          acceptanceCriteria: ticketsManifest.flatMap(
+            (t) => t.acceptanceCriteria
+          ),
+          glossaryMarkdown: issue.body,
+          designMarkdown: trustedBaseRoster.designMarkdown,
+          changedFiles: Array.from(accumulatedFiles.entries()).map(
+            ([path, content]) => ({ path, content })
+          ),
+          workspaceFiles: accumulatedFiles,
+          trustedBaseBranchFiles: trustedBaseFilesMap,
+          isReReviewPass: true,
+          previousFailedReviewers: finalFeatureReview.failed_reviewers,
+          llmApiKey: input.llmApiKey,
+          model,
+          fetchImpl: input.fetchImpl
+        });
+        await gh.postPullRequestReview(featurePr.number, {
+          commitId: currentFeaturePrHeadSha,
+          body: finalFeatureReview.review_body_markdown
+        });
+        await gh.publishCheckRun({
+          name: "PR title",
+          headSha: currentFeaturePrHeadSha,
+          conclusion: "success",
+          summary: `Conventional Commit title verified: '${featureSquashPreview.pr_title}'`
+        });
+        await gh.publishCheckRun({
+          name: "ai-review",
+          headSha: currentFeaturePrHeadSha,
+          conclusion: finalFeatureReview.conclusion,
+          summary: finalFeatureReview.check_summary_markdown
+        });
+        if (finalFeatureReview.touches_frontend_ui) {
+          await gh.publishCheckRun({
+            name: "impeccable-gate",
+            headSha: currentFeaturePrHeadSha,
+            conclusion: finalFeatureReview.impeccable_conclusion === "failure" ? "failure" : "success",
+            summary: `Impeccable UI & Accessibility Gate: ${finalFeatureReview.impeccable_conclusion}`
+          });
+        }
       }
       const updatedDone = await updateIssueStateWithCas({
         issueNumber: input.issueNumber,
