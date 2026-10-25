@@ -1,0 +1,32 @@
+User-agent: *
+Allow: /
+
+# Explicitly welcome AI & LLM documentation indexers
+User-agent: GPTBot
+Allow: /
+
+User-agent: OAI-SearchBot
+Allow: /
+
+User-agent: ChatGPT-User
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+User-agent: Claude-Web
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: Google-Extended
+Allow: /
+
+User-agent: Applebot-Extended
+Allow: /
+
+Sitemap: https://giskard-ai.github.io/epure/sitemap.xml
+# LLM-friendly documentation index (https://llmstxt.org):
+# https://giskard-ai.github.io/epure/llms.txt
+# https://giskard-ai.github.io/epure/llms-full.txt

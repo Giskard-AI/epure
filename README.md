@@ -32,7 +32,12 @@ The agent inspects your repository's stack and domain modules, guides you throug
 
 ## Official Bilingual Documentation (English & Français)
 
-The official documentation (powered by **VitePress** and interactive **Archify** showcase diagrams) is available in both English and French:
+The official documentation (powered by **VitePress** and interactive **Archify** showcase diagrams) is live at **[https://giskard-ai.github.io/epure/](https://giskard-ai.github.io/epure/)** (EN) and **[https://giskard-ai.github.io/epure/fr/](https://giskard-ai.github.io/epure/fr/)** (FR):
+
+- **AI & LLM Index (`llms.txt` standard)**:
+  - Concise index: [`https://giskard-ai.github.io/epure/llms.txt`](https://giskard-ai.github.io/epure/llms.txt)
+  - Full corpus (EN + FR + Glossary): [`https://giskard-ai.github.io/epure/llms-full.txt`](https://giskard-ai.github.io/epure/llms-full.txt)
+  - XML Sitemap: [`https://giskard-ai.github.io/epure/sitemap.xml`](https://giskard-ai.github.io/epure/sitemap.xml)
 
 | Section | English (`docs/`) | Français (`docs/fr/`) |
 | --- | --- | --- |

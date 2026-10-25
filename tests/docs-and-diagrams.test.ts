@@ -442,4 +442,40 @@ describe("Bilingual VitePress Documentation, Archify Showcase Diagrams & Impecca
     expect(verdict.conclusion).toBe("success");
     expect(verdict.blocking_findings).toHaveLength(0);
   });
+
+  it("provides SEO metadata (sitemap, canonical, hreflang, JSON-LD, OpenGraph) and LLM discovery files (robots.txt, llms.txt, llms-full.txt)", () => {
+    const configMts = readFileSync(
+      resolve(REPO_ROOT, "docs/.vitepress/config.mts"),
+      "utf8"
+    );
+    const robotsTxt = readFileSync(
+      resolve(REPO_ROOT, "docs/public/robots.txt"),
+      "utf8"
+    );
+    const llmsTxt = readFileSync(
+      resolve(REPO_ROOT, "docs/public/llms.txt"),
+      "utf8"
+    );
+    const llmsFullTxt = readFileSync(
+      resolve(REPO_ROOT, "docs/public/llms-full.txt"),
+      "utf8"
+    );
+
+    expect(configMts).toContain("sitemap:");
+    expect(configMts).toContain("transformHead");
+    expect(configMts).toContain("application/ld+json");
+    expect(configMts).toContain("hreflang");
+    expect(configMts).toContain("canonical");
+
+    expect(robotsTxt).toContain("Sitemap: https://giskard-ai.github.io/epure/sitemap.xml");
+    expect(robotsTxt).toContain("GPTBot");
+    expect(robotsTxt).toContain("ClaudeBot");
+    expect(robotsTxt).toContain("PerplexityBot");
+
+    expect(llmsTxt).toContain("# EPURE (Giskard-AI/epure)");
+    expect(llmsTxt).toContain("https://giskard-ai.github.io/epure/llms-full.txt");
+    expect(llmsTxt).toContain("/setup-repo");
+    expect(llmsFullTxt).toContain("## [EN] Introduction & Naming (L'Épure)");
+    expect(llmsFullTxt).toContain("## [FR] Introduction & Nom (L'Épure)");
+  });
 });

@@ -1,0 +1,46 @@
+# EPURE (Giskard-AI/epure)
+
+> Engineered Planning, Unified Review & Execution (FR: Élaboration de Plans, Usinage, Revue et Exécution) — Open-source GitHub-first specification-driven software engineering framework built on Reusable Workflows, TypeScript Custom Actions (Node.js 24 LTS), and AI Agent Skills.
+
+- Documentation Home (EN): https://giskard-ai.github.io/epure/
+- Documentation Accueil (FR): https://giskard-ai.github.io/epure/fr/
+- Full Concatenated Corpus for LLMs: https://giskard-ai.github.io/epure/llms-full.txt
+- GitHub Repository: https://github.com/Giskard-AI/epure
+- License: Apache-2.0
+
+## Core Summary for AI Agents
+
+- **Preferred Onboarding (`/setup-repo`)**: Invoke `/setup-repo <owner>/<repo>` in Cursor, Claude Code, Pi, or Codex (`.agents/skills/setup-repo/SKILL.md`). The agent inspects the repository stack and domains, runs `scripts/wizards/setup-github-apps-wizard.sh`, executes `node dist/cli/setup-repo.mjs --dry-run` then `--apply --apply-github-settings`, configures 3 Repository Rulesets (`epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`), generates a hardened `renovate.json` (with 3-to-14-day quarantine cooldowns), and dynamically composes `.cursor/agents/*.md` specialist reviewers.
+- **Four Mandatory Human Gates**:
+  1. Initiating `/epure plan` and answering the architectural Grill on the GitHub Issue.
+  2. Approving the locked specification mandate via `/epure approve` (pinned to `spec_sha`).
+  3. Reviewing and squash-merging the final `feature/<issue>-<slug> -> dev` Pull Request.
+  4. Triggering production SemVer releases (`dev -> main` fast-forward) via `release-promote.yml`.
+- **Security Invariants**: Out-of-branch atomic CAS state (`refs/epure/state/<issue>`), secretless TDD sandbox execution, Reviewer Roster always loaded from trusted `dev` (never from untrusted PR head), Dual GitHub Apps (`Agent App` vs `Release App`), `zizmor` workflow static analysis, and `iFixAi` trajectory auditing.
+
+## English Documentation
+
+- [Introduction & Naming (L'Épure)](https://giskard-ai.github.io/epure/introduction): Philosophy of L'Épure, 4 mandatory human validation gates, 3-category step taxonomy, and upstream open-source attributions.
+- [Installation & /setup-repo Skill](https://giskard-ai.github.io/epure/installation): Primary onboarding via the /setup-repo agent skill, Dual GitHub Apps wizard, 3 Repository Rulesets, and dynamic .cursor/agents/ reviewer roster design.
+- [Basic Usage (Case Study: craft-calculator)](https://giskard-ai.github.io/epure/basic-usage): End-to-end walkthrough of an issue from /epure plan Grill interview to DAG execution, secretless TDD, multi-agent review, and human merge.
+- [Commands Reference (/epure & /setup-repo)](https://giskard-ai.github.io/epure/commands): Complete reference for /setup-repo, /epure plan, /epure approve, /epure prototype, /epure resume, /epure retry, /epure pause, and /epure cancel.
+- [Configuration (.github/agents.yml & renovate.json)](https://giskard-ai.github.io/epure/configuration): Declarative configuration reference for .github/agents.yml and supply-chain security policy in renovate.json.
+- [Architecture, Security & Multi-Agent Review](https://giskard-ai.github.io/epure/architecture): Dual-App privilege separation, out-of-branch CAS state in refs/epure/state/<issue>, secretless TDD sandbox, iFixAi & zizmor audits, and dynamic PR review.
+- [How-To: Onboard a Repository](https://giskard-ai.github.io/epure/guides/how-to-onboard-repo): Step-by-step guide to bootstrapping a consumer repository with /setup-repo.
+- [How-To: Drive an Issue End-to-End](https://giskard-ai.github.io/epure/guides/how-to-drive-an-issue): Practical guide to running the Grill, approving the spec_sha mandate, monitoring the DAG, and merging feature/* -> dev.
+- [How-To: Customize Reviewers & Impeccable Gate](https://giskard-ai.github.io/epure/guides/how-to-customize-reviewers): How to add domain-specific reviewers in .cursor/agents/*.md and configure DESIGN.md + impeccable-gate.
+- [How-To: Promote a Release (dev -> main)](https://giskard-ai.github.io/epure/guides/how-to-release): How to promote dev to main via fast-forward under the Release App and handle hotfix back-merges.
+- [Domain Glossary (EN / FR)](https://giskard-ai.github.io/epure/reference/glossary): Canonical Ubiquitous Language dictionary for EPURE.
+
+## Documentation Française
+
+- [Introduction & Nom (L'Épure)](https://giskard-ai.github.io/epure/fr/introduction): Philosophie de L'Épure, 4 portes de validation humaine obligatoires, taxonomie à 3 catégories et crédits open-source.
+- [Installation & Skill /setup-repo](https://giskard-ai.github.io/epure/fr/installation): Onboarding recommandé via le skill /setup-repo, wizard des 2 GitHub Apps, 3 Rulesets et composition dynamique du roster .cursor/agents/.
+- [Usage de Base (Étude de Cas : craft-calculator)](https://giskard-ai.github.io/epure/fr/basic-usage): Parcours complet d'une issue depuis l'entretien Grill /epure plan jusqu'à la revue multi-agents et au merge humain.
+- [Référence des Commandes (/epure & /setup-repo)](https://giskard-ai.github.io/epure/fr/commands): Référence complète du skill /setup-repo et des commandes /epure sur GitHub Issues.
+- [Configuration (.github/agents.yml & renovate.json)](https://giskard-ai.github.io/epure/fr/configuration): Référence déclarative de .github/agents.yml et politique de sécurité supply-chain Renovate.
+- [Architecture, Sécurité & Revue Multi-Agents](https://giskard-ai.github.io/epure/fr/architecture): Séparation des privilèges à 2 GitHub Apps, état CAS hors-branches, sandbox TDD sans secret et panel de revue dynamique.
+- [Guide : Onboarder un Dépôt](https://giskard-ai.github.io/epure/fr/guides/how-to-onboard-repo): Guide pas à pas pour équiper un dépôt consommateur avec /setup-repo.
+- [Guide : Piloter une Issue de Bout en Bout](https://giskard-ai.github.io/epure/fr/guides/how-to-drive-an-issue): Conduire le Grill, approuver le mandat spec_sha et fusionner feature/* -> dev.
+- [Guide : Personnaliser le Roster & Impeccable](https://giskard-ai.github.io/epure/fr/guides/how-to-customize-reviewers): Créer des reviewers spécialisés dans .cursor/agents/*.md et configurer DESIGN.md.
+- [Guide : Promouvoir une Release (dev -> main)](https://giskard-ai.github.io/epure/fr/guides/how-to-release): Promotion fast-forward de dev vers main via la Release App.

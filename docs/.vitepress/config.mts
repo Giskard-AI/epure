@@ -1,6 +1,30 @@
-import { defineConfig } from "vitepress";
+import { defineConfig, type HeadConfig } from "vitepress";
 
 const basePath = process.env.VITEPRESS_BASE ?? "/epure/";
+const siteOrigin = "https://giskard-ai.github.io";
+const siteUrl = `${siteOrigin}${basePath}`;
+
+const structuredDataJsonLd = JSON.stringify({
+  "@context": "https://schema.org",
+  "@type": "SoftwareSourceCode",
+  name: "EPURE",
+  alternateName: [
+    "Engineered Planning, Unified Review & Execution",
+    "Élaboration de Plans, Usinage, Revue et Exécution"
+  ],
+  description:
+    "Open-source GitHub-first specification-driven software engineering framework built on Reusable Workflows, TypeScript Custom Actions (Node.js 24 LTS), and AI Agent Skills.",
+  url: siteUrl,
+  codeRepository: "https://github.com/Giskard-AI/epure",
+  license: "https://www.apache.org/licenses/LICENSE-2.0",
+  programmingLanguage: ["TypeScript", "JavaScript", "YAML"],
+  runtimePlatform: "Node.js 24 LTS / GitHub Actions",
+  author: {
+    "@type": "Organization",
+    name: "Giskard AI",
+    url: "https://github.com/Giskard-AI"
+  }
+});
 
 export default defineConfig({
   title: "EPURE",
@@ -8,6 +32,10 @@ export default defineConfig({
     "Engineered Planning, Unified Review & Execution — GitHub-First Specification-Driven Software Engineering Framework",
   base: basePath,
   cleanUrls: true,
+  lastUpdated: true,
+  sitemap: {
+    hostname: siteUrl
+  },
   head: [
     ["link", { rel: "icon", type: "image/x-icon", href: `${basePath}favicon.ico` }],
     [
@@ -47,9 +75,92 @@ export default defineConfig({
         href: `${basePath}apple-touch-icon.png`
       }
     ],
-    ["meta", { property: "og:image", content: `${basePath}og-image.png` }],
-    ["meta", { name: "twitter:card", content: "summary_large_image" }]
+    [
+      "link",
+      {
+        rel: "alternate",
+        type: "text/plain",
+        href: `${siteUrl}llms.txt`,
+        title: "LLM Documentation Index (llms.txt)"
+      }
+    ],
+    [
+      "link",
+      {
+        rel: "alternate",
+        type: "text/plain",
+        href: `${siteUrl}llms-full.txt`,
+        title: "LLM Full Documentation Corpus (llms-full.txt)"
+      }
+    ],
+    ["meta", { property: "og:site_name", content: "EPURE" }],
+    ["meta", { property: "og:type", content: "website" }],
+    ["meta", { property: "og:image", content: `${siteUrl}og-image.png` }],
+    ["meta", { property: "og:image:width", content: "1200" }],
+    ["meta", { property: "og:image:height", content: "630" }],
+    [
+      "meta",
+      {
+        property: "og:image:alt",
+        content: "EPURE — Engineered Planning, Unified Review & Execution"
+      }
+    ],
+    ["meta", { name: "twitter:card", content: "summary_large_image" }],
+    ["meta", { name: "twitter:image", content: `${siteUrl}og-image.png` }],
+    [
+      "meta",
+      {
+        name: "keywords",
+        content:
+          "EPURE, GitHub Actions, AI Coding Agents, Specification-Driven Engineering, TDD Sandbox, Multi-Agent Code Review, Impeccable, Archify, Matt Pocock Skills, Giskard AI"
+      }
+    ],
+    ["meta", { name: "robots", content: "index, follow, max-image-preview:large" }],
+    ["script", { type: "application/ld+json" }, structuredDataJsonLd]
   ],
+  transformHead({ pageData }) {
+    const relPath = pageData.relativePath
+      .replace(/(?:^|\/)index\.md$/, "")
+      .replace(/\.md$/, "");
+    const cleanPath = relPath ? `${relPath}` : "";
+    const isFrench = cleanPath === "fr" || cleanPath.startsWith("fr/");
+    const enSubPath = isFrench ? cleanPath.replace(/^fr\/?/, "") : cleanPath;
+
+    const canonicalUrl = cleanPath ? `${siteUrl}${cleanPath}` : siteUrl;
+    const enUrl = enSubPath ? `${siteUrl}${enSubPath}` : siteUrl;
+    const frUrl = enSubPath ? `${siteUrl}fr/${enSubPath}` : `${siteUrl}fr/`;
+
+    const pageTitle = pageData.title
+      ? `${pageData.title} | EPURE`
+      : "EPURE — Specification-Driven GitHub Engineering";
+    const pageDescription =
+      pageData.description ||
+      (isFrench
+        ? "Élaboration de Plans, Usinage, Revue et Exécution — Ingénierie Logicielle Gouvernée sur GitHub"
+        : "Engineered Planning, Unified Review & Execution — Specification-Driven GitHub Engineering");
+
+    const dynamicHead: HeadConfig[] = [
+      ["link", { rel: "canonical", href: canonicalUrl }],
+      ["link", { rel: "alternate", hreflang: "en-US", href: enUrl }],
+      ["link", { rel: "alternate", hreflang: "fr-FR", href: frUrl }],
+      ["link", { rel: "alternate", hreflang: "x-default", href: enUrl }],
+      ["meta", { property: "og:title", content: pageTitle }],
+      ["meta", { property: "og:description", content: pageDescription }],
+      ["meta", { property: "og:url", content: canonicalUrl }],
+      ["meta", { property: "og:locale", content: isFrench ? "fr_FR" : "en_US" }],
+      [
+        "meta",
+        {
+          property: "og:locale:alternate",
+          content: isFrench ? "en_US" : "fr_FR"
+        }
+      ],
+      ["meta", { name: "twitter:title", content: pageTitle }],
+      ["meta", { name: "twitter:description", content: pageDescription }]
+    ];
+
+    return dynamicHead;
+  },
   srcExclude: [
     "archify/**/*.json",
     "agents/**/*.md",
