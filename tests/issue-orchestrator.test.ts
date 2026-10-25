@@ -9,6 +9,11 @@ import {
   parseEpureCommand
 } from "../src/auth/issue-command-gate.js";
 import { extractJsonObject } from "../src/orchestrator/gemini-client.js";
+import { orchestrateIssueCommand } from "../src/orchestrator/issue-orchestrator.js";
+import {
+  createInMemoryGitRefStateStore,
+  updateIssueStateWithCas
+} from "../src/state/git-ref-state.js";
 
 const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const BUNDLED_ORCHESTRATE_ACTION_PATH = join(
@@ -162,5 +167,230 @@ describe("EPURE v1.1.0 — Real Orchestration Wiring (Q84–Q90, ADR-0026)", () 
       expect(existsSync(ORCHESTRATE_ACTION_MANIFEST_PATH)).toBe(true);
       expect(existsSync(BUNDLED_ORCHESTRATE_ACTION_PATH)).toBe(true);
     });
+  });
+
+  describe("4. Multi-Turn /grill-with-docs Loop on Issues", () => {
+    it.each([
+      {
+        id: "remains-in-grilling-and-posts-round-2-when-frontier-is-not-resolved",
+        frontierResolved: false,
+        followUpQuestions:
+          "❓ **Q5** - **Format d'encodage URL** : Quel encodage compact utilises-tu ?\n➡️ **Recommandation** : `lz-string` ou Base64URL JSON.",
+        expectedPhase: "grilling",
+        expectedStatus: "active",
+        expectedInSummary: "Round 2"
+      },
+      {
+        id: "transitions-to-tickets-and-generates-spec-when-frontier-is-resolved",
+        frontierResolved: true,
+        followUpQuestions: "",
+        expectedPhase: "tickets",
+        expectedStatus: "awaiting_human_approval",
+        expectedInSummary: "Spécification, Roster Adapté et Graphe de Tickets générés"
+      }
+    ])(
+      "$id",
+      async ({
+        frontierResolved,
+        followUpQuestions,
+        expectedPhase,
+        expectedStatus,
+        expectedInSummary
+      }) => {
+        const store = createInMemoryGitRefStateStore();
+        await updateIssueStateWithCas({
+          issueNumber: 16,
+          store,
+          mutator: (prev) => ({
+            ...prev,
+            phase: "grilling",
+            status: "active",
+            active_branch: "plan/16-enclume-astrale"
+          })
+        });
+
+        const postedComments: string[] = [];
+        let geminiCallIndex = 0;
+
+        const mockFetch = async (
+          url: string | URL | Request,
+          init?: RequestInit
+        ): Promise<Response> => {
+          const urlStr = String(url);
+          const method = init?.method ?? "GET";
+
+          // Gemini API calls
+          if (urlStr.includes("generativelanguage.googleapis.com")) {
+            geminiCallIndex += 1;
+            if (geminiCallIndex === 1) {
+              // First call during reply: GrillRoundEvaluation
+              return new Response(
+                JSON.stringify({
+                  candidates: [
+                    {
+                      content: {
+                        parts: [
+                          {
+                            text: JSON.stringify({
+                              frontier_resolved: frontierResolved,
+                              round_number: 2,
+                              follow_up_questions_markdown: followUpQuestions,
+                              rationale: frontierResolved
+                                ? "All architectural and domain questions answered."
+                                : "Follow-up needed on URL encoding."
+                            })
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }),
+                { status: 200 }
+              );
+            }
+            // Second call (when frontierResolved=true): Spec & Tickets bundle
+            return new Response(
+              JSON.stringify({
+                candidates: [
+                  {
+                    content: {
+                      parts: [
+                        {
+                          text: JSON.stringify({
+                            plan_slug: "enclume-astrale",
+                            glossary_markdown: "# GLOSSARY\n",
+                            adrs: [
+                              {
+                                path: "docs/adr/0001-arch.md",
+                                content: "# ADR 1\n"
+                              }
+                            ],
+                            spec_path: "docs/specs/enclume-astrale.md",
+                            spec_markdown: "# Spec\n",
+                            tickets: [
+                              {
+                                index: 1,
+                                slug: "core-math",
+                                title: "[Ticket 1] Core math",
+                                description: "Implement core math",
+                                acceptance_criteria: ["S <= B"],
+                                blocked_by_indices: [],
+                                files_to_create_or_update: ["src/forge.ts"]
+                              }
+                            ]
+                          })
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }),
+              { status: 200 }
+            );
+          }
+
+          // GitHub REST API mocks
+          if (urlStr.endsWith("/issues/16") && method === "GET") {
+            return new Response(
+              JSON.stringify({
+                number: 16,
+                title: "[Plan] L'Enclume Astrale",
+                body: "Cahier des charges initial"
+              }),
+              { status: 200 }
+            );
+          }
+          if (urlStr.includes("/issues/16/comments") && method === "GET") {
+            return new Response(
+              JSON.stringify([
+                {
+                  id: 101,
+                  body: "### Entretien de Cadrage EPURE (`/grill-with-docs` — Round 1)\n❓ **Q1** ...",
+                  user: { login: "hartorn-inc-epure-agent[bot]", type: "Bot" },
+                  created_at: "2026-10-24T10:00:00Z"
+                },
+                {
+                  id: 102,
+                  body: "Réponse partielle de l'utilisateur sur Q1.",
+                  user: { login: "Hartorn", type: "User" },
+                  created_at: "2026-10-24T10:05:00Z"
+                }
+              ]),
+              { status: 200 }
+            );
+          }
+          if (urlStr.includes("/issues/16/comments") && method === "POST") {
+            const parsed = JSON.parse(String(init?.body ?? "{}")) as {
+              body: string;
+            };
+            postedComments.push(parsed.body);
+            return new Response(
+              JSON.stringify({
+                html_url: "https://github.com/Hartorn-Inc/enclume-astrale/issues/16#issuecomment-200"
+              }),
+              { status: 201 }
+            );
+          }
+          if (urlStr.includes("/git/ref/heads/")) {
+            return new Response(
+              JSON.stringify({ object: { sha: "abc123456789" } }),
+              { status: 200 }
+            );
+          }
+          if (urlStr.includes("/git/commits/")) {
+            return new Response(
+              JSON.stringify({
+                sha: "newcommitsha",
+                tree: { sha: "treeshaxxx" }
+              }),
+              { status: 200 }
+            );
+          }
+          if (urlStr.includes("/git/blobs") || urlStr.includes("/git/trees")) {
+            return new Response(JSON.stringify({ sha: "blobortreesha" }), {
+              status: 201
+            });
+          }
+          if (urlStr.includes("/git/refs/heads/")) {
+            return new Response(JSON.stringify({ ok: true }), { status: 200 });
+          }
+          if (urlStr.includes("/labels")) {
+            return new Response(JSON.stringify({ name: "ready-for-agent" }), {
+              status: 201
+            });
+          }
+          if (urlStr.endsWith("/issues") && method === "POST") {
+            return new Response(
+              JSON.stringify({
+                number: 17,
+                html_url: "https://github.com/Hartorn-Inc/enclume-astrale/issues/17"
+              }),
+              { status: 201 }
+            );
+          }
+
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        };
+
+        const result = await orchestrateIssueCommand({
+          repository: "Hartorn-Inc/enclume-astrale",
+          issueNumber: 16,
+          command: "reply",
+          commandArgs: "Réponse partielle de l'utilisateur sur Q1.",
+          commentId: 102,
+          actor: "Hartorn",
+          fallbackGithubToken: "ghs_mock",
+          llmApiKey: "gemini_mock_key",
+          stateStore: store,
+          fetchImpl: mockFetch as typeof fetch
+        });
+
+        expect(result.executed).toBe(true);
+        expect(result.phase).toBe(expectedPhase);
+        expect(result.status).toBe(expectedStatus);
+        expect(result.summary_markdown).toContain(expectedInSummary);
+        expect(postedComments.length).toBe(1);
+      }
+    );
   });
 });

@@ -75,6 +75,33 @@ export async function callGeminiGenerateContent(
     }
   ];
 
+  async function fetchWithRetry(
+    reqUrl: string,
+    reqInit: RequestInit,
+    maxRetries = 3
+  ): Promise<Response> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+      try {
+        const res = await fetchFn(reqUrl, reqInit);
+        if (res.status >= 500 && attempt < maxRetries) {
+          await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+          continue;
+        }
+        return res;
+      } catch (err) {
+        lastError = err;
+        if (attempt < maxRetries) {
+          await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+          continue;
+        }
+      }
+    }
+    throw lastError instanceof Error
+      ? lastError
+      : new Error(String(lastError));
+  }
+
   for (let round = 0; round <= maxToolRounds; round += 1) {
     const allowToolsThisRound = hasTools && round < maxToolRounds;
     const generationConfig: Record<string, unknown> = {
@@ -101,7 +128,7 @@ export async function callGeminiGenerateContent(
       ];
     }
 
-    const response = await fetchFn(url, {
+    const response = await fetchWithRetry(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json"

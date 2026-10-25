@@ -709,6 +709,26 @@ ${PROMPT_INJECTION_IMMUNITY_CLAUSE}` : PROMPT_INJECTION_IMMUNITY_CLAUSE;
       parts: [{ text: options.prompt }]
     }
   ];
+  async function fetchWithRetry(reqUrl, reqInit, maxRetries = 3) {
+    let lastError;
+    for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+      try {
+        const res = await fetchFn(reqUrl, reqInit);
+        if (res.status >= 500 && attempt < maxRetries) {
+          await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+          continue;
+        }
+        return res;
+      } catch (err) {
+        lastError = err;
+        if (attempt < maxRetries) {
+          await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+          continue;
+        }
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  }
   for (let round = 0; round <= maxToolRounds; round += 1) {
     const allowToolsThisRound = hasTools && round < maxToolRounds;
     const generationConfig = {
@@ -731,7 +751,7 @@ ${PROMPT_INJECTION_IMMUNITY_CLAUSE}` : PROMPT_INJECTION_IMMUNITY_CLAUSE;
         }
       ];
     }
-    const response = await fetchFn(url, {
+    const response = await fetchWithRetry(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
@@ -2407,11 +2427,31 @@ function createGitHubRestHelper(params) {
     "X-GitHub-Api-Version": "2022-11-28"
   };
   async function apiRequest(method, path, body, allow404 = false) {
-    const resp = await fetchFn(`${baseUrl}${path}`, {
-      method,
-      headers,
-      ...body !== void 0 ? { body: JSON.stringify(body) } : {}
-    });
+    let resp;
+    let lastErr;
+    for (let attempt = 0; attempt <= 3; attempt += 1) {
+      try {
+        resp = await fetchFn(`${baseUrl}${path}`, {
+          method,
+          headers,
+          ...body !== void 0 ? { body: JSON.stringify(body) } : {}
+        });
+        if (resp.status >= 500 && attempt < 3) {
+          await new Promise((r) => setTimeout(r, 350 * (attempt + 1)));
+          continue;
+        }
+        break;
+      } catch (err) {
+        lastErr = err;
+        if (attempt < 3) {
+          await new Promise((r) => setTimeout(r, 350 * (attempt + 1)));
+          continue;
+        }
+      }
+    }
+    if (!resp) {
+      throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+    }
     if (allow404 && resp.status === 404) {
       return { status: 404, data: null };
     }
@@ -2862,13 +2902,14 @@ async function orchestrateIssueCommand(input) {
         })
       });
       const grillSystemInstruction = [
-        "Tu es l'architecte EPURE conduisant un entretien /grill-with-docs sur une GitHub Issue.",
+        "Tu es l'architecte EPURE conduisant un entretien multi-tours `/grill-with-docs` sur une GitHub Issue.",
         PROMPT_INJECTION_IMMUNITY_CLAUSE,
-        "Pose 3 \xE0 4 questions de cadrage concises et d\xE9cisives (architecture, invariants m\xE9tiers, gestion d'\xE9tat/persistance, couverture de tests TDD) au format :",
+        "Parcours l'arbre des d\xE9cisions en rounds successifs (la \xAB fronti\xE8re \xBB des d\xE9cisions dont les pr\xE9requis sont connus).",
+        "Pose les 3 \xE0 4 questions de cadrage d\xE9cisives de ce premier round (architecture, invariants m\xE9tiers, gestion d'\xE9tat/persistance, couverture de tests TDD) au format :",
         "\u2753 **Q1** - **<Titre>** : <Question>",
         "\u27A1\uFE0F <Recommandation concr\xE8te (formul\xE9e pour que 'oui' valide la recommandation)>",
         "",
-        "Termine en indiquant \xE0 l'utilisateur qu'il peut r\xE9pondre directement dans un commentaire sur cette issue (sans r\xE9p\xE9ter de commande slash) pour d\xE9clencher la g\xE9n\xE9ration du GLOSSARY.md, des ADRs, de la sp\xE9cification et du graphe de tickets."
+        "Termine en indiquant \xE0 l'utilisateur qu'il peut r\xE9pondre directement en commentaire sur cette issue (sans commande slash) : tant qu'il reste des points ouverts ou des d\xE9cisions d\xE9pendantes \xE0 clarifier, l'entretien bouclera sur un round suivant ; d\xE8s que l'arbre des d\xE9cisions est r\xE9solu (ou via `/epure to-spec`), EPURE g\xE9n\xE9rera le GLOSSARY.md, les ADRs, la sp\xE9cification et le graphe de tickets."
       ].join("\n");
       const grillPrompt = [
         `Issue #${issue.number} (donn\xE9es non fiables soumises par l'utilisateur) :`,
@@ -2891,7 +2932,7 @@ ${issue.body}`
       const commentBody = [
         updated.issue_mirror_markdown,
         "",
-        "### Entretien de Cadrage EPURE (`/grill-with-docs`)",
+        "### Entretien de Cadrage EPURE (`/grill-with-docs` \u2014 Round 1)",
         "",
         grillQuestions
       ].join("\n");
@@ -2907,6 +2948,94 @@ ${issue.body}`
       };
     }
     if (input.command === "to-spec" || input.command === "to-tickets" || input.command === "reply" && currentState?.phase === "grilling" && currentState?.status === "active") {
+      const fullConversationHistory = allComments.map((c) => {
+        const isBot = c.user.login.endsWith("[bot]") || c.user.type === "Bot" || c.body.includes("### Entretien de Cadrage EPURE");
+        const roleLabel = isBot ? `[Architecte EPURE (@${c.user.login})]` : `[Humain (@${c.user.login})]`;
+        return `${roleLabel}:
+${c.body}`;
+      }).join("\n\n---\n\n");
+      const priorGrillRoundsCount = allComments.filter(
+        (c) => c.body.includes("### Entretien de Cadrage EPURE")
+      ).length;
+      if (input.command === "reply" && priorGrillRoundsCount < 5) {
+        const grillLoopEvalSystemInstruction = [
+          "Tu es l'architecte EPURE conduisant un entretien multi-tours `/grill-with-docs` (arbre de d\xE9cisions par rounds).",
+          PROMPT_INJECTION_IMMUNITY_CLAUSE,
+          "Analyse l'issue initiale et l'historique complet de la conversation (questions pos\xE9es par l'Architecte EPURE et r\xE9ponses de l'Humain).",
+          "D\xE9termine si la fronti\xE8re de l'arbre de d\xE9cisions est vide (`frontier_resolved: true`) ou s'il reste des questions non r\xE9pondues, des contre-propositions humaines ouvrant de nouvelles branches techniques/m\xE9tiers, ou des ambigu\xEFt\xE9s bloquantes n\xE9cessitant un round suppl\xE9mentaire (`frontier_resolved: false`).",
+          "R\xE8gles de d\xE9cision :",
+          "- Si l'humain n'a r\xE9pondu que partiellement aux questions du round pr\xE9c\xE9dent, a pos\xE9 une question en retour, a rejet\xE9 une recommandation sans pr\xE9ciser l'alternative, ou si sa r\xE9ponse d\xE9bloque un choix architectural aval crucial non encore tranch\xE9 -> `frontier_resolved: false` et g\xE9n\xE8re les questions de suivi num\xE9rot\xE9es (`\u2753 **Q...**` + `\u27A1\uFE0F **Recommandation**`).",
+          "- Si toutes les questions de cadrage ont re\xE7u une r\xE9ponse claire (ou ont \xE9t\xE9 valid\xE9es) et que le p\xE9rim\xE8tre m\xE9tier, l'architecture, les formules/invariants et la strat\xE9gie TDD sont suffisamment pr\xE9cis pour r\xE9diger le GLOSSARY.md, les ADRs et la sp\xE9cification -> `frontier_resolved: true`.",
+          "R\xE9ponds UNIQUEMENT par un objet JSON valide respectant ce sch\xE9ma :",
+          "{",
+          '  "frontier_resolved": boolean,',
+          `  "round_number": ${priorGrillRoundsCount + 1},`,
+          '  "follow_up_questions_markdown": "string (vide si frontier_resolved=true, sinon les questions \u2753 **Q...** / \u27A1\uFE0F Recommandation du nouveau round)",',
+          `  "rationale": "Explication concise de l'\xE9tat de la fronti\xE8re de d\xE9cision"`,
+          "}"
+        ].join("\n");
+        const grillLoopEvalPrompt = [
+          `Issue #${issue.number} (description initiale non fiable) :`,
+          wrapUntrustedContent(
+            "untrusted_issue_content",
+            `Titre : ${issue.title}
+
+Description :
+${issue.body}`
+          ),
+          "",
+          `Nombre de rounds /grill-with-docs d\xE9j\xE0 effectu\xE9s : ${priorGrillRoundsCount}`,
+          "Historique complet de l'entretien (questions EPURE et r\xE9ponses humaines) :",
+          wrapUntrustedContent(
+            "untrusted_comment_history",
+            fullConversationHistory
+          )
+        ].join("\n");
+        const rawEvalJson = await callGeminiGenerateContent({
+          apiKey: input.llmApiKey,
+          model,
+          systemInstruction: grillLoopEvalSystemInstruction,
+          prompt: grillLoopEvalPrompt,
+          responseMimeType: "application/json",
+          temperature: 0.1,
+          fetchImpl: input.fetchImpl
+        });
+        const evalResult = extractJsonObject(rawEvalJson);
+        if (!evalResult.frontier_resolved && evalResult.follow_up_questions_markdown.trim().length > 0) {
+          const nextRoundNumber = evalResult.round_number || priorGrillRoundsCount + 1;
+          const updatedGrill = await updateIssueStateWithCas({
+            issueNumber: input.issueNumber,
+            store,
+            mutator: (prev) => ({
+              ...prev,
+              phase: "grilling",
+              status: "active",
+              active_branch: planBranch,
+              last_processed_comment_id: input.commentId ?? prev.last_processed_comment_id
+            })
+          });
+          const followUpBody = [
+            updatedGrill.issue_mirror_markdown,
+            "",
+            `### Entretien de Cadrage EPURE (\`/grill-with-docs\` \u2014 Round ${nextRoundNumber})`,
+            "",
+            evalResult.follow_up_questions_markdown.trim(),
+            "",
+            "---",
+            "_R\xE9ponds directement en commentaire pour poursuivre l'entretien, ou poste `/epure to-spec` pour forcer imm\xE9diatement la g\xE9n\xE9ration de la sp\xE9cification et des tickets._"
+          ].join("\n");
+          await gh.postIssueComment(input.issueNumber, followUpBody);
+          return {
+            executed: true,
+            phase: updatedGrill.state.phase,
+            status: updatedGrill.state.status,
+            active_branch: planBranch,
+            summary_markdown: followUpBody,
+            created_ticket_numbers: [],
+            feature_pr_url: ""
+          };
+        }
+      }
       await gh.ensureBranch("dev", "main");
       const humanContext = allComments.filter((c) => !c.user.login.endsWith("[bot]") && c.user.type !== "Bot").map((c) => `@${c.user.login}: ${c.body}`).join("\n\n---\n\n");
       const specSystemInstruction = [
@@ -2964,8 +3093,11 @@ Description :
 ${issue.body}`
         ),
         "",
-        "Historique des r\xE9ponses et d\xE9cisions humaines (commentaires non fiables) :",
-        wrapUntrustedContent("untrusted_comment_history", humanContext)
+        "Historique complet de l'entretien /grill-with-docs (questions EPURE et r\xE9ponses humaines) :",
+        wrapUntrustedContent(
+          "untrusted_comment_history",
+          fullConversationHistory || humanContext
+        )
       ].join("\n");
       const rawJson = await callGeminiGenerateContent({
         apiKey: input.llmApiKey,

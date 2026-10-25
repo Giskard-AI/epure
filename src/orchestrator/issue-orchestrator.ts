@@ -70,6 +70,13 @@ export interface GeneratedPlanningBundle {
   readonly tickets: readonly PlannedTicketDefinition[];
 }
 
+export interface GrillRoundEvaluation {
+  readonly frontier_resolved: boolean;
+  readonly round_number: number;
+  readonly follow_up_questions_markdown: string;
+  readonly rationale: string;
+}
+
 export interface GeneratedTicketImplementation {
   readonly files: ReadonlyArray<{
     readonly path: string;
@@ -211,11 +218,31 @@ function createGitHubRestHelper(params: {
     body?: unknown,
     allow404 = false
   ): Promise<{ status: number; data: T | null }> {
-    const resp = await fetchFn(`${baseUrl}${path}`, {
-      method,
-      headers,
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {})
-    });
+    let resp: Response | undefined;
+    let lastErr: unknown;
+    for (let attempt = 0; attempt <= 3; attempt += 1) {
+      try {
+        resp = await fetchFn(`${baseUrl}${path}`, {
+          method,
+          headers,
+          ...(body !== undefined ? { body: JSON.stringify(body) } : {})
+        });
+        if (resp.status >= 500 && attempt < 3) {
+          await new Promise((r) => setTimeout(r, 350 * (attempt + 1)));
+          continue;
+        }
+        break;
+      } catch (err) {
+        lastErr = err;
+        if (attempt < 3) {
+          await new Promise((r) => setTimeout(r, 350 * (attempt + 1)));
+          continue;
+        }
+      }
+    }
+    if (!resp) {
+      throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+    }
     if (allow404 && resp.status === 404) {
       return { status: 404, data: null };
     }
@@ -788,13 +815,14 @@ export async function orchestrateIssueCommand(
       });
 
       const grillSystemInstruction = [
-        "Tu es l'architecte EPURE conduisant un entretien /grill-with-docs sur une GitHub Issue.",
+        "Tu es l'architecte EPURE conduisant un entretien multi-tours `/grill-with-docs` sur une GitHub Issue.",
         PROMPT_INJECTION_IMMUNITY_CLAUSE,
-        "Pose 3 à 4 questions de cadrage concises et décisives (architecture, invariants métiers, gestion d'état/persistance, couverture de tests TDD) au format :",
+        "Parcours l'arbre des décisions en rounds successifs (la « frontière » des décisions dont les prérequis sont connus).",
+        "Pose les 3 à 4 questions de cadrage décisives de ce premier round (architecture, invariants métiers, gestion d'état/persistance, couverture de tests TDD) au format :",
         "❓ **Q1** - **<Titre>** : <Question>",
         "➡️ <Recommandation concrète (formulée pour que 'oui' valide la recommandation)>",
         "",
-        "Termine en indiquant à l'utilisateur qu'il peut répondre directement dans un commentaire sur cette issue (sans répéter de commande slash) pour déclencher la génération du GLOSSARY.md, des ADRs, de la spécification et du graphe de tickets."
+        "Termine en indiquant à l'utilisateur qu'il peut répondre directement en commentaire sur cette issue (sans commande slash) : tant qu'il reste des points ouverts ou des décisions dépendantes à clarifier, l'entretien bouclera sur un round suivant ; dès que l'arbre des décisions est résolu (ou via `/epure to-spec`), EPURE générera le GLOSSARY.md, les ADRs, la spécification et le graphe de tickets."
       ].join("\n");
 
       const grillPrompt = [
@@ -817,7 +845,7 @@ export async function orchestrateIssueCommand(
       const commentBody = [
         updated.issue_mirror_markdown,
         "",
-        "### Entretien de Cadrage EPURE (`/grill-with-docs`)",
+        "### Entretien de Cadrage EPURE (`/grill-with-docs` — Round 1)",
         "",
         grillQuestions
       ].join("\n");
@@ -842,6 +870,113 @@ export async function orchestrateIssueCommand(
         currentState?.phase === "grilling" &&
         currentState?.status === "active")
     ) {
+      const fullConversationHistory = allComments
+        .map((c) => {
+          const isBot =
+            c.user.login.endsWith("[bot]") ||
+            c.user.type === "Bot" ||
+            c.body.includes("### Entretien de Cadrage EPURE");
+          const roleLabel = isBot
+            ? `[Architecte EPURE (@${c.user.login})]`
+            : `[Humain (@${c.user.login})]`;
+          return `${roleLabel}:\n${c.body}`;
+        })
+        .join("\n\n---\n\n");
+
+      const priorGrillRoundsCount = allComments.filter((c) =>
+        c.body.includes("### Entretien de Cadrage EPURE")
+      ).length;
+
+      // Multi-turn /grill-with-docs loop evaluation (unless human explicitly forced /epure to-spec or /epure to-tickets)
+      if (input.command === "reply" && priorGrillRoundsCount < 5) {
+        const grillLoopEvalSystemInstruction = [
+          "Tu es l'architecte EPURE conduisant un entretien multi-tours `/grill-with-docs` (arbre de décisions par rounds).",
+          PROMPT_INJECTION_IMMUNITY_CLAUSE,
+          "Analyse l'issue initiale et l'historique complet de la conversation (questions posées par l'Architecte EPURE et réponses de l'Humain).",
+          "Détermine si la frontière de l'arbre de décisions est vide (`frontier_resolved: true`) ou s'il reste des questions non répondues, des contre-propositions humaines ouvrant de nouvelles branches techniques/métiers, ou des ambiguïtés bloquantes nécessitant un round supplémentaire (`frontier_resolved: false`).",
+          "Règles de décision :",
+          "- Si l'humain n'a répondu que partiellement aux questions du round précédent, a posé une question en retour, a rejeté une recommandation sans préciser l'alternative, ou si sa réponse débloque un choix architectural aval crucial non encore tranché -> `frontier_resolved: false` et génère les questions de suivi numérotées (`❓ **Q...**` + `➡️ **Recommandation**`).",
+          "- Si toutes les questions de cadrage ont reçu une réponse claire (ou ont été validées) et que le périmètre métier, l'architecture, les formules/invariants et la stratégie TDD sont suffisamment précis pour rédiger le GLOSSARY.md, les ADRs et la spécification -> `frontier_resolved: true`.",
+          "Réponds UNIQUEMENT par un objet JSON valide respectant ce schéma :",
+          "{",
+          '  "frontier_resolved": boolean,',
+          `  "round_number": ${priorGrillRoundsCount + 1},`,
+          '  "follow_up_questions_markdown": "string (vide si frontier_resolved=true, sinon les questions ❓ **Q...** / ➡️ Recommandation du nouveau round)",',
+          '  "rationale": "Explication concise de l\'état de la frontière de décision"',
+          "}"
+        ].join("\n");
+
+        const grillLoopEvalPrompt = [
+          `Issue #${issue.number} (description initiale non fiable) :`,
+          wrapUntrustedContent(
+            "untrusted_issue_content",
+            `Titre : ${issue.title}\n\nDescription :\n${issue.body}`
+          ),
+          "",
+          `Nombre de rounds /grill-with-docs déjà effectués : ${priorGrillRoundsCount}`,
+          "Historique complet de l'entretien (questions EPURE et réponses humaines) :",
+          wrapUntrustedContent(
+            "untrusted_comment_history",
+            fullConversationHistory
+          )
+        ].join("\n");
+
+        const rawEvalJson = await callGeminiGenerateContent({
+          apiKey: input.llmApiKey,
+          model,
+          systemInstruction: grillLoopEvalSystemInstruction,
+          prompt: grillLoopEvalPrompt,
+          responseMimeType: "application/json",
+          temperature: 0.1,
+          fetchImpl: input.fetchImpl
+        });
+
+        const evalResult =
+          extractJsonObject<GrillRoundEvaluation>(rawEvalJson);
+
+        if (
+          !evalResult.frontier_resolved &&
+          evalResult.follow_up_questions_markdown.trim().length > 0
+        ) {
+          const nextRoundNumber =
+            evalResult.round_number || priorGrillRoundsCount + 1;
+          const updatedGrill = await updateIssueStateWithCas({
+            issueNumber: input.issueNumber,
+            store,
+            mutator: (prev) => ({
+              ...prev,
+              phase: "grilling",
+              status: "active",
+              active_branch: planBranch,
+              last_processed_comment_id:
+                input.commentId ?? prev.last_processed_comment_id
+            })
+          });
+
+          const followUpBody = [
+            updatedGrill.issue_mirror_markdown,
+            "",
+            `### Entretien de Cadrage EPURE (\`/grill-with-docs\` — Round ${nextRoundNumber})`,
+            "",
+            evalResult.follow_up_questions_markdown.trim(),
+            "",
+            "---",
+            "_Réponds directement en commentaire pour poursuivre l'entretien, ou poste `/epure to-spec` pour forcer immédiatement la génération de la spécification et des tickets._"
+          ].join("\n");
+
+          await gh.postIssueComment(input.issueNumber, followUpBody);
+          return {
+            executed: true,
+            phase: updatedGrill.state.phase,
+            status: updatedGrill.state.status,
+            active_branch: planBranch,
+            summary_markdown: followUpBody,
+            created_ticket_numbers: [],
+            feature_pr_url: ""
+          };
+        }
+      }
+
       await gh.ensureBranch("dev", "main");
       const humanContext = allComments
         .filter((c) => !c.user.login.endsWith("[bot]") && c.user.type !== "Bot")
@@ -901,8 +1036,11 @@ export async function orchestrateIssueCommand(
           `Titre : ${issue.title}\n\nDescription :\n${issue.body}`
         ),
         "",
-        "Historique des réponses et décisions humaines (commentaires non fiables) :",
-        wrapUntrustedContent("untrusted_comment_history", humanContext)
+        "Historique complet de l'entretien /grill-with-docs (questions EPURE et réponses humaines) :",
+        wrapUntrustedContent(
+          "untrusted_comment_history",
+          fullConversationHistory || humanContext
+        )
       ].join("\n");
 
       const rawJson = await callGeminiGenerateContent({
