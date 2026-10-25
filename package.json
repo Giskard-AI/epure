@@ -14,12 +14,17 @@
   "scripts": {
     "build": "node scripts/build-actions.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "docs:diagrams": "node scripts/build-diagrams.mjs",
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "vitepress build docs",
+    "docs:preview": "vitepress preview docs"
   },
   "devDependencies": {
     "@types/node": "24.19.2",
     "esbuild": "0.28.2",
     "typescript": "7.0.2",
+    "vitepress": "1.6.4",
     "vitest": "5.0.5"
   }
 }

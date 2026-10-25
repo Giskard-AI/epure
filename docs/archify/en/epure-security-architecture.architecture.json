@@ -1,0 +1,171 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "EPURE Security & Trust Boundaries Architecture",
+    "subtitle": "Dual GitHub Apps, Secretless Sandbox Execution, Out-of-Branch CAS State, and Prompt-Injection Guards",
+    "visual_preset": "blueprint",
+    "quality_profile": "showcase",
+    "output": "docs/public/diagrams/en/epure-security-architecture.html"
+  },
+  "layout": {
+    "mode": "grid",
+    "origin": [48, 84],
+    "cols": 4,
+    "gapX": 108,
+    "gapY": 92,
+    "cellW": 148,
+    "cellH": 64
+  },
+  "components": [
+    {
+      "id": "github_events",
+      "type": "external",
+      "label": "GitHub Events",
+      "sublabel": "Issues & PRs",
+      "tag": "untrusted input",
+      "row": 0,
+      "col": 0
+    },
+    {
+      "id": "cas_state_ref",
+      "type": "database",
+      "label": "Git Ref CAS",
+      "sublabel": "refs/epure/state/*",
+      "tag": "spec_sha signed",
+      "row": 1,
+      "col": 0
+    },
+    {
+      "id": "command_gate",
+      "type": "security",
+      "label": "Permission Gate",
+      "sublabel": "write / admin check",
+      "tag": "fail-closed",
+      "row": 0,
+      "col": 1
+    },
+    {
+      "id": "orchestrator",
+      "type": "backend",
+      "label": "Orchestrator",
+      "sublabel": "Grill, DAG & TDD",
+      "tag": "issue-N lock",
+      "row": 1,
+      "col": 1
+    },
+    {
+      "id": "ifixai_audit",
+      "type": "security",
+      "label": "iFixAi Audit",
+      "sublabel": "trajectory gate",
+      "tag": "deterministic",
+      "row": 2,
+      "col": 1
+    },
+    {
+      "id": "llm_sidecar",
+      "type": "cloud",
+      "label": "LLM Sidecar",
+      "sublabel": "Gemini 3.8 HIGH",
+      "tag": "holds API key",
+      "row": 0,
+      "col": 2
+    },
+    {
+      "id": "trusted_reviewers",
+      "type": "security",
+      "label": "dev Roster",
+      "sublabel": "XML diff guards",
+      "tag": "OWASP LLM01",
+      "row": 1,
+      "col": 2
+    },
+    {
+      "id": "agent_app_pub",
+      "type": "security",
+      "label": "Agent App",
+      "sublabel": "plan / task / feature",
+      "tag": "ephemeral JWT",
+      "row": 2,
+      "col": 2
+    },
+    {
+      "id": "secretless_sandbox",
+      "type": "backend",
+      "label": "Code Sandbox",
+      "sublabel": "tsc + vitest run",
+      "tag": "0 env secrets",
+      "row": 1,
+      "col": 3
+    },
+    {
+      "id": "release_app_pub",
+      "type": "security",
+      "label": "Release App",
+      "sublabel": "dev -> main + vX.Y.Z",
+      "tag": "sole bypass",
+      "row": 2,
+      "col": 3
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "EPURE Trusted Control Plane",
+      "wraps": [
+        "command_gate",
+        "orchestrator",
+        "ifixai_audit",
+        "llm_sidecar",
+        "trusted_reviewers",
+        "agent_app_pub"
+      ]
+    },
+    {
+      "kind": "security-group",
+      "label": "Isolated Sandbox (0 Secrets)",
+      "wraps": ["secretless_sandbox"]
+    }
+  ],
+  "connections": [
+    { "id": "evt-to-gate", "from": "github_events", "to": "command_gate", "label": "webhook", "variant": "security" },
+    { "id": "gate-to-orch", "from": "command_gate", "to": "orchestrator", "label": "write+", "variant": "emphasis" },
+    { "id": "orch-to-state", "from": "orchestrator", "to": "cas_state_ref", "label": "CAS ref", "variant": "default" },
+    { "id": "orch-to-llm", "from": "orchestrator", "to": "llm_sidecar", "label": "JSON", "variant": "default" },
+    { "id": "orch-to-review", "from": "orchestrator", "to": "trusted_reviewers", "label": "from dev", "variant": "emphasis" },
+    { "id": "review-to-sandbox", "from": "trusted_reviewers", "to": "secretless_sandbox", "label": "0 secrets", "variant": "security" },
+    { "id": "orch-to-ifixai", "from": "orchestrator", "to": "ifixai_audit", "label": "trace", "variant": "dashed" },
+    { "id": "ifixai-to-agent-pub", "from": "ifixai_audit", "to": "agent_app_pub", "label": "publish", "variant": "security" },
+    { "id": "agent-to-release", "from": "agent_app_pub", "to": "release_app_pub", "label": "human gate", "variant": "dashed" }
+  ],
+  "cards": [
+    {
+      "dot": "rose",
+      "title": "Dual-App Privilege Separation",
+      "items": [
+        "Agent App (<owner>-epure-agent) can only write to plan/*, task/*, and feature/*",
+        "Agent App is hard-blocked from merging code PRs into dev or pushing to main",
+        "Release App (<owner>-epure-release) is the sole Bypass Actor on main and v* tags"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Secretless Sandbox & LLM Proxy",
+      "items": [
+        "Consumer test/build subprocesses run with LLM_API_KEY and App PEM keys stripped",
+        "Fail-closed enforcement aborts execution if secret isolation cannot be verified",
+        "Deterministic iFixAi trajectory audit checks every privileged operation"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Prompt-Injection Immunity (OWASP LLM01)",
+      "items": [
+        "Reviewer prompts (.cursor/agents/*.md) are loaded exclusively from trusted dev",
+        "Untrusted PR diffs and comments are isolated inside <untrusted_pr_diff> tags",
+        "Modifying .cursor/agents/** or workflows on task/* blocks autonomous merge"
+      ]
+    }
+  ]
+}

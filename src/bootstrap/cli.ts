@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
+import type { CustomDomainReviewerSpec } from "../review/reviewer-roster.js";
 import {
   applyGitHubRepositoryGovernance,
   planAndApplyRepoSetup
@@ -10,6 +11,8 @@ function parseArgs(argv: readonly string[]): {
   repoRootDir: string | undefined;
   epurePinnedSha: string | undefined;
   requirePrApprovalsOnDev: number | undefined;
+  includeFrontendReviewers: boolean | undefined;
+  customDomainSpecialists: readonly CustomDomainReviewerSpec[] | undefined;
   applyGithubSettings: boolean;
   githubToken: string | undefined;
   agentAppIntegrationId: number | undefined;
@@ -21,6 +24,8 @@ function parseArgs(argv: readonly string[]): {
   let repoRootDir: string | undefined;
   let epurePinnedSha: string | undefined;
   let requirePrApprovalsOnDev: number | undefined;
+  let includeFrontendReviewers: boolean | undefined;
+  let customDomainSpecialists: CustomDomainReviewerSpec[] | undefined;
   let applyGithubSettings = false;
   let githubToken: string | undefined;
   let agentAppIntegrationId: number | undefined;
@@ -33,7 +38,7 @@ function parseArgs(argv: readonly string[]): {
     if (arg === "--repo" && argv[i + 1]) {
       repository = argv[i + 1] ?? "";
       i += 1;
-    } else if ((arg === "--dir" || arg === "--repo-root") && argv[i + 1]) {
+    } else if ((arg === "--dir" || arg === "--repo-root" || arg === "--target-dir") && argv[i + 1]) {
       repoRootDir = argv[i + 1];
       i += 1;
     } else if (arg === "--pinned-sha" && argv[i + 1]) {
@@ -42,6 +47,23 @@ function parseArgs(argv: readonly string[]): {
     } else if (arg === "--require-pr-approvals" && argv[i + 1]) {
       requirePrApprovalsOnDev = Number.parseInt(argv[i + 1] ?? "0", 10);
       i += 1;
+    } else if (arg === "--no-frontend-reviewers") {
+      includeFrontendReviewers = false;
+    } else if (arg === "--domain-reviewers" && argv[i + 1]) {
+      const rawCsv = argv[i + 1] ?? "";
+      i += 1;
+      customDomainSpecialists = rawCsv
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0)
+        .map((name) => ({
+          name,
+          description: `Domain specialist reviewer (${name}) tailored by setup-repo.`,
+          scopeResponsibilities: [
+            `Verify domain invariants, module boundaries, and edge cases for ${name}.`,
+            "Enforce alignment with GLOSSARY.md and docs/adr/*.md."
+          ]
+        }));
     } else if (arg === "--github-token" && argv[i + 1]) {
       githubToken = argv[i + 1];
       i += 1;
@@ -67,6 +89,8 @@ function parseArgs(argv: readonly string[]): {
     repoRootDir,
     epurePinnedSha,
     requirePrApprovalsOnDev,
+    includeFrontendReviewers,
+    customDomainSpecialists,
     applyGithubSettings,
     githubToken,
     agentAppIntegrationId,
@@ -98,6 +122,8 @@ async function main(): Promise<void> {
     repoRootDir: args.repoRootDir,
     epurePinnedSha: args.epurePinnedSha,
     requirePrApprovalsOnDev: args.requirePrApprovalsOnDev,
+    includeFrontendReviewers: args.includeFrontendReviewers,
+    customDomainSpecialists: args.customDomainSpecialists,
     dryRun: args.dryRun
   });
 

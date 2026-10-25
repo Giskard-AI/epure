@@ -1,0 +1,171 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Pipeline de Revue Multi-Agents, Porte Impeccable & Squash Sémantique IA",
+    "subtitle": "Roster chargé depuis dev (max 4 agents), outils d'inspection en lecture seule, porte UI Impeccable et auto-remédiation bornée",
+    "legend": {
+      "entries": {
+        "frontend": { "label": "PR / Branche Cible" },
+        "backend": { "label": "Revue IA & Synthèse" },
+        "security": { "label": "Gouvernance & Checks" },
+        "database": { "label": "Outils Lecture Seule" },
+        "messagebus": { "label": "Auto-Remédiation" }
+      }
+    },
+    "visual_preset": "blueprint",
+    "quality_profile": "showcase",
+    "output": "docs/public/diagrams/fr/epure-review-pipeline.html"
+  },
+  "lanes": [
+    { "id": "pr_target", "label": "Branche PR & Rulesets (task/* -> feature/* / dev)" },
+    { "id": "roster_engine", "label": "Roster de Revue Multi-Agents (depuis dev)" },
+    { "id": "sandbox_tools", "label": "Outils Lecture Seule & Checks GitHub" },
+    { "id": "remediation", "label": "Auto-Remédiation & Escalade", "variant": "exception" }
+  ],
+  "phases": [
+    { "id": "select_phase", "label": "1. Sélection & Isolation", "fromCol": 0, "toCol": 1 },
+    { "id": "inspect_phase", "label": "2. Audit Outils & Portes", "fromCol": 2, "toCol": 3, "variant": "emphasis" },
+    { "id": "merge_phase", "label": "3. Squash ou Escalade", "fromCol": 4, "toCol": 5, "variant": "dashed" }
+  ],
+  "mainPath": [
+    "pr_opened",
+    "select_roster",
+    "agent_review",
+    "publish_checks",
+    "semantic_squash",
+    "branch_merged"
+  ],
+  "nodes": [
+    {
+      "id": "pr_opened",
+      "lane": "pr_target",
+      "col": 0,
+      "type": "frontend",
+      "label": "PR Ouverte",
+      "sublabel": "diff + SHA épinglé",
+      "tag": "diff non fiable",
+      "width": 132
+    },
+    {
+      "id": "semantic_squash",
+      "lane": "pr_target",
+      "col": 4,
+      "type": "backend",
+      "label": "Titre Squash IA",
+      "sublabel": "Conventional Commit",
+      "tag": "temp 0.0",
+      "width": 132
+    },
+    {
+      "id": "branch_merged",
+      "lane": "pr_target",
+      "col": 5,
+      "type": "security",
+      "label": "Merge Ruleset",
+      "sublabel": "auto task/* / humain dev",
+      "tag": "squash-only",
+      "width": 132
+    },
+    {
+      "id": "select_roster",
+      "lane": "roster_engine",
+      "col": 1,
+      "type": "security",
+      "label": "Roster depuis dev",
+      "sublabel": "max 4 spécialistes",
+      "tag": "depuis dev",
+      "width": 132
+    },
+    {
+      "id": "agent_review",
+      "lane": "roster_engine",
+      "col": 2,
+      "type": "backend",
+      "label": "Revue Parallèle",
+      "sublabel": "spec-parity + métier",
+      "tag": "balises XML",
+      "width": 132
+    },
+    {
+      "id": "readonly_tools",
+      "lane": "sandbox_tools",
+      "col": 2,
+      "type": "database",
+      "label": "Outils Lecture Seule",
+      "sublabel": "read_file, search_code",
+      "tag": "sans écriture",
+      "width": 132
+    },
+    {
+      "id": "publish_checks",
+      "lane": "sandbox_tools",
+      "col": 3,
+      "type": "security",
+      "label": "Checks GitHub",
+      "sublabel": "ai-review + impeccable",
+      "tag": "lié au SHA",
+      "width": 132
+    },
+    {
+      "id": "auto_fix",
+      "lane": "remediation",
+      "col": 3,
+      "type": "messagebus",
+      "label": "Fix Ciblé",
+      "sublabel": "relance agents en échec",
+      "tag": "essai 1..3",
+      "width": 132
+    },
+    {
+      "id": "escalate_human",
+      "lane": "remediation",
+      "col": 5,
+      "type": "security",
+      "label": "Escalade Humaine",
+      "sublabel": "après 3 échecs",
+      "tag": "needs-human",
+      "width": 132
+    }
+  ],
+  "edges": [
+    { "id": "pr-to-roster", "from": "pr_opened", "to": "select_roster", "label": "classer diff", "variant": "emphasis" },
+    { "id": "roster-to-review", "from": "select_roster", "to": "agent_review", "label": "max 4 agents", "variant": "default" },
+    { "id": "review-to-tools", "from": "agent_review", "to": "readonly_tools", "label": "inspecter", "variant": "dashed" },
+    { "id": "review-to-checks", "from": "agent_review", "to": "publish_checks", "label": "verdicts", "variant": "emphasis" },
+    { "id": "checks-to-squash", "from": "publish_checks", "to": "semantic_squash", "label": "0 must_fix", "variant": "emphasis", "fromSide": "top", "toSide": "left" },
+    { "id": "squash-to-merge", "from": "semantic_squash", "to": "branch_merged", "label": "PATCH + merge", "variant": "security" },
+    { "id": "checks-to-autofix", "from": "publish_checks", "to": "auto_fix", "label": "must_fix", "variant": "security", "role": "error" },
+    { "id": "autofix-to-review", "from": "auto_fix", "to": "agent_review", "label": "re-review", "variant": "dashed", "role": "return" },
+    { "id": "autofix-to-escalate", "from": "auto_fix", "to": "escalate_human", "label": ">3 essais", "variant": "security", "role": "error" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Roster de Confiance & Défense Prompt-Injection",
+      "items": [
+        "Prompts (.cursor/agents/*.md) chargés exclusivement depuis la branche dev",
+        "Diffs et commentaires isolés dans des balises XML <untrusted_pr_diff>",
+        "Jusqu'à 4 spécialistes sélectionnés dynamiquement + spec-parity-reviewer"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Outils Lecture Seule & Porte Impeccable",
+      "items": [
+        "Les agents appellent list_files, read_file, read_line_range et search_code",
+        "Les PRs UI exécutent user-advocate (implementation-review) et impeccable-gate",
+        "Les violations objectives WCAG AA, overflow et DESIGN.md bloquent le merge"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Remédiation Ciblée & Squash Sémantique IA",
+      "items": [
+        "Les tours 2 et 3 ne relancent que les reviewers en must_fix + spec-parity",
+        "Les correctifs sur feature/* passent par des PRs task/review-fix-*",
+        "L'IA synthétise un titre et un corps Conventional Commit avant le squash"
+      ]
+    }
+  ]
+}

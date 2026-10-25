@@ -40,3 +40,14 @@ Third-Party Attributions and Redistributed / Adapted Components (ADR-0018)
    - Pinned Reference: `v1.0.0` (deterministic authorization trajectory audit
      contract referenced in `actions/ifixai` and ADR-0019 / ADR-0020).
    - Copyright (c) iFixAi contributors.
+
+4. Archify Interactive Architecture Diagram Engine (`tt-a1i/archify`)
+   - Upstream Repository: https://github.com/tt-a1i/archify
+   - License: MIT License
+   - Pinned Reference: Embedded in `scripts/archify/` (ADR-0028 / Q98–Q99) for
+     offline showcase-quality IR validation and interactive HTML diagram rendering.
+   - Copyright (c) tt-a1i and Archify contributors.
+
+5. External Tooling Integrations (Invoked via Composite Actions / Workflows)
+   - Zizmor GitHub Actions Security Auditor: https://github.com/woodruffw/zizmor
+   - Renovate Dependency Automation: https://github.com/renovatebot/renovate

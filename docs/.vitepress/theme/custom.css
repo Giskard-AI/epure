@@ -1,0 +1,234 @@
+/* DESIGN.md — EPURE Architectural Blueprint Design System (Impeccable Gate) */
+
+:root {
+  --epure-brand-1: #1d4ed8;
+  --epure-brand-2: #1e40af;
+  --epure-brand-accent: #0284c7;
+  --epure-brand-soft: rgba(29, 78, 216, 0.10);
+  --epure-surface-card: #f8fafc;
+  --epure-surface-elevated: #ffffff;
+  --epure-border-subtle: #cbd5e1;
+  --epure-border-strong: #64748b;
+  --epure-text-primary: #0f172a;
+  --epure-text-secondary: #334155;
+
+  --epure-grid-line: rgba(29, 78, 216, 0.055);
+  --epure-radial-glow: radial-gradient(
+    900px circle at 50% -120px,
+    rgba(29, 78, 216, 0.12),
+    rgba(2, 132, 199, 0.05) 45%,
+    transparent 75%
+  );
+  --epure-toolbar-gradient: linear-gradient(
+    90deg,
+    rgba(29, 78, 216, 0.06) 0%,
+    rgba(248, 250, 252, 0.94) 45%
+  );
+  --epure-card-shadow: 0 8px 24px -6px rgba(15, 23, 42, 0.07),
+    0 2px 6px -1px rgba(15, 23, 42, 0.04);
+  --epure-card-shadow-hover: 0 16px 36px -8px rgba(29, 78, 216, 0.16),
+    0 4px 12px -2px rgba(15, 23, 42, 0.06);
+
+  /* 3-Category Taxonomy Tokens (Q101) */
+  --epure-gate-human-bg: #fef3c7;
+  --epure-gate-human-fg: #92400e;
+  --epure-gate-human-border: #d97706;
+
+  --epure-step-auto-bg: #dbeafe;
+  --epure-step-auto-fg: #1e3a8a;
+  --epure-step-auto-border: #2563eb;
+
+  --epure-step-optional-bg: #d1fae5;
+  --epure-step-optional-fg: #065f46;
+  --epure-step-optional-border: #059669;
+
+  --epure-danger-bg: #fef2f2;
+  --epure-danger-fg: #991b1b;
+  --epure-danger-border: #dc2626;
+
+  /* VitePress Brand & Hero Overrides */
+  --vp-c-brand-1: var(--epure-brand-1);
+  --vp-c-brand-2: var(--epure-brand-2);
+  --vp-c-brand-3: var(--epure-brand-1);
+  --vp-c-brand-soft: var(--epure-brand-soft);
+
+  --vp-home-hero-name-color: transparent;
+  --vp-home-hero-name-background: linear-gradient(
+    125deg,
+    #1e3a8a 0%,
+    #2563eb 48%,
+    #0d9488 100%
+  );
+  --vp-home-hero-image-background-image: radial-gradient(
+    circle,
+    rgba(29, 78, 216, 0.16) 0%,
+    rgba(78, 216, 184, 0.14) 52%,
+    transparent 72%
+  );
+  --vp-home-hero-image-filter: blur(44px);
+
+  --vp-font-family-base: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --vp-font-family-mono: "JetBrains Mono", "Fira Code", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.dark {
+  --epure-brand-1: #60a5fa;
+  --epure-brand-2: #93c5fd;
+  --epure-brand-accent: #38bdf8;
+  --epure-brand-soft: rgba(96, 165, 250, 0.14);
+  --epure-surface-card: #0f172a;
+  --epure-surface-elevated: #1e293b;
+  --epure-border-subtle: #334155;
+  --epure-border-strong: #94a3b8;
+  --epure-text-primary: #f8fafc;
+  --epure-text-secondary: #cbd5e1;
+
+  --epure-grid-line: rgba(96, 165, 250, 0.065);
+  --epure-radial-glow: radial-gradient(
+    950px circle at 50% -140px,
+    rgba(56, 189, 248, 0.16),
+    rgba(37, 99, 235, 0.08) 45%,
+    transparent 75%
+  );
+  --epure-toolbar-gradient: linear-gradient(
+    90deg,
+    rgba(56, 189, 248, 0.12) 0%,
+    rgba(15, 23, 42, 0.92) 50%
+  );
+  --epure-card-shadow: 0 12px 32px -8px rgba(0, 0, 0, 0.45);
+  --epure-card-shadow-hover: 0 18px 42px -8px rgba(56, 189, 248, 0.22);
+
+  /* 3-Category Taxonomy Tokens (Q101 - Dark Mode) */
+  --epure-gate-human-bg: #451a03;
+  --epure-gate-human-fg: #fde68a;
+  --epure-gate-human-border: #f59e0b;
+
+  --epure-step-auto-bg: #172554;
+  --epure-step-auto-fg: #bfdbfe;
+  --epure-step-auto-border: #60a5fa;
+
+  --epure-step-optional-bg: #064e3b;
+  --epure-step-optional-fg: #a7f3d0;
+  --epure-step-optional-border: #34d399;
+
+  --epure-danger-bg: #450a0a;
+  --epure-danger-fg: #fecaca;
+  --epure-danger-border: #f87171;
+
+  --vp-c-brand-1: var(--epure-brand-1);
+  --vp-c-brand-2: var(--epure-brand-2);
+  --vp-c-brand-3: var(--epure-brand-1);
+  --vp-c-brand-soft: var(--epure-brand-soft);
+
+  --vp-home-hero-name-color: transparent;
+  --vp-home-hero-name-background: linear-gradient(
+    125deg,
+    #93c5fd 0%,
+    #38bdf8 50%,
+    #5eead4 100%
+  );
+  --vp-home-hero-image-background-image: radial-gradient(
+    circle,
+    rgba(96, 165, 250, 0.22) 0%,
+    rgba(94, 234, 212, 0.18) 52%,
+    transparent 74%
+  );
+  --vp-home-hero-image-filter: blur(48px);
+}
+
+/* Architectural Blueprint Grid & Atmospheric Background */
+.VPContent {
+  background-image: var(--epure-radial-glow),
+    linear-gradient(to right, var(--epure-grid-line) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--epure-grid-line) 1px, transparent 1px);
+  background-size: 100% 100%, 32px 32px, 32px 32px;
+  background-position: center top, -1px -1px, -1px -1px;
+}
+
+/* Interactive Feature Cards with Blueprint Hover Elevation */
+.VPFeature {
+  border: 1px solid var(--epure-border-subtle) !important;
+  background: var(--epure-surface-card) !important;
+  box-shadow: var(--epure-card-shadow);
+  transition: transform 0.22s cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 0.22s ease, box-shadow 0.22s ease !important;
+}
+
+.VPFeature:hover {
+  transform: translateY(-4px);
+  border-color: var(--epure-brand-1) !important;
+  box-shadow: var(--epure-card-shadow-hover);
+}
+
+/* Editorial reading rhythm & responsive safety */
+.vp-doc {
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+.vp-doc p,
+.vp-doc li {
+  line-height: 1.7;
+  max-width: 74ch;
+}
+
+.vp-doc h1 {
+  letter-spacing: -0.02em;
+}
+
+.vp-doc h2 {
+  border-top: 1px dashed var(--epure-border-subtle);
+  padding-top: 1.5rem;
+}
+
+/* Taxonomy Badges for Q101 */
+.epure-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.18rem 0.65rem;
+  border-radius: 9999px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  line-height: 1.3;
+  vertical-align: middle;
+  transition: transform 0.15s ease;
+}
+
+.epure-badge:hover {
+  transform: translateY(-1px);
+}
+
+.epure-badge--human {
+  background-color: var(--epure-gate-human-bg);
+  color: var(--epure-gate-human-fg);
+  border: 1px solid var(--epure-gate-human-border);
+}
+
+.epure-badge--auto {
+  background-color: var(--epure-step-auto-bg);
+  color: var(--epure-step-auto-fg);
+  border: 1px solid var(--epure-step-auto-border);
+}
+
+.epure-badge--optional {
+  background-color: var(--epure-step-optional-bg);
+  color: var(--epure-step-optional-fg);
+  border: 1px dashed var(--epure-step-optional-border);
+}
+
+/* Global Keyboard Accessibility Focus Ring */
+a:focus-visible,
+button:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--epure-brand-1);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .VPFeature,
+  .epure-badge {
+    transition: none !important;
+    transform: none !important;
+  }
+}

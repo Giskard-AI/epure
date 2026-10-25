@@ -358,5 +358,17 @@ _Éviter_ : reporter toute la validation UX et d'accessibilité après le codage
 **Synthèse de message de squash sémantique par IA (Q94)** : génération juste avant chaque squash-merge, par un modèle léger à température nulle inspectant le diff consolidé de la PR, d'un titre Conventional Commit (`type(scope): summary (#PR)`) synchronisé sur la PR et d'un corps concis listant les changements effectifs, en utilisant `Refs #<ticket>` lors de l'intégration `task/* -> feature/*` et `Closes #<issue>` / `Closes #<ticket>` uniquement lors de l'atterrissage sur la branche par défaut `dev`.
 _Éviter_ : conserver des messages de commits intermédiaires de debug dans l'historique de `feature/*` ou `dev`, ou supposer que `Closes #N` sur une branche non-default ferme automatiquement le ticket GitHub.
 
+## Taxonomie du flux d'orchestration et documentation bilingue (Q97–Q103)
+
+**Portes de validation humaine obligatoires (4 jalons, Q101)** : les quatre points de décision où l'intervention explicite d'un contributeur autorisé (`write` ou supérieur) est indispensable et ne peut jamais être déléguée à un agent : (1) lancement `/epure plan` et réponses au Grill sur l'issue de pilotage, (2) signature du plan approuvé par `/epure approve` verrouillant `spec_sha` dans `refs/epure/state/<issue>`, (3) validation humaine d'intégration par revue et squash-merge humain de la PR finale `feature/* -> dev`, et (4) release à déclenchement humain (`workflow_dispatch` de promotion fast-forward `dev -> main`).
+_Éviter_ : autoriser l'Agent App à fusionner du code applicatif dans `dev` ou `main` sans décision humaine explicite.
+
+**Étapes automatisées obligatoires (Q101)** : séquence déterministe exécutée par l'orchestrateur sur chaque fonctionnalité approuvée : génération documentaire sur `plan/<issue>-<slug>` (`GLOSSARY.md`, `docs/adr/`, `docs/specs/<slug>.md`) et création du graphe de tickets d'implémentation avec `blocked_by`, boucle TDD en sandbox sans secret (`npm test`, `npm run build`, `verify-contract`), revue indépendante multi-agents chargée depuis `dev` avec auto-remédiation bornée (`max_code_fix_attempts = 3`) et intégration sérialisée (`task/* -> feature/*`) par squash sémantique IA, puis revue de synthèse complète sur la PR finale `feature/* -> dev`.
+_Éviter_ : contourner la sandbox sans secret ou intégrer une branche `task/*` sans revue indépendante liée au SHA.
+
+**Étapes facultatives ou conditionnelles (Q101)** : opérations activées uniquement selon la nature du changement ou la demande explicite d'un contributeur autorisé : détour exploratoire `/prototype` (Q72) et preview GitHub Pages isolée (Q70, désactivée par défaut), génération de `DESIGN.md` + `user-advocate` (`design-gate` et `implementation-review`) + `impeccable-gate` (Q96, activés automatiquement uniquement lorsque le projet ou le diff comporte une surface UI/frontend), commandes de pilotage granulaire (`/epure to-spec`, `/epure to-tickets`, `/epure status`, `/epure cancel`), et escalade humaine (`needs-human`) en cas d'exception sensible ou d'épuisement des trois tentatives de correction.
+_Éviter_ : imposer les contrôles UI Impeccable ou un prototype exploratoire sur des projets ou tickets purement backend/CLI.
+
+
 
 

@@ -1,0 +1,113 @@
+{
+  "schema_version": 3,
+  "diagram_type": "lifecycle",
+  "meta": {
+    "title": "EPURE Issue State Machine (CAS Git Ref: refs/epure/state/<issue>)",
+    "subtitle": "Atomic Compare-And-Swap state transitions, batch comment cursor, and idempotent resumption",
+    "visual_preset": "blueprint",
+    "quality_profile": "showcase",
+    "output": "docs/public/diagrams/en/epure-state-machine.html"
+  },
+  "mainPath": [
+    "grilling",
+    "blueprint_dag",
+    "awaiting_approval",
+    "implementation",
+    "completed"
+  ],
+  "states": [
+    {
+      "id": "grilling",
+      "type": "start",
+      "label": "Grilling",
+      "sublabel": "/epure plan + replies",
+      "tag": "phase: grilling",
+      "step": "01"
+    },
+    {
+      "id": "blueprint_dag",
+      "type": "decision",
+      "label": "Spec & DAG",
+      "sublabel": "plan/* + tickets",
+      "tag": "spec + tickets",
+      "step": "02"
+    },
+    {
+      "id": "awaiting_approval",
+      "type": "waiting",
+      "label": "Awaiting Approval",
+      "sublabel": "human sign-off",
+      "tag": "gate 2",
+      "step": "03"
+    },
+    {
+      "id": "implementation",
+      "type": "active",
+      "label": "Implementation",
+      "sublabel": "TDD + review loop",
+      "tag": "spec_sha locked",
+      "step": "04"
+    },
+    {
+      "id": "completed",
+      "type": "success",
+      "label": "Completed",
+      "sublabel": "feature/* -> dev PR",
+      "tag": "ready for merge",
+      "step": "05"
+    },
+    {
+      "id": "failed",
+      "type": "failure",
+      "label": "Needs Human",
+      "sublabel": ">3 tries or sensitive",
+      "tag": "escalation"
+    },
+    {
+      "id": "cancelled",
+      "type": "neutral",
+      "label": "Cancelled",
+      "sublabel": "/epure cancel",
+      "tag": "terminal"
+    }
+  ],
+  "transitions": [
+    { "id": "grill-to-blueprint", "from": "grilling", "to": "blueprint_dag", "label": "settled" },
+    { "id": "blueprint-to-grill", "from": "blueprint_dag", "to": "grilling", "label": "next round" },
+    { "id": "blueprint-to-awaiting", "from": "blueprint_dag", "to": "awaiting_approval", "label": "DAG ready" },
+    { "id": "awaiting-to-impl", "from": "awaiting_approval", "to": "implementation", "label": "approve", "variant": "security" },
+    { "id": "impl-to-completed", "from": "implementation", "to": "completed", "label": "DAG merged", "variant": "emphasis" },
+    { "id": "impl-to-failed", "from": "implementation", "to": "failed", "label": ">3 tries", "variant": "security" },
+    { "id": "failed-to-impl", "from": "failed", "to": "implementation", "label": "re-approve", "variant": "emphasis" },
+    { "id": "awaiting-to-cancelled", "from": "awaiting_approval", "to": "cancelled", "label": "cancel" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Out-of-Branch CAS Persistence",
+      "items": [
+        "State lives in refs/epure/state/<issue> via atomic git update-ref CAS",
+        "Zero state-machine commit pollution on dev or main branches",
+        "Synchronized with a human-readable Markdown dashboard in the issue body"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Batch Cursor & Implicit Grill",
+      "items": [
+        "last_processed_comment_id processes queued human replies in strict order",
+        "Any comment during grilling is accepted without repeating a slash command",
+        "Optional /epure to-spec and /epure to-tickets force immediate transitions"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Idempotent Resumption",
+      "items": [
+        "Re-posting /epure approve after a failure preloads merged files from feature/*",
+        "Already closed tickets in the DAG are automatically skipped",
+        "/epure cancel halts new runs while preserving branches and audit traces"
+      ]
+    }
+  ]
+}

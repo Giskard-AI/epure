@@ -1,0 +1,162 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "EPURE Multi-Agent PR Review, Impeccable Gate & Semantic Squash Pipeline",
+    "subtitle": "Trusted dev roster (max 4 agents), read-only code inspection tools, Impeccable UI gate, and bounded remediation",
+    "visual_preset": "blueprint",
+    "quality_profile": "showcase",
+    "output": "docs/public/diagrams/en/epure-review-pipeline.html"
+  },
+  "lanes": [
+    { "id": "pr_target", "label": "PR Branch & Rulesets (task/* -> feature/* / dev)" },
+    { "id": "roster_engine", "label": "Multi-Agent Reviewer Roster (from trusted dev)" },
+    { "id": "sandbox_tools", "label": "Read-Only Inspection & Checks" },
+    { "id": "remediation", "label": "Auto-Remediation & Escalation", "variant": "exception" }
+  ],
+  "phases": [
+    { "id": "select_phase", "label": "1. Select & Isolate", "fromCol": 0, "toCol": 1 },
+    { "id": "inspect_phase", "label": "2. Tool Audit & Gates", "fromCol": 2, "toCol": 3, "variant": "emphasis" },
+    { "id": "merge_phase", "label": "3. Squash or Escalate", "fromCol": 4, "toCol": 5, "variant": "dashed" }
+  ],
+  "mainPath": [
+    "pr_opened",
+    "select_roster",
+    "agent_review",
+    "publish_checks",
+    "semantic_squash",
+    "branch_merged"
+  ],
+  "nodes": [
+    {
+      "id": "pr_opened",
+      "lane": "pr_target",
+      "col": 0,
+      "type": "frontend",
+      "label": "PR Opened",
+      "sublabel": "diff + SHA pinned",
+      "tag": "untrusted diff",
+      "width": 132
+    },
+    {
+      "id": "semantic_squash",
+      "lane": "pr_target",
+      "col": 4,
+      "type": "backend",
+      "label": "AI Squash Title",
+      "sublabel": "Conventional Commit",
+      "tag": "temp 0.0",
+      "width": 132
+    },
+    {
+      "id": "branch_merged",
+      "lane": "pr_target",
+      "col": 5,
+      "type": "security",
+      "label": "Ruleset Merge",
+      "sublabel": "auto task/* or human dev",
+      "tag": "squash-only",
+      "width": 132
+    },
+    {
+      "id": "select_roster",
+      "lane": "roster_engine",
+      "col": 1,
+      "type": "security",
+      "label": "Load dev Roster",
+      "sublabel": "max 4 specialists",
+      "tag": "from dev only",
+      "width": 132
+    },
+    {
+      "id": "agent_review",
+      "lane": "roster_engine",
+      "col": 2,
+      "type": "backend",
+      "label": "Parallel Review",
+      "sublabel": "spec-parity + domain",
+      "tag": "XML wrapped",
+      "width": 132
+    },
+    {
+      "id": "readonly_tools",
+      "lane": "sandbox_tools",
+      "col": 2,
+      "type": "database",
+      "label": "Read-Only Tools",
+      "sublabel": "read_file, search_code",
+      "tag": "no write access",
+      "width": 132
+    },
+    {
+      "id": "publish_checks",
+      "lane": "sandbox_tools",
+      "col": 3,
+      "type": "security",
+      "label": "GitHub Checks",
+      "sublabel": "ai-review + impeccable",
+      "tag": "SHA bound",
+      "width": 132
+    },
+    {
+      "id": "auto_fix",
+      "lane": "remediation",
+      "col": 3,
+      "type": "messagebus",
+      "label": "Targeted Fix",
+      "sublabel": "retry failed agents",
+      "tag": "attempt 1..3",
+      "width": 132
+    },
+    {
+      "id": "escalate_human",
+      "lane": "remediation",
+      "col": 5,
+      "type": "security",
+      "label": "Needs Human",
+      "sublabel": "after 3 failed fixes",
+      "tag": "escalation",
+      "width": 132
+    }
+  ],
+  "edges": [
+    { "id": "pr-to-roster", "from": "pr_opened", "to": "select_roster", "label": "classify diff", "variant": "emphasis" },
+    { "id": "roster-to-review", "from": "select_roster", "to": "agent_review", "label": "max 4 agents", "variant": "default" },
+    { "id": "review-to-tools", "from": "agent_review", "to": "readonly_tools", "label": "inspect repo", "variant": "dashed" },
+    { "id": "review-to-checks", "from": "agent_review", "to": "publish_checks", "label": "verdicts", "variant": "emphasis" },
+    { "id": "checks-to-squash", "from": "publish_checks", "to": "semantic_squash", "label": "0 must_fix", "variant": "emphasis", "fromSide": "top", "toSide": "left" },
+    { "id": "squash-to-merge", "from": "semantic_squash", "to": "branch_merged", "label": "PATCH + merge", "variant": "security" },
+    { "id": "checks-to-autofix", "from": "publish_checks", "to": "auto_fix", "label": "must_fix found", "variant": "security", "role": "error" },
+    { "id": "autofix-to-review", "from": "auto_fix", "to": "agent_review", "label": "re-review", "variant": "dashed", "role": "return" },
+    { "id": "autofix-to-escalate", "from": "auto_fix", "to": "escalate_human", "label": ">3 attempts", "variant": "security", "role": "error" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Trusted dev Roster & Prompt-Injection Defense",
+      "items": [
+        "Reviewer definitions (.cursor/agents/*.md) are loaded strictly from dev",
+        "Diffs and comments are wrapped in <untrusted_pr_diff> XML guards",
+        "Up to 4 specialists selected dynamically + spec-parity-reviewer"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Read-Only Tooling & Impeccable Gate",
+      "items": [
+        "Agents call list_files, read_file, read_line_range, and search_code",
+        "Frontend PRs run user-advocate (implementation-review) and impeccable-gate",
+        "Objective WCAG AA, layout overflow, and DESIGN.md violations block merge"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Targeted Remediation & AI Semantic Squash",
+      "items": [
+        "Rounds 2-3 re-run only reviewers that emitted must_fix + spec-parity",
+        "Feature PR fixes route via task/review-fix-* PRs to respect rulesets",
+        "AI synthesizes a clean Conventional Commit title and body before squash"
+      ]
+    }
+  ]
+}

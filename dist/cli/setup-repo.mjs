@@ -109,9 +109,42 @@ var JSON_OUTPUT_CONTRACT_BLOCK = [
   "- Use `must_fix` ONLY for objective correctness bugs, broken domain invariants, security flaws, missing spec requirements, or blocking accessibility/UX failures.",
   "- Use `informational` for non-blocking suggestions."
 ].join("\n");
+function buildStackStandardsBullets(stackKind) {
+  switch (stackKind) {
+    case "python":
+      return [
+        "- Enforce strict Python type annotations (`mypy` / `pyright`) and `ruff` compliance without blanket `# type: ignore`.",
+        "- Verify that tests use parameterized `@pytest.mark.parametrize` tables with descriptive test IDs covering nominal and edge cases.",
+        "- Ensure surgical, minimal code free of dead imports or speculative abstractions."
+      ];
+    case "rust":
+      return [
+        "- Enforce idiomatic, warning-free Rust (`cargo clippy -- -D warnings`), avoiding `unwrap()` / `expect()` in production paths.",
+        "- Verify that tests use table-driven or parameterized test cases covering nominal and boundary conditions.",
+        "- Ensure surgical, minimal code free of dead code or speculative traits."
+      ];
+    case "go":
+      return [
+        "- Enforce idiomatic Go error handling and strict `go vet` / `golangci-lint` cleanliness.",
+        "- Verify that tests use table-driven `t.Run` subtests with descriptive case names covering nominal and edge cases.",
+        "- Ensure surgical, minimal code free of unused exports or premature abstractions."
+      ];
+    case "node":
+    case "generic":
+    default:
+      return [
+        "- Enforce strict TypeScript types (no `any` or unsafe casts without guard).",
+        "- Verify that tests use parameterized `it.each` tables with descriptive test IDs covering nominal and edge cases.",
+        "- Ensure surgical, minimal code free of dead imports or speculative abstractions."
+      ];
+  }
+}
 function buildDefaultReviewerRosterFiles(params) {
   const repo = params.repository.trim() || "consumer/repo";
-  return [
+  const stackKind = params.stackKind ?? "node";
+  const includeUi = params.includeFrontendReviewers !== false;
+  const customSpecialists = params.customDomainSpecialists ?? [];
+  const files = [
     {
       name: "domain-backend-reviewer",
       path: ".cursor/agents/domain-backend-reviewer.md",
@@ -132,8 +165,38 @@ function buildDefaultReviewerRosterFiles(params) {
         JSON_OUTPUT_CONTRACT_BLOCK,
         ""
       ].join("\n")
-    },
-    {
+    }
+  ];
+  for (const spec of customSpecialists) {
+    const cleanName = spec.name.trim().toLowerCase().replace(/\.md$/i, "").replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
+    if (!cleanName) continue;
+    const reviewerName = cleanName.endsWith("-reviewer") ? cleanName : `${cleanName}-reviewer`;
+    if (files.some((f) => f.name === reviewerName)) continue;
+    files.push({
+      name: reviewerName,
+      path: `.cursor/agents/${reviewerName}.md`,
+      category: "specialist",
+      content: [
+        "---",
+        `name: ${reviewerName}`,
+        `description: ${spec.description || `Domain specialist reviewer (${reviewerName}) for ${repo}.`}`,
+        "---",
+        "",
+        `# Specialist Reviewer \u2014 \`${reviewerName}\` (\`${repo}\`)`,
+        "",
+        "## Scope & Responsibilities",
+        ...spec.scopeResponsibilities.length > 0 ? spec.scopeResponsibilities.map((b) => b.startsWith("-") ? b : `- ${b}`) : [
+          `- Verify domain invariants, module boundaries, and edge cases specific to \`${reviewerName}\`.`,
+          "- Enforce alignment with `GLOSSARY.md` and `docs/adr/*.md`."
+        ],
+        "",
+        JSON_OUTPUT_CONTRACT_BLOCK,
+        ""
+      ].join("\n")
+    });
+  }
+  if (includeUi) {
+    files.push({
       name: "frontend-reviewer",
       path: ".cursor/agents/frontend-reviewer.md",
       category: "specialist",
@@ -153,7 +216,9 @@ function buildDefaultReviewerRosterFiles(params) {
         JSON_OUTPUT_CONTRACT_BLOCK,
         ""
       ].join("\n")
-    },
+    });
+  }
+  files.push(
     {
       name: "infra-reviewer",
       path: ".cursor/agents/infra-reviewer.md",
@@ -167,7 +232,7 @@ function buildDefaultReviewerRosterFiles(params) {
         `# Infrastructure & Build Reviewer (\`${repo}\`)`,
         "",
         "## Scope & Responsibilities",
-        "- Audit `package.json`, `tsconfig.json`, `vite.config.*`, and `.github/workflows/*` changes.",
+        "- Audit build manifests (`package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, `Makefile`, `Dockerfile`) and `.github/workflows/*` changes.",
         "- Ensure deterministic builds, pinned dependencies, and zero secret exposure in scripts or workflows.",
         "",
         JSON_OUTPUT_CONTRACT_BLOCK,
@@ -244,92 +309,95 @@ function buildDefaultReviewerRosterFiles(params) {
       content: [
         "---",
         "name: standards-reviewer",
-        `description: Coding standards, strict TypeScript typing, and parameterized test quality (it.each) reviewer for ${repo}.`,
+        `description: Coding standards, strict typing, and parameterized test quality reviewer for ${repo} (stack: ${stackKind}).`,
         "---",
         "",
         `# Coding Standards & Test Quality Reviewer (\`${repo}\`)`,
         "",
         "## Scope & Responsibilities",
-        "- Enforce strict TypeScript types (no `any` or unsafe casts without guard).",
-        "- Verify that tests use parameterized `it.each` tables with descriptive test IDs covering nominal and edge cases.",
-        "- Ensure surgical, minimal code free of dead imports or speculative abstractions.",
-        "",
-        JSON_OUTPUT_CONTRACT_BLOCK,
-        ""
-      ].join("\n")
-    },
-    {
-      name: "accessibility-reviewer",
-      path: ".cursor/agents/accessibility-reviewer.md",
-      category: "cross-cutting",
-      content: [
-        "---",
-        "name: accessibility-reviewer",
-        `description: WCAG 2.1 AA accessibility, semantic HTML, ARIA attributes, keyboard navigation, and focus management reviewer for ${repo}.`,
-        "---",
-        "",
-        `# Accessibility (WCAG 2.1 AA) Reviewer (\`${repo}\`)`,
-        "",
-        "## Scope & Responsibilities",
-        '- Verify semantic landmarks (`main`, `nav`, `section`, `form`), explicit `<label>` associations on all form controls, and `aria-live` / `role="alert"` on dynamic validation errors.',
-        "- Check keyboard operability (`Tab`, `Enter`, `Space`, `Escape`) and visible focus states.",
-        "- Ensure sufficient color contrast and non-color-only status indicators.",
-        "",
-        JSON_OUTPUT_CONTRACT_BLOCK,
-        ""
-      ].join("\n")
-    },
-    {
-      name: "design-reviewer",
-      path: ".cursor/agents/design-reviewer.md",
-      category: "cross-cutting",
-      content: [
-        "---",
-        "name: design-reviewer",
-        `description: Impeccable UI/UX quality gate checking DESIGN.md tokens, responsive layout integrity, and interaction states for ${repo}.`,
-        "---",
-        "",
-        `# Impeccable Design & Layout Reviewer (\`${repo}\`)`,
-        "",
-        "## Scope & Responsibilities",
-        "- Verify compliance with `DESIGN.md` visual tokens, typography hierarchy, and spacing scale.",
-        "- Detect responsive layout overflows, broken grid/flex alignments, and missing interaction states (loading, empty, error, disabled).",
-        "- Distinguish objective design/layout violations (`must_fix`) from purely subjective aesthetic preferences (`informational`).",
-        "",
-        JSON_OUTPUT_CONTRACT_BLOCK,
-        ""
-      ].join("\n")
-    },
-    {
-      name: "user-advocate",
-      path: ".cursor/agents/user-advocate.md",
-      category: "persona",
-      content: [
-        "---",
-        "name: user-advocate",
-        `description: Persona-driven UX advocate for ${repo} operating in design-gate (pre-implementation) and implementation-review (PR) modes.`,
-        "---",
-        "",
-        `# User Advocate \u2014 Persona Journey Reviewer (\`${repo}\`)`,
-        "",
-        "## Operating Modes",
-        "1. **`design-gate` (Pre-implementation on `plan/*`)**:",
-        "   - Walk the proposed specification and ticket graph through the eyes of each target user persona.",
-        "   - Identify missing workflow steps, confusing terminology, unguarded destructive actions, or friction points.",
-        "   - Enrich UI tickets with concrete persona acceptance criteria before `/epure approve`.",
-        "2. **`implementation-review` (Post-implementation on PRs)**:",
-        "   - Walk the implemented UI/API diff as each persona attempting their core task end-to-end.",
-        "   - Flag dead-ends, missing feedback when a rule blocks an action, or unreadable outputs as `must_fix`.",
-        "",
-        "## Default Domain Personas (Adapted during `/epure plan`)",
-        "- **Primary Operator / Power User**: Needs fast, accurate feedback, clear constraint explanations, and reliable state persistence.",
-        "- **First-Time / Casual User**: Needs self-explanatory labels, safe defaults, and immediate visual guidance when an input is invalid.",
+        ...buildStackStandardsBullets(stackKind),
         "",
         JSON_OUTPUT_CONTRACT_BLOCK,
         ""
       ].join("\n")
     }
-  ];
+  );
+  if (includeUi) {
+    files.push(
+      {
+        name: "accessibility-reviewer",
+        path: ".cursor/agents/accessibility-reviewer.md",
+        category: "cross-cutting",
+        content: [
+          "---",
+          "name: accessibility-reviewer",
+          `description: WCAG 2.1 AA accessibility, semantic HTML, ARIA attributes, keyboard navigation, and focus management reviewer for ${repo}.`,
+          "---",
+          "",
+          `# Accessibility (WCAG 2.1 AA) Reviewer (\`${repo}\`)`,
+          "",
+          "## Scope & Responsibilities",
+          '- Verify semantic landmarks (`main`, `nav`, `section`, `form`), explicit `<label>` associations on all form controls, and `aria-live` / `role="alert"` on dynamic validation errors.',
+          "- Check keyboard operability (`Tab`, `Enter`, `Space`, `Escape`) and visible focus states.",
+          "- Ensure sufficient color contrast and non-color-only status indicators.",
+          "",
+          JSON_OUTPUT_CONTRACT_BLOCK,
+          ""
+        ].join("\n")
+      },
+      {
+        name: "design-reviewer",
+        path: ".cursor/agents/design-reviewer.md",
+        category: "cross-cutting",
+        content: [
+          "---",
+          "name: design-reviewer",
+          `description: Impeccable UI/UX quality gate checking DESIGN.md tokens, responsive layout integrity, and interaction states for ${repo}.`,
+          "---",
+          "",
+          `# Impeccable Design & Layout Reviewer (\`${repo}\`)`,
+          "",
+          "## Scope & Responsibilities",
+          "- Verify compliance with `DESIGN.md` visual tokens, typography hierarchy, and spacing scale.",
+          "- Detect responsive layout overflows, broken grid/flex alignments, and missing interaction states (loading, empty, error, disabled).",
+          "- Distinguish objective design/layout violations (`must_fix`) from purely subjective aesthetic preferences (`informational`).",
+          "",
+          JSON_OUTPUT_CONTRACT_BLOCK,
+          ""
+        ].join("\n")
+      }
+    );
+  }
+  files.push({
+    name: "user-advocate",
+    path: ".cursor/agents/user-advocate.md",
+    category: "persona",
+    content: [
+      "---",
+      "name: user-advocate",
+      `description: Persona-driven UX advocate for ${repo} operating in design-gate (pre-implementation) and implementation-review (PR) modes.`,
+      "---",
+      "",
+      `# User Advocate \u2014 Persona Journey Reviewer (\`${repo}\`)`,
+      "",
+      "## Operating Modes",
+      "1. **`design-gate` (Pre-implementation on `plan/*`)**:",
+      "   - Walk the proposed specification and ticket graph through the eyes of each target user persona.",
+      "   - Identify missing workflow steps, confusing terminology, unguarded destructive actions, or friction points.",
+      "   - Enrich UI tickets with concrete persona acceptance criteria before `/epure approve`.",
+      "2. **`implementation-review` (Post-implementation on PRs)**:",
+      "   - Walk the implemented UI/API diff as each persona attempting their core task end-to-end.",
+      "   - Flag dead-ends, missing feedback when a rule blocks an action, or unreadable outputs as `must_fix`.",
+      "",
+      "## Default Domain Personas (Adapted during `/epure plan`)",
+      "- **Primary Operator / Power User**: Needs fast, accurate feedback, clear constraint explanations, and reliable state persistence.",
+      "- **First-Time / Casual User**: Needs self-explanatory labels, safe defaults, and immediate visual guidance when an input is invalid.",
+      "",
+      JSON_OUTPUT_CONTRACT_BLOCK,
+      ""
+    ].join("\n")
+  });
+  return files;
 }
 
 // src/bootstrap/ci-and-renovate.ts
@@ -460,21 +528,40 @@ function buildZizmorConfigYaml() {
 function buildRenovateConfigJson(stack) {
   const packageRules = [
     {
-      description: "Actions and container image cooldown (7 days)",
+      description: "Supply-chain protection: never merge or propose day-1 releases (default 3-day quarantine cooldown)",
+      matchUpdateTypes: ["major", "minor", "patch", "pin", "digest"],
+      minimumReleaseAge: "3 days"
+    },
+    {
+      description: "Expedite verified security vulnerability patches while keeping PR review trace",
+      matchCategories: ["security"],
+      minimumReleaseAge: "0 days",
+      automerge: false
+    },
+    {
+      description: "Actions and container image cooldown (7 days) + automatic PR update for digests & versions",
       matchManagers: ["github-actions", "dockerfile", "docker-compose"],
       minimumReleaseAge: "7 days"
     },
     {
       description: "Group GitHub Actions digest & version updates",
       groupName: "github-actions",
-      matchManagers: ["github-actions"]
+      matchManagers: ["github-actions"],
+      automerge: false
+    },
+    {
+      description: "Require explicit maintainer review on major updates",
+      matchUpdateTypes: ["major"],
+      automerge: false,
+      dependencyDashboardApproval: false
     }
   ];
   if (stack.hasDockerfile || stack.hasDockerCompose) {
     packageRules.push({
       description: "Group Docker and compose image updates",
       groupName: "docker",
-      matchManagers: ["dockerfile", "docker-compose"]
+      matchManagers: ["dockerfile", "docker-compose"],
+      automerge: false
     });
   }
   if (stack.kind === "node") {
@@ -495,7 +582,8 @@ function buildRenovateConfigJson(stack) {
         description: "npm major cooldown",
         matchDatasources: ["npm"],
         matchUpdateTypes: ["major"],
-        minimumReleaseAge: "14 days"
+        minimumReleaseAge: "14 days",
+        automerge: false
       }
     );
     if (stack.subprojects.length > 0) {
@@ -504,7 +592,7 @@ function buildRenovateConfigJson(stack) {
           description: `Group ${sub} npm minor, patch, and pin`,
           groupName: `${sub}-minor-and-patch`,
           matchFileNames: [`${sub}/package.json`],
-          matchUpdateTypes: ["minor", "patch", "pin"]
+          matchUpdateTypes: ["minor", "patch", "pin", "digest"]
         });
       }
     } else {
@@ -512,7 +600,7 @@ function buildRenovateConfigJson(stack) {
         description: "Group npm minor, patch, and pin updates",
         groupName: "npm-minor-and-patch",
         matchDatasources: ["npm"],
-        matchUpdateTypes: ["minor", "patch", "pin"]
+        matchUpdateTypes: ["minor", "patch", "pin", "digest"]
       });
     }
   } else if (stack.kind === "python") {
@@ -533,7 +621,7 @@ function buildRenovateConfigJson(stack) {
         description: "Group Python minor and patch updates",
         groupName: "python-minor-and-patch",
         matchDatasources: ["pypi"],
-        matchUpdateTypes: ["minor", "patch", "pin"]
+        matchUpdateTypes: ["minor", "patch", "pin", "digest"]
       }
     );
   } else if (stack.kind === "rust") {
@@ -541,7 +629,7 @@ function buildRenovateConfigJson(stack) {
       description: "Crates.io cooldown and grouping",
       groupName: "cargo-minor-and-patch",
       matchDatasources: ["crate"],
-      matchUpdateTypes: ["minor", "patch", "pin"],
+      matchUpdateTypes: ["minor", "patch", "pin", "digest"],
       minimumReleaseAge: "3 days"
     });
   } else if (stack.kind === "go") {
@@ -549,22 +637,45 @@ function buildRenovateConfigJson(stack) {
       description: "Go modules cooldown and grouping",
       groupName: "gomod-minor-and-patch",
       matchDatasources: ["go"],
-      matchUpdateTypes: ["minor", "patch", "pin"],
+      matchUpdateTypes: ["minor", "patch", "pin", "digest"],
       minimumReleaseAge: "3 days"
     });
   }
   const configObject = {
     $schema: "https://docs.renovatebot.com/renovate-schema.json",
     extends: [
-      "config:recommended",
+      "config:best-practices",
+      ":dependencyDashboard",
       "helpers:pinGitHubActionDigests",
       ":pinAllExceptPeerDependencies",
-      "docker:pinDigests"
+      "docker:pinDigests",
+      "security:openssf-scorecard",
+      ":enableVulnerabilityAlertsWithLabel(security)"
     ],
     baseBranchPatterns: ["dev"],
     schedule: ["before 6am on monday"],
-    labels: ["dependencies"],
+    timezone: "UTC",
+    labels: ["dependencies", "renovate"],
     semanticCommits: "enabled",
+    commitMessageAction: "bump",
+    rangeStrategy: "pin",
+    minimumReleaseAge: "3 days",
+    internalChecksFilter: "strict",
+    prCreation: "not-pending",
+    rebaseWhen: "behind-base-branch",
+    automerge: false,
+    platformAutomerge: false,
+    npmrc: "ignore-scripts=true\n",
+    lockFileMaintenance: {
+      enabled: true,
+      schedule: ["before 6am on the first day of the month"]
+    },
+    vulnerabilityAlerts: {
+      enabled: true,
+      labels: ["security", "dependencies"],
+      minimumReleaseAge: "0 days",
+      automerge: false
+    },
     prHourlyLimit: 2,
     prConcurrentLimit: 5,
     packageRules
@@ -1244,7 +1355,12 @@ function planAndApplyRepoSetup(input) {
     action: computeFilePlanAction(input.repoRootDir, wf.path, wf.content),
     content: wf.content
   }));
-  const rosterTemplates = buildDefaultReviewerRosterFiles({ repository });
+  const rosterTemplates = buildDefaultReviewerRosterFiles({
+    repository,
+    stackKind: detectedStack.kind,
+    includeFrontendReviewers: input.includeFrontendReviewers,
+    customDomainSpecialists: input.customDomainSpecialists
+  });
   const plannedReviewerRoster = rosterTemplates.map(
     (item) => ({
       name: item.name,
@@ -1515,6 +1631,8 @@ function parseArgs(argv) {
   let repoRootDir;
   let epurePinnedSha;
   let requirePrApprovalsOnDev;
+  let includeFrontendReviewers;
+  let customDomainSpecialists;
   let applyGithubSettings = false;
   let githubToken;
   let agentAppIntegrationId;
@@ -1526,7 +1644,7 @@ function parseArgs(argv) {
     if (arg === "--repo" && argv[i + 1]) {
       repository = argv[i + 1] ?? "";
       i += 1;
-    } else if ((arg === "--dir" || arg === "--repo-root") && argv[i + 1]) {
+    } else if ((arg === "--dir" || arg === "--repo-root" || arg === "--target-dir") && argv[i + 1]) {
       repoRootDir = argv[i + 1];
       i += 1;
     } else if (arg === "--pinned-sha" && argv[i + 1]) {
@@ -1535,6 +1653,19 @@ function parseArgs(argv) {
     } else if (arg === "--require-pr-approvals" && argv[i + 1]) {
       requirePrApprovalsOnDev = Number.parseInt(argv[i + 1] ?? "0", 10);
       i += 1;
+    } else if (arg === "--no-frontend-reviewers") {
+      includeFrontendReviewers = false;
+    } else if (arg === "--domain-reviewers" && argv[i + 1]) {
+      const rawCsv = argv[i + 1] ?? "";
+      i += 1;
+      customDomainSpecialists = rawCsv.split(",").map((s) => s.trim()).filter((s) => s.length > 0).map((name) => ({
+        name,
+        description: `Domain specialist reviewer (${name}) tailored by setup-repo.`,
+        scopeResponsibilities: [
+          `Verify domain invariants, module boundaries, and edge cases for ${name}.`,
+          "Enforce alignment with GLOSSARY.md and docs/adr/*.md."
+        ]
+      }));
     } else if (arg === "--github-token" && argv[i + 1]) {
       githubToken = argv[i + 1];
       i += 1;
@@ -1559,6 +1690,8 @@ function parseArgs(argv) {
     repoRootDir,
     epurePinnedSha,
     requirePrApprovalsOnDev,
+    includeFrontendReviewers,
+    customDomainSpecialists,
     applyGithubSettings,
     githubToken,
     agentAppIntegrationId,
@@ -1588,6 +1721,8 @@ async function main() {
     repoRootDir: args.repoRootDir,
     epurePinnedSha: args.epurePinnedSha,
     requirePrApprovalsOnDev: args.requirePrApprovalsOnDev,
+    includeFrontendReviewers: args.includeFrontendReviewers,
+    customDomainSpecialists: args.customDomainSpecialists,
     dryRun: args.dryRun
   });
   if (result.status !== "error" && !args.dryRun && args.applyGithubSettings) {

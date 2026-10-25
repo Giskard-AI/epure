@@ -5,7 +5,7 @@ status: accepted
 
 ## Contexte
 
-Le test pilote de bout en bout d'`EPURE v1.1.0` sur un dépôt consommateur réel (`Hartorn-Inc/enclume-astrale`) et la comparaison avec l'architecture de référence `Hartorn-Inc/cozyvtt` ont mis en évidence quatre décisions structurantes difficiles à inverser :
+Le test pilote de bout en bout d'`EPURE v1.1.0` sur un dépôt consommateur réel (`my-org/craft-calculator`) et la comparaison avec une architecture de référence multi-agents ont mis en évidence quatre décisions structurantes difficiles à inverser :
 1. Un GitHub Repository Ruleset unique ciblant simultanément `refs/heads/dev` et `refs/heads/feature/*` partagerait ses `bypass_actors` : accorder un bypass à l'`Agent App` pour squash-merger `task/* -> feature/*` lui permettrait aussi de fusionner du code applicatif dans `dev` sans intervention humaine, ce qui violerait la frontière de validation humaine ([ADR-0001](0001-branches-et-frontieres-de-validation.md), Q45).
 2. Un dépôt consommateur héberge dans `.cursor/agents/*.md` les définitions de ses reviewers spécialisés, transverses et `user-advocate`, enrichies avec les personas et invariants du domaine lors de `/epure plan`. Charger ces prompts directement depuis la branche de travail `task/*` inspectée exposerait la review à une injection de prompt d'auto-approbation par l'exécuteur ([ADR-0004](0004-separation-execution-et-publication.md), [ADR-0017](0017-prevention-des-boucles-review-independante-et-reprises.md)).
 3. La sélection et les re-passes de review multi-agents doivent concilier couverture spécialisée (domaine, UI, sécurité, parité spec, accessibilité Impeccable, personas `user-advocate`) et maîtrise du coût/temps sous le plafond `max_code_fix_attempts = 3` (Q78).

@@ -147,6 +147,7 @@ interface GitHubRestHelper {
   closeIssue(issueNumber: number): Promise<void>;
   getDefaultBranchSha(branch: string): Promise<string | null>;
   readBranchWorkspaceFiles(branch: string): Promise<Map<string, string>>;
+  readTrustedBaseRosterFiles(branch: string): Promise<Map<string, string>>;
   ensureBranch(branch: string, fromBranch?: string): Promise<string>;
   commitFilesToBranch(params: {
     branch: string;
@@ -374,6 +375,46 @@ function createGitHubRestHelper(params: {
             p === "renovate.json" ||
             p === "GLOSSARY.md"
           ) {
+            continue;
+          }
+          const blobRes = await apiRequest<{ content?: string; encoding?: string }>(
+            "GET",
+            `/repos/${owner}/${repo}/git/blobs/${entry.sha}`,
+            undefined,
+            true
+          );
+          if (blobRes.data?.content && blobRes.data.encoding === "base64") {
+            const decoded = Buffer.from(
+              blobRes.data.content.replace(/\s+/g, ""),
+              "base64"
+            ).toString("utf8");
+            filesMap.set(p, decoded);
+          }
+        }
+      } catch {
+        // Non-fatal if branch tree is unavailable or mocked in tests
+      }
+      return filesMap;
+    },
+
+    async readTrustedBaseRosterFiles(branch: string): Promise<Map<string, string>> {
+      const filesMap = new Map<string, string>();
+      try {
+        const treeRes = await apiRequest<{
+          tree?: Array<{ path?: string; type?: string; sha?: string }>;
+        }>(
+          "GET",
+          `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
+          undefined,
+          true
+        );
+        const entries = treeRes.data?.tree ?? [];
+        for (const entry of entries) {
+          if (entry.type !== "blob" || !entry.path || !entry.sha) {
+            continue;
+          }
+          const p = entry.path;
+          if (!/^\.cursor\/agents\/[a-z0-9-]+\.md$/i.test(p) && p !== "DESIGN.md") {
             continue;
           }
           const blobRes = await apiRequest<{ content?: string; encoding?: string }>(
@@ -1097,8 +1138,8 @@ export async function orchestrateIssueCommand(
         "    },",
         "    {",
         '      "index": 3,',
-        '      "slug": "interface-react-enclume-astrale",',
-        '      "title": "[Ticket 3] Interface interactive React L\'Enclume Astrale et persistance locale",',
+        '      "slug": "interface-react-craft-calculator",',
+        '      "title": "[Ticket 3] Interface interactive React du calculateur et persistance locale",',
         '      "description": "Construire l\'application React/Vite complète (calculateur de forge, simulateur de marché, grimoire du MJ, sauvegarde localStorage) et vérifier le build.",',
         '      "acceptance_criteria": ["Calculateur interactif avec garde-fou S <= B", "Simulateur de marché d20", "Build Vite et suite de tests Vitest 100% verts"],',
         '      "blocked_by_indices": [1, 2],',
@@ -1162,19 +1203,20 @@ export async function orchestrateIssueCommand(
           })
         : null;
 
+      const plannedStack = detectRepositoryStack({
+        targetFilesHint: allTargetFiles
+      });
       const adaptedRoster = adaptReviewerRosterForDomain({
         repository: input.repository,
         planTitle: issue.title,
         glossaryMarkdown: bundle.glossary_markdown,
         specMarkdown: bundle.spec_markdown,
         touchesFrontendUi,
+        stackKind: plannedStack.kind,
         personas: designGate?.personas,
         domainInvariants: designGate?.domain_invariants
       });
 
-      const plannedStack = detectRepositoryStack({
-        targetFilesHint: allTargetFiles
-      });
       const zizmorFile = buildZizmorConfigYaml();
       const renovateFile = buildRenovateConfigJson(plannedStack);
       const ciFile = buildStackAwareCiWorkflowYaml({
@@ -1383,6 +1425,12 @@ export async function orchestrateIssueCommand(
         });
       } catch {
         // Ignore if planBranch was already merged into dev on a previous attempt
+      }
+
+      // Load actual .cursor/agents/*.md files designed & committed on dev (Q92)
+      const remoteTrustedRoster = await gh.readTrustedBaseRosterFiles("dev");
+      for (const [relPath, content] of remoteTrustedRoster.entries()) {
+        trustedBaseFilesMap.set(relPath, content);
       }
 
       // Create feature branch from updated dev

@@ -207,14 +207,35 @@ export function buildRenovateConfigJson(
 ): GeneratedRepoGovernanceFile {
   const packageRules: Array<Record<string, unknown>> = [
     {
-      description: "Actions and container image cooldown (7 days)",
+      description:
+        "Supply-chain protection: never merge or propose day-1 releases (default 3-day quarantine cooldown)",
+      matchUpdateTypes: ["major", "minor", "patch", "pin", "digest"],
+      minimumReleaseAge: "3 days"
+    },
+    {
+      description:
+        "Expedite verified security vulnerability patches while keeping PR review trace",
+      matchCategories: ["security"],
+      minimumReleaseAge: "0 days",
+      automerge: false
+    },
+    {
+      description:
+        "Actions and container image cooldown (7 days) + automatic PR update for digests & versions",
       matchManagers: ["github-actions", "dockerfile", "docker-compose"],
       minimumReleaseAge: "7 days"
     },
     {
       description: "Group GitHub Actions digest & version updates",
       groupName: "github-actions",
-      matchManagers: ["github-actions"]
+      matchManagers: ["github-actions"],
+      automerge: false
+    },
+    {
+      description: "Require explicit maintainer review on major updates",
+      matchUpdateTypes: ["major"],
+      automerge: false,
+      dependencyDashboardApproval: false
     }
   ];
 
@@ -222,7 +243,8 @@ export function buildRenovateConfigJson(
     packageRules.push({
       description: "Group Docker and compose image updates",
       groupName: "docker",
-      matchManagers: ["dockerfile", "docker-compose"]
+      matchManagers: ["dockerfile", "docker-compose"],
+      automerge: false
     });
   }
 
@@ -244,7 +266,8 @@ export function buildRenovateConfigJson(
         description: "npm major cooldown",
         matchDatasources: ["npm"],
         matchUpdateTypes: ["major"],
-        minimumReleaseAge: "14 days"
+        minimumReleaseAge: "14 days",
+        automerge: false
       }
     );
 
@@ -254,7 +277,7 @@ export function buildRenovateConfigJson(
           description: `Group ${sub} npm minor, patch, and pin`,
           groupName: `${sub}-minor-and-patch`,
           matchFileNames: [`${sub}/package.json`],
-          matchUpdateTypes: ["minor", "patch", "pin"]
+          matchUpdateTypes: ["minor", "patch", "pin", "digest"]
         });
       }
     } else {
@@ -262,7 +285,7 @@ export function buildRenovateConfigJson(
         description: "Group npm minor, patch, and pin updates",
         groupName: "npm-minor-and-patch",
         matchDatasources: ["npm"],
-        matchUpdateTypes: ["minor", "patch", "pin"]
+        matchUpdateTypes: ["minor", "patch", "pin", "digest"]
       });
     }
   } else if (stack.kind === "python") {
@@ -283,7 +306,7 @@ export function buildRenovateConfigJson(
         description: "Group Python minor and patch updates",
         groupName: "python-minor-and-patch",
         matchDatasources: ["pypi"],
-        matchUpdateTypes: ["minor", "patch", "pin"]
+        matchUpdateTypes: ["minor", "patch", "pin", "digest"]
       }
     );
   } else if (stack.kind === "rust") {
@@ -291,7 +314,7 @@ export function buildRenovateConfigJson(
       description: "Crates.io cooldown and grouping",
       groupName: "cargo-minor-and-patch",
       matchDatasources: ["crate"],
-      matchUpdateTypes: ["minor", "patch", "pin"],
+      matchUpdateTypes: ["minor", "patch", "pin", "digest"],
       minimumReleaseAge: "3 days"
     });
   } else if (stack.kind === "go") {
@@ -299,7 +322,7 @@ export function buildRenovateConfigJson(
       description: "Go modules cooldown and grouping",
       groupName: "gomod-minor-and-patch",
       matchDatasources: ["go"],
-      matchUpdateTypes: ["minor", "patch", "pin"],
+      matchUpdateTypes: ["minor", "patch", "pin", "digest"],
       minimumReleaseAge: "3 days"
     });
   }
@@ -307,15 +330,38 @@ export function buildRenovateConfigJson(
   const configObject = {
     $schema: "https://docs.renovatebot.com/renovate-schema.json",
     extends: [
-      "config:recommended",
+      "config:best-practices",
+      ":dependencyDashboard",
       "helpers:pinGitHubActionDigests",
       ":pinAllExceptPeerDependencies",
-      "docker:pinDigests"
+      "docker:pinDigests",
+      "security:openssf-scorecard",
+      ":enableVulnerabilityAlertsWithLabel(security)"
     ],
     baseBranchPatterns: ["dev"],
     schedule: ["before 6am on monday"],
-    labels: ["dependencies"],
+    timezone: "UTC",
+    labels: ["dependencies", "renovate"],
     semanticCommits: "enabled",
+    commitMessageAction: "bump",
+    rangeStrategy: "pin",
+    minimumReleaseAge: "3 days",
+    internalChecksFilter: "strict",
+    prCreation: "not-pending",
+    rebaseWhen: "behind-base-branch",
+    automerge: false,
+    platformAutomerge: false,
+    npmrc: "ignore-scripts=true\n",
+    lockFileMaintenance: {
+      enabled: true,
+      schedule: ["before 6am on the first day of the month"]
+    },
+    vulnerabilityAlerts: {
+      enabled: true,
+      labels: ["security", "dependencies"],
+      minimumReleaseAge: "0 days",
+      automerge: false
+    },
     prHourlyLimit: 2,
     prConcurrentLimit: 5,
     packageRules

@@ -14,6 +14,7 @@ import {
   wrapUntrustedContent
 } from "../security/prompt-injection-guard.js";
 import {
+  ALL_REVIEWER_AGENT_NAMES,
   isSensitiveReviewerRosterPath,
   resolveTrustedReviewerPrompt,
   type ReviewerAgentName
@@ -45,6 +46,10 @@ export interface SelectReviewersInput {
   readonly isReReviewPass?: boolean | undefined;
   readonly previousFailedReviewers?: readonly ReviewerAgentName[] | undefined;
   readonly maxReviewers?: number | undefined;
+  readonly trustedBaseBranchFiles?:
+    | ReadonlyMap<string, string>
+    | Readonly<Record<string, string>>
+    | undefined;
 }
 
 export interface SelectReviewersResult {
@@ -107,6 +112,83 @@ const INFRA_FILE_PATTERN =
 const SENSITIVE_TASK_PATH_PATTERN =
   /^(?:\.github\/workflows\/|\.github\/agents\.ya?ml$|\.cursor\/agents\/|\.env)/i;
 
+const BUILTIN_REVIEWER_NAMES = new Set<string>(ALL_REVIEWER_AGENT_NAMES);
+
+function extractCustomReviewersFromTrustedFiles(
+  trustedBaseBranchFiles:
+    | ReadonlyMap<string, string>
+    | Readonly<Record<string, string>>
+    | undefined,
+  cleanChangedPaths: readonly string[]
+): readonly ReviewerAgentName[] {
+  if (!trustedBaseBranchFiles) {
+    return [];
+  }
+  const entries: Array<[string, string]> =
+    trustedBaseBranchFiles instanceof Map ||
+    typeof (trustedBaseBranchFiles as ReadonlyMap<string, string>).entries ===
+      "function"
+      ? Array.from(
+          (trustedBaseBranchFiles as ReadonlyMap<string, string>).entries()
+        )
+      : Object.entries(
+          trustedBaseBranchFiles as Readonly<Record<string, string>>
+        );
+
+  const matchedCustom: ReviewerAgentName[] = [];
+
+  for (const [rawPath, content] of entries) {
+    const normPath = rawPath.trim().replace(/^\/+/, "");
+    const match = /^\.cursor\/agents\/([a-z0-9-]+)\.md$/i.exec(normPath);
+    if (!match || !match[1]) {
+      continue;
+    }
+    const agentName = match[1].toLowerCase();
+    if (BUILTIN_REVIEWER_NAMES.has(agentName)) {
+      continue;
+    }
+
+    // Check frontmatter paths: (e.g. `paths: src/realtime, src/ws` or YAML array)
+    const frontmatterMatch = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content ?? "");
+    const pathTokens: string[] = [];
+    if (frontmatterMatch && frontmatterMatch[1]) {
+      const pathsLine = /^\s*paths\s*:\s*(.+)$/im.exec(frontmatterMatch[1]);
+      if (pathsLine && pathsLine[1]) {
+        const cleaned = pathsLine[1].replace(/[\[\]"']/g, "");
+        for (const part of cleaned.split(",")) {
+          const token = part
+            .trim()
+            .replace(/\/?\*\*.*$/, "")
+            .replace(/^\/+|\/+$/g, "")
+            .toLowerCase();
+          if (token.length >= 2) {
+            pathTokens.push(token);
+          }
+        }
+      }
+    }
+
+    // Also derive domain stem tokens from `<stem>-reviewer`
+    const stem = agentName.replace(/-reviewer$/i, "");
+    for (const part of stem.split("-")) {
+      if (part.length >= 3 && !pathTokens.includes(part)) {
+        pathTokens.push(part);
+      }
+    }
+
+    const matchesDiff = cleanChangedPaths.some((filePath) => {
+      const lowerFile = filePath.toLowerCase();
+      return pathTokens.some((tok) => lowerFile.includes(tok));
+    });
+
+    if (matchesDiff) {
+      matchedCustom.push(agentName);
+    }
+  }
+
+  return matchedCustom;
+}
+
 export function selectReviewersForDiff(
   input: SelectReviewersInput
 ): SelectReviewersResult {
@@ -153,6 +235,15 @@ export function selectReviewersForDiff(
 
   if (touchesSensitivePaths) {
     addCandidate("security-reviewer");
+  }
+
+  // Custom domain specialists created/designed in .cursor/agents/*.md during /setup-repo or /epure plan
+  const customMatched = extractCustomReviewersFromTrustedFiles(
+    input.trustedBaseBranchFiles,
+    cleanPaths
+  );
+  for (const customReviewer of customMatched) {
+    addCandidate(customReviewer);
   }
 
   if (touchesFrontendUi) {
@@ -395,7 +486,9 @@ export function buildReviewerInspectionTools(input: RunMultiAgentPrReviewInput):
       };
     },
     search_code: (args) => {
-      const query = String(args.query ?? "").trim();
+      const query = String(args.query ?? "")
+        .trim()
+        .slice(0, 256);
       const filterPath = args.path
         ? String(args.path).trim().replace(/^\/+/, "")
         : undefined;
@@ -561,7 +654,8 @@ export async function runMultiAgentPrReviewPass(
   const selection = selectReviewersForDiff({
     changedFiles: filePaths,
     isReReviewPass: input.isReReviewPass,
-    previousFailedReviewers: input.previousFailedReviewers
+    previousFailedReviewers: input.previousFailedReviewers,
+    trustedBaseBranchFiles: input.trustedBaseBranchFiles
   });
 
   if (isGha) {

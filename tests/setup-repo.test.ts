@@ -516,7 +516,14 @@ describe("5. Pre-bundled CLI (dist/cli/setup-repo.mjs) & skill (.agents/skills/s
       const renovate = buildRenovateConfigJson(stack);
       expect(renovate.path).toBe("renovate.json");
       expect(renovate.content).toContain('"baseBranchPatterns": [\n    "dev"\n  ]');
+      expect(renovate.content).toContain("config:best-practices");
       expect(renovate.content).toContain("helpers:pinGitHubActionDigests");
+      expect(renovate.content).toContain("security:openssf-scorecard");
+      expect(renovate.content).toContain('"minimumReleaseAge": "3 days"');
+      expect(renovate.content).toContain('"internalChecksFilter": "strict"');
+      expect(renovate.content).toContain('"prCreation": "not-pending"');
+      expect(renovate.content).toContain('"automerge": false');
+      expect(renovate.content).toContain('ignore-scripts=true');
       expect(renovate.content).toContain(expectedRenovateSubstring);
 
       const ci = buildStackAwareCiWorkflowYaml({
@@ -527,6 +534,80 @@ describe("5. Pre-bundled CLI (dist/cli/setup-repo.mjs) & skill (.agents/skills/s
       expect(ci.content).toContain("zizmorcore/zizmor-action@");
       expect(ci.content).toContain("persona: pedantic");
       expect(ci.content).toContain(expectedCiSubstring);
+    }
+  );
+
+  it.each([
+    {
+      id: "composes-headless-roster-with-always-on-core-and-custom-domain-specialists-when-ui-disabled",
+      includeFrontendReviewers: false,
+      customDomainSpecialists: [
+        {
+          name: "realtime",
+          description: "WebSocket and CRDT state synchronization reviewer.",
+          scopeResponsibilities: ["Audit WebSocket reconnection and sequence ordering."]
+        },
+        {
+          name: "game-systems-reviewer",
+          description: "Dice engine and combat ruleset specialist.",
+          scopeResponsibilities: ["Verify deterministic RNG seeding and modifiers."]
+        }
+      ],
+      expectedNames: [
+        "domain-backend-reviewer",
+        "realtime-reviewer",
+        "game-systems-reviewer",
+        "infra-reviewer",
+        "architecture-reviewer",
+        "security-reviewer",
+        "spec-parity-reviewer",
+        "standards-reviewer",
+        "user-advocate"
+      ],
+      excludedNames: [
+        "frontend-reviewer",
+        "accessibility-reviewer",
+        "design-reviewer"
+      ]
+    },
+    {
+      id: "composes-full-ui-roster-by-default-with-impeccable-and-accessibility-reviewers",
+      includeFrontendReviewers: true,
+      customDomainSpecialists: undefined,
+      expectedNames: [
+        "domain-backend-reviewer",
+        "frontend-reviewer",
+        "infra-reviewer",
+        "architecture-reviewer",
+        "security-reviewer",
+        "spec-parity-reviewer",
+        "standards-reviewer",
+        "accessibility-reviewer",
+        "design-reviewer",
+        "user-advocate"
+      ],
+      excludedNames: []
+    }
+  ])(
+    "$id",
+    ({
+      includeFrontendReviewers,
+      customDomainSpecialists,
+      expectedNames,
+      excludedNames
+    }) => {
+      const result = planAndApplyRepoSetup({
+        repository: "acme-org/custom-service",
+        dryRun: true,
+        includeFrontendReviewers,
+        customDomainSpecialists
+      });
+
+      const actualNames = result.planned_reviewer_roster.map((r) => r.name);
+      expect(actualNames).toEqual(expectedNames);
+      for (const excluded of excludedNames) {
+        expect(actualNames).not.toContain(excluded);
+      }
     }
   );
 });

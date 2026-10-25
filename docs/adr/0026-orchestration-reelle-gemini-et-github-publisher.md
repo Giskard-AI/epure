@@ -5,7 +5,7 @@ status: accepted
 
 ## Contexte
 
-Les 38 tickets initiaux de la V1.0 d'`EPURE` ont validé l'ensemble des contrats d'interface, des garde-fous de sécurité et des machines d'état via des implémentations en mémoire de test (`createInMemoryGitRefStateStore`, `createDefaultDryPublisherClient`, adaptateurs de test Pi/Codex). Lors de l'exercice réel sur un dépôt consommateur (`Hartorn-Inc/enclume-astrale`), le workflow réutilisable `.github/workflows/issue-command.yml` s'arrêtait après la vérification de permissions `authorize-command`, obligeant un agent local à suppléer manuellement la création des branches, des tickets et du code.
+Les 38 tickets initiaux de la V1.0 d'`EPURE` ont validé l'ensemble des contrats d'interface, des garde-fous de sécurité et des machines d'état via des implémentations en mémoire de test (`createInMemoryGitRefStateStore`, `createDefaultDryPublisherClient`, adaptateurs de test Pi/Codex). Lors de l'exercice réel sur un dépôt consommateur pilote (`my-org/craft-calculator`), le workflow réutilisable `.github/workflows/issue-command.yml` s'arrêtait après la vérification de permissions `authorize-command`, obligeant un agent local à suppléer manuellement la création des branches, des tickets et du code.
 
 Pour qu'un utilisateur humain puisse piloter l'intégralité du cycle de vie uniquement par des commentaires GitHub (`/epure plan`, réponses au grill, `/epure approve`), le Reusable Workflow doit exécuter les transitions de bout en bout sur le runner du dépôt consommateur.
 

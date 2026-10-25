@@ -104,3 +104,6 @@ Desktop.ini
 # Local archives & scratch
 *.zip
 .scratch/
+docs/.vitepress/cache/
+docs/.vitepress/dist/
+

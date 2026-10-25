@@ -305,6 +305,29 @@ describe("EPURE v1.2.0 — 3 Repository Rulesets, Multi-Agent Review Roster & Se
       }
     );
 
+    it("dynamically routes PR diffs to custom .cursor/agents/<role>-reviewer.md files designed during /setup-repo", () => {
+      const trustedBaseBranchFiles = new Map<string, string>([
+        [
+          ".cursor/agents/realtime-sync-reviewer.md",
+          [
+            "---",
+            "name: realtime-sync-reviewer",
+            "paths: src/net, src/ws",
+            "---",
+            "# Realtime & WebSocket Reviewer"
+          ].join("\n")
+        ]
+      ]);
+
+      const res = selectReviewersForDiff({
+        changedFiles: ["src/ws/socket-session.ts", "tests/socket.test.ts"],
+        trustedBaseBranchFiles
+      });
+
+      expect(res.selected_reviewers[0]).toBe("realtime-sync-reviewer");
+      expect(res.selected_reviewers).toContain("spec-parity-reviewer");
+    });
+
     it("automatically blocks a task/* PR with a critical security must_fix if it modifies .cursor/agents/**", async () => {
       const review = await runMultiAgentPrReviewPass({
         repository: "Hartorn-Inc/enclume-astrale",

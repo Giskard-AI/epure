@@ -4,6 +4,7 @@ import { buildConsumerAppManifests } from "../auth/github-apps.js";
 import { EPURE_PUBLIC_VERSION } from "../contract/epure-contract.js";
 import {
   buildDefaultReviewerRosterFiles,
+  type CustomDomainReviewerSpec,
   type ReviewerAgentName
 } from "../review/reviewer-roster.js";
 import {
@@ -178,6 +179,8 @@ export interface SetupRepoInput {
   readonly dryRun?: boolean | undefined;
   readonly epurePinnedSha?: string | undefined;
   readonly requirePrApprovalsOnDev?: number | undefined;
+  readonly includeFrontendReviewers?: boolean | undefined;
+  readonly customDomainSpecialists?: readonly CustomDomainReviewerSpec[] | undefined;
   readonly agentsOverrides?: AgentsConfigOverrides | undefined;
   readonly existingState?: ExistingRepositoryState | undefined;
 }
@@ -845,7 +848,12 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
     content: wf.content
   }));
 
-  const rosterTemplates = buildDefaultReviewerRosterFiles({ repository });
+  const rosterTemplates = buildDefaultReviewerRosterFiles({
+    repository,
+    stackKind: detectedStack.kind,
+    includeFrontendReviewers: input.includeFrontendReviewers,
+    customDomainSpecialists: input.customDomainSpecialists
+  });
   const plannedReviewerRoster: PlannedReviewerRosterFile[] = rosterTemplates.map(
     (item) => ({
       name: item.name,

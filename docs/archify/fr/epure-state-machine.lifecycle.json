@@ -1,0 +1,124 @@
+{
+  "schema_version": 3,
+  "diagram_type": "lifecycle",
+  "meta": {
+    "title": "Machine à États d'une Issue EPURE (Ref Git CAS : refs/epure/state/<issue>)",
+    "subtitle": "Transitions atomiques Compare-And-Swap, curseur de commentaires en lot et reprise idempotente",
+    "legend": {
+      "entries": {
+        "start": { "label": "état initial" },
+        "active": { "label": "en cours" },
+        "waiting": { "label": "en attente" },
+        "decision": { "label": "décision" },
+        "success": { "label": "succès" },
+        "failure": { "label": "escalade / échec" },
+        "neutral": { "label": "annulé" }
+      }
+    },
+    "visual_preset": "blueprint",
+    "quality_profile": "showcase",
+    "output": "docs/public/diagrams/fr/epure-state-machine.html"
+  },
+  "mainPath": [
+    "grilling",
+    "blueprint_dag",
+    "awaiting_approval",
+    "implementation",
+    "completed"
+  ],
+  "states": [
+    {
+      "id": "grilling",
+      "type": "start",
+      "label": "Entretien Grill",
+      "sublabel": "/epure plan + réponses",
+      "tag": "phase: grilling",
+      "step": "01"
+    },
+    {
+      "id": "blueprint_dag",
+      "type": "decision",
+      "label": "Spec & DAG",
+      "sublabel": "plan/* + tickets",
+      "tag": "spec + tickets",
+      "step": "02"
+    },
+    {
+      "id": "awaiting_approval",
+      "type": "waiting",
+      "label": "Attente Approbation",
+      "sublabel": "validation humaine",
+      "tag": "jalon 2",
+      "step": "03"
+    },
+    {
+      "id": "implementation",
+      "type": "active",
+      "label": "Implémentation",
+      "sublabel": "boucle TDD + revue",
+      "tag": "spec_sha signé",
+      "step": "04"
+    },
+    {
+      "id": "completed",
+      "type": "success",
+      "label": "Terminé",
+      "sublabel": "PR feature/* -> dev",
+      "tag": "prêt à merger",
+      "step": "05"
+    },
+    {
+      "id": "failed",
+      "type": "failure",
+      "label": "Escalade Humaine",
+      "sublabel": ">3 essais ou sensible",
+      "tag": "needs-human"
+    },
+    {
+      "id": "cancelled",
+      "type": "neutral",
+      "label": "Annulé",
+      "sublabel": "/epure cancel",
+      "tag": "terminal"
+    }
+  ],
+  "transitions": [
+    { "id": "grill-to-blueprint", "from": "grilling", "to": "blueprint_dag", "label": "clarifié" },
+    { "id": "blueprint-to-grill", "from": "blueprint_dag", "to": "grilling", "label": "autre tour" },
+    { "id": "blueprint-to-awaiting", "from": "blueprint_dag", "to": "awaiting_approval", "label": "DAG prêt" },
+    { "id": "awaiting-to-impl", "from": "awaiting_approval", "to": "implementation", "label": "approuvé", "variant": "security" },
+    { "id": "impl-to-completed", "from": "implementation", "to": "completed", "label": "DAG mergé", "variant": "emphasis" },
+    { "id": "impl-to-failed", "from": "implementation", "to": "failed", "label": ">3 essais", "variant": "security" },
+    { "id": "failed-to-impl", "from": "failed", "to": "implementation", "label": "re-approve", "variant": "emphasis" },
+    { "id": "awaiting-to-cancelled", "from": "awaiting_approval", "to": "cancelled", "label": "annuler" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Persistance CAS Hors-Branches",
+      "items": [
+        "État stocké dans refs/epure/state/<issue> par git update-ref atomique",
+        "Zéro pollution de commits d'état machine sur les branches dev et main",
+        "Synchronisé avec un tableau de bord Markdown en haut de l'issue GitHub"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Curseur de Lot & Grill Implicite",
+      "items": [
+        "last_processed_comment_id traite tous les commentaires humains dans l'ordre",
+        "Toute réponse humaine en phase grilling est acceptée sans commande slash",
+        "Les commandes facultatives /epure to-spec et to-tickets forcent la transition"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Reprise Idempotente",
+      "items": [
+        "Reposter /epure approve après un échec précharge les fichiers déjà mergés sur feature/*",
+        "Les tickets déjà fermés du DAG sont automatiquement ignorés à la reprise",
+        "/epure cancel fige l'exécution tout en préservant les branches et traces d'audit"
+      ]
+    }
+  ]
+}
