@@ -1,3 +1,5 @@
+import { PROMPT_INJECTION_IMMUNITY_CLAUSE } from "../security/prompt-injection-guard.js";
+
 export interface GeminiGenerateOptions {
   readonly apiKey: string;
   readonly model?: string | undefined;
@@ -24,7 +26,17 @@ export async function callGeminiGenerateContent(
     generationConfig.responseMimeType = options.responseMimeType;
   }
 
+  const effectiveSystemInstruction = options.systemInstruction
+    ? options.systemInstruction.includes("PROMPT_INJECTION_IMMUNITY") ||
+      options.systemInstruction.includes("<untrusted_")
+      ? options.systemInstruction
+      : `${options.systemInstruction.trim()}\n\n${PROMPT_INJECTION_IMMUNITY_CLAUSE}`
+    : PROMPT_INJECTION_IMMUNITY_CLAUSE;
+
   const body: Record<string, unknown> = {
+    systemInstruction: {
+      parts: [{ text: effectiveSystemInstruction }]
+    },
     contents: [
       {
         role: "user",
@@ -33,12 +45,6 @@ export async function callGeminiGenerateContent(
     ],
     generationConfig
   };
-
-  if (options.systemInstruction) {
-    body.systemInstruction = {
-      parts: [{ text: options.systemInstruction }]
-    };
-  }
 
   const response = await fetchFn(url, {
     method: "POST",

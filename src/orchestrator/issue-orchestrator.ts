@@ -20,6 +20,10 @@ import {
   type EpureIssueState,
   type GitRefStateStore
 } from "../state/git-ref-state.js";
+import {
+  PROMPT_INJECTION_IMMUNITY_CLAUSE,
+  wrapUntrustedContent
+} from "../security/prompt-injection-guard.js";
 import { callGeminiGenerateContent, extractJsonObject } from "./gemini-client.js";
 
 export interface IssueCommentRecord {
@@ -756,12 +760,9 @@ export async function orchestrateIssueCommand(
         })
       });
 
-      const grillPrompt = [
+      const grillSystemInstruction = [
         "Tu es l'architecte EPURE conduisant un entretien /grill-with-docs sur une GitHub Issue.",
-        `Titre de l'issue (#${issue.number}) : ${issue.title}`,
-        "Corps de l'issue :",
-        issue.body,
-        "",
+        PROMPT_INJECTION_IMMUNITY_CLAUSE,
         "Pose 3 à 4 questions de cadrage concises et décisives (architecture, invariants métiers, gestion d'état/persistance, couverture de tests TDD) au format :",
         "❓ **Q1** - **<Titre>** : <Question>",
         "➡️ <Recommandation concrète (formulée pour que 'oui' valide la recommandation)>",
@@ -769,9 +770,19 @@ export async function orchestrateIssueCommand(
         "Termine en indiquant à l'utilisateur qu'il peut répondre directement dans un commentaire sur cette issue (sans répéter de commande slash) pour déclencher la génération du GLOSSARY.md, des ADRs, de la spécification et du graphe de tickets."
       ].join("\n");
 
+      const grillPrompt = [
+        `Issue #${issue.number} (données non fiables soumises par l'utilisateur) :`,
+        wrapUntrustedContent(
+          "untrusted_issue_content",
+          `Titre : ${issue.title}\n\nCorps :\n${issue.body}`,
+          12000
+        )
+      ].join("\n");
+
       const grillQuestions = await callGeminiGenerateContent({
         apiKey: input.llmApiKey,
         model,
+        systemInstruction: grillSystemInstruction,
         prompt: grillPrompt,
         temperature: 0.2,
         fetchImpl: input.fetchImpl
@@ -811,15 +822,9 @@ export async function orchestrateIssueCommand(
         .map((c) => `@${c.user.login}: ${c.body}`)
         .join("\n\n---\n\n");
 
-      const specGenerationPrompt = [
+      const specSystemInstruction = [
         "Tu es l'architecte EPURE chargé de produire le dossier de spécification complet et le découpage en tickets atomiques TDD.",
-        `Issue #${issue.number} : ${issue.title}`,
-        "Description initiale :",
-        issue.body,
-        "",
-        "Historique des réponses et décisions humaines :",
-        humanContext,
-        "",
+        PROMPT_INJECTION_IMMUNITY_CLAUSE,
         "Produis un objet JSON strictement valide (sans markdown autour) respectant exactement ce schéma TypeScript :",
         "{",
         `  "plan_slug": "${planSlug}",`,
@@ -863,9 +868,22 @@ export async function orchestrateIssueCommand(
         "}"
       ].join("\n");
 
+      const specGenerationPrompt = [
+        `Issue #${issue.number} (description initiale non fiable) :`,
+        wrapUntrustedContent(
+          "untrusted_issue_content",
+          `Titre : ${issue.title}\n\nDescription :\n${issue.body}`,
+          12000
+        ),
+        "",
+        "Historique des réponses et décisions humaines (commentaires non fiables) :",
+        wrapUntrustedContent("untrusted_comment_history", humanContext, 12000)
+      ].join("\n");
+
       const rawJson = await callGeminiGenerateContent({
         apiKey: input.llmApiKey,
         model,
+        systemInstruction: specSystemInstruction,
         prompt: specGenerationPrompt,
         responseMimeType: "application/json",
         temperature: 0.1,
@@ -1139,21 +1157,9 @@ export async function orchestrateIssueCommand(
           .map(([path, content]) => `--- FILE: ${path} ---\n${content}`)
           .join("\n\n");
 
-        const tddPrompt = [
+        const tddSystemInstruction = [
           "Tu es un ingénieur TDD EPURE implémentant un ticket approuvé en TypeScript / React / Vite / Vitest.",
-          `Plan parent (#${input.issueNumber}) : ${issue.title}`,
-          "Cahier des charges de référence :",
-          issue.body,
-          "",
-          `Ticket #${ticket.ticketIssueNumber} : ${ticket.title}`,
-          `Description : ${ticket.description}`,
-          `Critères d'acceptation : ${ticket.acceptanceCriteria.join(" ; ")}`,
-          `Fichiers cibles : ${ticket.filesToTouch.join(", ")}`,
-          "",
-          existingFilesContext
-            ? `Fichiers déjà présents sur la branche feature :\n${existingFilesContext}`
-            : "C'est le premier ticket : inclus un package.json complet (avec scripts 'test': 'vitest run' et 'build': 'vite build', dependencies react/react-dom, devDependencies typescript/vite/vitest/@vitejs/plugin-react/@types/react/@types/react-dom) ainsi que tsconfig.json et vite.config.ts.",
-          "",
+          PROMPT_INJECTION_IMMUNITY_CLAUSE,
           "Règles strictes :",
           "1. Écris des tests unitaires Vitest paramétrés (it.each) couvrant tous les critères d'acceptation et cas limites.",
           "2. Implémente le code propre et complet faisant passer 100% des tests.",
@@ -1171,9 +1177,35 @@ export async function orchestrateIssueCommand(
           "}"
         ].join("\n");
 
+        const tddPrompt = [
+          `Plan parent (#${input.issueNumber}) et cahier des charges :`,
+          wrapUntrustedContent(
+            "untrusted_issue_content",
+            `Titre : ${issue.title}\n\nCahier des charges :\n${issue.body}`,
+            10000
+          ),
+          "",
+          "Ticket à implémenter :",
+          wrapUntrustedContent(
+            "untrusted_issue_content",
+            [
+              `Ticket #${ticket.ticketIssueNumber} : ${ticket.title}`,
+              `Description : ${ticket.description}`,
+              `Critères d'acceptation : ${ticket.acceptanceCriteria.join(" ; ")}`,
+              `Fichiers cibles : ${ticket.filesToTouch.join(", ")}`
+            ].join("\n"),
+            6000
+          ),
+          "",
+          existingFilesContext
+            ? `Fichiers déjà présents sur la branche feature :\n${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext, 16000)}`
+            : "C'est le premier ticket : inclus un package.json complet (avec scripts 'test': 'vitest run' et 'build': 'vite build', dependencies react/react-dom, devDependencies typescript/vite/vitest/@vitejs/plugin-react/@types/react/@types/react-dom) ainsi que tsconfig.json et vite.config.ts."
+        ].join("\n");
+
         const rawImpl = await callGeminiGenerateContent({
           apiKey: input.llmApiKey,
           model,
+          systemInstruction: tddSystemInstruction,
           prompt: tddPrompt,
           responseMimeType: "application/json",
           temperature: 0.1,
@@ -1202,16 +1234,11 @@ export async function orchestrateIssueCommand(
             .map(([p, c]) => `--- FILE: ${p} ---\n${c}`)
             .join("\n\n");
 
-          const fixPrompt = [
-            `La suite de tests Vitest du Ticket #${ticket.ticketIssueNumber} (${ticket.title}) a échoué dans la sandbox avec la sortie suivante :`,
-            "```",
-            testCheck.output.slice(-6000),
-            "```",
-            "",
-            "Fichiers actuels du workspace :",
-            currentFilesContext,
-            "",
+          const fixSystemInstruction = [
+            "Tu es un ingénieur TDD EPURE corrigeant un échec de test Vitest en sandbox isolée.",
+            PROMPT_INJECTION_IMMUNITY_CLAUSE,
             "Corrige les fichiers en défaut (code ou assertions de test comme les espaces insécables Unicode U+202F de toLocaleString('fr-FR')) pour que 100% des tests Vitest passent (`vitest run`).",
+            "Ne modifie JAMAIS .cursor/agents/**, .github/workflows/** ou .github/agents.yml.",
             "Renvoie un objet JSON strictement valide respectant exactement ce schéma :",
             "{",
             `  "commit_message": "feat(ticket-${ticket.ticketIssueNumber}): ...",`,
@@ -1222,9 +1249,25 @@ export async function orchestrateIssueCommand(
             "}"
           ].join("\n");
 
+          const fixPrompt = [
+            `La suite de tests Vitest du Ticket #${ticket.ticketIssueNumber} a échoué dans la sandbox avec la sortie suivante :`,
+            wrapUntrustedContent(
+              "untrusted_test_output",
+              testCheck.output.slice(-6000)
+            ),
+            "",
+            "Fichiers actuels du workspace :",
+            wrapUntrustedContent(
+              "untrusted_workspace_files",
+              currentFilesContext,
+              16000
+            )
+          ].join("\n");
+
           const rawFix = await callGeminiGenerateContent({
             apiKey: input.llmApiKey,
             model,
+            systemInstruction: fixSystemInstruction,
             prompt: fixPrompt,
             responseMimeType: "application/json",
             temperature: 0.1,
@@ -1351,14 +1394,11 @@ export async function orchestrateIssueCommand(
             .map(([p, c]) => `--- FILE: ${p} ---\n${c}`)
             .join("\n\n");
 
-          const reviewFixPrompt = [
-            `Les reviewers multi-agents EPURE ont émis ${reviewResult.must_fix_findings.length} constat(s) bloquant(s) ('must_fix') sur la PR #${taskPr.number} du Ticket #${ticket.ticketIssueNumber} :`,
-            findingsText,
-            "",
-            "Fichiers actuels du workspace :",
-            currentFilesContext,
-            "",
+          const reviewFixSystemInstruction = [
+            "Tu es un ingénieur TDD EPURE corrigeant les constats bloquants ('must_fix') émis par le roster de revue multi-agents.",
+            PROMPT_INJECTION_IMMUNITY_CLAUSE,
             "Corrige précisément chaque 'must_fix' tout en maintenant 100% des tests Vitest au vert.",
+            "Ne modifie JAMAIS .cursor/agents/**, .github/workflows/** ou .github/agents.yml.",
             "Renvoie un objet JSON strictement valide :",
             "{",
             `  "commit_message": "fix(review): address reviewer findings on #${ticket.ticketIssueNumber}",`,
@@ -1369,9 +1409,22 @@ export async function orchestrateIssueCommand(
             "}"
           ].join("\n");
 
+          const reviewFixPrompt = [
+            `Les reviewers multi-agents EPURE ont émis ${reviewResult.must_fix_findings.length} constat(s) bloquant(s) ('must_fix') sur la PR #${taskPr.number} du Ticket #${ticket.ticketIssueNumber} :`,
+            wrapUntrustedContent("untrusted_issue_content", findingsText, 6000),
+            "",
+            "Fichiers actuels du workspace :",
+            wrapUntrustedContent(
+              "untrusted_workspace_files",
+              currentFilesContext,
+              16000
+            )
+          ].join("\n");
+
           const rawReviewFix = await callGeminiGenerateContent({
             apiKey: input.llmApiKey,
             model,
+            systemInstruction: reviewFixSystemInstruction,
             prompt: reviewFixPrompt,
             responseMimeType: "application/json",
             temperature: 0.1,

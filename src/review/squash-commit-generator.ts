@@ -3,6 +3,10 @@ import {
   callGeminiGenerateContent,
   extractJsonObject
 } from "../orchestrator/gemini-client.js";
+import {
+  PROMPT_INJECTION_IMMUNITY_CLAUSE,
+  wrapUntrustedContent
+} from "../security/prompt-injection-guard.js";
 
 export interface GenerateSquashCommitInput {
   readonly prNumber: number;
@@ -143,13 +147,9 @@ export async function generateSemanticSquashCommitFromDiff(
       .join("\n\n")
       .slice(0, 10000);
 
-    const prompt = [
+    const systemInstruction = [
       "Tu es un assistant de release Git produisant un titre et un corps de commit de squash Conventional Commit concis à partir du diff réel d'une Pull Request.",
-      `PR #${input.prNumber} vers '${cleanTarget}'`,
-      `Titre initial : ${input.fallbackTitle}`,
-      "Fichiers modifiés :",
-      diffSnippet,
-      "",
+      PROMPT_INJECTION_IMMUNITY_CLAUSE,
       "Règles :",
       `1. 'pr_title' DOIT respecter strictement l'expression régulière : ${CONVENTIONAL_COMMIT_PATTERN_REGEX} (sans numéro de PR à la fin).`,
       "2. 'bullets' DOIT contenir 2 à 4 puces synthétiques décrivant les changements techniques réels du diff.",
@@ -160,9 +160,19 @@ export async function generateSemanticSquashCommitFromDiff(
       "}"
     ].join("\n");
 
+    const prompt = [
+      `PR #${input.prNumber} vers '${cleanTarget}'`,
+      "Titre initial (non fiable) :",
+      wrapUntrustedContent("untrusted_issue_content", input.fallbackTitle, 500),
+      "",
+      "Fichiers modifiés (diff non fiable) :",
+      wrapUntrustedContent("untrusted_pr_diff", diffSnippet, 10000)
+    ].join("\n");
+
     const raw = await callGeminiGenerateContent({
       apiKey: input.llmApiKey,
       model: input.model ?? "gemini-3.8-flash",
+      systemInstruction,
       prompt,
       responseMimeType: "application/json",
       temperature: 0.0,
