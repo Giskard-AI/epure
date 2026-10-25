@@ -141,11 +141,10 @@ export async function generateSemanticSquashCommitFromDiff(
   try {
     const diffSnippet = input.changedFiles
       .map((f) => {
-        const snippet = (f.patch ?? f.content ?? "").slice(0, 1500);
+        const snippet = f.patch ?? f.content ?? "";
         return `--- ${f.path} ---\n${snippet}`;
       })
-      .join("\n\n")
-      .slice(0, 10000);
+      .join("\n\n");
 
     const systemInstruction = [
       "Tu es un assistant de release Git produisant un titre et un corps de commit de squash Conventional Commit concis à partir du diff réel d'une Pull Request.",
@@ -163,10 +162,10 @@ export async function generateSemanticSquashCommitFromDiff(
     const prompt = [
       `PR #${input.prNumber} vers '${cleanTarget}'`,
       "Titre initial (non fiable) :",
-      wrapUntrustedContent("untrusted_issue_content", input.fallbackTitle, 500),
+      wrapUntrustedContent("untrusted_issue_content", input.fallbackTitle),
       "",
       "Fichiers modifiés (diff non fiable) :",
-      wrapUntrustedContent("untrusted_pr_diff", diffSnippet, 10000)
+      wrapUntrustedContent("untrusted_pr_diff", diffSnippet)
     ].join("\n");
 
     const raw = await callGeminiGenerateContent({

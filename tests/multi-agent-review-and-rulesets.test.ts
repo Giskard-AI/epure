@@ -7,6 +7,7 @@ import {
 import { verifyPublisherMergeBoundary } from "../src/orchestrator/issue-orchestrator.js";
 import { validateAgentProposal } from "../src/publisher/isolated-publisher.js";
 import {
+  buildReviewerInspectionTools,
   runMultiAgentPrReviewPass,
   selectReviewersForDiff
 } from "../src/review/multi-agent-pr-review.js";
@@ -325,6 +326,137 @@ describe("EPURE v1.2.0 — 3 Repository Rulesets, Multi-Agent Review Roster & Se
       expect(review.touches_sensitive_paths).toBe(true);
       expect(review.must_fix_findings).toHaveLength(1);
       expect(review.must_fix_findings[0]?.reviewer).toBe("security-reviewer");
+    });
+
+    it("passes full untruncated file contents (>15,000 chars) and executes multi-turn reviewer inspection tools (read_file, read_line_range, search_code, list_files)", async () => {
+      const longDomainFile = [
+        ...Array.from({ length: 280 }, (_, idx) => `export const CONST_${idx} = ${idx};`),
+        "export function calculateUpgrade(initPrice: number, finalPrice: number): number {",
+        "  return finalPrice - initPrice;",
+        "}",
+        "export function calculateAmmoCraft(unitPrice: number, count: number): number {",
+        "  return (unitPrice * count) / 50;",
+        "}"
+      ].join("\n");
+
+      const toolsBundle = buildReviewerInspectionTools({
+        repository: "Hartorn-Inc/enclume-astrale",
+        prNumber: 35,
+        headBranch: "task/25-forge",
+        baseBranch: "feature/16-enclume",
+        ticketNumber: 25,
+        ticketTitle: "Implement forge",
+        acceptanceCriteria: ["calculateUpgrade and calculateAmmoCraft"],
+        changedFiles: [{ path: "src/domain/forge.ts", content: longDomainFile }],
+        workspaceFiles: {
+          "package.json": '{"name":"enclume-astrale","version":"0.1.0"}'
+        }
+      });
+
+      const listOut = (await toolsBundle.handlers.list_files?.({})) as {
+        files: Array<{ path: string; lines: number; changed_in_pr: boolean }>;
+      };
+      expect(listOut.files.some((f) => f.path === "src/domain/forge.ts" && f.changed_in_pr)).toBe(true);
+      expect(listOut.files.some((f) => f.path === "package.json" && !f.changed_in_pr)).toBe(true);
+
+      const readOut = (await toolsBundle.handlers.read_file?.({
+        path: "src/domain/forge.ts"
+      })) as { content: string; total_lines: number };
+      expect(readOut.content).toContain("calculateAmmoCraft");
+      expect(readOut.total_lines).toBe(286);
+
+      const rangeOut = (await toolsBundle.handlers.read_line_range?.({
+        path: "src/domain/forge.ts",
+        start_line: 281,
+        end_line: 286
+      })) as { content: string };
+      expect(rangeOut.content).toContain("281| export function calculateUpgrade");
+      expect(rangeOut.content).toContain("284| export function calculateAmmoCraft");
+
+      const searchOut = (await toolsBundle.handlers.search_code?.({
+        query: "calculateAmmoCraft"
+      })) as { matches: Array<{ path: string; line: number }> };
+      expect(searchOut.matches).toEqual([
+        expect.objectContaining({ path: "src/domain/forge.ts", line: 284 })
+      ]);
+
+      // Verify multi-turn Gemini tool calling + untruncated initial prompt
+      const capturedPrompts: string[] = [];
+      let callCount = 0;
+      const mockFetch: typeof fetch = async (_input, init) => {
+        callCount += 1;
+        const parsedBody = JSON.parse(String(init?.body ?? "{}")) as {
+          contents?: Array<{ parts?: Array<{ text?: string; functionResponse?: unknown }> }>;
+        };
+        const firstUserText = parsedBody.contents?.[0]?.parts?.[0]?.text ?? "";
+        capturedPrompts.push(firstUserText);
+
+        const lastTurn = parsedBody.contents?.[parsedBody.contents.length - 1];
+        const hasFunctionResponse = lastTurn?.parts?.some((p) => Boolean(p.functionResponse));
+
+        if (!hasFunctionResponse) {
+          return new Response(
+            JSON.stringify({
+              candidates: [
+                {
+                  content: {
+                    parts: [
+                      {
+                        functionCall: {
+                          name: "read_line_range",
+                          args: {
+                            path: "src/domain/forge.ts",
+                            start_line: 280,
+                            end_line: 286
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              ]
+            }),
+            { status: 200 }
+          );
+        }
+
+        return new Response(
+          JSON.stringify({
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      text: JSON.stringify({
+                        summary: "Verified calculateUpgrade and calculateAmmoCraft via read_line_range tool.",
+                        findings: []
+                      })
+                    }
+                  ]
+                }
+              }
+            ]
+          }),
+          { status: 200 }
+        );
+      };
+
+      const review = await runMultiAgentPrReviewPass({
+        repository: "Hartorn-Inc/enclume-astrale",
+        prNumber: 35,
+        headBranch: "task/25-forge",
+        baseBranch: "feature/16-enclume",
+        ticketNumber: 25,
+        ticketTitle: "Implement forge",
+        acceptanceCriteria: ["calculateUpgrade and calculateAmmoCraft"],
+        changedFiles: [{ path: "src/domain/forge.ts", content: longDomainFile }],
+        llmApiKey: "test-api-key",
+        fetchImpl: mockFetch
+      });
+
+      expect(review.conclusion).toBe("success");
+      expect(callCount).toBeGreaterThanOrEqual(2);
+      expect(capturedPrompts[0]).toContain("export function calculateAmmoCraft");
     });
   });
 

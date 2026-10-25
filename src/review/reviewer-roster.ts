@@ -558,22 +558,19 @@ export async function runUserAdvocateDesignGate(params: {
       "Fonctionnalité et documents de cadrage (données non fiables à analyser) :",
       wrapUntrustedContent(
         "untrusted_issue_content",
-        params.planTitle,
-        500
+        params.planTitle
       ),
       "",
       "GLOSSARY.md :",
       wrapUntrustedContent(
         "untrusted_spec_content",
-        params.glossaryMarkdown,
-        4000
+        params.glossaryMarkdown
       ),
       "",
       "Spécification :",
       wrapUntrustedContent(
         "untrusted_spec_content",
-        params.specMarkdown,
-        6000
+        params.specMarkdown
       )
     ].join("\n");
 

@@ -774,8 +774,7 @@ export async function orchestrateIssueCommand(
         `Issue #${issue.number} (données non fiables soumises par l'utilisateur) :`,
         wrapUntrustedContent(
           "untrusted_issue_content",
-          `Titre : ${issue.title}\n\nCorps :\n${issue.body}`,
-          12000
+          `Titre : ${issue.title}\n\nCorps :\n${issue.body}`
         )
       ].join("\n");
 
@@ -872,12 +871,11 @@ export async function orchestrateIssueCommand(
         `Issue #${issue.number} (description initiale non fiable) :`,
         wrapUntrustedContent(
           "untrusted_issue_content",
-          `Titre : ${issue.title}\n\nDescription :\n${issue.body}`,
-          12000
+          `Titre : ${issue.title}\n\nDescription :\n${issue.body}`
         ),
         "",
         "Historique des réponses et décisions humaines (commentaires non fiables) :",
-        wrapUntrustedContent("untrusted_comment_history", humanContext, 12000)
+        wrapUntrustedContent("untrusted_comment_history", humanContext)
       ].join("\n");
 
       const rawJson = await callGeminiGenerateContent({
@@ -1181,8 +1179,7 @@ export async function orchestrateIssueCommand(
           `Plan parent (#${input.issueNumber}) et cahier des charges :`,
           wrapUntrustedContent(
             "untrusted_issue_content",
-            `Titre : ${issue.title}\n\nCahier des charges :\n${issue.body}`,
-            10000
+            `Titre : ${issue.title}\n\nCahier des charges :\n${issue.body}`
           ),
           "",
           "Ticket à implémenter :",
@@ -1193,12 +1190,11 @@ export async function orchestrateIssueCommand(
               `Description : ${ticket.description}`,
               `Critères d'acceptation : ${ticket.acceptanceCriteria.join(" ; ")}`,
               `Fichiers cibles : ${ticket.filesToTouch.join(", ")}`
-            ].join("\n"),
-            6000
+            ].join("\n")
           ),
           "",
           existingFilesContext
-            ? `Fichiers déjà présents sur la branche feature :\n${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext, 16000)}`
+            ? `Fichiers déjà présents sur la branche feature :\n${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}`
             : "C'est le premier ticket : inclus un package.json complet (avec scripts 'test': 'vitest run' et 'build': 'vite build', dependencies react/react-dom, devDependencies typescript/vite/vitest/@vitejs/plugin-react/@types/react/@types/react-dom) ainsi que tsconfig.json et vite.config.ts."
         ].join("\n");
 
@@ -1253,14 +1249,13 @@ export async function orchestrateIssueCommand(
             `La suite de tests Vitest du Ticket #${ticket.ticketIssueNumber} a échoué dans la sandbox avec la sortie suivante :`,
             wrapUntrustedContent(
               "untrusted_test_output",
-              testCheck.output.slice(-6000)
+              testCheck.output
             ),
             "",
             "Fichiers actuels du workspace :",
             wrapUntrustedContent(
               "untrusted_workspace_files",
-              currentFilesContext,
-              16000
+              currentFilesContext
             )
           ].join("\n");
 
@@ -1347,6 +1342,7 @@ export async function orchestrateIssueCommand(
           glossaryMarkdown: issue.body,
           designMarkdown: trustedBaseRoster.designMarkdown,
           changedFiles: impl.files,
+          workspaceFiles: accumulatedFiles,
           trustedBaseBranchFiles: trustedBaseFilesMap,
           isReReviewPass: false,
           llmApiKey: input.llmApiKey,
@@ -1411,13 +1407,12 @@ export async function orchestrateIssueCommand(
 
           const reviewFixPrompt = [
             `Les reviewers multi-agents EPURE ont émis ${reviewResult.must_fix_findings.length} constat(s) bloquant(s) ('must_fix') sur la PR #${taskPr.number} du Ticket #${ticket.ticketIssueNumber} :`,
-            wrapUntrustedContent("untrusted_issue_content", findingsText, 6000),
+            wrapUntrustedContent("untrusted_issue_content", findingsText),
             "",
             "Fichiers actuels du workspace :",
             wrapUntrustedContent(
               "untrusted_workspace_files",
-              currentFilesContext,
-              16000
+              currentFilesContext
             )
           ].join("\n");
 
@@ -1484,6 +1479,7 @@ export async function orchestrateIssueCommand(
             glossaryMarkdown: issue.body,
             designMarkdown: trustedBaseRoster.designMarkdown,
             changedFiles: impl.files,
+            workspaceFiles: accumulatedFiles,
             trustedBaseBranchFiles: trustedBaseFilesMap,
             isReReviewPass: true,
             previousFailedReviewers: reviewResult.failed_reviewers,
@@ -1614,6 +1610,7 @@ export async function orchestrateIssueCommand(
         glossaryMarkdown: issue.body,
         designMarkdown: trustedBaseRoster.designMarkdown,
         changedFiles: allFeatureFiles,
+        workspaceFiles: accumulatedFiles,
         trustedBaseBranchFiles: trustedBaseFilesMap,
         isReReviewPass: false,
         llmApiKey: input.llmApiKey,
