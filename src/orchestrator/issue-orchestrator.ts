@@ -624,7 +624,15 @@ function parseTrackedTicketsFromComments(
 async function runTestsInIsolatedWorkspace(params: {
   readonly files: ReadonlyArray<{ path: string; content: string }>;
   readonly llmApiKey: string;
+  readonly label?: string | undefined;
 }): Promise<{ passed: boolean; output: string }> {
+  const isGha = process.env.GITHUB_ACTIONS === "true";
+  const groupTitle = params.label
+    ? `[EPURE][Sandbox] ${params.label}`
+    : "[EPURE][Sandbox] Verify TypeScript & Vitest suite";
+  if (isGha) {
+    process.stdout.write(`::group::${groupTitle}\n`);
+  }
   const workDir = mkdtempSync(join(tmpdir(), "epure-task-sandbox-"));
   try {
     for (const file of params.files) {
@@ -658,10 +666,17 @@ async function runTestsInIsolatedWorkspace(params: {
         timeoutMs: 60_000
       });
       if (!tscRun.isolated || tscRun.exit_code !== 0) {
+        const failOut = `TypeScript strict typecheck (tsc --noEmit) failed:\n${tscRun.stdout}\n${tscRun.stderr}`.trim();
+        if (isGha) {
+          process.stdout.write(`${failOut.slice(-4000)}\n`);
+        }
         return {
           passed: false,
-          output: `TypeScript strict typecheck (tsc --noEmit) failed:\n${tscRun.stdout}\n${tscRun.stderr}`.trim()
+          output: failOut
         };
+      }
+      if (isGha) {
+        process.stdout.write("[EPURE][Sandbox] tsc --noEmit passed (0 errors)\n");
       }
     }
 
@@ -678,14 +693,27 @@ async function runTestsInIsolatedWorkspace(params: {
       timeoutMs: 120_000
     });
 
+    const combinedOut = `${sandboxRun.stdout}\n${sandboxRun.stderr}`.trim();
+    const passed = sandboxRun.isolated && sandboxRun.exit_code === 0;
+    if (isGha) {
+      process.stdout.write(
+        `[EPURE][Sandbox] vitest run -> ${passed ? "PASSED" : "FAILED"}\n${combinedOut.slice(-4000)}\n`
+      );
+    }
     return {
-      passed: sandboxRun.isolated && sandboxRun.exit_code === 0,
-      output: `${sandboxRun.stdout}\n${sandboxRun.stderr}`.trim()
+      passed,
+      output: combinedOut
     };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
+    if (isGha) {
+      process.stdout.write(`[EPURE][Sandbox] ERROR: ${msg}\n`);
+    }
     return { passed: false, output: msg };
   } finally {
+    if (isGha) {
+      process.stdout.write("::endgroup::\n");
+    }
     rmSync(workDir, { recursive: true, force: true });
   }
 }
@@ -1327,6 +1355,11 @@ export async function orchestrateIssueCommand(
 
       for (const ticket of ticketsManifest) {
         const taskBranch = `task/${ticket.ticketIssueNumber}-${ticket.slug}`;
+        if (process.env.GITHUB_ACTIONS === "true") {
+          process.stdout.write(
+            `::group::[EPURE][Ticket #${ticket.ticketIssueNumber}] Initial TDD Implementation (${taskBranch})\n`
+          );
+        }
         await gh.ensureBranch(taskBranch, featureBranch);
 
         const existingFilesContext = Array.from(accumulatedFiles.entries())
@@ -1390,6 +1423,11 @@ export async function orchestrateIssueCommand(
         for (const f of impl.files) {
           accumulatedFiles.set(f.path.replace(/^\/+/, ""), f.content);
         }
+        if (process.env.GITHUB_ACTIONS === "true") {
+          process.stdout.write(
+            `[EPURE][Ticket #${ticket.ticketIssueNumber}] Generated ${impl.files.length} file(s): ${impl.files.map((f) => f.path).join(", ")}\n::endgroup::\n`
+          );
+        }
 
         // Q78 & Q93: Unified max_code_fix_attempts = 3 shared between sandbox test fixes and PR review fixes
         let fixAttempt = 0;
@@ -1399,7 +1437,8 @@ export async function orchestrateIssueCommand(
           files: Array.from(accumulatedFiles.entries()).map(
             ([path, content]) => ({ path, content })
           ),
-          llmApiKey: input.llmApiKey
+          llmApiKey: input.llmApiKey,
+          label: `Ticket #${ticket.ticketIssueNumber} initial TDD suite`
         });
 
         while (!testCheck.passed && fixAttempt < maxCodeFixAttempts) {
@@ -1470,7 +1509,8 @@ export async function orchestrateIssueCommand(
             files: Array.from(accumulatedFiles.entries()).map(
               ([path, content]) => ({ path, content })
             ),
-            llmApiKey: input.llmApiKey
+            llmApiKey: input.llmApiKey,
+            label: `Ticket #${ticket.ticketIssueNumber} TDD auto-fix attempt ${fixAttempt}/${maxCodeFixAttempts}`
           });
         }
 
@@ -1636,7 +1676,8 @@ export async function orchestrateIssueCommand(
             files: Array.from(accumulatedFiles.entries()).map(
               ([path, content]) => ({ path, content })
             ),
-            llmApiKey: input.llmApiKey
+            llmApiKey: input.llmApiKey,
+            label: `Ticket #${ticket.ticketIssueNumber} review-fix iteration ${reviewFixAttempt}/${maxCodeFixAttempts}`
           });
           let reviewTestRetry = 0;
           while (!testCheck.passed && reviewTestRetry < 2) {
@@ -1681,7 +1722,8 @@ export async function orchestrateIssueCommand(
               files: Array.from(accumulatedFiles.entries()).map(
                 ([path, content]) => ({ path, content })
               ),
-              llmApiKey: input.llmApiKey
+              llmApiKey: input.llmApiKey,
+              label: `Ticket #${ticket.ticketIssueNumber} review-fix iteration ${reviewFixAttempt} test retry ${reviewTestRetry}/2`
             });
           }
           if (!testCheck.passed) {

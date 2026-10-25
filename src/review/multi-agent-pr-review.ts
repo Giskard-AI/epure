@@ -556,12 +556,19 @@ async function executeSingleReviewerPass(params: {
 export async function runMultiAgentPrReviewPass(
   input: RunMultiAgentPrReviewInput
 ): Promise<MultiAgentPrReviewResult> {
+  const isGha = process.env.GITHUB_ACTIONS === "true";
   const filePaths = input.changedFiles.map((f) => f.path);
   const selection = selectReviewersForDiff({
     changedFiles: filePaths,
     isReReviewPass: input.isReReviewPass,
     previousFailedReviewers: input.previousFailedReviewers
   });
+
+  if (isGha) {
+    process.stdout.write(
+      `::group::[EPURE][Review] PR #${input.prNumber} (${input.isReReviewPass ? "Re-review" : "Initial pass"}) -> Roster: ${selection.selected_reviewers.join(", ")}\n`
+    );
+  }
 
   // Execute selected reviewers in parallel (read-only)
   const passes = await Promise.all(
@@ -709,6 +716,24 @@ export async function runMultiAgentPrReviewPass(
     `Reviewers executed: ${selection.selected_reviewers.map((r) => `\`${r}\``).join(", ")}.`,
     `Impeccable UI Gate: \`${impeccableConclusion}\`.`
   ].join(" ");
+
+  if (isGha) {
+    for (const p of passes) {
+      const mCount = p.findings.filter((f) => f.category === "must_fix").length;
+      const iCount = p.findings.filter((f) => f.category === "informational").length;
+      process.stdout.write(
+        `[EPURE][Review][${p.reviewer}] verdict=${mCount > 0 ? "FAIL" : "PASS"} must_fix=${mCount} info=${iCount} — ${p.summary}\n`
+      );
+    }
+    for (const f of mustFixFindings) {
+      process.stdout.write(
+        `  -> [MUST_FIX][${f.severity.toUpperCase()}][${f.reviewer}] (${f.path}:${f.line}) ${f.title}: ${f.rationale}\n`
+      );
+    }
+    process.stdout.write(
+      `[EPURE][Review] PR #${input.prNumber} conclusion=${conclusion} impeccable_gate=${impeccableConclusion}\n::endgroup::\n`
+    );
+  }
 
   return {
     conclusion,

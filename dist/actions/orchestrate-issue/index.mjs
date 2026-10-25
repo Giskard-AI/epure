@@ -1744,12 +1744,19 @@ ${wrapUntrustedContent("untrusted_spec_content", input.designMarkdown)}` : "",
   }
 }
 async function runMultiAgentPrReviewPass(input) {
+  const isGha = process.env.GITHUB_ACTIONS === "true";
   const filePaths = input.changedFiles.map((f) => f.path);
   const selection = selectReviewersForDiff({
     changedFiles: filePaths,
     isReReviewPass: input.isReReviewPass,
     previousFailedReviewers: input.previousFailedReviewers
   });
+  if (isGha) {
+    process.stdout.write(
+      `::group::[EPURE][Review] PR #${input.prNumber} (${input.isReReviewPass ? "Re-review" : "Initial pass"}) -> Roster: ${selection.selected_reviewers.join(", ")}
+`
+    );
+  }
   const passes = await Promise.all(
     selection.selected_reviewers.map(
       (reviewer) => executeSingleReviewerPass({ reviewer, input })
@@ -1864,6 +1871,27 @@ async function runMultiAgentPrReviewPass(input) {
     `Reviewers executed: ${selection.selected_reviewers.map((r) => `\`${r}\``).join(", ")}.`,
     `Impeccable UI Gate: \`${impeccableConclusion}\`.`
   ].join(" ");
+  if (isGha) {
+    for (const p of passes) {
+      const mCount = p.findings.filter((f) => f.category === "must_fix").length;
+      const iCount = p.findings.filter((f) => f.category === "informational").length;
+      process.stdout.write(
+        `[EPURE][Review][${p.reviewer}] verdict=${mCount > 0 ? "FAIL" : "PASS"} must_fix=${mCount} info=${iCount} \u2014 ${p.summary}
+`
+      );
+    }
+    for (const f of mustFixFindings) {
+      process.stdout.write(
+        `  -> [MUST_FIX][${f.severity.toUpperCase()}][${f.reviewer}] (${f.path}:${f.line}) ${f.title}: ${f.rationale}
+`
+      );
+    }
+    process.stdout.write(
+      `[EPURE][Review] PR #${input.prNumber} conclusion=${conclusion} impeccable_gate=${impeccableConclusion}
+::endgroup::
+`
+    );
+  }
   return {
     conclusion,
     impeccable_conclusion: impeccableConclusion,
@@ -2755,6 +2783,12 @@ function parseTrackedTicketsFromComments(comments) {
   return [];
 }
 async function runTestsInIsolatedWorkspace(params) {
+  const isGha = process.env.GITHUB_ACTIONS === "true";
+  const groupTitle = params.label ? `[EPURE][Sandbox] ${params.label}` : "[EPURE][Sandbox] Verify TypeScript & Vitest suite";
+  if (isGha) {
+    process.stdout.write(`::group::${groupTitle}
+`);
+  }
   const workDir = mkdtempSync(join2(tmpdir(), "epure-task-sandbox-"));
   try {
     for (const file of params.files) {
@@ -2785,12 +2819,20 @@ async function runTestsInIsolatedWorkspace(params) {
         timeoutMs: 6e4
       });
       if (!tscRun.isolated || tscRun.exit_code !== 0) {
+        const failOut = `TypeScript strict typecheck (tsc --noEmit) failed:
+${tscRun.stdout}
+${tscRun.stderr}`.trim();
+        if (isGha) {
+          process.stdout.write(`${failOut.slice(-4e3)}
+`);
+        }
         return {
           passed: false,
-          output: `TypeScript strict typecheck (tsc --noEmit) failed:
-${tscRun.stdout}
-${tscRun.stderr}`.trim()
+          output: failOut
         };
+      }
+      if (isGha) {
+        process.stdout.write("[EPURE][Sandbox] tsc --noEmit passed (0 errors)\n");
       }
     }
     const sandboxRun = await runInUntrustedCodeSandbox({
@@ -2805,15 +2847,31 @@ ${tscRun.stderr}`.trim()
       cwd: workDir,
       timeoutMs: 12e4
     });
+    const combinedOut = `${sandboxRun.stdout}
+${sandboxRun.stderr}`.trim();
+    const passed = sandboxRun.isolated && sandboxRun.exit_code === 0;
+    if (isGha) {
+      process.stdout.write(
+        `[EPURE][Sandbox] vitest run -> ${passed ? "PASSED" : "FAILED"}
+${combinedOut.slice(-4e3)}
+`
+      );
+    }
     return {
-      passed: sandboxRun.isolated && sandboxRun.exit_code === 0,
-      output: `${sandboxRun.stdout}
-${sandboxRun.stderr}`.trim()
+      passed,
+      output: combinedOut
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    if (isGha) {
+      process.stdout.write(`[EPURE][Sandbox] ERROR: ${msg}
+`);
+    }
     return { passed: false, output: msg };
   } finally {
+    if (isGha) {
+      process.stdout.write("::endgroup::\n");
+    }
     rmSync(workDir, { recursive: true, force: true });
   }
 }
@@ -3341,6 +3399,12 @@ Refs #${input.issueNumber}`
       const completedTicketsSummary = [];
       for (const ticket of ticketsManifest) {
         const taskBranch = `task/${ticket.ticketIssueNumber}-${ticket.slug}`;
+        if (process.env.GITHUB_ACTIONS === "true") {
+          process.stdout.write(
+            `::group::[EPURE][Ticket #${ticket.ticketIssueNumber}] Initial TDD Implementation (${taskBranch})
+`
+          );
+        }
         await gh.ensureBranch(taskBranch, featureBranch);
         const existingFilesContext = Array.from(accumulatedFiles.entries()).map(([path, content]) => `--- FILE: ${path} ---
 ${content}`).join("\n\n");
@@ -3400,13 +3464,21 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
         for (const f of impl.files) {
           accumulatedFiles.set(f.path.replace(/^\/+/, ""), f.content);
         }
+        if (process.env.GITHUB_ACTIONS === "true") {
+          process.stdout.write(
+            `[EPURE][Ticket #${ticket.ticketIssueNumber}] Generated ${impl.files.length} file(s): ${impl.files.map((f) => f.path).join(", ")}
+::endgroup::
+`
+          );
+        }
         let fixAttempt = 0;
         const maxCodeFixAttempts = 3;
         let testCheck = await runTestsInIsolatedWorkspace({
           files: Array.from(accumulatedFiles.entries()).map(
             ([path, content]) => ({ path, content })
           ),
-          llmApiKey: input.llmApiKey
+          llmApiKey: input.llmApiKey,
+          label: `Ticket #${ticket.ticketIssueNumber} initial TDD suite`
         });
         while (!testCheck.passed && fixAttempt < maxCodeFixAttempts) {
           fixAttempt += 1;
@@ -3470,7 +3542,8 @@ ${c}`).join("\n\n");
             files: Array.from(accumulatedFiles.entries()).map(
               ([path, content]) => ({ path, content })
             ),
-            llmApiKey: input.llmApiKey
+            llmApiKey: input.llmApiKey,
+            label: `Ticket #${ticket.ticketIssueNumber} TDD auto-fix attempt ${fixAttempt}/${maxCodeFixAttempts}`
           });
         }
         if (!testCheck.passed) {
@@ -3608,7 +3681,8 @@ ${c}`).join("\n\n");
             files: Array.from(accumulatedFiles.entries()).map(
               ([path, content]) => ({ path, content })
             ),
-            llmApiKey: input.llmApiKey
+            llmApiKey: input.llmApiKey,
+            label: `Ticket #${ticket.ticketIssueNumber} review-fix iteration ${reviewFixAttempt}/${maxCodeFixAttempts}`
           });
           let reviewTestRetry = 0;
           while (!testCheck.passed && reviewTestRetry < 2) {
@@ -3652,7 +3726,8 @@ ${c}`).join("\n\n");
               files: Array.from(accumulatedFiles.entries()).map(
                 ([path, content]) => ({ path, content })
               ),
-              llmApiKey: input.llmApiKey
+              llmApiKey: input.llmApiKey,
+              label: `Ticket #${ticket.ticketIssueNumber} review-fix iteration ${reviewFixAttempt} test retry ${reviewTestRetry}/2`
             });
           }
           if (!testCheck.passed) {
