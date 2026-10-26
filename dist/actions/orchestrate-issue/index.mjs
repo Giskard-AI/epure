@@ -747,7 +747,7 @@ async function callGeminiGenerateContent(options) {
     model
   )}:generateContent?key=${encodeURIComponent(options.apiKey.trim())}`;
   const hasTools = Boolean(options.tools && options.tools.length > 0);
-  const maxToolRounds = options.maxToolRounds ?? 6;
+  const maxToolRounds = options.maxToolRounds ?? 20;
   const effectiveSystemInstruction = options.systemInstruction ? options.systemInstruction.includes("PROMPT_INJECTION_IMMUNITY") || options.systemInstruction.includes("<untrusted_") ? options.systemInstruction : `${options.systemInstruction.trim()}
 
 ${PROMPT_INJECTION_IMMUNITY_CLAUSE}` : PROMPT_INJECTION_IMMUNITY_CLAUSE;
@@ -789,22 +789,40 @@ ${PROMPT_INJECTION_IMMUNITY_CLAUSE}` : PROMPT_INJECTION_IMMUNITY_CLAUSE;
         thinkingLevel: effectiveThinkingLevel
       };
     }
-    if (options.responseMimeType && !allowToolsThisRound) {
+    if (options.responseMimeType && !hasTools) {
       generationConfig.responseMimeType = options.responseMimeType;
     }
+    const requestContents = hasTools && !allowToolsThisRound ? [
+      ...contents,
+      {
+        role: "user",
+        parts: [
+          {
+            text: "Tool budget reached. Do not call any more tools. Output ONLY the final valid JSON object matching the required schema."
+          }
+        ]
+      }
+    ] : contents;
     const body = {
       systemInstruction: {
         parts: [{ text: effectiveSystemInstruction }]
       },
-      contents,
+      contents: requestContents,
       generationConfig
     };
-    if (allowToolsThisRound && options.tools) {
+    if (hasTools && options.tools) {
       body.tools = [
         {
           functionDeclarations: options.tools
         }
       ];
+      if (!allowToolsThisRound) {
+        body.toolConfig = {
+          functionCallingConfig: {
+            mode: "NONE"
+          }
+        };
+      }
     }
     const response = await fetchWithRetry(url, {
       method: "POST",
@@ -865,7 +883,8 @@ ${PROMPT_INJECTION_IMMUNITY_CLAUSE}` : PROMPT_INJECTION_IMMUNITY_CLAUSE;
       });
       continue;
     }
-    const text = parts.map((p) => p.text ?? "").join("");
+    const nonThoughtText = parts.filter((p) => !p.thought).map((p) => p.text ?? "").join("");
+    const text = nonThoughtText.trim() ? nonThoughtText : parts.map((p) => p.text ?? "").join("");
     if (!text.trim()) {
       throw new Error(`Gemini API returned empty content for model '${model}'.`);
     }
