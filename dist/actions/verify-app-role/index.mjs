@@ -7,6 +7,8 @@ var SECRET_PATTERNS = [
   /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{16,255}\b/g,
   /\bgithub_pat_[A-Za-z0-9_]{20,255}\b/g,
   /\bsk-(?:ant-)?[A-Za-z0-9_-]{16,255}\b/g,
+  /\bAIza[0-9A-Za-z_-]{35}\b/g,
+  /\bAuthorization:\s*(?:Bearer|Basic|token)\s+[A-Za-z0-9._~+/=-]+/gi,
   /\bBearer\s+[A-Za-z0-9._~+/=-]{12,512}\b/gi
 ];
 function redactSecrets(text, extraSecrets = []) {
@@ -19,6 +21,10 @@ function redactSecrets(text, extraSecrets = []) {
   }
   for (const pattern of SECRET_PATTERNS) {
     result = result.replace(pattern, (match) => {
+      const authHeaderMatch = /^(Authorization:\s*(?:Bearer|Basic|token))\s+/i.exec(match);
+      if (authHeaderMatch) {
+        return `${authHeaderMatch[1]} [REDACTED]`;
+      }
       if (/^bearer\s+/i.test(match)) {
         return "Bearer [REDACTED]";
       }

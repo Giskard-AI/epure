@@ -12,8 +12,19 @@ import {
   buildStackAwareCiWorkflowYaml,
   buildZizmorConfigYaml,
   detectRepositoryStack,
-  type DetectedStackProfile
+  discoverVerificationProfile,
+  type DetectedStackProfile,
+  type VerificationProfile,
+  type VerificationTargetKind,
+  type VerificationTargetSpec
 } from "./ci-and-renovate.js";
+
+export {
+  discoverVerificationProfile,
+  type VerificationProfile,
+  type VerificationTargetKind,
+  type VerificationTargetSpec
+};
 
 export const DEFAULT_EPURE_PINNED_SHA =
   "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
@@ -57,6 +68,7 @@ export interface AgentsConfig {
   readonly trace_retention_days: number;
   readonly preview_retention_days: number;
   readonly github_pages_previews: boolean;
+  readonly verification?: VerificationProfile | undefined;
 }
 
 export interface SecurityOverridesAttempt {
@@ -73,6 +85,9 @@ export interface AgentsConfigOverrides {
   readonly merge_policy?: StaleBaseMergePolicy | undefined;
   readonly max_code_fix_attempts?: number | undefined;
   readonly max_transient_api_retries?: number | undefined;
+  readonly transient_retry_backoff_seconds?:
+    | readonly [number, number, number, number]
+    | undefined;
   readonly job_timeout_minutes?: number | undefined;
   readonly review_timeout_minutes?: number | undefined;
   readonly max_concurrent_tasks_per_feature?: number | undefined;
@@ -81,6 +96,8 @@ export interface AgentsConfigOverrides {
   readonly github_pages_previews?: boolean | undefined;
   readonly github_pages_human_consent?: boolean | undefined;
   readonly preview_separate_origin?: boolean | undefined;
+  readonly verification?: Partial<VerificationProfile> | undefined;
+  readonly reset_verification_targets?: boolean | undefined;
   readonly security_overrides?: SecurityOverridesAttempt | undefined;
 }
 
@@ -245,6 +262,13 @@ export interface OrgSecretSharingValidationResult {
   readonly effective_token_repositories: readonly string[];
 }
 
+export const DEFAULT_VERIFICATION_PROFILE: VerificationProfile = {
+  wait_for_external_ci: true,
+  external_ci_timeout_minutes: 15,
+  grace_window_seconds: 45,
+  targets: []
+};
+
 export const DEFAULT_AGENTS_CONFIG: AgentsConfig = {
   harness: "pi",
   models: {
@@ -261,7 +285,8 @@ export const DEFAULT_AGENTS_CONFIG: AgentsConfig = {
   max_concurrent_tasks_per_feature: 3,
   trace_retention_days: 30,
   preview_retention_days: 14,
-  github_pages_previews: false
+  github_pages_previews: false,
+  verification: DEFAULT_VERIFICATION_PROFILE
 };
 
 export const DEFAULT_REPOSITORY_MERGE_SETTINGS: RepositoryMergeSettingsSpec = {
@@ -274,6 +299,29 @@ export const DEFAULT_REPOSITORY_MERGE_SETTINGS: RepositoryMergeSettingsSpec = {
 };
 
 const REPO_SLUG_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+
+function normalizeVerificationTarget(
+  target: VerificationTargetSpec
+): VerificationTargetSpec {
+  return {
+    name: target.name,
+    working_directory: target.working_directory,
+    kind: target.kind,
+    path_patterns: [...target.path_patterns],
+    ...(target.install_command
+      ? { install_command: target.install_command }
+      : {}),
+    ...(target.codegen_command
+      ? { codegen_command: target.codegen_command }
+      : {}),
+    ...(target.typecheck_command
+      ? { typecheck_command: target.typecheck_command }
+      : {}),
+    ...(target.lint_command ? { lint_command: target.lint_command } : {}),
+    ...(target.test_command ? { test_command: target.test_command } : {}),
+    ...(target.build_command ? { build_command: target.build_command } : {})
+  };
+}
 
 export function resolveAgentsConfig(
   overrides: AgentsConfigOverrides = {}
@@ -335,6 +383,31 @@ export function resolveAgentsConfig(
     }
   }
 
+  const verification: VerificationProfile = overrides.verification
+    ? {
+        wait_for_external_ci:
+          overrides.verification.wait_for_external_ci ??
+          DEFAULT_VERIFICATION_PROFILE.wait_for_external_ci,
+        external_ci_timeout_minutes:
+          overrides.verification.external_ci_timeout_minutes ??
+          DEFAULT_VERIFICATION_PROFILE.external_ci_timeout_minutes,
+        grace_window_seconds:
+          overrides.verification.grace_window_seconds ??
+          DEFAULT_VERIFICATION_PROFILE.grace_window_seconds,
+        ...(overrides.verification.deferred_external_workflows &&
+        overrides.verification.deferred_external_workflows.length > 0
+          ? {
+              deferred_external_workflows: [
+                ...overrides.verification.deferred_external_workflows
+              ]
+            }
+          : {}),
+        targets: overrides.verification.targets
+          ? overrides.verification.targets.map(normalizeVerificationTarget)
+          : DEFAULT_VERIFICATION_PROFILE.targets
+      }
+    : DEFAULT_VERIFICATION_PROFILE;
+
   const config: AgentsConfig = {
     harness: overrides.harness ?? DEFAULT_AGENTS_CONFIG.harness,
     models: {
@@ -353,6 +426,7 @@ export function resolveAgentsConfig(
       overrides.max_transient_api_retries ??
       DEFAULT_AGENTS_CONFIG.max_transient_api_retries,
     transient_retry_backoff_seconds:
+      overrides.transient_retry_backoff_seconds ??
       DEFAULT_AGENTS_CONFIG.transient_retry_backoff_seconds,
     job_timeout_minutes:
       overrides.job_timeout_minutes ??
@@ -369,7 +443,8 @@ export function resolveAgentsConfig(
     preview_retention_days:
       overrides.preview_retention_days ??
       DEFAULT_AGENTS_CONFIG.preview_retention_days,
-    github_pages_previews: pagesPreviews
+    github_pages_previews: pagesPreviews,
+    verification
   };
 
   return {
@@ -380,10 +455,81 @@ export function resolveAgentsConfig(
   };
 }
 
+function escapeYamlDoubleQuoted(val: string): string {
+  return JSON.stringify(val);
+}
+
 export function serializeAgentsConfigYaml(
   config: AgentsConfig,
-  taskAutoMergeEnabled: boolean
+  taskAutoMergeEnabled: boolean = false
 ): string {
+  const verification = config.verification ?? DEFAULT_VERIFICATION_PROFILE;
+  const verificationLines: string[] = [
+    "verification:",
+    `  wait_for_external_ci: ${verification.wait_for_external_ci}`,
+    `  external_ci_timeout_minutes: ${verification.external_ci_timeout_minutes}`,
+    `  grace_window_seconds: ${verification.grace_window_seconds}`
+  ];
+
+  if (
+    verification.deferred_external_workflows &&
+    verification.deferred_external_workflows.length > 0
+  ) {
+    const formattedDeferred = verification.deferred_external_workflows
+      .map((w) => escapeYamlDoubleQuoted(w))
+      .join(", ");
+    verificationLines.push(
+      `  deferred_external_workflows: [${formattedDeferred}]`
+    );
+  }
+
+  if (verification.targets.length === 0) {
+    verificationLines.push("  targets: []");
+  } else {
+    verificationLines.push("  targets:");
+    for (const target of verification.targets) {
+      const formattedPatterns = target.path_patterns
+        .map((p) => escapeYamlDoubleQuoted(p))
+        .join(", ");
+      verificationLines.push(`    - name: ${target.name}`);
+      verificationLines.push(
+        `      working_directory: ${target.working_directory}`
+      );
+      verificationLines.push(`      kind: ${target.kind}`);
+      verificationLines.push(`      path_patterns: [${formattedPatterns}]`);
+      if (target.install_command) {
+        verificationLines.push(
+          `      install_command: ${escapeYamlDoubleQuoted(target.install_command)}`
+        );
+      }
+      if (target.codegen_command) {
+        verificationLines.push(
+          `      codegen_command: ${escapeYamlDoubleQuoted(target.codegen_command)}`
+        );
+      }
+      if (target.typecheck_command) {
+        verificationLines.push(
+          `      typecheck_command: ${escapeYamlDoubleQuoted(target.typecheck_command)}`
+        );
+      }
+      if (target.lint_command) {
+        verificationLines.push(
+          `      lint_command: ${escapeYamlDoubleQuoted(target.lint_command)}`
+        );
+      }
+      if (target.test_command) {
+        verificationLines.push(
+          `      test_command: ${escapeYamlDoubleQuoted(target.test_command)}`
+        );
+      }
+      if (target.build_command) {
+        verificationLines.push(
+          `      build_command: ${escapeYamlDoubleQuoted(target.build_command)}`
+        );
+      }
+    }
+  }
+
   return [
     "# EPURE Consumer Repository Configuration (.github/agents.yml)",
     "# Generated by setup-repo — security boundaries are enforced by shared workflows (ADR-0010, ADR-0023).",
@@ -403,6 +549,7 @@ export function serializeAgentsConfigYaml(
     `trace_retention_days: ${config.trace_retention_days}`,
     `preview_retention_days: ${config.preview_retention_days}`,
     `github_pages_previews: ${config.github_pages_previews}`,
+    ...verificationLines,
     "security_invariants:",
     "  require_write_permission: true",
     "  sandbox_isolation: true",
@@ -411,6 +558,524 @@ export function serializeAgentsConfigYaml(
     "  auto_merge_main: false",
     ""
   ].join("\n");
+}
+
+export function buildDefaultAgentsYaml(
+  configOrOptions?:
+    | AgentsConfig
+    | {
+        readonly config?: AgentsConfig | undefined;
+        readonly overrides?: AgentsConfigOverrides | undefined;
+        readonly taskAutoMergeEnabled?: boolean | undefined;
+      },
+  taskAutoMergeEnabled: boolean = false
+): string {
+  if (!configOrOptions) {
+    return serializeAgentsConfigYaml(
+      DEFAULT_AGENTS_CONFIG,
+      taskAutoMergeEnabled
+    );
+  }
+  if ("harness" in configOrOptions && "models" in configOrOptions) {
+    return serializeAgentsConfigYaml(configOrOptions, taskAutoMergeEnabled);
+  }
+  const baseConfig =
+    configOrOptions.config ??
+    resolveAgentsConfig(configOrOptions.overrides ?? {}).config;
+  return serializeAgentsConfigYaml(
+    baseConfig,
+    configOrOptions.taskAutoMergeEnabled ?? taskAutoMergeEnabled
+  );
+}
+
+function unquoteYamlScalar(raw: string): string {
+  const trimmed = raw.trim();
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    if (trimmed.startsWith('"')) {
+      try {
+        return JSON.parse(trimmed) as string;
+      } catch {
+        return trimmed.slice(1, -1);
+      }
+    }
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+function parseYamlStringArrayInline(raw: string): string[] {
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) {
+    return [];
+  }
+  const inner = trimmed.slice(1, -1).trim();
+  if (!inner) {
+    return [];
+  }
+  const items: string[] = [];
+  let current = "";
+  let inQuote: '"' | "'" | null = null;
+  let escaped = false;
+  for (let i = 0; i < inner.length; i += 1) {
+    const ch = inner[i] ?? "";
+    if (escaped) {
+      current += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\" && inQuote === '"') {
+      current += ch;
+      escaped = true;
+      continue;
+    }
+    if ((ch === '"' || ch === "'") && !inQuote) {
+      inQuote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === inQuote) {
+      inQuote = null;
+      current += ch;
+      continue;
+    }
+    if (ch === "," && !inQuote) {
+      items.push(unquoteYamlScalar(current));
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  if (current.trim().length > 0) {
+    items.push(unquoteYamlScalar(current));
+  }
+  return items;
+}
+
+export function parseAgentsYaml(
+  yamlContent: string
+): AgentsConfig & {
+  readonly task_auto_merge_enabled?: boolean | undefined;
+  readonly github_pages_human_consent?: boolean | undefined;
+  readonly preview_separate_origin?: boolean | undefined;
+  readonly security_overrides?: SecurityOverridesAttempt | undefined;
+} {
+  let harness: AgentHarness | undefined;
+  const models: Partial< Record<keyof AgentsModelsConfig, string> > = {};
+  let merge_policy: StaleBaseMergePolicy | undefined;
+  let task_auto_merge_enabled: boolean | undefined;
+  let max_code_fix_attempts: number | undefined;
+  let max_transient_api_retries: number | undefined;
+  let transient_retry_backoff_seconds:
+    | readonly [number, number, number, number]
+    | undefined;
+  let job_timeout_minutes: number | undefined;
+  let review_timeout_minutes: number | undefined;
+  let max_concurrent_tasks_per_feature: number | undefined;
+  let trace_retention_days: number | undefined;
+  let preview_retention_days: number | undefined;
+  let github_pages_previews: boolean | undefined;
+  let github_pages_human_consent: boolean | undefined;
+  let preview_separate_origin: boolean | undefined;
+
+  let wait_for_external_ci: boolean | undefined;
+  let external_ci_timeout_minutes: number | undefined;
+  let grace_window_seconds: number | undefined;
+  let deferred_external_workflows: string[] | undefined;
+  let hasTargetsKey = false;
+  const targets: Array<{
+    name?: string;
+    working_directory?: string;
+    kind?: VerificationTargetKind;
+    path_patterns?: string[];
+    install_command?: string;
+    codegen_command?: string;
+    typecheck_command?: string;
+    lint_command?: string;
+    test_command?: string;
+    build_command?: string;
+  }> = [];
+
+  const securityOverrides: {
+    require_write_permission?: boolean;
+    sandbox_isolation?: boolean;
+    allow_agent_release?: boolean;
+    auto_merge_dev?: boolean;
+    auto_merge_main?: boolean;
+  } = {};
+
+  const lines = yamlContent.split(/\r?\n/);
+  let section:
+    | "root"
+    | "models"
+    | "verification"
+    | "security"
+    | "other" = "root";
+  let inTargets = false;
+  let inDeferredWorkflows = false;
+  let inCurrentTargetPathPatterns = false;
+  let currentTarget: {
+    name?: string;
+    working_directory?: string;
+    kind?: VerificationTargetKind;
+    path_patterns?: string[];
+    install_command?: string;
+    codegen_command?: string;
+    typecheck_command?: string;
+    lint_command?: string;
+    test_command?: string;
+    build_command?: string;
+  } | null = null;
+
+  const parseBool = (raw: string): boolean | undefined => {
+    const v = unquoteYamlScalar(raw).toLowerCase();
+    if (v === "true") return true;
+    if (v === "false") return false;
+    return undefined;
+  };
+
+  const parseNum = (raw: string): number | undefined => {
+    const n = Number.parseInt(unquoteYamlScalar(raw), 10);
+    return Number.isFinite(n) ? n : undefined;
+  };
+
+  const assignTargetField = (
+    targetObj: NonNullable<typeof currentTarget>,
+    key: string,
+    rawVal: string
+  ): void => {
+    const val = unquoteYamlScalar(rawVal);
+    if (key === "name") {
+      targetObj.name = val;
+    } else if (key === "working_directory") {
+      targetObj.working_directory = val;
+    } else if (key === "kind") {
+      targetObj.kind = val as VerificationTargetKind;
+    } else if (key === "path_patterns") {
+      if (rawVal.trim().startsWith("[")) {
+        targetObj.path_patterns = parseYamlStringArrayInline(rawVal);
+        inCurrentTargetPathPatterns = false;
+      } else {
+        targetObj.path_patterns = [];
+        inCurrentTargetPathPatterns = true;
+      }
+    } else if (key === "install_command") {
+      targetObj.install_command = val;
+    } else if (key === "codegen_command") {
+      targetObj.codegen_command = val;
+    } else if (key === "typecheck_command") {
+      targetObj.typecheck_command = val;
+    } else if (key === "lint_command") {
+      targetObj.lint_command = val;
+    } else if (key === "test_command") {
+      targetObj.test_command = val;
+    } else if (key === "build_command") {
+      targetObj.build_command = val;
+    }
+  };
+
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+
+    const indent = /^(\s*)/.exec(rawLine)?.[1]?.length ?? 0;
+
+    if (indent === 0) {
+      inTargets = false;
+      inDeferredWorkflows = false;
+      inCurrentTargetPathPatterns = false;
+      currentTarget = null;
+
+      const kv = /^([a-zA-Z0-9_]+):\s*(.*)$/.exec(trimmed);
+      if (!kv || !kv[1]) {
+        continue;
+      }
+      const key = kv[1];
+      const val = (kv[2] ?? "").replace(/\s+#.*$/, "").trim();
+
+      if (key === "models" && !val) {
+        section = "models";
+        continue;
+      }
+      if (key === "verification" && !val) {
+        section = "verification";
+        continue;
+      }
+      if (
+        (key === "security_invariants" || key === "security_overrides") &&
+        !val
+      ) {
+        section = "security";
+        continue;
+      }
+      section = "root";
+
+      if (key === "harness") {
+        const h = unquoteYamlScalar(val);
+        if (h === "pi" || h === "codex") {
+          harness = h;
+        }
+      } else if (key === "merge_policy") {
+        const mp = unquoteYamlScalar(val);
+        if (mp === "strict" || mp === "relaxed") {
+          merge_policy = mp;
+        }
+      } else if (key === "task_auto_merge_enabled") {
+        task_auto_merge_enabled = parseBool(val);
+      } else if (key === "max_code_fix_attempts") {
+        max_code_fix_attempts = parseNum(val);
+      } else if (key === "max_transient_api_retries") {
+        max_transient_api_retries = parseNum(val);
+      } else if (key === "transient_retry_backoff_seconds") {
+        const nums = parseYamlStringArrayInline(val)
+          .map((s) => Number.parseInt(s, 10))
+          .filter((n) => Number.isFinite(n));
+        if (nums.length === 4) {
+          transient_retry_backoff_seconds = [
+            nums[0]!,
+            nums[1]!,
+            nums[2]!,
+            nums[3]!
+          ];
+        }
+      } else if (key === "job_timeout_minutes") {
+        job_timeout_minutes = parseNum(val);
+      } else if (key === "review_timeout_minutes") {
+        review_timeout_minutes = parseNum(val);
+      } else if (key === "max_concurrent_tasks_per_feature") {
+        max_concurrent_tasks_per_feature = parseNum(val);
+      } else if (key === "trace_retention_days") {
+        trace_retention_days = parseNum(val);
+      } else if (key === "preview_retention_days") {
+        preview_retention_days = parseNum(val);
+      } else if (key === "github_pages_previews") {
+        github_pages_previews = parseBool(val);
+      } else if (key === "github_pages_human_consent") {
+        github_pages_human_consent = parseBool(val);
+      } else if (key === "preview_separate_origin") {
+        preview_separate_origin = parseBool(val);
+      }
+      continue;
+    }
+
+    if (section === "models") {
+      const kv = /^([a-zA-Z0-9_]+):\s*(.+)$/.exec(trimmed);
+      if (kv && kv[1] && kv[2]) {
+        const k = kv[1];
+        const v = unquoteYamlScalar(kv[2].replace(/\s+#.*$/, ""));
+        if (k === "planning" || k === "implementation" || k === "review") {
+          models[k] = v;
+        }
+      }
+      continue;
+    }
+
+    if (section === "security") {
+      const kv = /^([a-zA-Z0-9_]+):\s*(.+)$/.exec(trimmed);
+      if (kv && kv[1] && kv[2]) {
+        const k = kv[1];
+        const b = parseBool(kv[2].replace(/\s+#.*$/, ""));
+        if (b !== undefined) {
+          if (k === "require_write_permission") {
+            securityOverrides.require_write_permission = b;
+          } else if (k === "sandbox_isolation") {
+            securityOverrides.sandbox_isolation = b;
+          } else if (k === "allow_agent_release") {
+            securityOverrides.allow_agent_release = b;
+          } else if (k === "auto_merge_dev") {
+            securityOverrides.auto_merge_dev = b;
+          } else if (k === "auto_merge_main") {
+            securityOverrides.auto_merge_main = b;
+          }
+        }
+      }
+      continue;
+    }
+
+    if (section === "verification") {
+      if (indent === 2) {
+        inTargets = false;
+        inDeferredWorkflows = false;
+        inCurrentTargetPathPatterns = false;
+        currentTarget = null;
+
+        const kv = /^([a-zA-Z0-9_]+):\s*(.*)$/.exec(trimmed);
+        if (!kv || !kv[1]) {
+          continue;
+        }
+        const k = kv[1];
+        const v = (kv[2] ?? "").replace(/\s+#.*$/, "").trim();
+        if (k === "wait_for_external_ci") {
+          wait_for_external_ci = parseBool(v);
+        } else if (k === "external_ci_timeout_minutes") {
+          external_ci_timeout_minutes = parseNum(v);
+        } else if (k === "grace_window_seconds") {
+          grace_window_seconds = parseNum(v);
+        } else if (k === "deferred_external_workflows") {
+          if (v.startsWith("[")) {
+            deferred_external_workflows = parseYamlStringArrayInline(v);
+          } else {
+            deferred_external_workflows = [];
+            inDeferredWorkflows = true;
+          }
+        } else if (k === "targets") {
+          hasTargetsKey = true;
+          if (v === "[]") {
+            inTargets = false;
+          } else {
+            inTargets = true;
+          }
+        }
+        continue;
+      }
+
+      if (inDeferredWorkflows && trimmed.startsWith("-")) {
+        const item = unquoteYamlScalar(trimmed.replace(/^-\s*/, ""));
+        if (item) {
+          deferred_external_workflows = deferred_external_workflows ?? [];
+          deferred_external_workflows.push(item);
+        }
+        continue;
+      }
+
+      if (inTargets) {
+        if (indent === 4 && trimmed.startsWith("-")) {
+          inCurrentTargetPathPatterns = false;
+          currentTarget = {};
+          targets.push(currentTarget);
+          const afterDash = trimmed.replace(/^-\s*/, "");
+          const kv = /^([a-zA-Z0-9_]+):\s*(.*)$/.exec(afterDash);
+          if (kv && kv[1]) {
+            assignTargetField(
+              currentTarget,
+              kv[1],
+              (kv[2] ?? "").replace(/\s+#.*$/, "").trim()
+            );
+          }
+          continue;
+        }
+
+        if (currentTarget) {
+          if (inCurrentTargetPathPatterns && trimmed.startsWith("-")) {
+            const pat = unquoteYamlScalar(trimmed.replace(/^-\s*/, ""));
+            currentTarget.path_patterns = currentTarget.path_patterns ?? [];
+            currentTarget.path_patterns.push(pat);
+            continue;
+          }
+
+          const kv = /^([a-zA-Z0-9_]+):\s*(.*)$/.exec(trimmed);
+          if (kv && kv[1]) {
+            inCurrentTargetPathPatterns = false;
+            assignTargetField(
+              currentTarget,
+              kv[1],
+              (kv[2] ?? "").replace(/\s+#.*$/, "").trim()
+            );
+          }
+        }
+      }
+    }
+  }
+
+  const parsedTargets: VerificationTargetSpec[] = targets
+    .filter((t) => Boolean(t.name))
+    .map((t) => ({
+      name: t.name ?? "root",
+      working_directory: t.working_directory ?? ".",
+      kind: t.kind ?? "node",
+      path_patterns:
+        t.path_patterns && t.path_patterns.length > 0
+          ? t.path_patterns
+          : ["**"],
+      ...(t.install_command ? { install_command: t.install_command } : {}),
+      ...(t.codegen_command ? { codegen_command: t.codegen_command } : {}),
+      ...(t.typecheck_command
+        ? { typecheck_command: t.typecheck_command }
+        : {}),
+      ...(t.lint_command ? { lint_command: t.lint_command } : {}),
+      ...(t.test_command ? { test_command: t.test_command } : {}),
+      ...(t.build_command ? { build_command: t.build_command } : {})
+    }));
+
+  const hasVerificationOverrides =
+    wait_for_external_ci !== undefined ||
+    external_ci_timeout_minutes !== undefined ||
+    grace_window_seconds !== undefined ||
+    deferred_external_workflows !== undefined ||
+    hasTargetsKey ||
+    parsedTargets.length > 0;
+
+  const overrides: AgentsConfigOverrides = {
+    ...(harness ? { harness } : {}),
+    ...(Object.keys(models).length > 0 ? { models } : {}),
+    ...(merge_policy ? { merge_policy } : {}),
+    ...(max_code_fix_attempts !== undefined ? { max_code_fix_attempts } : {}),
+    ...(max_transient_api_retries !== undefined
+      ? { max_transient_api_retries }
+      : {}),
+    ...(transient_retry_backoff_seconds
+      ? { transient_retry_backoff_seconds }
+      : {}),
+    ...(job_timeout_minutes !== undefined ? { job_timeout_minutes } : {}),
+    ...(review_timeout_minutes !== undefined ? { review_timeout_minutes } : {}),
+    ...(max_concurrent_tasks_per_feature !== undefined
+      ? { max_concurrent_tasks_per_feature }
+      : {}),
+    ...(trace_retention_days !== undefined ? { trace_retention_days } : {}),
+    ...(preview_retention_days !== undefined ? { preview_retention_days } : {}),
+    ...(github_pages_previews !== undefined ? { github_pages_previews } : {}),
+    ...(github_pages_human_consent !== undefined
+      ? { github_pages_human_consent }
+      : {}),
+    ...(preview_separate_origin !== undefined
+      ? { preview_separate_origin }
+      : {}),
+    ...(hasVerificationOverrides
+      ? {
+          verification: {
+            ...(wait_for_external_ci !== undefined
+              ? { wait_for_external_ci }
+              : {}),
+            ...(external_ci_timeout_minutes !== undefined
+              ? { external_ci_timeout_minutes }
+              : {}),
+            ...(grace_window_seconds !== undefined
+              ? { grace_window_seconds }
+              : {}),
+            ...(deferred_external_workflows !== undefined
+              ? { deferred_external_workflows }
+              : {}),
+            ...(hasTargetsKey || parsedTargets.length > 0
+              ? { targets: parsedTargets }
+              : {})
+          }
+        }
+      : {}),
+    ...(Object.keys(securityOverrides).length > 0
+      ? { security_overrides: securityOverrides }
+      : {})
+  };
+
+  const resolved = resolveAgentsConfig(overrides);
+  return {
+    ...resolved.config,
+    ...(task_auto_merge_enabled !== undefined
+      ? { task_auto_merge_enabled }
+      : {}),
+    ...(github_pages_human_consent !== undefined
+      ? { github_pages_human_consent }
+      : {}),
+    ...(preview_separate_origin !== undefined
+      ? { preview_separate_origin }
+      : {}),
+    ...(Object.keys(securityOverrides).length > 0
+      ? { security_overrides: securityOverrides }
+      : {})
+  };
 }
 
 function buildCallerWorkflows(
@@ -815,8 +1480,118 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
     ? "NONE"
     : "AUTO_MERGE_DISABLED_MISSING_PROTECTIONS";
 
+  const detectedStack = detectRepositoryStack({
+    repoRootDir: input.repoRootDir
+  });
+
+  // Load existing .github/agents.yml if present to preserve user-customized verification.targets on re-run
+  let existingVerification: VerificationProfile | undefined;
+  if (
+    input.repoRootDir &&
+    existsSync(join(input.repoRootDir, ".github", "agents.yml"))
+  ) {
+    try {
+      const existingRaw = readFileSync(
+        join(input.repoRootDir, ".github", "agents.yml"),
+        "utf8"
+      );
+      const parsedExisting = parseAgentsYaml(existingRaw);
+      existingVerification = parsedExisting.verification;
+    } catch {
+      existingVerification = undefined;
+    }
+  }
+
+  const resetTargets =
+    input.agentsOverrides?.reset_verification_targets === true;
+  const overrideVerification = input.agentsOverrides?.verification;
+  const discoveredVerification = detectedStack.verification;
+
+  let mergedTargets: VerificationTargetSpec[];
+  if (overrideVerification?.targets) {
+    if (
+      resetTargets ||
+      !existingVerification ||
+      existingVerification.targets.length === 0
+    ) {
+      mergedTargets = overrideVerification.targets.map(
+        normalizeVerificationTarget
+      );
+    } else {
+      const targetMap = new Map<string, VerificationTargetSpec>();
+      for (const t of existingVerification.targets) {
+        targetMap.set(t.name, normalizeVerificationTarget(t));
+      }
+      for (const t of overrideVerification.targets) {
+        targetMap.set(t.name, normalizeVerificationTarget(t));
+      }
+      mergedTargets = Array.from(targetMap.values());
+    }
+  } else if (
+    !resetTargets &&
+    existingVerification &&
+    existingVerification.targets.length > 0
+  ) {
+    const targetMap = new Map<string, VerificationTargetSpec>();
+    for (const t of existingVerification.targets) {
+      targetMap.set(t.name, normalizeVerificationTarget(t));
+    }
+    for (const t of discoveredVerification.targets) {
+      if (!targetMap.has(t.name)) {
+        targetMap.set(t.name, normalizeVerificationTarget(t));
+      }
+    }
+    mergedTargets = Array.from(targetMap.values());
+  } else {
+    mergedTargets = discoveredVerification.targets.map(
+      normalizeVerificationTarget
+    );
+  }
+
+  const deferredSet = new Set<string>();
+  if (overrideVerification?.deferred_external_workflows) {
+    for (const w of overrideVerification.deferred_external_workflows) {
+      deferredSet.add(w);
+    }
+  } else {
+    if (!resetTargets && existingVerification?.deferred_external_workflows) {
+      for (const w of existingVerification.deferred_external_workflows) {
+        deferredSet.add(w);
+      }
+    }
+    if (discoveredVerification.deferred_external_workflows) {
+      for (const w of discoveredVerification.deferred_external_workflows) {
+        deferredSet.add(w);
+      }
+    }
+  }
+
+  const effectiveVerification: VerificationProfile = {
+    wait_for_external_ci:
+      overrideVerification?.wait_for_external_ci ??
+      existingVerification?.wait_for_external_ci ??
+      discoveredVerification.wait_for_external_ci,
+    external_ci_timeout_minutes:
+      overrideVerification?.external_ci_timeout_minutes ??
+      existingVerification?.external_ci_timeout_minutes ??
+      discoveredVerification.external_ci_timeout_minutes,
+    grace_window_seconds:
+      overrideVerification?.grace_window_seconds ??
+      existingVerification?.grace_window_seconds ??
+      discoveredVerification.grace_window_seconds,
+    ...(deferredSet.size > 0
+      ? { deferred_external_workflows: Array.from(deferredSet) }
+      : {}),
+    targets: mergedTargets
+  };
+
+  const effectiveAgentsConfig: AgentsConfig = {
+    ...resolvedConfig.config,
+    verification: effectiveVerification
+  };
+
   const agentsYamlContent = serializeAgentsConfigYaml(
-    resolvedConfig.config,
+    effectiveAgentsConfig,
     taskAutoMergeEnabled
   );
   const agentsConfigAction = computeFilePlanAction(
@@ -825,9 +1600,6 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
     agentsYamlContent
   );
 
-  const detectedStack = detectRepositoryStack({
-    repoRootDir: input.repoRootDir
-  });
   const zizmorConfig = buildZizmorConfigYaml();
   const renovateConfig = buildRenovateConfigJson(detectedStack);
   const zizmorAction = computeFilePlanAction(
@@ -936,15 +1708,38 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
     }
   ];
 
+  const deferredWorkflowsList =
+    effectiveVerification.deferred_external_workflows ?? [];
+  const targetTableRows = effectiveVerification.targets.map((t) => {
+    const stage1Cmds = [
+      t.install_command ? `install: \`${t.install_command}\`` : null,
+      t.codegen_command ? `codegen: \`${t.codegen_command}\`` : null,
+      t.typecheck_command ? `typecheck: \`${t.typecheck_command}\`` : null,
+      t.lint_command ? `lint: \`${t.lint_command}\`` : null,
+      t.test_command ? `test: \`${t.test_command}\`` : null,
+      t.build_command ? `build: \`${t.build_command}\`` : null
+    ]
+      .filter((item): item is string => Boolean(item))
+      .join(", ");
+    const patternsStr = t.path_patterns.map((p) => `\`${p}\``).join(", ");
+    return `| \`${t.name}\` | \`${t.kind}\` | \`${t.working_directory}\` | ${patternsStr} | ${stage1Cmds || "none"} |`;
+  });
+
   const summaryMarkdown = [
     `### EPURE setup-repo (${dryRun ? "Dry-Run Simulation" : "Guided Application"})`,
     `- **Repository**: \`${repository}\``,
     `- **Merge Governance**: \`squash-only\` (\`allow_merge_commit=false\`, \`allow_rebase_merge=false\`, \`delete_branch_on_merge=true\`)`,
-    `- **Agents Config (\`.github/agents.yml\`)**: \`${agentsConfigAction}\` (harness=\`${resolvedConfig.config.harness}\`, merge_policy=\`${resolvedConfig.config.merge_policy}\`)`,
+    `- **Agents Config (\`.github/agents.yml\`)**: \`${agentsConfigAction}\` (harness=\`${effectiveAgentsConfig.harness}\`, merge_policy=\`${effectiveAgentsConfig.merge_policy}\`)`,
     `- **Reviewer Roster (\`.cursor/agents/*.md\`)**: \`${plannedReviewerRoster.length}\` agents (specialists + cross-cutting + \`user-advocate\`)`,
     `- **Task Auto-Merge Enabled**: \`${taskAutoMergeEnabled}\` (${autoMergeWarningCode})`,
     `- **Governance Rulesets**: ${governanceRulesets.map((r) => `\`${r.name}\``).join(", ")}`,
-    `- **Mutated Files**: ${mutatedFiles.length > 0 ? mutatedFiles.map((f) => `\`${f}\``).join(", ") : "none"}`
+    `- **Deferred External Workflows**: ${deferredWorkflowsList.length > 0 ? deferredWorkflowsList.map((w) => `\`${w}\``).join(", ") : "none"}`,
+    `- **Mutated Files**: ${mutatedFiles.length > 0 ? mutatedFiles.map((f) => `\`${f}\``).join(", ") : "none"}`,
+    "",
+    "#### Discovered Verification Targets (`verification.targets`)",
+    "| Name | Kind | Working Directory | Path Patterns | Stage 1 Commands |",
+    "| :--- | :--- | :--- | :--- | :--- |",
+    ...targetTableRows
   ].join("\n");
 
   return {
@@ -953,7 +1748,7 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
     error_code: "NONE",
     error_message: "",
     repository,
-    agents_config: resolvedConfig.config,
+    agents_config: effectiveAgentsConfig,
     agents_config_action: agentsConfigAction,
     planned_workflows: plannedWorkflows,
     planned_reviewer_roster: plannedReviewerRoster,

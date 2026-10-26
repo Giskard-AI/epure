@@ -7,6 +7,8 @@ var SECRET_PATTERNS = [
   /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{16,255}\b/g,
   /\bgithub_pat_[A-Za-z0-9_]{20,255}\b/g,
   /\bsk-(?:ant-)?[A-Za-z0-9_-]{16,255}\b/g,
+  /\bAIza[0-9A-Za-z_-]{35}\b/g,
+  /\bAuthorization:\s*(?:Bearer|Basic|token)\s+[A-Za-z0-9._~+/=-]+/gi,
   /\bBearer\s+[A-Za-z0-9._~+/=-]{12,512}\b/gi
 ];
 function redactSecrets(text, extraSecrets = []) {
@@ -19,6 +21,10 @@ function redactSecrets(text, extraSecrets = []) {
   }
   for (const pattern of SECRET_PATTERNS) {
     result = result.replace(pattern, (match) => {
+      const authHeaderMatch = /^(Authorization:\s*(?:Bearer|Basic|token))\s+/i.exec(match);
+      if (authHeaderMatch) {
+        return `${authHeaderMatch[1]} [REDACTED]`;
+      }
       if (/^bearer\s+/i.test(match)) {
         return "Bearer [REDACTED]";
       }
@@ -430,7 +436,7 @@ async function publishAgentProposal(input) {
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
-var SECRET_ENV_NAME_PATTERN = /^(?:OPENAI_API_KEY|ANTHROPIC_API_KEY|GEMINI_API_KEY|LLM_API_KEY|GITHUB_TOKEN|GH_TOKEN|GITHUB_PAT|EPURE_.*(?:KEY|TOKEN|SECRET)|AWS_.*|AZURE_.*|GCP_.*|NPM_TOKEN|NODE_AUTH_TOKEN|ACTIONS_ID_TOKEN_REQUEST_TOKEN)$/i;
+var SECRET_ENV_NAME_PATTERN = /^(?:OPENAI_API_KEY|ANTHROPIC_API_KEY|GOOGLE_API_KEY|GEMINI_API_KEY|LLM_API_KEY|GITHUB_TOKEN|GH_TOKEN|GITHUB_PAT|EPURE_.*(?:KEY|TOKEN|SECRET)|AWS_.*|AZURE_.*|GCP_.*|NPM_TOKEN|NODE_AUTH_TOKEN|ACTIONS_RUNTIME_TOKEN|ACTIONS_ID_TOKEN_REQUEST_TOKEN)$/i;
 var ALLOWED_PROXY_PATHS = /* @__PURE__ */ new Set([
   "/v1/chat/completions",
   "/v1/responses",
@@ -560,7 +566,7 @@ async function runInUntrustedCodeSandbox(input) {
       proxy_url: ""
     };
   }
-  const llmApiKey = (input.runnerEnv.OPENAI_API_KEY ?? input.runnerEnv.ANTHROPIC_API_KEY ?? input.runnerEnv.LLM_API_KEY ?? "").trim();
+  const llmApiKey = (input.runnerEnv.OPENAI_API_KEY ?? input.runnerEnv.ANTHROPIC_API_KEY ?? input.runnerEnv.GOOGLE_API_KEY ?? input.runnerEnv.GEMINI_API_KEY ?? input.runnerEnv.LLM_API_KEY ?? "").trim();
   if (!llmApiKey) {
     return {
       isolated: false,

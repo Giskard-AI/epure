@@ -1,23 +1,41 @@
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
 import { mintRepositoryInstallationToken, revokeGitHubInstallationToken } from "../auth/github-app-jwt.js";
 import { type EpureCommandName, redactSecrets } from "../auth/issue-command-gate.js";
 import {
   buildRenovateConfigJson,
   buildStackAwareCiWorkflowYaml,
   buildZizmorConfigYaml,
-  detectRepositoryStack
+  detectRepositoryStack,
+  discoverVerificationProfile,
+  type VerificationProfile
 } from "../bootstrap/ci-and-renovate.js";
+import { parseAgentsYaml } from "../bootstrap/setup-repo.js";
+import {
+  discoverExpectedExternalWorkflows,
+  formatNeedsHumanEscalationComment,
+  waitForExternalCiChecks,
+  type CheckRunAnnotationRecord,
+  type ExternalCheckRunRecord,
+  type ExternalWorkflowRunRecord,
+  type WaitForExternalCiChecksResult
+} from "../execution/external-ci-gate.js";
 import { planImpeccableDesignSession } from "../frontend/impeccable-planning.js";
-import { runMultiAgentPrReviewPass } from "../review/multi-agent-pr-review.js";
+import {
+  runMultiAgentPrReviewPass,
+  type ReviewerFinding
+} from "../review/multi-agent-pr-review.js";
 import {
   adaptReviewerRosterForDomain,
-  runUserAdvocateDesignGate
+  runUserAdvocateDesignGate,
+  type ReviewerAgentName
 } from "../review/reviewer-roster.js";
 import { generateSemanticSquashCommitFromDiff } from "../review/squash-commit-generator.js";
-import { runInUntrustedCodeSandbox } from "../sandbox/llm-sandbox.js";
+import type { SandboxExecutionInput, SandboxExecutionResult } from "../sandbox/llm-sandbox.js";
+import {
+  formatVerificationToolingGuideMarkdown,
+  prepareRepositorySandboxWorkspace,
+  runPolyglotStage1Verification,
+  validateWorkspaceFileOperations
+} from "../sandbox/polyglot-workspace-runner.js";
 import {
   buildIssueStateRefName,
   createGitHubApiRefStateStore,
@@ -94,6 +112,7 @@ export interface GeneratedTicketImplementation {
     readonly content: string;
   }> | undefined;
   readonly patches?: readonly GeneratedTicketFilePatch[] | undefined;
+  readonly deleted_files?: readonly string[] | undefined;
   readonly commit_message: string;
   readonly test_summary: string;
 }
@@ -103,6 +122,8 @@ async function applyTicketImplementationPayload(params: {
   readonly accumulatedFiles: Map<string, string>;
   readonly featureChangedFilesMap: Map<string, string>;
   readonly ticketChangedFilesMap: Map<string, string>;
+  readonly featureDeletedFilesSet?: Set<string> | undefined;
+  readonly ticketDeletedFilesSet?: Set<string> | undefined;
   readonly gh: GitHubRestHelper;
   readonly branch: string;
 }): Promise<Array<{ path: string; content: string }>> {
@@ -111,6 +132,17 @@ async function applyTicketImplementationPayload(params: {
     params.accumulatedFiles.set(cleanPath, f.content);
     params.featureChangedFilesMap.set(cleanPath, f.content);
     params.ticketChangedFilesMap.set(cleanPath, f.content);
+    params.featureDeletedFilesSet?.delete(cleanPath);
+    params.ticketDeletedFilesSet?.delete(cleanPath);
+  }
+
+  for (const del of params.parsed.deleted_files ?? []) {
+    const cleanPath = del.replace(/^\/+/, "");
+    params.accumulatedFiles.delete(cleanPath);
+    params.featureChangedFilesMap.delete(cleanPath);
+    params.ticketChangedFilesMap.delete(cleanPath);
+    params.featureDeletedFilesSet?.add(cleanPath);
+    params.ticketDeletedFilesSet?.add(cleanPath);
   }
 
   for (const patch of params.parsed.patches ?? []) {
@@ -137,6 +169,8 @@ async function applyTicketImplementationPayload(params: {
     params.accumulatedFiles.set(cleanPath, updatedContent);
     params.featureChangedFilesMap.set(cleanPath, updatedContent);
     params.ticketChangedFilesMap.set(cleanPath, updatedContent);
+    params.featureDeletedFilesSet?.delete(cleanPath);
+    params.ticketDeletedFilesSet?.delete(cleanPath);
   }
 
   return Array.from(params.ticketChangedFilesMap.entries()).map(
@@ -158,6 +192,11 @@ export interface OrchestrateIssueInput {
   readonly model?: string | undefined;
   readonly stateStore?: GitRefStateStore | undefined;
   readonly fetchImpl?: typeof fetch | undefined;
+  readonly sleepFn?: ((ms: number) => Promise<void>) | undefined;
+  readonly pollIntervalMs?: number | undefined;
+  readonly sandboxRunner?:
+    | ((input: SandboxExecutionInput) => Promise<SandboxExecutionResult>)
+    | undefined;
 }
 
 export interface OrchestrateIssueResult {
@@ -196,6 +235,7 @@ interface GitHubRestHelper {
   listIssueComments(issueNumber: number): Promise<IssueCommentRecord[]>;
   postIssueComment(issueNumber: number, body: string): Promise<string>;
   ensureLabel(name: string, color: string, description: string): Promise<void>;
+  addIssueLabels(issueNumber: number, labels: readonly string[]): Promise<void>;
   createIssue(params: {
     title: string;
     body: string;
@@ -207,13 +247,28 @@ interface GitHubRestHelper {
   readSingleBranchFile(branch: string, filePath: string): Promise<string | null>;
   readBranchWorkspaceFiles(branch: string, hintText?: string): Promise<Map<string, string>>;
   readTrustedBaseRosterFiles(branch: string): Promise<Map<string, string>>;
+  readDevWorkflowsMap(branch: string): Promise<Map<string, string>>;
   ensureBranch(branch: string, fromBranch?: string): Promise<string>;
   commitFilesToBranch(params: {
     branch: string;
     fromBranch?: string;
     commitMessage: string;
     files: ReadonlyArray<{ path: string; content: string }>;
+    readonly deletedFiles?: readonly string[] | undefined;
   }): Promise<string>;
+  listPullRequestFiles(
+    prNumber: number
+  ): Promise<ReadonlyArray<{ filename: string; status: string }>>;
+  findOpenPullRequestByHead(
+    headBranch: string,
+    baseBranch: string
+  ): Promise<{
+    number: number;
+    html_url: string;
+    head_sha: string;
+    title: string;
+    body: string;
+  } | null>;
   openPullRequest(params: {
     head: string;
     base: string;
@@ -243,6 +298,17 @@ interface GitHubRestHelper {
     conclusion: "success" | "failure";
     summary: string;
   }): Promise<void>;
+  listWorkflowRunsForSha(
+    headSha: string
+  ): Promise<readonly ExternalWorkflowRunRecord[]>;
+  listCheckRunsForRef(
+    headSha: string
+  ): Promise<readonly ExternalCheckRunRecord[]>;
+  listCheckRunAnnotations(
+    checkRunId: number
+  ): Promise<readonly CheckRunAnnotationRecord[]>;
+  getActionJobLogs(jobId: number): Promise<string>;
+  rerunFailedWorkflowJobs(runId: number): Promise<void>;
 }
 
 function slugifyTitle(raw: string): string {
@@ -373,6 +439,21 @@ function createGitHubRestHelper(params: {
           color,
           description
         });
+      }
+    },
+
+    async addIssueLabels(
+      issueNumber: number,
+      labels: readonly string[]
+    ): Promise<void> {
+      try {
+        await apiRequest(
+          "POST",
+          `/repos/${owner}/${repo}/issues/${issueNumber}/labels`,
+          { labels: [...labels] }
+        );
+      } catch {
+        // Non-fatal in mock tests
       }
     },
 
@@ -638,6 +719,45 @@ function createGitHubRestHelper(params: {
       return filesMap;
     },
 
+    async readDevWorkflowsMap(branch: string): Promise<Map<string, string>> {
+      const workflowsMap = new Map<string, string>();
+      try {
+        const treeRes = await apiRequest<{
+          tree?: Array<{ path?: string; type?: string; sha?: string }>;
+        }>(
+          "GET",
+          `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
+          undefined,
+          true
+        );
+        const entries = treeRes.data?.tree ?? [];
+        for (const entry of entries) {
+          if (entry.type !== "blob" || !entry.path || !entry.sha) {
+            continue;
+          }
+          if (!/^\.github\/workflows\/[^/]+\.ya?ml$/i.test(entry.path)) {
+            continue;
+          }
+          const blobRes = await apiRequest<{ content?: string; encoding?: string }>(
+            "GET",
+            `/repos/${owner}/${repo}/git/blobs/${entry.sha}`,
+            undefined,
+            true
+          );
+          if (blobRes.data?.content && blobRes.data.encoding === "base64") {
+            const decoded = Buffer.from(
+              blobRes.data.content.replace(/\s+/g, ""),
+              "base64"
+            ).toString("utf8");
+            workflowsMap.set(entry.path, decoded);
+          }
+        }
+      } catch {
+        // Non-fatal if branch tree is unavailable or mocked in tests
+      }
+      return workflowsMap;
+    },
+
     async ensureBranch(branch: string, fromBranch = "main"): Promise<string> {
       const existingSha = await this.getDefaultBranchSha(branch);
       if (existingSha) {
@@ -679,9 +799,10 @@ function createGitHubRestHelper(params: {
         path: string;
         mode: "100644";
         type: "blob";
-        sha: string;
+        sha: string | null;
       }> = [];
 
+      const seenTreePaths = new Set<string>();
       for (const file of input.files) {
         const cleanPath = file.path.trim().replace(/^\/+/, "");
         const blobRes = await apiRequest<{ sha: string }>(
@@ -692,11 +813,26 @@ function createGitHubRestHelper(params: {
             encoding: "utf-8"
           }
         );
+        seenTreePaths.add(cleanPath);
         treeEntries.push({
           path: cleanPath,
           mode: "100644",
           type: "blob",
           sha: blobRes.data!.sha
+        });
+      }
+
+      for (const delPath of input.deletedFiles ?? []) {
+        const cleanPath = delPath.trim().replace(/^\/+/, "");
+        if (!cleanPath || seenTreePaths.has(cleanPath)) {
+          continue;
+        }
+        seenTreePaths.add(cleanPath);
+        treeEntries.push({
+          path: cleanPath,
+          mode: "100644",
+          type: "blob",
+          sha: null
         });
       }
 
@@ -731,25 +867,100 @@ function createGitHubRestHelper(params: {
       return newCommit.data!.sha;
     },
 
+    async listPullRequestFiles(
+      prNumber: number
+    ): Promise<ReadonlyArray<{ filename: string; status: string }>> {
+      try {
+        const existing = await apiRequest<
+          Array<{
+            filename?: string;
+            status?: string;
+          }>
+        >(
+          "GET",
+          `/repos/${owner}/${repo}/pulls/${prNumber}/files`,
+          undefined,
+          true
+        );
+        if (Array.isArray(existing.data)) {
+          return existing.data
+            .filter(
+              (item): item is { filename: string; status?: string } =>
+                typeof item?.filename === "string" &&
+                item.filename.trim().length > 0
+            )
+            .map((item) => ({
+              filename: item.filename.trim().replace(/^\/+/, ""),
+              status: item.status ?? "modified"
+            }));
+        }
+      } catch {
+        // Non-fatal in mock tests
+      }
+      return [];
+    },
+
+    async findOpenPullRequestByHead(
+      headBranch: string,
+      baseBranch: string
+    ): Promise<{
+      number: number;
+      html_url: string;
+      head_sha: string;
+      title: string;
+      body: string;
+    } | null> {
+      try {
+        const existing = await apiRequest<
+          Array<{
+            number: number;
+            html_url: string;
+            title?: string;
+            body?: string | null;
+            head?: { sha?: string };
+          }>
+        >(
+          "GET",
+          `/repos/${owner}/${repo}/pulls?state=open&head=${encodeURIComponent(
+            `${owner}:${headBranch}`
+          )}&base=${encodeURIComponent(baseBranch)}`,
+          undefined,
+          true
+        );
+        if (
+          Array.isArray(existing.data) &&
+          existing.data.length > 0 &&
+          existing.data[0]?.head?.sha
+        ) {
+          const first = existing.data[0]!;
+          return {
+            number: first.number,
+            html_url: first.html_url,
+            head_sha: first.head!.sha!,
+            title: first.title ?? "",
+            body: first.body ?? ""
+          };
+        }
+      } catch {
+        // Non-fatal in mock tests
+      }
+      return null;
+    },
+
     async openPullRequest(input): Promise<{
       number: number;
       html_url: string;
       head_sha: string;
     }> {
-      const existing = await apiRequest<
-        Array<{ number: number; html_url: string; head: { sha: string } }>
-      >(
-        "GET",
-        `/repos/${owner}/${repo}/pulls?state=open&head=${encodeURIComponent(
-          `${owner}:${input.head}`
-        )}&base=${encodeURIComponent(input.base)}`
+      const existingPr = await this.findOpenPullRequestByHead(
+        input.head,
+        input.base
       );
-      if (existing.data && existing.data.length > 0) {
-        const first = existing.data[0]!;
+      if (existingPr) {
         return {
-          number: first.number,
-          html_url: first.html_url,
-          head_sha: first.head.sha
+          number: existingPr.number,
+          html_url: existingPr.html_url,
+          head_sha: existingPr.head_sha
         };
       }
 
@@ -872,6 +1083,96 @@ function createGitHubRestHelper(params: {
       } catch {
         // Non-fatal if token lacks checks:write
       }
+    },
+
+    async listWorkflowRunsForSha(
+      headSha: string
+    ): Promise<readonly ExternalWorkflowRunRecord[]> {
+      try {
+        const res = await apiRequest<{
+          workflow_runs?: ExternalWorkflowRunRecord[];
+        }>(
+          "GET",
+          `/repos/${owner}/${repo}/actions/runs?head_sha=${encodeURIComponent(headSha)}&per_page=100`,
+          undefined,
+          true
+        );
+        return Array.isArray(res.data?.workflow_runs)
+          ? res.data!.workflow_runs!
+          : [];
+      } catch {
+        return [];
+      }
+    },
+
+    async listCheckRunsForRef(
+      headSha: string
+    ): Promise<readonly ExternalCheckRunRecord[]> {
+      try {
+        const res = await apiRequest<{
+          check_runs?: ExternalCheckRunRecord[];
+        }>(
+          "GET",
+          `/repos/${owner}/${repo}/commits/${encodeURIComponent(headSha)}/check-runs?per_page=100`,
+          undefined,
+          true
+        );
+        return Array.isArray(res.data?.check_runs)
+          ? res.data!.check_runs!
+          : [];
+      } catch {
+        return [];
+      }
+    },
+
+    async listCheckRunAnnotations(
+      checkRunId: number
+    ): Promise<readonly CheckRunAnnotationRecord[]> {
+      try {
+        const res = await apiRequest<CheckRunAnnotationRecord[]>(
+          "GET",
+          `/repos/${owner}/${repo}/check-runs/${checkRunId}/annotations?per_page=50`,
+          undefined,
+          true
+        );
+        return Array.isArray(res.data) ? res.data : [];
+      } catch {
+        return [];
+      }
+    },
+
+    async getActionJobLogs(jobId: number): Promise<string> {
+      try {
+        const resp = await fetchFn(
+          `${baseUrl}/repos/${owner}/${repo}/actions/jobs/${jobId}/logs`,
+          {
+            method: "GET",
+            headers
+          }
+        );
+        if (!resp.ok) {
+          return "";
+        }
+        const text = await resp.text();
+        if (text.trim() === '{"ok":true}') {
+          return "";
+        }
+        return text;
+      } catch {
+        return "";
+      }
+    },
+
+    async rerunFailedWorkflowJobs(runId: number): Promise<void> {
+      try {
+        await apiRequest(
+          "POST",
+          `/repos/${owner}/${repo}/actions/runs/${runId}/rerun-failed-jobs`,
+          {}
+        );
+      } catch {
+        // Non-fatal in mock tests
+      }
     }
   };
 }
@@ -914,88 +1215,65 @@ function parseTrackedTicketsFromComments(
   return [];
 }
 
-async function runTestsInIsolatedWorkspace(params: {
+export async function runTestsInIsolatedWorkspace(params: {
   readonly files: ReadonlyArray<{ path: string; content: string }>;
+  readonly deleted_files?: readonly string[] | undefined;
+  readonly changedPaths?: readonly string[] | undefined;
+  readonly isTaskBranch?: boolean | undefined;
+  readonly verificationProfile?: VerificationProfile | undefined;
+  readonly workDir?: string | undefined;
+  readonly bootstrappedTargets?: Set<string> | undefined;
+  readonly sandboxRunner?:
+    | ((input: SandboxExecutionInput) => Promise<SandboxExecutionResult>)
+    | undefined;
   readonly llmApiKey: string;
   readonly label?: string | undefined;
-}): Promise<{ passed: boolean; output: string }> {
+}): Promise<{
+  readonly passed: boolean;
+  readonly output: string;
+  readonly blocked_by_security_gate?: boolean;
+  readonly sensitive_paths?: readonly string[];
+  readonly traversal_paths?: readonly string[];
+}> {
   const isGha = process.env.GITHUB_ACTIONS === "true";
   const groupTitle = params.label
     ? `[EPURE][Sandbox] ${params.label}`
-    : "[EPURE][Sandbox] Verify TypeScript & Vitest suite";
+    : "[EPURE][Sandbox] Verify Polyglot Stage 1 Suite";
   if (isGha) {
     process.stdout.write(`::group::${groupTitle}\n`);
   }
-  const workDir = mkdtempSync(join(tmpdir(), "epure-task-sandbox-"));
   try {
-    for (const file of params.files) {
-      const target = join(workDir, file.path.replace(/^\/+/, ""));
-      mkdirSync(dirname(target), { recursive: true });
-      writeFileSync(target, file.content, "utf8");
-    }
-
-    const pkgJsonPath = join(workDir, "package.json");
-    if (!existsSync(pkgJsonPath)) {
-      return { passed: true, output: "No package.json in workspace snapshot; syntax verified." };
-    }
-
-    execFileSync("npm", ["install", "--no-audit", "--no-fund"], {
-      cwd: workDir,
-      stdio: "pipe",
-      timeout: 180_000
-    });
-
-    if (existsSync(join(workDir, "tsconfig.json"))) {
-      const tscRun = await runInUntrustedCodeSandbox({
-        isolationAvailable: true,
-        runnerEnv: {
-          PATH: process.env.PATH,
-          HOME: process.env.HOME,
-          LLM_API_KEY: params.llmApiKey
-        },
-        command: "npx",
-        args: ["tsc", "--noEmit"],
-        cwd: workDir,
-        timeoutMs: 60_000
+    const profile =
+      params.verificationProfile ??
+      discoverVerificationProfile({
+        targetFilesHint: params.files.map((f) => f.path)
       });
-      if (!tscRun.isolated || tscRun.exit_code !== 0) {
-        const failOut = `TypeScript strict typecheck (tsc --noEmit) failed:\n${tscRun.stdout}\n${tscRun.stderr}`.trim();
-        if (isGha) {
-          process.stdout.write(`${failOut.slice(-4000)}\n`);
-        }
-        return {
-          passed: false,
-          output: failOut
-        };
-      }
-      if (isGha) {
-        process.stdout.write("[EPURE][Sandbox] tsc --noEmit passed (0 errors)\n");
-      }
-    }
 
-    const sandboxRun = await runInUntrustedCodeSandbox({
-      isolationAvailable: true,
-      runnerEnv: {
-        PATH: process.env.PATH,
-        HOME: process.env.HOME,
-        LLM_API_KEY: params.llmApiKey
-      },
-      command: "npm",
-      args: ["test", "--", "--run"],
-      cwd: workDir,
-      timeoutMs: 120_000
+    const stage1Result = await runPolyglotStage1Verification({
+      workDir: params.workDir,
+      profile,
+      files: params.files,
+      deleted_files: params.deleted_files,
+      changedPaths: params.changedPaths,
+      isTaskBranch: params.isTaskBranch,
+      llmApiKey: params.llmApiKey,
+      bootstrappedTargets: params.bootstrappedTargets,
+      sandboxRunner: params.sandboxRunner,
+      label: params.label
     });
 
-    const combinedOut = `${sandboxRun.stdout}\n${sandboxRun.stderr}`.trim();
-    const passed = sandboxRun.isolated && sandboxRun.exit_code === 0;
     if (isGha) {
       process.stdout.write(
-        `[EPURE][Sandbox] vitest run -> ${passed ? "PASSED" : "FAILED"}\n${combinedOut.slice(-4000)}\n`
+        `[EPURE][Sandbox] Stage 1 -> ${stage1Result.passed ? "PASSED" : "FAILED"}\n${stage1Result.output.slice(-4000)}\n`
       );
     }
+
     return {
-      passed,
-      output: combinedOut
+      passed: stage1Result.passed,
+      output: stage1Result.output,
+      blocked_by_security_gate: stage1Result.blocked_by_security_gate,
+      sensitive_paths: stage1Result.sensitive_paths,
+      traversal_paths: stage1Result.traversal_paths
     };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -1007,7 +1285,6 @@ async function runTestsInIsolatedWorkspace(params: {
     if (isGha) {
       process.stdout.write("::endgroup::\n");
     }
-    rmSync(workDir, { recursive: true, force: true });
   }
 }
 
@@ -1659,6 +1936,147 @@ export async function orchestrateIssueCommand(
         trustedBaseFilesMap.set(relPath, content);
       }
 
+      // Load trusted .github/agents.yml & .github/workflows/*.{yml,yaml} from dev (Q104, Q107)
+      const rawDevAgentsYaml =
+        (await gh.readSingleBranchFile("dev", ".github/agents.yml")) ??
+        (await gh.readSingleBranchFile("dev", ".github/agents.yaml"));
+      let parsedDevAgentsConfig: ReturnType<typeof parseAgentsYaml> | null = null;
+      if (rawDevAgentsYaml) {
+        try {
+          parsedDevAgentsConfig = parseAgentsYaml(rawDevAgentsYaml);
+        } catch {
+          parsedDevAgentsConfig = null;
+        }
+      }
+
+      const devWorkflowsMap = await gh.readDevWorkflowsMap("dev");
+      const devBranchPaths = await gh.listBranchPaths("dev");
+      const maxCodeFixAttempts =
+        parsedDevAgentsConfig?.max_code_fix_attempts ?? 3;
+
+      const discoveredDevProfile = discoverVerificationProfile({
+        targetFilesHint: [
+          ...devBranchPaths,
+          ...ticketsManifest.flatMap((t) => t.filesToTouch)
+        ],
+        workflowFilesMap: Object.fromEntries(devWorkflowsMap)
+      });
+
+      let verificationProfile: VerificationProfile =
+        parsedDevAgentsConfig?.verification?.targets &&
+        parsedDevAgentsConfig.verification.targets.length > 0
+          ? {
+              ...parsedDevAgentsConfig.verification,
+              deferred_external_workflows:
+                parsedDevAgentsConfig.verification.deferred_external_workflows
+                  ?.length
+                  ? parsedDevAgentsConfig.verification
+                      .deferred_external_workflows
+                  : discoveredDevProfile.deferred_external_workflows
+            }
+          : {
+              ...discoveredDevProfile,
+              wait_for_external_ci:
+                parsedDevAgentsConfig?.verification?.wait_for_external_ci ??
+                discoveredDevProfile.wait_for_external_ci,
+              external_ci_timeout_minutes:
+                parsedDevAgentsConfig?.verification
+                  ?.external_ci_timeout_minutes ??
+                discoveredDevProfile.external_ci_timeout_minutes,
+              grace_window_seconds:
+                parsedDevAgentsConfig?.verification?.grace_window_seconds ??
+                discoveredDevProfile.grace_window_seconds
+            };
+
+      let verificationGuideMarkdown =
+        formatVerificationToolingGuideMarkdown(verificationProfile);
+
+      const effectiveSleepFn =
+        input.sleepFn ?? (input.fetchImpl ? async () => {} : undefined);
+      const infraRerunsBySha = new Map<string, number>();
+      let totalTransientRetriesUsed = 0;
+
+      const escalateToNeedsHuman = async (params: {
+        reason:
+          | "remediation_exhausted"
+          | "grace_window_timeout"
+          | "wall_clock_budget_exhausted"
+          | "sensitive_path_violation";
+        ticketNumber: number;
+        branch: string;
+        prNumber?: number;
+        prUrl?: string;
+        featurePrUrl?: string;
+        codeFixAttemptsUsed?: number;
+        failedChecks?: WaitForExternalCiChecksResult["failedChecks"];
+        mustFixFindings?: ReadonlyArray<ReviewerFinding>;
+        sensitivePaths?: ReadonlyArray<string>;
+        traversalPaths?: ReadonlyArray<string>;
+        diagnosticExcerpt?: string;
+      }): Promise<OrchestrateIssueResult> => {
+        await gh.ensureLabel(
+          "needs-human",
+          "D93F0B",
+          "Requires human maintainer intervention"
+        );
+        await gh.addIssueLabels(input.issueNumber, ["needs-human"]);
+        if (params.ticketNumber !== input.issueNumber) {
+          await gh.addIssueLabels(params.ticketNumber, ["needs-human"]);
+        }
+
+        const updatedSuspended = await updateIssueStateWithCas({
+          issueNumber: input.issueNumber,
+          store,
+          mutator: (prev) => ({
+            ...prev,
+            phase: "implementation",
+            status: "suspended",
+            active_branch: params.branch,
+            code_fix_attempts_used:
+              params.codeFixAttemptsUsed ?? prev.code_fix_attempts_used,
+            transient_retries_used:
+              totalTransientRetriesUsed || prev.transient_retries_used,
+            last_processed_comment_id:
+              input.commentId ?? prev.last_processed_comment_id
+          })
+        });
+
+        const escalationMarkdown = [
+          updatedSuspended.issue_mirror_markdown,
+          "",
+          formatNeedsHumanEscalationComment({
+            reason: params.reason,
+            issueNumber: input.issueNumber,
+            ticketIssueNumber: params.ticketNumber,
+            prNumber: params.prNumber,
+            prUrl: params.prUrl,
+            branch: params.branch,
+            codeFixAttemptsUsed: params.codeFixAttemptsUsed,
+            maxCodeFixAttempts,
+            graceWindowSeconds: verificationProfile.grace_window_seconds,
+            failedChecks: params.failedChecks,
+            mustFixFindings: params.mustFixFindings,
+            sensitivePaths: params.sensitivePaths,
+            traversalPaths: params.traversalPaths,
+            diagnosticExcerpt: params.diagnosticExcerpt
+          })
+        ].join("\n");
+
+        await gh.postIssueComment(input.issueNumber, escalationMarkdown);
+
+        return {
+          executed: true,
+          phase: updatedSuspended.state.phase,
+          status: updatedSuspended.state.status,
+          active_branch: params.branch,
+          summary_markdown: escalationMarkdown,
+          created_ticket_numbers: ticketsManifest.map(
+            (t) => t.ticketIssueNumber
+          ),
+          feature_pr_url: params.featurePrUrl ?? params.prUrl ?? ""
+        };
+      };
+
       // Create feature branch from updated dev
       await gh.ensureBranch(featureBranch, "dev");
 
@@ -1687,107 +2105,23 @@ export async function orchestrateIssueCommand(
         hintForWorkspace
       );
       const featureChangedFilesMap = new Map<string, string>();
+      const featureDeletedFilesSet = new Set<string>();
       const completedTicketsSummary: string[] = [];
 
-      for (const ticket of ticketsManifest) {
-        const ticketIssueMeta = await gh.getIssue(ticket.ticketIssueNumber);
-        if (
-          ticket.ticketIssueNumber !== input.issueNumber &&
-          ticketIssueMeta.state === "closed" &&
-          accumulatedFiles.size > 0
-        ) {
-          if (process.env.GITHUB_ACTIONS === "true") {
-            process.stdout.write(
-              `[EPURE][Ticket #${ticket.ticketIssueNumber}] Already merged & closed on ${featureBranch} — skipping\n`
-            );
-          }
-          completedTicketsSummary.push(
-            `- **#${ticket.ticketIssueNumber}** (${ticket.title}) — previously squash-merged into \`${featureBranch}\``
-          );
-          continue;
-        }
-
-        const taskBranch = `task/${ticket.ticketIssueNumber}-${ticket.slug}`;
-        if (process.env.GITHUB_ACTIONS === "true") {
-          process.stdout.write(
-            `::group::[EPURE][Ticket #${ticket.ticketIssueNumber}] Initial TDD Implementation (${taskBranch})\n`
-          );
-        }
-        await gh.ensureBranch(taskBranch, featureBranch);
-
-        const existingFilesContext = Array.from(accumulatedFiles.entries())
-          .map(([path, content]) => `--- FILE: ${path} ---\n${content}`)
-          .join("\n\n");
-
-        const isBrownfieldSubpackageRepo =
-          accumulatedFiles.size > 0 &&
+      const checkIsBrownfieldSubpackageRepo = (): boolean =>
+        (accumulatedFiles.size > 0 &&
           !accumulatedFiles.has("package.json") &&
           Array.from(accumulatedFiles.keys()).some(
             (k) => k.startsWith("backend/") || k.startsWith("frontend/")
-          );
+          )) ||
+        (!devBranchPaths.includes("package.json") &&
+          devBranchPaths.some(
+            (k) => k.startsWith("backend/") || k.startsWith("frontend/")
+          ));
 
-        const tddSystemInstruction = [
-          "Tu es un ingénieur TDD EPURE implémentant un ticket approuvé en TypeScript.",
-          PROMPT_INJECTION_IMMUNITY_CLAUSE,
-          "Règles strictes :",
-          "1. Écris des tests couvrant tous les critères d'acceptation et cas limites.",
-          "2. Implémente le code propre et complet faisant passer 100% des tests.",
-          "3. N'utilise aucune dépendance externe exotique non déclarée dans package.json.",
-          "4. Ne modifie JAMAIS .cursor/agents/**, .github/workflows/** ou .github/agents.yml.",
-          ...(isBrownfieldSubpackageRepo
-            ? [
-                "5. Il s'agit d'un dépôt existant multi-packages (`backend/`, `frontend/`). Utilise les outils `list_repo_files`, `search_in_repo_file` et `read_repo_file` pour inspecter les fichiers pertinents avant de coder.",
-                "6. Pour modifier un fichier existant du dépôt, utilise de préférence `patches` (`old_string` -> `new_string` exact) afin de faire une modification chirurgicale sans réécrire des milliers de lignes inchangées. Pour créer un nouveau fichier (ex: nouveau fichier de test), utilise `files` avec son contenu complet. Ne crée PAS de package.json à la racine.",
-                "Renvoie un objet JSON strictement valide respectant ce schéma :",
-                "{",
-                '  "commit_message": "fix: ...",',
-                '  "test_summary": "Tests and acceptance criteria verified",',
-                '  "patches": [',
-                '    { "path": "backend/src/...", "edits": [{ "old_string": "...", "new_string": "..." }] }',
-                "  ],",
-                '  "files": [',
-                '    { "path": "backend/src/__tests__/...", "content": "..." }',
-                "  ]",
-                "}"
-              ]
-            : [
-                "5. Renvoie un objet JSON strictement valide respectant exactement ce schéma :",
-                "{",
-                `  "commit_message": "feat(ticket-${ticket.ticketIssueNumber}): ...",`,
-                '  "test_summary": "Vitest parameterized suite verified",',
-                '  "files": [',
-                '    { "path": "package.json", "content": "..." },',
-                '    { "path": "src/...", "content": "..." },',
-                '    { "path": "tests/...", "content": "..." }',
-                "  ]",
-                "}"
-              ])
-        ].join("\n");
-
-        const tddPrompt = [
-          `Plan parent (#${input.issueNumber}) et cahier des charges :`,
-          wrapUntrustedContent(
-            "untrusted_issue_content",
-            `Titre : ${issue.title}\n\nCahier des charges :\n${issue.body}`
-          ),
-          "",
-          "Ticket à implémenter :",
-          wrapUntrustedContent(
-            "untrusted_issue_content",
-            [
-              `Ticket #${ticket.ticketIssueNumber} : ${ticket.title}`,
-              `Description : ${ticket.description}`,
-              `Critères d'acceptation : ${ticket.acceptanceCriteria.join(" ; ")}`,
-              `Fichiers cibles : ${ticket.filesToTouch.join(", ")}`
-            ].join("\n")
-          ),
-          "",
-          existingFilesContext
-            ? `Fichiers déjà présents sur la branche feature :\n${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}`
-            : "C'est le premier ticket : inclus un package.json complet (avec scripts 'test': 'vitest run' et 'build': 'vite build', dependencies react/react-dom, devDependencies typescript/vite/vitest/@vitejs/plugin-react/@types/react/@types/react-dom) ainsi que tsconfig.json et vite.config.ts."
-        ].join("\n");
-
-        const brownfieldTools = isBrownfieldSubpackageRepo
+      const buildRepoExplorationToolsAndHandlers = (branch: string) =>
+        checkIsBrownfieldSubpackageRepo() ||
+        process.env.GITHUB_ACTIONS === "true"
           ? {
               tools: [
                 {
@@ -1799,7 +2133,8 @@ export async function orchestrateIssueCommand(
                     properties: {
                       query: {
                         type: "STRING" as const,
-                        description: "Case-insensitive path substring to match"
+                        description:
+                          "Case-insensitive path substring to match"
                       }
                     },
                     required: ["query"]
@@ -1849,11 +2184,16 @@ export async function orchestrateIssueCommand(
                 }
               ],
               toolHandlers: {
-                list_repo_files: async (args: Readonly<Record<string, unknown>>) => {
+                list_repo_files: async (
+                  args: Readonly<Record<string, unknown>>
+                ) => {
                   const q = String(args.query ?? "")
                     .trim()
                     .toLowerCase();
-                  const allPaths = await gh.listBranchPaths(featureBranch);
+                  let allPaths = await gh.listBranchPaths(branch);
+                  if (allPaths.length === 0 && branch !== featureBranch) {
+                    allPaths = await gh.listBranchPaths(featureBranch);
+                  }
                   const matches = allPaths
                     .filter((p) => p.toLowerCase().includes(q))
                     .slice(0, 60);
@@ -1868,7 +2208,11 @@ export async function orchestrateIssueCommand(
                   const q = String(args.query ?? "").trim();
                   let content = accumulatedFiles.get(p) ?? null;
                   if (content === null) {
-                    content = await gh.readSingleBranchFile(featureBranch, p);
+                    content =
+                      (await gh.readSingleBranchFile(branch, p)) ??
+                      (branch !== featureBranch
+                        ? await gh.readSingleBranchFile(featureBranch, p)
+                        : null);
                     if (content !== null) {
                       accumulatedFiles.set(p, content);
                     }
@@ -1901,13 +2245,19 @@ export async function orchestrateIssueCommand(
                     matches: snippets
                   };
                 },
-                read_repo_file: async (args: Readonly<Record<string, unknown>>) => {
+                read_repo_file: async (
+                  args: Readonly<Record<string, unknown>>
+                ) => {
                   const p = String(args.path ?? "")
                     .trim()
                     .replace(/^\/+/, "");
                   let content = accumulatedFiles.get(p) ?? null;
                   if (content === null) {
-                    content = await gh.readSingleBranchFile(featureBranch, p);
+                    content =
+                      (await gh.readSingleBranchFile(branch, p)) ??
+                      (branch !== featureBranch
+                        ? await gh.readSingleBranchFile(featureBranch, p)
+                        : null);
                     if (content !== null) {
                       accumulatedFiles.set(p, content);
                     }
@@ -1922,8 +2272,9 @@ export async function orchestrateIssueCommand(
                   );
                   const endLine = Math.min(
                     lines.length,
-                    Number(args.end_line ?? Math.min(lines.length, startLine + 250)) ||
-                      lines.length
+                    Number(
+                      args.end_line ?? Math.min(lines.length, startLine + 250)
+                    ) || lines.length
                   );
                   return {
                     path: p,
@@ -1937,446 +2288,983 @@ export async function orchestrateIssueCommand(
             }
           : {};
 
-        const rawImpl = await callGeminiGenerateContent({
-          apiKey: input.llmApiKey,
-          model,
-          systemInstruction: tddSystemInstruction,
-          prompt: tddPrompt,
-          responseMimeType: "application/json",
-          temperature: 0.1,
-          ...brownfieldTools,
-          fetchImpl: input.fetchImpl
-        });
+      const existingFeaturePrAtStart = await gh.findOpenPullRequestByHead(
+        featureBranch,
+        "dev"
+      );
+      let skipTicketLoopForExistingFeaturePr = false;
+      if (existingFeaturePrAtStart) {
+        let hasOpenTaskPr = false;
+        for (const ticket of ticketsManifest) {
+          const candidateTaskBranch = `task/${ticket.ticketIssueNumber}-${ticket.slug}`;
+          const openTaskPr = await gh.findOpenPullRequestByHead(
+            candidateTaskBranch,
+            featureBranch
+          );
+          if (openTaskPr) {
+            hasOpenTaskPr = true;
+            break;
+          }
+        }
+        if (!hasOpenTaskPr) {
+          skipTicketLoopForExistingFeaturePr = true;
+          const featurePrFiles = await gh.listPullRequestFiles(
+            existingFeaturePrAtStart.number
+          );
+          for (const prFile of featurePrFiles) {
+            const cleanPath = prFile.filename.replace(/^\/+/, "");
+            if (prFile.status === "removed") {
+              accumulatedFiles.delete(cleanPath);
+              featureChangedFilesMap.delete(cleanPath);
+              featureDeletedFilesSet.add(cleanPath);
+            } else {
+              const content =
+                (await gh.readSingleBranchFile(featureBranch, cleanPath)) ??
+                accumulatedFiles.get(cleanPath) ??
+                null;
+              if (content !== null) {
+                accumulatedFiles.set(cleanPath, content);
+                featureChangedFilesMap.set(cleanPath, content);
+                featureDeletedFilesSet.delete(cleanPath);
+              }
+            }
+          }
+          for (const ticket of ticketsManifest) {
+            completedTicketsSummary.push(
+              `- **#${ticket.ticketIssueNumber}** (${ticket.title}) — previously squash-merged into \`${featureBranch}\``
+            );
+          }
+        }
+      }
 
-        const parsedImpl = extractJsonObject<GeneratedTicketImplementation>(rawImpl);
-        const ticketChangedFilesMap = new Map<string, string>();
-        const initialChangedFiles = await applyTicketImplementationPayload({
-          parsed: parsedImpl,
-          accumulatedFiles,
-          featureChangedFilesMap,
-          ticketChangedFilesMap,
-          gh,
-          branch: featureBranch
-        });
-        let impl: {
-          commit_message: string;
-          test_summary: string;
-          files: Array<{ path: string; content: string }>;
-        } = {
-          commit_message: parsedImpl.commit_message,
-          test_summary: parsedImpl.test_summary,
-          files: initialChangedFiles
-        };
+      for (const ticket of skipTicketLoopForExistingFeaturePr
+        ? []
+        : ticketsManifest) {
+        const ticketIssueMeta = await gh.getIssue(ticket.ticketIssueNumber);
+        if (
+          ticket.ticketIssueNumber !== input.issueNumber &&
+          ticketIssueMeta.state === "closed" &&
+          accumulatedFiles.size > 0
+        ) {
+          if (process.env.GITHUB_ACTIONS === "true") {
+            process.stdout.write(
+              `[EPURE][Ticket #${ticket.ticketIssueNumber}] Already merged & closed on ${featureBranch} — skipping\n`
+            );
+          }
+          completedTicketsSummary.push(
+            `- **#${ticket.ticketIssueNumber}** (${ticket.title}) — previously squash-merged into \`${featureBranch}\``
+          );
+          continue;
+        }
+
+        const taskBranch = `task/${ticket.ticketIssueNumber}-${ticket.slug}`;
         if (process.env.GITHUB_ACTIONS === "true") {
           process.stdout.write(
-            `[EPURE][Ticket #${ticket.ticketIssueNumber}] Generated ${impl.files.length} file(s): ${impl.files.map((f) => f.path).join(", ")}\n::endgroup::\n`
+            `::group::[EPURE][Ticket #${ticket.ticketIssueNumber}] Initial TDD Implementation (${taskBranch})\n`
           );
         }
+        await gh.ensureBranch(taskBranch, featureBranch);
 
-        // Q78 & Q93: Unified max_code_fix_attempts = 3 shared between sandbox test fixes and PR review fixes
-        let fixAttempt = 0;
-        const maxCodeFixAttempts = 3;
-
-        let testCheck = await runTestsInIsolatedWorkspace({
-          files: Array.from(accumulatedFiles.entries()).map(
-            ([path, content]) => ({ path, content })
-          ),
-          llmApiKey: input.llmApiKey,
-          label: `Ticket #${ticket.ticketIssueNumber} initial TDD suite`
-        });
-
-        while (!testCheck.passed && fixAttempt < maxCodeFixAttempts) {
-          fixAttempt += 1;
-          const currentFilesContext = Array.from(accumulatedFiles.entries())
-            .map(([p, c]) => `--- FILE: ${p} ---\n${c}`)
-            .join("\n\n");
-
-          const fixSystemInstruction = [
-            "Tu es un ingénieur TDD EPURE corrigeant un échec de test Vitest en sandbox isolée.",
-            PROMPT_INJECTION_IMMUNITY_CLAUSE,
-            "Corrige les fichiers en défaut (code ou assertions de test comme les espaces insécables Unicode U+202F de toLocaleString('fr-FR')) pour que 100% des tests Vitest passent (`vitest run`).",
-            "Ne modifie JAMAIS .cursor/agents/**, .github/workflows/** ou .github/agents.yml.",
-            "Renvoie un objet JSON strictement valide respectant exactement ce schéma :",
-            "{",
-            `  "commit_message": "feat(ticket-${ticket.ticketIssueNumber}): ...",`,
-            '  "test_summary": "Vitest parameterized suite verified",',
-            '  "files": [',
-            '    { "path": "...", "content": "..." }',
-            "  ]",
-            "}"
-          ].join("\n");
-
-          const fixPrompt = [
-            `La suite de tests Vitest du Ticket #${ticket.ticketIssueNumber} a échoué dans la sandbox avec la sortie suivante :`,
-            wrapUntrustedContent(
-              "untrusted_test_output",
-              testCheck.output
-            ),
-            "",
-            "Fichiers actuels du workspace :",
-            wrapUntrustedContent(
-              "untrusted_workspace_files",
-              currentFilesContext
-            )
-          ].join("\n");
-
-          const rawFix = await callGeminiGenerateContent({
-            apiKey: input.llmApiKey,
-            model,
-            systemInstruction: fixSystemInstruction,
-            prompt: fixPrompt,
-            responseMimeType: "application/json",
-            temperature: 0.1,
-            fetchImpl: input.fetchImpl
-          });
-
-          const fixedImpl = extractJsonObject<GeneratedTicketImplementation>(rawFix);
-          const updatedFiles = await applyTicketImplementationPayload({
-            parsed: fixedImpl,
-            accumulatedFiles,
-            featureChangedFilesMap,
-            ticketChangedFilesMap,
-            gh,
-            branch: featureBranch
-          });
-          impl = {
-            commit_message: fixedImpl.commit_message || impl.commit_message,
-            test_summary: fixedImpl.test_summary || impl.test_summary,
-            files: updatedFiles
-          };
-
-          testCheck = await runTestsInIsolatedWorkspace({
-            files: Array.from(accumulatedFiles.entries()).map(
-              ([path, content]) => ({ path, content })
-            ),
-            llmApiKey: input.llmApiKey,
-            label: `Ticket #${ticket.ticketIssueNumber} TDD auto-fix attempt ${fixAttempt}/${maxCodeFixAttempts}`
-          });
-        }
-
-        if (!testCheck.passed) {
-          throw new Error(
-            `TDD sandbox verification failed for ticket #${ticket.ticketIssueNumber} after ${fixAttempt} auto-fix attempts:\n${testCheck.output.slice(-2000)}`
-          );
-        }
-
-        await gh.commitFilesToBranch({
-          branch: taskBranch,
-          fromBranch: featureBranch,
-          commitMessage: impl.commit_message,
-          files: impl.files
-        });
-
-        const prBody = [
-          "## Summary",
-          `Automated TDD implementation of #${ticket.ticketIssueNumber} for plan #${input.issueNumber}.`,
-          "",
-          `Refs #${ticket.ticketIssueNumber}`,
-          `Part of #${input.issueNumber}`,
-          "",
-          "## TDD & Sandbox Verification",
-          `- **Sandbox Test Execution**: \`passed\``,
-          `- **Summary**: ${impl.test_summary}`
-        ].join("\n");
-
-        const taskPr = await gh.openPullRequest({
-          head: taskBranch,
-          base: featureBranch,
-          title: impl.commit_message,
-          body: prBody
-        });
-
-        let currentPrHeadSha = taskPr.head_sha;
-
-        // Step 3 (Q92, Q93, Q96): Blocking Multi-Agent PR Review Loop with re-review of failed reviewers
-        let reviewResult = await runMultiAgentPrReviewPass({
+        const sandboxWorkspace = prepareRepositorySandboxWorkspace({
           repository: input.repository,
-          prNumber: taskPr.number,
-          headBranch: taskBranch,
-          baseBranch: featureBranch,
-          ticketNumber: ticket.ticketIssueNumber,
-          ticketTitle: ticket.title,
-          acceptanceCriteria: ticket.acceptanceCriteria,
-          glossaryMarkdown: issue.body,
-          designMarkdown: trustedBaseRoster.designMarkdown,
-          changedFiles: impl.files,
-          workspaceFiles: accumulatedFiles,
-          trustedBaseBranchFiles: trustedBaseFilesMap,
-          isReReviewPass: false,
-          llmApiKey: input.llmApiKey,
-          model,
-          fetchImpl: input.fetchImpl
+          branch: featureBranch,
+          githubToken: activeToken,
+          seedFiles: accumulatedFiles,
+          enableRemoteClone: Boolean(
+            process.env.GITHUB_ACTIONS === "true" && !input.fetchImpl
+          )
         });
-
-        await gh.postPullRequestReview(taskPr.number, {
-          commitId: currentPrHeadSha,
-          body: reviewResult.review_body_markdown
-        });
-
-        await gh.publishCheckRun({
-          name: "ai-review",
-          headSha: currentPrHeadSha,
-          conclusion: reviewResult.conclusion,
-          summary: reviewResult.check_summary_markdown
-        });
-
-        if (reviewResult.touches_frontend_ui) {
-          await gh.publishCheckRun({
-            name: "impeccable-gate",
-            headSha: currentPrHeadSha,
-            conclusion:
-              reviewResult.impeccable_conclusion === "failure"
-                ? "failure"
-                : "success",
-            summary: `Impeccable UI & Accessibility Gate: ${reviewResult.impeccable_conclusion}`
-          });
-        }
-
-        let reviewFixAttempt = 0;
-        while (
-          reviewResult.conclusion === "failure" &&
-          reviewFixAttempt < maxCodeFixAttempts
+        if (
+          sandboxWorkspace.clonedFromRemote &&
+          !parsedDevAgentsConfig?.verification?.targets?.length
         ) {
-          reviewFixAttempt += 1;
-          process.stdout.write(
-            `[EPURE][Ticket #${ticket.ticketIssueNumber}][PR #${taskPr.number}] Multi-agent review fix iteration ${reviewFixAttempt}/${maxCodeFixAttempts} (${reviewResult.must_fix_findings.length} must_fix finding(s))\n`
-          );
-          const findingsText = reviewResult.must_fix_findings
-            .map(
-              (f, idx) =>
-                `${idx + 1}. [${f.reviewer}] (${f.path}:${f.line}) ${f.title} — ${f.rationale} -> Action: ${f.suggested_action}`
-            )
-            .join("\n");
-
-          const currentFilesContext = Array.from(accumulatedFiles.entries())
-            .map(([p, c]) => `--- FILE: ${p} ---\n${c}`)
-            .join("\n\n");
-
-          const reviewFixSystemInstruction = [
-            "Tu es un ingénieur TDD EPURE corrigeant les constats bloquants ('must_fix') émis par le roster de revue multi-agents.",
-            PROMPT_INJECTION_IMMUNITY_CLAUSE,
-            "Corrige précisément chaque 'must_fix' tout en maintenant 100% des tests au vert.",
-            "Ne modifie JAMAIS .cursor/agents/**, .github/workflows/** ou .github/agents.yml.",
-            "Pour modifier un fichier existant volumineux, utilise de préférence `patches` (`old_string` -> `new_string` exact). Sinon utilise `files` avec le contenu intégral du fichier.",
-            "Renvoie un objet JSON strictement valide :",
-            "{",
-            `  "commit_message": "fix(review): address reviewer findings on #${ticket.ticketIssueNumber}",`,
-            '  "test_summary": "Addressed must_fix review findings and verified test suite",',
-            '  "patches": [',
-            '    { "path": "...", "edits": [{ "old_string": "...", "new_string": "..." }] }',
-            "  ],",
-            '  "files": [',
-            '    { "path": "...", "content": "..." }',
-            "  ]",
-            "}"
-          ].join("\n");
-
-          const reviewFixPrompt = [
-            `Les reviewers multi-agents EPURE ont émis ${reviewResult.must_fix_findings.length} constat(s) bloquant(s) ('must_fix') sur la PR #${taskPr.number} du Ticket #${ticket.ticketIssueNumber} :`,
-            wrapUntrustedContent("untrusted_issue_content", findingsText),
-            "",
-            "Fichiers actuels du workspace :",
-            wrapUntrustedContent(
-              "untrusted_workspace_files",
-              currentFilesContext
-            )
-          ].join("\n");
-
-          const rawReviewFix = await callGeminiGenerateContent({
-            apiKey: input.llmApiKey,
-            model,
-            thinkingLevel: "HIGH",
-            logLabel: `review-fix:#${ticket.ticketIssueNumber}/iter-${reviewFixAttempt}`,
-            systemInstruction: reviewFixSystemInstruction,
-            prompt: reviewFixPrompt,
-            responseMimeType: "application/json",
-            temperature: 0.1,
-            fetchImpl: input.fetchImpl
+          const clonedProfile = discoverVerificationProfile({
+            repoRootDir: sandboxWorkspace.workDir,
+            targetFilesHint: [
+              ...devBranchPaths,
+              ...ticketsManifest.flatMap((t) => t.filesToTouch)
+            ],
+            workflowFilesMap: Object.fromEntries(devWorkflowsMap)
           });
-
-          const reviewFixedImpl =
-            extractJsonObject<GeneratedTicketImplementation>(rawReviewFix);
-          const updatedReviewFiles = await applyTicketImplementationPayload({
-            parsed: reviewFixedImpl,
-            accumulatedFiles,
-            featureChangedFilesMap,
-            ticketChangedFilesMap,
-            gh,
-            branch: featureBranch
-          });
-          impl = {
-            commit_message:
-              reviewFixedImpl.commit_message ||
-              `fix(review): address reviewer findings on #${ticket.ticketIssueNumber}`,
-            test_summary: reviewFixedImpl.test_summary || impl.test_summary,
-            files: updatedReviewFiles
+          verificationProfile = {
+            ...clonedProfile,
+            wait_for_external_ci:
+              parsedDevAgentsConfig?.verification?.wait_for_external_ci ??
+              clonedProfile.wait_for_external_ci,
+            external_ci_timeout_minutes:
+              parsedDevAgentsConfig?.verification
+                ?.external_ci_timeout_minutes ??
+              clonedProfile.external_ci_timeout_minutes,
+            grace_window_seconds:
+              parsedDevAgentsConfig?.verification?.grace_window_seconds ??
+              clonedProfile.grace_window_seconds
           };
+          verificationGuideMarkdown =
+            formatVerificationToolingGuideMarkdown(verificationProfile);
+        }
+        const bootstrappedTargets = new Set<string>();
 
-          testCheck = await runTestsInIsolatedWorkspace({
-            files: Array.from(accumulatedFiles.entries()).map(
-              ([path, content]) => ({ path, content })
-            ),
-            llmApiKey: input.llmApiKey,
-            label: `Ticket #${ticket.ticketIssueNumber} review-fix iteration ${reviewFixAttempt}/${maxCodeFixAttempts}`
-          });
-          let reviewTestRetry = 0;
-          while (!testCheck.passed && reviewTestRetry < 2) {
-            reviewTestRetry += 1;
-            const retryFilesContext = Array.from(accumulatedFiles.entries())
-              .map(([p, c]) => `--- FILE: ${p} ---\n${c}`)
+        try {
+          const ticketChangedFilesMap = new Map<string, string>();
+          const ticketDeletedFilesSet = new Set<string>();
+          let impl: {
+            commit_message: string;
+            test_summary: string;
+            files: Array<{ path: string; content: string }>;
+          };
+          let taskPr: { number: number; html_url: string; head_sha: string };
+          let currentPrHeadSha: string;
+          let fixAttempt = 0;
+
+          // Pre-Generation Open-PR Reconciliation (Q110): check if an open PR already exists on task/* -> feature/*
+          const existingTaskPr = await gh.findOpenPullRequestByHead(
+            taskBranch,
+            featureBranch
+          );
+
+          if (existingTaskPr) {
+            const taskPrFiles = await gh.listPullRequestFiles(
+              existingTaskPr.number
+            );
+            if (taskPrFiles.length > 0) {
+              for (const prFile of taskPrFiles) {
+                const cleanPath = prFile.filename.replace(/^\/+/, "");
+                if (prFile.status === "removed") {
+                  accumulatedFiles.delete(cleanPath);
+                  featureChangedFilesMap.delete(cleanPath);
+                  ticketChangedFilesMap.delete(cleanPath);
+                  featureDeletedFilesSet.add(cleanPath);
+                  ticketDeletedFilesSet.add(cleanPath);
+                } else {
+                  const content =
+                    (await gh.readSingleBranchFile(taskBranch, cleanPath)) ??
+                    accumulatedFiles.get(cleanPath) ??
+                    null;
+                  if (content !== null) {
+                    accumulatedFiles.set(cleanPath, content);
+                    featureChangedFilesMap.set(cleanPath, content);
+                    ticketChangedFilesMap.set(cleanPath, content);
+                    featureDeletedFilesSet.delete(cleanPath);
+                    ticketDeletedFilesSet.delete(cleanPath);
+                  }
+                }
+              }
+            } else {
+              const taskBranchFiles = await gh.readBranchWorkspaceFiles(
+                taskBranch,
+                hintForWorkspace
+              );
+              for (const [p, c] of taskBranchFiles.entries()) {
+                accumulatedFiles.set(p, c);
+                featureChangedFilesMap.set(p, c);
+                ticketChangedFilesMap.set(p, c);
+              }
+            }
+
+            const existingPreCheck = validateWorkspaceFileOperations({
+              workDir: sandboxWorkspace.workDir,
+              files: Array.from(ticketChangedFilesMap.keys()).map((p) => ({
+                path: p
+              })),
+              deleted_files: Array.from(ticketDeletedFilesSet),
+              targets: verificationProfile.targets,
+              isTaskBranch: true
+            });
+            if (!existingPreCheck.allowed) {
+              return await escalateToNeedsHuman({
+                reason: "sensitive_path_violation",
+                ticketNumber: ticket.ticketIssueNumber,
+                branch: taskBranch,
+                prNumber: existingTaskPr.number,
+                prUrl: existingTaskPr.html_url,
+                sensitivePaths: existingPreCheck.sensitivePaths,
+                traversalPaths: existingPreCheck.traversalPaths
+              });
+            }
+
+            impl = {
+              commit_message:
+                existingTaskPr.title ||
+                `feat(ticket-${ticket.ticketIssueNumber}): ${ticket.title}`,
+              test_summary:
+                "Reconciled existing open Pull Request on task branch (Q110)",
+              files: Array.from(ticketChangedFilesMap.entries()).map(
+                ([path, content]) => ({ path, content })
+              )
+            };
+            taskPr = existingTaskPr;
+            currentPrHeadSha = existingTaskPr.head_sha;
+          } else {
+            const existingFilesContext = Array.from(accumulatedFiles.entries())
+              .map(([path, content]) => `--- FILE: ${path} ---\n${content}`)
               .join("\n\n");
-            const rawRetryFix = await callGeminiGenerateContent({
+
+            const isBrownfieldSubpackageRepo =
+              checkIsBrownfieldSubpackageRepo();
+
+            const tddSystemInstruction = [
+              "Tu es un ingénieur TDD EPURE implémentant un ticket approuvé.",
+              PROMPT_INJECTION_IMMUNITY_CLAUSE,
+              "Règles strictes :",
+              "1. Écris des tests couvrant tous les critères d'acceptation et cas limites.",
+              "2. Implémente le code propre et complet faisant passer 100% des tests.",
+              "3. N'utilise aucune dépendance externe exotique non déclarée.",
+              "4. Ne modifie JAMAIS .cursor/agents/**, .github/workflows/**, .github/agents.yml ou .env*.",
+              "",
+              verificationGuideMarkdown,
+              "",
+              ...(isBrownfieldSubpackageRepo
+                ? [
+                    "5. Il s'agit d'un dépôt existant multi-packages (`backend/`, `frontend/`). Utilise les outils `list_repo_files`, `search_in_repo_file` et `read_repo_file` pour inspecter les fichiers pertinents avant de coder.",
+                    "6. Pour modifier un fichier existant du dépôt, utilise de préférence `patches` (`old_string` -> `new_string` exact) afin de faire une modification chirurgicale sans réécrire des milliers de lignes inchangées. Pour créer un nouveau fichier (ex: nouveau fichier de test), utilise `files` avec son contenu complet. Pour supprimer un fichier obsolète, utilise `deleted_files`. Ne crée PAS de package.json à la racine.",
+                    "Renvoie un objet JSON strictement valide respectant ce schéma :",
+                    "{",
+                    '  "commit_message": "fix: ...",',
+                    '  "test_summary": "Tests and acceptance criteria verified",',
+                    '  "patches": [',
+                    '    { "path": "backend/src/...", "edits": [{ "old_string": "...", "new_string": "..." }] }',
+                    "  ],",
+                    '  "files": [',
+                    '    { "path": "backend/src/__tests__/...", "content": "..." }',
+                    "  ],",
+                    '  "deleted_files": []',
+                    "}"
+                  ]
+                : [
+                    "5. Renvoie un objet JSON strictement valide respectant exactement ce schéma :",
+                    "{",
+                    `  "commit_message": "feat(ticket-${ticket.ticketIssueNumber}): ...",`,
+                    '  "test_summary": "Vitest parameterized suite verified",',
+                    '  "files": [',
+                    '    { "path": "package.json", "content": "..." },',
+                    '    { "path": "src/...", "content": "..." },',
+                    '    { "path": "tests/...", "content": "..." }',
+                    "  ]",
+                    "}"
+                  ])
+            ].join("\n");
+
+            const tddPrompt = [
+              `Plan parent (#${input.issueNumber}) et cahier des charges :`,
+              wrapUntrustedContent(
+                "untrusted_issue_content",
+                `Titre : ${issue.title}\n\nCahier des charges :\n${issue.body}`
+              ),
+              "",
+              "Ticket à implémenter :",
+              wrapUntrustedContent(
+                "untrusted_issue_content",
+                [
+                  `Ticket #${ticket.ticketIssueNumber} : ${ticket.title}`,
+                  `Description : ${ticket.description}`,
+                  `Critères d'acceptation : ${ticket.acceptanceCriteria.join(" ; ")}`,
+                  `Fichiers cibles : ${ticket.filesToTouch.join(", ")}`
+                ].join("\n")
+              ),
+              "",
+              verificationGuideMarkdown,
+              "",
+              existingFilesContext
+                ? `Fichiers déjà présents sur la branche feature :\n${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}`
+                : "C'est le premier ticket : inclus un package.json complet (avec scripts 'test': 'vitest run' et 'build': 'vite build', dependencies react/react-dom, devDependencies typescript/vite/vitest/@vitejs/plugin-react/@types/react/@types/react-dom) ainsi que tsconfig.json et vite.config.ts."
+            ].join("\n");
+
+            const rawImpl = await callGeminiGenerateContent({
               apiKey: input.llmApiKey,
               model,
-              thinkingLevel: "HIGH",
-              systemInstruction: reviewFixSystemInstruction,
-              prompt: [
-                `La correction de review a fait échouer la suite de tests Vitest/TypeScript (tentative ${reviewTestRetry}/2) :`,
-                wrapUntrustedContent("untrusted_test_output", testCheck.output.slice(-6000)),
-                "",
-                "Constats must_fix à maintenir corrigés :",
-                wrapUntrustedContent("untrusted_issue_content", findingsText),
-                "",
-                "Fichiers actuels du workspace :",
-                wrapUntrustedContent("untrusted_workspace_files", retryFilesContext)
-              ].join("\n"),
+              systemInstruction: tddSystemInstruction,
+              prompt: tddPrompt,
               responseMimeType: "application/json",
               temperature: 0.1,
+              ...buildRepoExplorationToolsAndHandlers(featureBranch),
               fetchImpl: input.fetchImpl
             });
-            const retryImpl = extractJsonObject<GeneratedTicketImplementation>(rawRetryFix);
-            const updatedRetryFiles = await applyTicketImplementationPayload({
-              parsed: retryImpl,
+
+            const parsedImpl =
+              extractJsonObject<GeneratedTicketImplementation>(rawImpl);
+
+            // Pre-Stage-1 Sensitive Path & Path Containment Gate (before Stage 1 and before git push)
+            const preStage1Check = validateWorkspaceFileOperations({
+              workDir: sandboxWorkspace.workDir,
+              files: [
+                ...(parsedImpl.files ?? []).map((f) => ({ path: f.path })),
+                ...(parsedImpl.patches ?? []).map((p) => ({ path: p.path }))
+              ],
+              deleted_files: parsedImpl.deleted_files,
+              targets: verificationProfile.targets,
+              isTaskBranch: true
+            });
+            if (!preStage1Check.allowed) {
+              return await escalateToNeedsHuman({
+                reason: "sensitive_path_violation",
+                ticketNumber: ticket.ticketIssueNumber,
+                branch: taskBranch,
+                sensitivePaths: preStage1Check.sensitivePaths,
+                traversalPaths: preStage1Check.traversalPaths
+              });
+            }
+
+            const initialChangedFiles = await applyTicketImplementationPayload({
+              parsed: parsedImpl,
               accumulatedFiles,
               featureChangedFilesMap,
               ticketChangedFilesMap,
+              featureDeletedFilesSet,
+              ticketDeletedFilesSet,
               gh,
               branch: featureBranch
             });
             impl = {
-              commit_message: impl.commit_message,
-              test_summary: retryImpl.test_summary || impl.test_summary,
-              files: updatedRetryFiles
+              commit_message: parsedImpl.commit_message,
+              test_summary: parsedImpl.test_summary,
+              files: initialChangedFiles
             };
-            testCheck = await runTestsInIsolatedWorkspace({
+            if (process.env.GITHUB_ACTIONS === "true") {
+              process.stdout.write(
+                `[EPURE][Ticket #${ticket.ticketIssueNumber}] Generated ${impl.files.length} file(s): ${impl.files.map((f) => f.path).join(", ")}\n::endgroup::\n`
+              );
+            }
+
+            let testCheck = await runTestsInIsolatedWorkspace({
+              workDir: sandboxWorkspace.workDir,
               files: Array.from(accumulatedFiles.entries()).map(
                 ([path, content]) => ({ path, content })
               ),
+              deleted_files: Array.from(ticketDeletedFilesSet),
+              changedPaths: [
+                ...impl.files.map((f) => f.path),
+                ...Array.from(ticketDeletedFilesSet)
+              ],
+              isTaskBranch: true,
+              verificationProfile,
+              bootstrappedTargets,
+              sandboxRunner: input.sandboxRunner,
               llmApiKey: input.llmApiKey,
-              label: `Ticket #${ticket.ticketIssueNumber} review-fix iteration ${reviewFixAttempt} test retry ${reviewTestRetry}/2`
+              label: `Ticket #${ticket.ticketIssueNumber} initial TDD suite`
+            });
+
+            while (!testCheck.passed && fixAttempt < maxCodeFixAttempts) {
+              fixAttempt += 1;
+              const currentFilesContext = Array.from(accumulatedFiles.entries())
+                .map(([p, c]) => `--- FILE: ${p} ---\n${c}`)
+                .join("\n\n");
+
+              const fixSystemInstruction = [
+                "Tu es un ingénieur TDD EPURE corrigeant un échec de vérification Stage 1 en sandbox isolée.",
+                PROMPT_INJECTION_IMMUNITY_CLAUSE,
+                "Corrige les fichiers en défaut (code ou assertions de test) pour que 100% des cibles Stage 1 passent.",
+                "Ne modifie JAMAIS .cursor/agents/**, .github/workflows/**, .github/agents.yml ou .env*.",
+                "Tu peux utiliser les outils `list_repo_files`, `search_in_repo_file` et `read_repo_file` pour inspecter les fichiers du dépôt.",
+                "Pour modifier un fichier existant volumineux, utilise de préférence `patches` (`old_string` -> `new_string` exact). Pour supprimer un fichier obsolète, utilise `deleted_files`.",
+                "",
+                verificationGuideMarkdown,
+                "",
+                "Renvoie un objet JSON strictement valide respectant exactement ce schéma :",
+                "{",
+                `  "commit_message": "feat(ticket-${ticket.ticketIssueNumber}): ...",`,
+                '  "test_summary": "Stage 1 verification suite verified",',
+                '  "patches": [',
+                '    { "path": "...", "edits": [{ "old_string": "...", "new_string": "..." }] }',
+                "  ],",
+                '  "files": [',
+                '    { "path": "...", "content": "..." }',
+                "  ],",
+                '  "deleted_files": []',
+                "}"
+              ].join("\n");
+
+              const fixPrompt = [
+                `La vérification Stage 1 du Ticket #${ticket.ticketIssueNumber} a échoué dans la sandbox avec la sortie suivante :`,
+                wrapUntrustedContent("untrusted_test_output", testCheck.output),
+                "",
+                verificationGuideMarkdown,
+                "",
+                "Fichiers actuels du workspace :",
+                wrapUntrustedContent(
+                  "untrusted_workspace_files",
+                  currentFilesContext
+                )
+              ].join("\n");
+
+              const rawFix = await callGeminiGenerateContent({
+                apiKey: input.llmApiKey,
+                model,
+                systemInstruction: fixSystemInstruction,
+                prompt: fixPrompt,
+                responseMimeType: "application/json",
+                temperature: 0.1,
+                ...buildRepoExplorationToolsAndHandlers(featureBranch),
+                fetchImpl: input.fetchImpl
+              });
+
+              const fixedImpl =
+                extractJsonObject<GeneratedTicketImplementation>(rawFix);
+
+              const fixPreCheck = validateWorkspaceFileOperations({
+                workDir: sandboxWorkspace.workDir,
+                files: [
+                  ...(fixedImpl.files ?? []).map((f) => ({ path: f.path })),
+                  ...(fixedImpl.patches ?? []).map((p) => ({ path: p.path }))
+                ],
+                deleted_files: fixedImpl.deleted_files,
+                targets: verificationProfile.targets,
+                isTaskBranch: true
+              });
+              if (!fixPreCheck.allowed) {
+                return await escalateToNeedsHuman({
+                  reason: "sensitive_path_violation",
+                  ticketNumber: ticket.ticketIssueNumber,
+                  branch: taskBranch,
+                  codeFixAttemptsUsed: fixAttempt,
+                  sensitivePaths: fixPreCheck.sensitivePaths,
+                  traversalPaths: fixPreCheck.traversalPaths
+                });
+              }
+
+              const updatedFiles = await applyTicketImplementationPayload({
+                parsed: fixedImpl,
+                accumulatedFiles,
+                featureChangedFilesMap,
+                ticketChangedFilesMap,
+                featureDeletedFilesSet,
+                ticketDeletedFilesSet,
+                gh,
+                branch: featureBranch
+              });
+              impl = {
+                commit_message:
+                  fixedImpl.commit_message || impl.commit_message,
+                test_summary: fixedImpl.test_summary || impl.test_summary,
+                files: updatedFiles
+              };
+
+              testCheck = await runTestsInIsolatedWorkspace({
+                workDir: sandboxWorkspace.workDir,
+                files: Array.from(accumulatedFiles.entries()).map(
+                  ([path, content]) => ({ path, content })
+                ),
+                deleted_files: Array.from(ticketDeletedFilesSet),
+                changedPaths: [
+                  ...impl.files.map((f) => f.path),
+                  ...Array.from(ticketDeletedFilesSet)
+                ],
+                isTaskBranch: true,
+                verificationProfile,
+                bootstrappedTargets,
+                sandboxRunner: input.sandboxRunner,
+                llmApiKey: input.llmApiKey,
+                label: `Ticket #${ticket.ticketIssueNumber} TDD auto-fix attempt ${fixAttempt}/${maxCodeFixAttempts}`
+              });
+            }
+
+            if (!testCheck.passed) {
+              throw new Error(
+                `TDD sandbox verification failed for ticket #${ticket.ticketIssueNumber} after ${fixAttempt} auto-fix attempts:\n${testCheck.output.slice(-2000)}`
+              );
+            }
+
+            await gh.commitFilesToBranch({
+              branch: taskBranch,
+              fromBranch: featureBranch,
+              commitMessage: impl.commit_message,
+              files: impl.files,
+              deletedFiles: Array.from(ticketDeletedFilesSet)
+            });
+
+            const prBody = [
+              "## Summary",
+              `Automated TDD implementation of #${ticket.ticketIssueNumber} for plan #${input.issueNumber}.`,
+              "",
+              `Refs #${ticket.ticketIssueNumber}`,
+              `Part of #${input.issueNumber}`,
+              "",
+              "## TDD & Sandbox Verification",
+              `- **Sandbox Test Execution**: \`passed\``,
+              `- **Summary**: ${impl.test_summary}`
+            ].join("\n");
+
+            taskPr = await gh.openPullRequest({
+              head: taskBranch,
+              base: featureBranch,
+              title: impl.commit_message,
+              body: prBody
+            });
+
+            currentPrHeadSha = taskPr.head_sha;
+          }
+
+          // Joint Post-PR Validation Gate: Stage 2 (Multi-Agent Review) + Stage 3 (External CI Gate)
+          const runStage2AndStage3ForTaskPr = async (params: {
+            headSha: string;
+            isReReviewPass: boolean;
+            previousFailedReviewers?: ReadonlyArray<ReviewerAgentName>;
+          }): Promise<{
+            reviewResult: Awaited<ReturnType<typeof runMultiAgentPrReviewPass>>;
+            ciGateResult: WaitForExternalCiChecksResult;
+          }> => {
+            const changedPaths = impl.files.map((f) => f.path);
+            const expectedWorkflows = discoverExpectedExternalWorkflows({
+              workflowFilesMap: devWorkflowsMap,
+              changedPaths,
+              targetBranch: featureBranch
+            });
+
+            const reviewRes = await runMultiAgentPrReviewPass({
+              repository: input.repository,
+              prNumber: taskPr.number,
+              headBranch: taskBranch,
+              baseBranch: featureBranch,
+              ticketNumber: ticket.ticketIssueNumber,
+              ticketTitle: ticket.title,
+              acceptanceCriteria: ticket.acceptanceCriteria,
+              glossaryMarkdown: issue.body,
+              designMarkdown: trustedBaseRoster.designMarkdown,
+              changedFiles: impl.files,
+              workspaceFiles: accumulatedFiles,
+              trustedBaseBranchFiles: trustedBaseFilesMap,
+              isReReviewPass: params.isReReviewPass,
+              previousFailedReviewers: params.previousFailedReviewers,
+              llmApiKey: input.llmApiKey,
+              model,
+              fetchImpl: input.fetchImpl
+            });
+
+            await gh.postPullRequestReview(taskPr.number, {
+              commitId: params.headSha,
+              body: reviewRes.review_body_markdown
+            });
+
+            await gh.publishCheckRun({
+              name: "ai-review",
+              headSha: params.headSha,
+              conclusion: reviewRes.conclusion,
+              summary: reviewRes.check_summary_markdown
+            });
+
+            if (reviewRes.touches_frontend_ui) {
+              await gh.publishCheckRun({
+                name: "impeccable-gate",
+                headSha: params.headSha,
+                conclusion:
+                  reviewRes.impeccable_conclusion === "failure"
+                    ? "failure"
+                    : "success",
+                summary: `Impeccable UI & Accessibility Gate: ${reviewRes.impeccable_conclusion}`
+              });
+            }
+
+            const ciRes = await waitForExternalCiChecks({
+              headSha: params.headSha,
+              expectedWorkflows,
+              waitForExternalCi: verificationProfile.wait_for_external_ci,
+              timeoutMinutes: verificationProfile.external_ci_timeout_minutes,
+              graceWindowSeconds: verificationProfile.grace_window_seconds,
+              pollIntervalMs: input.pollIntervalMs,
+              extraSecrets: [activeToken, input.llmApiKey],
+              infraRerunsBySha,
+              listWorkflowRunsForSha: (sha) => gh.listWorkflowRunsForSha(sha),
+              listCheckRunsForRef: (sha) => gh.listCheckRunsForRef(sha),
+              listCheckRunAnnotations: (id) => gh.listCheckRunAnnotations(id),
+              getJobLogs: (id) => gh.getActionJobLogs(id),
+              rerunFailedJobs: (runId) => gh.rerunFailedWorkflowJobs(runId),
+              sleepFn: effectiveSleepFn
+            });
+
+            if (ciRes.infraRerunsTriggered > 0) {
+              totalTransientRetriesUsed += ciRes.infraRerunsTriggered;
+              await updateIssueStateWithCas({
+                issueNumber: input.issueNumber,
+                store,
+                mutator: (prev) => ({
+                  ...prev,
+                  transient_retries_used: totalTransientRetriesUsed
+                })
+              });
+            }
+
+            return { reviewResult: reviewRes, ciGateResult: ciRes };
+          };
+
+          let { reviewResult, ciGateResult } =
+            await runStage2AndStage3ForTaskPr({
+              headSha: currentPrHeadSha,
+              isReReviewPass: false
+            });
+
+          if (
+            !ciGateResult.passed &&
+            (ciGateResult.reason === "grace_window_timeout" ||
+              ciGateResult.reason === "wall_clock_budget_exhausted")
+          ) {
+            return await escalateToNeedsHuman({
+              reason: ciGateResult.reason,
+              ticketNumber: ticket.ticketIssueNumber,
+              branch: taskBranch,
+              prNumber: taskPr.number,
+              prUrl: taskPr.html_url,
+              codeFixAttemptsUsed: 0,
+              failedChecks: ciGateResult.failedChecks,
+              mustFixFindings: reviewResult.must_fix_findings,
+              diagnosticExcerpt: ciGateResult.formattedDiagnostics
             });
           }
-          if (!testCheck.passed) {
-            throw new Error(
-              `Sandbox test verification failed while addressing review findings on #${ticket.ticketIssueNumber}:\n${testCheck.output.slice(-2000)}`
+
+          let reviewFixAttempt = 0;
+          while (
+            (reviewResult.conclusion === "failure" || !ciGateResult.passed) &&
+            reviewFixAttempt < maxCodeFixAttempts
+          ) {
+            reviewFixAttempt += 1;
+            await updateIssueStateWithCas({
+              issueNumber: input.issueNumber,
+              store,
+              mutator: (prev) => ({
+                ...prev,
+                code_fix_attempts_used: reviewFixAttempt,
+                transient_retries_used:
+                  totalTransientRetriesUsed || prev.transient_retries_used
+              })
+            });
+
+            process.stdout.write(
+              `[EPURE][Ticket #${ticket.ticketIssueNumber}][PR #${taskPr.number}] Post-PR remediation round ${reviewFixAttempt}/${maxCodeFixAttempts} (${reviewResult.must_fix_findings.length} must_fix finding(s), CI passed=${ciGateResult.passed})\n`
             );
+            const findingsText = reviewResult.must_fix_findings
+              .map(
+                (f, idx) =>
+                  `${idx + 1}. [${f.reviewer}] (${f.path}:${f.line}) ${f.title} — ${f.rationale} -> Action: ${f.suggested_action}`
+              )
+              .join("\n");
+
+            const currentFilesContext = Array.from(accumulatedFiles.entries())
+              .map(([p, c]) => `--- FILE: ${p} ---\n${c}`)
+              .join("\n\n");
+
+            const reviewFixSystemInstruction = [
+              "Tu es un ingénieur TDD EPURE corrigeant les constats bloquants ('must_fix') de revue multi-agents et/ou les échecs CI externes.",
+              PROMPT_INJECTION_IMMUNITY_CLAUSE,
+              "Corrige précisément chaque anomalie tout en maintenant 100% des cibles Stage 1 au vert.",
+              "Ne modifie JAMAIS .cursor/agents/**, .github/workflows/**, .github/agents.yml ou .env*.",
+              "Utilise les outils `list_repo_files`, `search_in_repo_file` et `read_repo_file` pour inspecter les fichiers pertinents du dépôt avant de coder.",
+              "",
+              verificationGuideMarkdown,
+              "",
+              "Pour modifier un fichier existant volumineux, utilise de préférence `patches` (`old_string` -> `new_string` exact). Sinon utilise `files` avec le contenu intégral du fichier. Pour supprimer un fichier obsolète, utilise `deleted_files`.",
+              "Renvoie un objet JSON strictement valide :",
+              "{",
+              `  "commit_message": "fix(review): address post-PR findings on #${ticket.ticketIssueNumber}",`,
+              '  "test_summary": "Addressed review and CI findings and verified test suite",',
+              '  "patches": [',
+              '    { "path": "...", "edits": [{ "old_string": "...", "new_string": "..." }] }',
+              "  ],",
+              '  "files": [',
+              '    { "path": "...", "content": "..." }',
+              "  ],",
+              '  "deleted_files": ["..."]',
+              "}"
+            ].join("\n");
+
+            const promptParts: string[] = [];
+            if (reviewResult.must_fix_findings.length > 0) {
+              promptParts.push(
+                `Les reviewers multi-agents EPURE ont émis ${reviewResult.must_fix_findings.length} constat(s) bloquant(s) ('must_fix') sur la PR #${taskPr.number} du Ticket #${ticket.ticketIssueNumber} :`,
+                wrapUntrustedContent("untrusted_issue_content", findingsText),
+                ""
+              );
+            }
+            if (!ciGateResult.passed && ciGateResult.formattedDiagnostics) {
+              promptParts.push(
+                `Les workflows CI externes sur la PR #${taskPr.number} (SHA \`${currentPrHeadSha}\`) ont échoué :`,
+                ciGateResult.formattedDiagnostics,
+                ""
+              );
+            }
+            promptParts.push(
+              verificationGuideMarkdown,
+              "",
+              "Fichiers actuels du workspace :",
+              wrapUntrustedContent(
+                "untrusted_workspace_files",
+                currentFilesContext
+              )
+            );
+
+            const rawReviewFix = await callGeminiGenerateContent({
+              apiKey: input.llmApiKey,
+              model,
+              thinkingLevel: "HIGH",
+              logLabel: `review-fix:#${ticket.ticketIssueNumber}/iter-${reviewFixAttempt}`,
+              systemInstruction: reviewFixSystemInstruction,
+              prompt: promptParts.join("\n"),
+              responseMimeType: "application/json",
+              temperature: 0.1,
+              ...buildRepoExplorationToolsAndHandlers(taskBranch),
+              fetchImpl: input.fetchImpl
+            });
+
+            const reviewFixedImpl =
+              extractJsonObject<GeneratedTicketImplementation>(rawReviewFix);
+
+            // Pre-Stage-1 Sensitive Path & Path Containment Gate on remediation
+            const remediationPreCheck = validateWorkspaceFileOperations({
+              workDir: sandboxWorkspace.workDir,
+              files: [
+                ...(reviewFixedImpl.files ?? []).map((f) => ({ path: f.path })),
+                ...(reviewFixedImpl.patches ?? []).map((p) => ({
+                  path: p.path
+                }))
+              ],
+              deleted_files: reviewFixedImpl.deleted_files,
+              targets: verificationProfile.targets,
+              isTaskBranch: true
+            });
+            if (!remediationPreCheck.allowed) {
+              return await escalateToNeedsHuman({
+                reason: "sensitive_path_violation",
+                ticketNumber: ticket.ticketIssueNumber,
+                branch: taskBranch,
+                prNumber: taskPr.number,
+                prUrl: taskPr.html_url,
+                codeFixAttemptsUsed: reviewFixAttempt,
+                sensitivePaths: remediationPreCheck.sensitivePaths,
+                traversalPaths: remediationPreCheck.traversalPaths
+              });
+            }
+
+            const updatedReviewFiles = await applyTicketImplementationPayload({
+              parsed: reviewFixedImpl,
+              accumulatedFiles,
+              featureChangedFilesMap,
+              ticketChangedFilesMap,
+              featureDeletedFilesSet,
+              ticketDeletedFilesSet,
+              gh,
+              branch: featureBranch
+            });
+            impl = {
+              commit_message:
+                reviewFixedImpl.commit_message ||
+                `fix(review): address reviewer findings on #${ticket.ticketIssueNumber}`,
+              test_summary: reviewFixedImpl.test_summary || impl.test_summary,
+              files: updatedReviewFiles
+            };
+
+            let testCheck = await runTestsInIsolatedWorkspace({
+              workDir: sandboxWorkspace.workDir,
+              files: Array.from(accumulatedFiles.entries()).map(
+                ([path, content]) => ({ path, content })
+              ),
+              deleted_files: Array.from(ticketDeletedFilesSet),
+              changedPaths: [
+                ...impl.files.map((f) => f.path),
+                ...Array.from(ticketDeletedFilesSet)
+              ],
+              isTaskBranch: true,
+              verificationProfile,
+              bootstrappedTargets,
+              sandboxRunner: input.sandboxRunner,
+              llmApiKey: input.llmApiKey,
+              label: `Ticket #${ticket.ticketIssueNumber} review-fix iteration ${reviewFixAttempt}/${maxCodeFixAttempts}`
+            });
+            let reviewTestRetry = 0;
+            while (!testCheck.passed && reviewTestRetry < 2) {
+              reviewTestRetry += 1;
+              const retryFilesContext = Array.from(accumulatedFiles.entries())
+                .map(([p, c]) => `--- FILE: ${p} ---\n${c}`)
+                .join("\n\n");
+              const rawRetryFix = await callGeminiGenerateContent({
+                apiKey: input.llmApiKey,
+                model,
+                thinkingLevel: "HIGH",
+                systemInstruction: reviewFixSystemInstruction,
+                prompt: [
+                  `La correction a fait échouer la vérification Stage 1 en sandbox (tentative ${reviewTestRetry}/2) :`,
+                  wrapUntrustedContent(
+                    "untrusted_test_output",
+                    testCheck.output.slice(-6000)
+                  ),
+                  "",
+                  ...(findingsText
+                    ? [
+                        "Constats must_fix à maintenir corrigés :",
+                        wrapUntrustedContent(
+                          "untrusted_issue_content",
+                          findingsText
+                        ),
+                        ""
+                      ]
+                    : []),
+                  "Fichiers actuels du workspace :",
+                  wrapUntrustedContent(
+                    "untrusted_workspace_files",
+                    retryFilesContext
+                  )
+                ].join("\n"),
+                responseMimeType: "application/json",
+                temperature: 0.1,
+                ...buildRepoExplorationToolsAndHandlers(taskBranch),
+                fetchImpl: input.fetchImpl
+              });
+              const retryImpl =
+                extractJsonObject<GeneratedTicketImplementation>(rawRetryFix);
+
+              const retryPreCheck = validateWorkspaceFileOperations({
+                workDir: sandboxWorkspace.workDir,
+                files: [
+                  ...(retryImpl.files ?? []).map((f) => ({ path: f.path })),
+                  ...(retryImpl.patches ?? []).map((p) => ({ path: p.path }))
+                ],
+                deleted_files: retryImpl.deleted_files,
+                targets: verificationProfile.targets,
+                isTaskBranch: true
+              });
+              if (!retryPreCheck.allowed) {
+                return await escalateToNeedsHuman({
+                  reason: "sensitive_path_violation",
+                  ticketNumber: ticket.ticketIssueNumber,
+                  branch: taskBranch,
+                  prNumber: taskPr.number,
+                  prUrl: taskPr.html_url,
+                  codeFixAttemptsUsed: reviewFixAttempt,
+                  sensitivePaths: retryPreCheck.sensitivePaths,
+                  traversalPaths: retryPreCheck.traversalPaths
+                });
+              }
+
+              const updatedRetryFiles = await applyTicketImplementationPayload({
+                parsed: retryImpl,
+                accumulatedFiles,
+                featureChangedFilesMap,
+                ticketChangedFilesMap,
+                featureDeletedFilesSet,
+                ticketDeletedFilesSet,
+                gh,
+                branch: featureBranch
+              });
+              impl = {
+                commit_message: impl.commit_message,
+                test_summary: retryImpl.test_summary || impl.test_summary,
+                files: updatedRetryFiles
+              };
+              testCheck = await runTestsInIsolatedWorkspace({
+                workDir: sandboxWorkspace.workDir,
+                files: Array.from(accumulatedFiles.entries()).map(
+                  ([path, content]) => ({ path, content })
+                ),
+                deleted_files: Array.from(ticketDeletedFilesSet),
+                changedPaths: [
+                  ...impl.files.map((f) => f.path),
+                  ...Array.from(ticketDeletedFilesSet)
+                ],
+                isTaskBranch: true,
+                verificationProfile,
+                bootstrappedTargets,
+                sandboxRunner: input.sandboxRunner,
+                llmApiKey: input.llmApiKey,
+                label: `Ticket #${ticket.ticketIssueNumber} review-fix iteration ${reviewFixAttempt} test retry ${reviewTestRetry}/2`
+              });
+            }
+            if (!testCheck.passed) {
+              throw new Error(
+                `Sandbox test verification failed while addressing review/CI findings on #${ticket.ticketIssueNumber}:\n${testCheck.output.slice(-2000)}`
+              );
+            }
+
+            currentPrHeadSha = await gh.commitFilesToBranch({
+              branch: taskBranch,
+              fromBranch: featureBranch,
+              commitMessage: `fix(review): address reviewer findings on #${ticket.ticketIssueNumber}`,
+              files: impl.files,
+              deletedFiles: Array.from(ticketDeletedFilesSet)
+            });
+
+            // Re-run Stage 2 + Stage 3 on new headSha
+            const nextPass = await runStage2AndStage3ForTaskPr({
+              headSha: currentPrHeadSha,
+              isReReviewPass: true,
+              previousFailedReviewers: reviewResult.failed_reviewers
+            });
+            reviewResult = nextPass.reviewResult;
+            ciGateResult = nextPass.ciGateResult;
+
+            if (
+              !ciGateResult.passed &&
+              (ciGateResult.reason === "grace_window_timeout" ||
+                ciGateResult.reason === "wall_clock_budget_exhausted")
+            ) {
+              return await escalateToNeedsHuman({
+                reason: ciGateResult.reason,
+                ticketNumber: ticket.ticketIssueNumber,
+                branch: taskBranch,
+                prNumber: taskPr.number,
+                prUrl: taskPr.html_url,
+                codeFixAttemptsUsed: reviewFixAttempt,
+                failedChecks: ciGateResult.failedChecks,
+                mustFixFindings: reviewResult.must_fix_findings,
+                diagnosticExcerpt: ciGateResult.formattedDiagnostics
+              });
+            }
           }
 
-          currentPrHeadSha = await gh.commitFilesToBranch({
-            branch: taskBranch,
-            fromBranch: featureBranch,
-            commitMessage: `fix(review): address reviewer findings on #${ticket.ticketIssueNumber}`,
-            files: impl.files
-          });
+          if (reviewResult.conclusion === "failure" || !ciGateResult.passed) {
+            return await escalateToNeedsHuman({
+              reason: "remediation_exhausted",
+              ticketNumber: ticket.ticketIssueNumber,
+              branch: taskBranch,
+              prNumber: taskPr.number,
+              prUrl: taskPr.html_url,
+              codeFixAttemptsUsed: reviewFixAttempt,
+              failedChecks: ciGateResult.failedChecks,
+              mustFixFindings: reviewResult.must_fix_findings,
+              diagnosticExcerpt: ciGateResult.formattedDiagnostics
+            });
+          }
 
-          // Q93: Re-run only failed reviewers + spec-parity-reviewer
-          reviewResult = await runMultiAgentPrReviewPass({
-            repository: input.repository,
+          // Step 4 (Q94): Synthesize semantic Conventional Commit squash title & body from the PR diff
+          const squashCommit = await generateSemanticSquashCommitFromDiff({
             prNumber: taskPr.number,
-            headBranch: taskBranch,
-            baseBranch: featureBranch,
-            ticketNumber: ticket.ticketIssueNumber,
-            ticketTitle: ticket.title,
-            acceptanceCriteria: ticket.acceptanceCriteria,
-            glossaryMarkdown: issue.body,
-            designMarkdown: trustedBaseRoster.designMarkdown,
+            targetBranch: featureBranch,
+            defaultBranch: "dev",
+            planIssueNumber: input.issueNumber,
+            ticketNumbers: [ticket.ticketIssueNumber],
+            fallbackTitle: impl.commit_message,
             changedFiles: impl.files,
-            workspaceFiles: accumulatedFiles,
-            trustedBaseBranchFiles: trustedBaseFilesMap,
-            isReReviewPass: true,
-            previousFailedReviewers: reviewResult.failed_reviewers,
             llmApiKey: input.llmApiKey,
             model,
             fetchImpl: input.fetchImpl
           });
 
-          await gh.postPullRequestReview(taskPr.number, {
-            commitId: currentPrHeadSha,
-            body: reviewResult.review_body_markdown
+          await gh.updatePullRequest(taskPr.number, {
+            title: squashCommit.pr_title
           });
 
           await gh.publishCheckRun({
-            name: "ai-review",
+            name: "PR title",
             headSha: currentPrHeadSha,
-            conclusion: reviewResult.conclusion,
-            summary: reviewResult.check_summary_markdown
+            conclusion: "success",
+            summary: `Conventional Commit title verified: '${squashCommit.pr_title}'`
           });
 
-          if (reviewResult.touches_frontend_ui) {
-            await gh.publishCheckRun({
-              name: "impeccable-gate",
-              headSha: currentPrHeadSha,
-              conclusion:
-                reviewResult.impeccable_conclusion === "failure"
-                  ? "failure"
-                  : "success",
-              summary: `Impeccable UI & Accessibility Gate: ${reviewResult.impeccable_conclusion}`
-            });
+          await gh.mergePullRequest(taskPr.number, {
+            headBranch: taskBranch,
+            baseBranch: featureBranch,
+            commitTitle: squashCommit.commit_title,
+            commitMessage: squashCommit.commit_message
+          });
+
+          if (ticket.ticketIssueNumber !== input.issueNumber) {
+            await gh.closeIssue(ticket.ticketIssueNumber);
           }
-        }
 
-        if (reviewResult.conclusion === "failure") {
-          await gh.postIssueComment(
-            input.issueNumber,
-            `### Escalation — Multi-Agent Review Blocked on PR #${taskPr.number} (Ticket #${ticket.ticketIssueNumber})\n\nAfter \`${fixAttempt}\` attempts (\`max_code_fix_attempts = ${maxCodeFixAttempts}\`), \`${reviewResult.must_fix_findings.length}\` blocking finding(s) remain open on \`${taskBranch}\`. Human intervention is required.`
+          completedTicketsSummary.push(
+            `- **#${ticket.ticketIssueNumber}** (${ticket.title}) — PR #${taskPr.number} squash-merged into \`${featureBranch}\` as \`${squashCommit.commit_title}\` (Reviewers: ${reviewResult.selected_reviewers.map((r) => `\`${r}\``).join(", ")})`
           );
-          throw new Error(
-            `Multi-agent PR review blocked merge for ticket #${ticket.ticketIssueNumber} (PR #${taskPr.number}) with ${reviewResult.must_fix_findings.length} open must_fix finding(s).`
-          );
+        } finally {
+          sandboxWorkspace.cleanup();
         }
-
-        // Step 4 (Q94): Synthesize semantic Conventional Commit squash title & body from the PR diff
-        const squashCommit = await generateSemanticSquashCommitFromDiff({
-          prNumber: taskPr.number,
-          targetBranch: featureBranch,
-          defaultBranch: "dev",
-          planIssueNumber: input.issueNumber,
-          ticketNumbers: [ticket.ticketIssueNumber],
-          fallbackTitle: impl.commit_message,
-          changedFiles: impl.files,
-          llmApiKey: input.llmApiKey,
-          model,
-          fetchImpl: input.fetchImpl
-        });
-
-        await gh.updatePullRequest(taskPr.number, {
-          title: squashCommit.pr_title
-        });
-
-        await gh.publishCheckRun({
-          name: "PR title",
-          headSha: currentPrHeadSha,
-          conclusion: "success",
-          summary: `Conventional Commit title verified: '${squashCommit.pr_title}'`
-        });
-
-        await gh.mergePullRequest(taskPr.number, {
-          headBranch: taskBranch,
-          baseBranch: featureBranch,
-          commitTitle: squashCommit.commit_title,
-          commitMessage: squashCommit.commit_message
-        });
-
-        if (ticket.ticketIssueNumber !== input.issueNumber) {
-          await gh.closeIssue(ticket.ticketIssueNumber);
-        }
-
-        completedTicketsSummary.push(
-          `- **#${ticket.ticketIssueNumber}** (${ticket.title}) — PR #${taskPr.number} squash-merged into \`${featureBranch}\` as \`${squashCommit.commit_title}\` (Reviewers: ${reviewResult.selected_reviewers.map((r) => `\`${r}\``).join(", ")})`
-        );
       }
 
-      // Open final Pull Request feature/* -> dev (requires human review & merge per ADR-0011 Q45, Q91, Q94, Q95)
+      // Open or reconcile final Pull Request feature/* -> dev (Q110, ADR-0011 Q45, Q91, Q94, Q95)
       const effectiveFeatureEntries =
         featureChangedFilesMap.size > 0
           ? Array.from(featureChangedFilesMap.entries())
@@ -2399,274 +3287,55 @@ export async function orchestrateIssueCommand(
         fetchImpl: input.fetchImpl
       });
 
-      const featurePr = await gh.openPullRequest({
-        head: featureBranch,
-        base: "dev",
-        title: featureSquashPreview.pr_title,
-        body: [
-          "## Summary",
-          `Completes implementation for #${input.issueNumber}.`,
-          "",
-          `Closes #${input.issueNumber}`,
-          "",
-          featureSquashPreview.commit_message,
-          "",
-          "## Completed Tickets & Squash History",
-          ...completedTicketsSummary,
-          "",
-          "## Governance",
-          "- Requires human review and squash-merge into `dev` in the GitHub UI (ADR-0001, ADR-0027, Q45, Q91, Q95)."
-        ].join("\n")
-      });
+      const existingFeaturePr =
+        existingFeaturePrAtStart ??
+        (await gh.findOpenPullRequestByHead(featureBranch, "dev"));
 
-      // Q93: Run final synthesis Multi-Agent Review pass on feature/* -> dev PR for the human validator
+      const featurePr = existingFeaturePr
+        ? existingFeaturePr
+        : await gh.openPullRequest({
+            head: featureBranch,
+            base: "dev",
+            title: featureSquashPreview.pr_title,
+            body: [
+              "## Summary",
+              `Completes implementation for #${input.issueNumber}.`,
+              "",
+              `Closes #${input.issueNumber}`,
+              "",
+              featureSquashPreview.commit_message,
+              "",
+              "## Completed Tickets & Squash History",
+              ...completedTicketsSummary,
+              "",
+              "## Governance",
+              "- Requires human review and squash-merge into `dev` in the GitHub UI (ADR-0001, ADR-0027, Q45, Q91, Q95)."
+            ].join("\n")
+          });
+
+      // Q93 + Stage 3: Run final synthesis Multi-Agent Review pass + External CI Gate on feature/* -> dev PR
       let currentFeaturePrHeadSha = featurePr.head_sha;
-      let finalFeatureReview = await runMultiAgentPrReviewPass({
-        repository: input.repository,
-        prNumber: featurePr.number,
-        headBranch: featureBranch,
-        baseBranch: "dev",
-        ticketTitle: issue.title,
-        acceptanceCriteria: ticketsManifest.flatMap((t) => t.acceptanceCriteria),
-        glossaryMarkdown: issue.body,
-        designMarkdown: trustedBaseRoster.designMarkdown,
-        changedFiles: Array.from(
+      const runStage2AndStage3ForFeaturePr = async (params: {
+        headSha: string;
+        isReReviewPass: boolean;
+        previousFailedReviewers?: ReadonlyArray<ReviewerAgentName>;
+      }): Promise<{
+        reviewResult: Awaited<ReturnType<typeof runMultiAgentPrReviewPass>>;
+        ciGateResult: WaitForExternalCiChecksResult;
+      }> => {
+        const currentChangedFeatureFiles = Array.from(
           (featureChangedFilesMap.size > 0
             ? featureChangedFilesMap
             : accumulatedFiles
           ).entries()
-        ).map(([path, content]) => ({ path, content })),
-        workspaceFiles: accumulatedFiles,
-        trustedBaseBranchFiles: trustedBaseFilesMap,
-        isReReviewPass: false,
-        llmApiKey: input.llmApiKey,
-        model,
-        fetchImpl: input.fetchImpl
-      });
-
-      await gh.postPullRequestReview(featurePr.number, {
-        commitId: currentFeaturePrHeadSha,
-        body: finalFeatureReview.review_body_markdown
-      });
-
-      await gh.publishCheckRun({
-        name: "PR title",
-        headSha: currentFeaturePrHeadSha,
-        conclusion: "success",
-        summary: `Conventional Commit title verified: '${featureSquashPreview.pr_title}'`
-      });
-
-      await gh.publishCheckRun({
-        name: "ai-review",
-        headSha: currentFeaturePrHeadSha,
-        conclusion: finalFeatureReview.conclusion,
-        summary: finalFeatureReview.check_summary_markdown
-      });
-
-      if (finalFeatureReview.touches_frontend_ui) {
-        await gh.publishCheckRun({
-          name: "impeccable-gate",
-          headSha: currentFeaturePrHeadSha,
-          conclusion:
-            finalFeatureReview.impeccable_conclusion === "failure"
-              ? "failure"
-              : "success",
-          summary: `Impeccable UI & Accessibility Gate: ${finalFeatureReview.impeccable_conclusion}`
-        });
-      }
-
-      let featureReviewFixAttempt = 0;
-      const maxFeatureReviewFixAttempts = 3;
-      while (
-        finalFeatureReview.conclusion === "failure" &&
-        featureReviewFixAttempt < maxFeatureReviewFixAttempts
-      ) {
-        featureReviewFixAttempt += 1;
-        process.stdout.write(
-          `[EPURE][Feature PR #${featurePr.number}] Multi-agent synthesis review fix iteration ${featureReviewFixAttempt}/${maxFeatureReviewFixAttempts} (${finalFeatureReview.must_fix_findings.length} must_fix finding(s))\n`
-        );
-        const findingsText = finalFeatureReview.must_fix_findings
-          .map(
-            (f, idx) =>
-              `${idx + 1}. [${f.reviewer}] (${f.path}:${f.line}) ${f.title} — ${f.rationale} -> Action: ${f.suggested_action}`
-          )
-          .join("\n");
-
-        const currentFilesContext = Array.from(accumulatedFiles.entries())
-          .map(([p, c]) => `--- FILE: ${p} ---\n${c}`)
-          .join("\n\n");
-
-        const featureFixSystemInstruction = [
-          "Tu es un ingénieur TDD EPURE corrigeant les constats bloquants ('must_fix') émis par le roster de revue multi-agents sur la PR finale de feature.",
-          PROMPT_INJECTION_IMMUNITY_CLAUSE,
-          "Corrige précisément chaque 'must_fix' tout en maintenant 100% des tests et TypeScript au vert.",
-          "Ne modifie JAMAIS .cursor/agents/**, .github/workflows/** ou .github/agents.yml.",
-          "Pour modifier un fichier existant volumineux, utilise de préférence `patches` (`old_string` -> `new_string` exact). Sinon utilise `files` avec le contenu intégral du fichier.",
-          "Renvoie un objet JSON strictement valide :",
-          "{",
-          `  "commit_message": "fix(review): address final feature review findings on #${input.issueNumber}",`,
-          '  "test_summary": "Addressed final feature review findings and verified test suite",',
-          '  "patches": [',
-          '    { "path": "...", "edits": [{ "old_string": "...", "new_string": "..." }] }',
-          "  ],",
-          '  "files": [',
-          '    { "path": "...", "content": "..." }',
-          "  ]",
-          "}"
-        ].join("\n");
-
-        const rawFeatureFix = await callGeminiGenerateContent({
-          apiKey: input.llmApiKey,
-          model,
-          thinkingLevel: "HIGH",
-          logLabel: `feature-review-fix:#PR${featurePr.number}/iter-${featureReviewFixAttempt}`,
-          systemInstruction: featureFixSystemInstruction,
-          prompt: [
-            `Les reviewers multi-agents EPURE ont émis ${finalFeatureReview.must_fix_findings.length} constat(s) bloquant(s) ('must_fix') sur la PR finale #${featurePr.number} (\`${featureBranch} -> dev\`) :`,
-            wrapUntrustedContent("untrusted_issue_content", findingsText),
-            "",
-            "Fichiers actuels du workspace :",
-            wrapUntrustedContent("untrusted_workspace_files", currentFilesContext)
-          ].join("\n"),
-          responseMimeType: "application/json",
-          temperature: 0.1,
-          fetchImpl: input.fetchImpl
+        ).map(([path, content]) => ({ path, content }));
+        const expectedFeatureWorkflows = discoverExpectedExternalWorkflows({
+          workflowFilesMap: devWorkflowsMap,
+          changedPaths: currentChangedFeatureFiles.map((f) => f.path),
+          targetBranch: "dev"
         });
 
-        const parsedFeatureFix =
-          extractJsonObject<GeneratedTicketImplementation>(rawFeatureFix);
-        const changedFixFilesMap = new Map<string, string>();
-        await applyTicketImplementationPayload({
-          parsed: parsedFeatureFix,
-          accumulatedFiles,
-          featureChangedFilesMap,
-          ticketChangedFilesMap: changedFixFilesMap,
-          gh,
-          branch: featureBranch
-        });
-
-        let featureTestCheck = await runTestsInIsolatedWorkspace({
-          files: Array.from(accumulatedFiles.entries()).map(
-            ([path, content]) => ({ path, content })
-          ),
-          llmApiKey: input.llmApiKey,
-          label: `Feature PR #${featurePr.number} review-fix iteration ${featureReviewFixAttempt}/${maxFeatureReviewFixAttempts}`
-        });
-
-        let featureTestRetry = 0;
-        while (!featureTestCheck.passed && featureTestRetry < 2) {
-          featureTestRetry += 1;
-          const retryFilesContext = Array.from(accumulatedFiles.entries())
-            .map(([p, c]) => `--- FILE: ${p} ---\n${c}`)
-            .join("\n\n");
-          const rawRetryFeatureFix = await callGeminiGenerateContent({
-            apiKey: input.llmApiKey,
-            model,
-            thinkingLevel: "HIGH",
-            logLabel: `feature-review-test-retry:#PR${featurePr.number}/iter-${featureReviewFixAttempt}-retry-${featureTestRetry}`,
-            systemInstruction: featureFixSystemInstruction,
-            prompt: [
-              `La correction de review finale a échoué à la vérification TypeScript/Vitest (tentative ${featureTestRetry}/2) :`,
-              wrapUntrustedContent(
-                "untrusted_test_output",
-                featureTestCheck.output.slice(-6000)
-              ),
-              "",
-              "Constats must_fix à maintenir corrigés :",
-              wrapUntrustedContent("untrusted_issue_content", findingsText),
-              "",
-              "Fichiers actuels du workspace :",
-              wrapUntrustedContent("untrusted_workspace_files", retryFilesContext)
-            ].join("\n"),
-            responseMimeType: "application/json",
-            temperature: 0.1,
-            fetchImpl: input.fetchImpl
-          });
-          const retryParsed =
-            extractJsonObject<GeneratedTicketImplementation>(rawRetryFeatureFix);
-          await applyTicketImplementationPayload({
-            parsed: retryParsed,
-            accumulatedFiles,
-            featureChangedFilesMap,
-            ticketChangedFilesMap: changedFixFilesMap,
-            gh,
-            branch: featureBranch
-          });
-          featureTestCheck = await runTestsInIsolatedWorkspace({
-            files: Array.from(accumulatedFiles.entries()).map(
-              ([path, content]) => ({ path, content })
-            ),
-            llmApiKey: input.llmApiKey,
-            label: `Feature PR #${featurePr.number} review-fix iteration ${featureReviewFixAttempt} test retry ${featureTestRetry}/2`
-          });
-        }
-
-        if (!featureTestCheck.passed) {
-          throw new Error(
-            `Sandbox test verification failed while addressing final feature review findings on PR #${featurePr.number}:\n${featureTestCheck.output.slice(-2000)}`
-          );
-        }
-
-        const changedFixFiles = Array.from(changedFixFilesMap.entries()).map(
-          ([path, content]) => ({ path, content })
-        );
-
-        const fixTaskBranch = `task/review-fix-${input.issueNumber}-${featureReviewFixAttempt}`;
-        const fixCommitTitle =
-          parsedFeatureFix.commit_message &&
-          /^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9._/-]+\))?!?: .+/i.test(
-            parsedFeatureFix.commit_message
-          )
-            ? parsedFeatureFix.commit_message
-            : `fix(review): address final feature review findings on #${input.issueNumber}`;
-
-        await gh.commitFilesToBranch({
-          branch: fixTaskBranch,
-          fromBranch: featureBranch,
-          commitMessage: fixCommitTitle,
-          files: changedFixFiles
-        });
-
-        const fixPr = await gh.openPullRequest({
-          head: fixTaskBranch,
-          base: featureBranch,
-          title: fixCommitTitle,
-          body: `Addresses multi-agent review findings on feature PR #${featurePr.number} (iteration ${featureReviewFixAttempt}).\n\nRefs #${input.issueNumber}`
-        });
-
-        await gh.publishCheckRun({
-          name: "PR title",
-          headSha: fixPr.head_sha,
-          conclusion: "success",
-          summary: `Conventional Commit title verified: '${fixCommitTitle}'`
-        });
-
-        await gh.publishCheckRun({
-          name: "ai-review",
-          headSha: fixPr.head_sha,
-          conclusion: "success",
-          summary: "Sandbox verified remediation commit for feature synthesis PR."
-        });
-
-        await gh.publishCheckRun({
-          name: "impeccable-gate",
-          headSha: fixPr.head_sha,
-          conclusion: "success",
-          summary: "Impeccable gate verified in synthesis loop."
-        });
-
-        await gh.mergePullRequest(fixPr.number, {
-          headBranch: fixTaskBranch,
-          baseBranch: featureBranch,
-          commitTitle: `${fixCommitTitle} (#${fixPr.number})`,
-          commitMessage: `Automated remediation of synthesis review findings.\n\nRefs #${input.issueNumber}`
-        });
-
-        currentFeaturePrHeadSha =
-          (await gh.getDefaultBranchSha(featureBranch)) ??
-          currentFeaturePrHeadSha;
-
-        finalFeatureReview = await runMultiAgentPrReviewPass({
+        const reviewRes = await runMultiAgentPrReviewPass({
           repository: input.repository,
           prNumber: featurePr.number,
           headBranch: featureBranch,
@@ -2677,51 +3346,513 @@ export async function orchestrateIssueCommand(
           ),
           glossaryMarkdown: issue.body,
           designMarkdown: trustedBaseRoster.designMarkdown,
-          changedFiles: Array.from(
-            (featureChangedFilesMap.size > 0
-              ? featureChangedFilesMap
-              : accumulatedFiles
-            ).entries()
-          ).map(([path, content]) => ({ path, content })),
+          changedFiles: currentChangedFeatureFiles,
           workspaceFiles: accumulatedFiles,
           trustedBaseBranchFiles: trustedBaseFilesMap,
-          isReReviewPass: true,
-          previousFailedReviewers: finalFeatureReview.failed_reviewers,
+          isReReviewPass: params.isReReviewPass,
+          previousFailedReviewers: params.previousFailedReviewers,
           llmApiKey: input.llmApiKey,
           model,
           fetchImpl: input.fetchImpl
         });
 
         await gh.postPullRequestReview(featurePr.number, {
-          commitId: currentFeaturePrHeadSha,
-          body: finalFeatureReview.review_body_markdown
+          commitId: params.headSha,
+          body: reviewRes.review_body_markdown
         });
 
         await gh.publishCheckRun({
           name: "PR title",
-          headSha: currentFeaturePrHeadSha,
+          headSha: params.headSha,
           conclusion: "success",
           summary: `Conventional Commit title verified: '${featureSquashPreview.pr_title}'`
         });
 
         await gh.publishCheckRun({
           name: "ai-review",
-          headSha: currentFeaturePrHeadSha,
-          conclusion: finalFeatureReview.conclusion,
-          summary: finalFeatureReview.check_summary_markdown
+          headSha: params.headSha,
+          conclusion: reviewRes.conclusion,
+          summary: reviewRes.check_summary_markdown
         });
 
-        if (finalFeatureReview.touches_frontend_ui) {
+        if (reviewRes.touches_frontend_ui) {
           await gh.publishCheckRun({
             name: "impeccable-gate",
-            headSha: currentFeaturePrHeadSha,
+            headSha: params.headSha,
             conclusion:
-              finalFeatureReview.impeccable_conclusion === "failure"
+              reviewRes.impeccable_conclusion === "failure"
                 ? "failure"
                 : "success",
-            summary: `Impeccable UI & Accessibility Gate: ${finalFeatureReview.impeccable_conclusion}`
+            summary: `Impeccable UI & Accessibility Gate: ${reviewRes.impeccable_conclusion}`
           });
         }
+
+        const ciRes = await waitForExternalCiChecks({
+          headSha: params.headSha,
+          expectedWorkflows: expectedFeatureWorkflows,
+          waitForExternalCi: verificationProfile.wait_for_external_ci,
+          timeoutMinutes: verificationProfile.external_ci_timeout_minutes,
+          graceWindowSeconds: verificationProfile.grace_window_seconds,
+          pollIntervalMs: input.pollIntervalMs,
+          extraSecrets: [activeToken, input.llmApiKey],
+          infraRerunsBySha,
+          listWorkflowRunsForSha: (sha) => gh.listWorkflowRunsForSha(sha),
+          listCheckRunsForRef: (sha) => gh.listCheckRunsForRef(sha),
+          listCheckRunAnnotations: (id) => gh.listCheckRunAnnotations(id),
+          getJobLogs: (id) => gh.getActionJobLogs(id),
+          rerunFailedJobs: (runId) => gh.rerunFailedWorkflowJobs(runId),
+          sleepFn: effectiveSleepFn
+        });
+
+        if (ciRes.infraRerunsTriggered > 0) {
+          totalTransientRetriesUsed += ciRes.infraRerunsTriggered;
+          await updateIssueStateWithCas({
+            issueNumber: input.issueNumber,
+            store,
+            mutator: (prev) => ({
+              ...prev,
+              transient_retries_used: totalTransientRetriesUsed
+            })
+          });
+        }
+
+        return { reviewResult: reviewRes, ciGateResult: ciRes };
+      };
+
+      let {
+        reviewResult: finalFeatureReview,
+        ciGateResult: finalFeatureCiGate
+      } = await runStage2AndStage3ForFeaturePr({
+        headSha: currentFeaturePrHeadSha,
+        isReReviewPass: false
+      });
+
+      if (
+        !finalFeatureCiGate.passed &&
+        (finalFeatureCiGate.reason === "grace_window_timeout" ||
+          finalFeatureCiGate.reason === "wall_clock_budget_exhausted")
+      ) {
+        return await escalateToNeedsHuman({
+          reason: finalFeatureCiGate.reason,
+          ticketNumber: input.issueNumber,
+          branch: featureBranch,
+          prNumber: featurePr.number,
+          prUrl: featurePr.html_url,
+          featurePrUrl: featurePr.html_url,
+          codeFixAttemptsUsed: 0,
+          failedChecks: finalFeatureCiGate.failedChecks,
+          mustFixFindings: finalFeatureReview.must_fix_findings,
+          diagnosticExcerpt: finalFeatureCiGate.formattedDiagnostics
+        });
+      }
+
+      let featureReviewFixAttempt = 0;
+      const maxFeatureReviewFixAttempts = maxCodeFixAttempts;
+      while (
+        (finalFeatureReview.conclusion === "failure" ||
+          !finalFeatureCiGate.passed) &&
+        featureReviewFixAttempt < maxFeatureReviewFixAttempts
+      ) {
+        featureReviewFixAttempt += 1;
+        await updateIssueStateWithCas({
+          issueNumber: input.issueNumber,
+          store,
+          mutator: (prev) => ({
+            ...prev,
+            code_fix_attempts_used: featureReviewFixAttempt,
+            transient_retries_used:
+              totalTransientRetriesUsed || prev.transient_retries_used
+          })
+        });
+
+        process.stdout.write(
+          `[EPURE][Feature PR #${featurePr.number}] Multi-agent synthesis review + CI fix iteration ${featureReviewFixAttempt}/${maxFeatureReviewFixAttempts} (${finalFeatureReview.must_fix_findings.length} must_fix finding(s), CI passed=${finalFeatureCiGate.passed})\n`
+        );
+        const findingsText = finalFeatureReview.must_fix_findings
+          .map(
+            (f, idx) =>
+              `${idx + 1}. [${f.reviewer}] (${f.path}:${f.line}) ${f.title} — ${f.rationale} -> Action: ${f.suggested_action}`
+          )
+          .join("\n");
+
+        const featureSandbox = prepareRepositorySandboxWorkspace({
+          repository: input.repository,
+          branch: featureBranch,
+          githubToken: activeToken,
+          seedFiles: accumulatedFiles,
+          enableRemoteClone: Boolean(
+            process.env.GITHUB_ACTIONS === "true" && !input.fetchImpl
+          )
+        });
+        if (
+          featureSandbox.clonedFromRemote &&
+          !parsedDevAgentsConfig?.verification?.targets?.length
+        ) {
+          const clonedProfile = discoverVerificationProfile({
+            repoRootDir: featureSandbox.workDir,
+            targetFilesHint: [
+              ...devBranchPaths,
+              ...ticketsManifest.flatMap((t) => t.filesToTouch)
+            ],
+            workflowFilesMap: Object.fromEntries(devWorkflowsMap)
+          });
+          verificationProfile = {
+            ...clonedProfile,
+            wait_for_external_ci:
+              parsedDevAgentsConfig?.verification?.wait_for_external_ci ??
+              clonedProfile.wait_for_external_ci,
+            external_ci_timeout_minutes:
+              parsedDevAgentsConfig?.verification
+                ?.external_ci_timeout_minutes ??
+              clonedProfile.external_ci_timeout_minutes,
+            grace_window_seconds:
+              parsedDevAgentsConfig?.verification?.grace_window_seconds ??
+              clonedProfile.grace_window_seconds
+          };
+          verificationGuideMarkdown =
+            formatVerificationToolingGuideMarkdown(verificationProfile);
+        }
+
+        try {
+          const currentFilesContext = Array.from(accumulatedFiles.entries())
+            .map(([p, c]) => `--- FILE: ${p} ---\n${c}`)
+            .join("\n\n");
+
+          const featureFixSystemInstruction = [
+            "Tu es un ingénieur TDD EPURE corrigeant les constats bloquants ('must_fix') et/ou échecs CI sur la PR finale de feature.",
+            PROMPT_INJECTION_IMMUNITY_CLAUSE,
+            "Corrige précisément chaque anomalie tout en maintenant 100% des cibles Stage 1 au vert.",
+            "Ne modifie JAMAIS .cursor/agents/**, .github/workflows/**, .github/agents.yml ou .env*.",
+            "Utilise les outils `list_repo_files`, `search_in_repo_file` et `read_repo_file` pour inspecter les fichiers pertinents du dépôt avant de coder.",
+            "",
+            verificationGuideMarkdown,
+            "",
+            "Pour modifier un fichier existant volumineux, utilise de préférence `patches` (`old_string` -> `new_string` exact). Sinon utilise `files` avec le contenu intégral du fichier. Pour supprimer un fichier obsolète, utilise `deleted_files`.",
+            "Renvoie un objet JSON strictement valide :",
+            "{",
+            `  "commit_message": "fix(review): address final feature review findings on #${input.issueNumber}",`,
+            '  "test_summary": "Addressed final feature review findings and verified test suite",',
+            '  "patches": [',
+            '    { "path": "...", "edits": [{ "old_string": "...", "new_string": "..." }] }',
+            "  ],",
+            '  "files": [',
+            '    { "path": "...", "content": "..." }',
+            "  ],",
+            '  "deleted_files": ["..."]',
+            "}"
+          ].join("\n");
+
+          const featureFixPromptParts: string[] = [];
+          if (finalFeatureReview.must_fix_findings.length > 0) {
+            featureFixPromptParts.push(
+              `Les reviewers multi-agents EPURE ont émis ${finalFeatureReview.must_fix_findings.length} constat(s) bloquant(s) ('must_fix') sur la PR finale #${featurePr.number} (\`${featureBranch} -> dev\`) :`,
+              wrapUntrustedContent("untrusted_issue_content", findingsText),
+              ""
+            );
+          }
+          if (
+            !finalFeatureCiGate.passed &&
+            finalFeatureCiGate.formattedDiagnostics
+          ) {
+            featureFixPromptParts.push(
+              `Les workflows CI externes sur la PR finale #${featurePr.number} (\`${featureBranch} -> dev\`) ont échoué :`,
+              finalFeatureCiGate.formattedDiagnostics,
+              ""
+            );
+          }
+          featureFixPromptParts.push(
+            verificationGuideMarkdown,
+            "",
+            "Fichiers actuels du workspace :",
+            wrapUntrustedContent(
+              "untrusted_workspace_files",
+              currentFilesContext
+            )
+          );
+
+          const rawFeatureFix = await callGeminiGenerateContent({
+            apiKey: input.llmApiKey,
+            model,
+            thinkingLevel: "HIGH",
+            logLabel: `feature-review-fix:#PR${featurePr.number}/iter-${featureReviewFixAttempt}`,
+            systemInstruction: featureFixSystemInstruction,
+            prompt: featureFixPromptParts.join("\n"),
+            responseMimeType: "application/json",
+            temperature: 0.1,
+            ...buildRepoExplorationToolsAndHandlers(featureBranch),
+            fetchImpl: input.fetchImpl
+          });
+
+          const parsedFeatureFix =
+            extractJsonObject<GeneratedTicketImplementation>(rawFeatureFix);
+
+          const featureFixPreCheck = validateWorkspaceFileOperations({
+            workDir: featureSandbox.workDir,
+            files: [
+              ...(parsedFeatureFix.files ?? []).map((f) => ({ path: f.path })),
+              ...(parsedFeatureFix.patches ?? []).map((p) => ({
+                path: p.path
+              }))
+            ],
+            deleted_files: parsedFeatureFix.deleted_files,
+            targets: verificationProfile.targets,
+            isTaskBranch: true
+          });
+          if (!featureFixPreCheck.allowed) {
+            return await escalateToNeedsHuman({
+              reason: "sensitive_path_violation",
+              ticketNumber: input.issueNumber,
+              branch: featureBranch,
+              prNumber: featurePr.number,
+              prUrl: featurePr.html_url,
+              featurePrUrl: featurePr.html_url,
+              codeFixAttemptsUsed: featureReviewFixAttempt,
+              sensitivePaths: featureFixPreCheck.sensitivePaths,
+              traversalPaths: featureFixPreCheck.traversalPaths
+            });
+          }
+
+          const changedFixFilesMap = new Map<string, string>();
+          const changedDeletedFilesSet = new Set<string>();
+          await applyTicketImplementationPayload({
+            parsed: parsedFeatureFix,
+            accumulatedFiles,
+            featureChangedFilesMap,
+            ticketChangedFilesMap: changedFixFilesMap,
+            featureDeletedFilesSet,
+            ticketDeletedFilesSet: changedDeletedFilesSet,
+            gh,
+            branch: featureBranch
+          });
+
+          let featureTestCheck = await runTestsInIsolatedWorkspace({
+            workDir: featureSandbox.workDir,
+            files: Array.from(accumulatedFiles.entries()).map(
+              ([path, content]) => ({ path, content })
+            ),
+            deleted_files: Array.from(changedDeletedFilesSet),
+            changedPaths: [
+              ...Array.from(changedFixFilesMap.keys()),
+              ...Array.from(changedDeletedFilesSet)
+            ],
+            isTaskBranch: true,
+            verificationProfile,
+            sandboxRunner: input.sandboxRunner,
+            llmApiKey: input.llmApiKey,
+            label: `Feature PR #${featurePr.number} review-fix iteration ${featureReviewFixAttempt}/${maxFeatureReviewFixAttempts}`
+          });
+
+          let featureTestRetry = 0;
+          while (!featureTestCheck.passed && featureTestRetry < 2) {
+            featureTestRetry += 1;
+            const retryFilesContext = Array.from(accumulatedFiles.entries())
+              .map(([p, c]) => `--- FILE: ${p} ---\n${c}`)
+              .join("\n\n");
+            const rawRetryFeatureFix = await callGeminiGenerateContent({
+              apiKey: input.llmApiKey,
+              model,
+              thinkingLevel: "HIGH",
+              logLabel: `feature-review-test-retry:#PR${featurePr.number}/iter-${featureReviewFixAttempt}-retry-${featureTestRetry}`,
+              systemInstruction: featureFixSystemInstruction,
+              prompt: [
+                `La correction de review finale a échoué à la vérification Stage 1 (tentative ${featureTestRetry}/2) :`,
+                wrapUntrustedContent(
+                  "untrusted_test_output",
+                  featureTestCheck.output.slice(-6000)
+                ),
+                "",
+                ...(findingsText
+                  ? [
+                      "Constats must_fix à maintenir corrigés :",
+                      wrapUntrustedContent(
+                        "untrusted_issue_content",
+                        findingsText
+                      ),
+                      ""
+                    ]
+                  : []),
+                "Fichiers actuels du workspace :",
+                wrapUntrustedContent(
+                  "untrusted_workspace_files",
+                  retryFilesContext
+                )
+              ].join("\n"),
+              responseMimeType: "application/json",
+              temperature: 0.1,
+              ...buildRepoExplorationToolsAndHandlers(featureBranch),
+              fetchImpl: input.fetchImpl
+            });
+            const retryParsed =
+              extractJsonObject<GeneratedTicketImplementation>(
+                rawRetryFeatureFix
+              );
+
+            const retryPreCheck = validateWorkspaceFileOperations({
+              workDir: featureSandbox.workDir,
+              files: [
+                ...(retryParsed.files ?? []).map((f) => ({ path: f.path })),
+                ...(retryParsed.patches ?? []).map((p) => ({ path: p.path }))
+              ],
+              deleted_files: retryParsed.deleted_files,
+              targets: verificationProfile.targets,
+              isTaskBranch: true
+            });
+            if (!retryPreCheck.allowed) {
+              return await escalateToNeedsHuman({
+                reason: "sensitive_path_violation",
+                ticketNumber: input.issueNumber,
+                branch: featureBranch,
+                prNumber: featurePr.number,
+                prUrl: featurePr.html_url,
+                featurePrUrl: featurePr.html_url,
+                codeFixAttemptsUsed: featureReviewFixAttempt,
+                sensitivePaths: retryPreCheck.sensitivePaths,
+                traversalPaths: retryPreCheck.traversalPaths
+              });
+            }
+
+            await applyTicketImplementationPayload({
+              parsed: retryParsed,
+              accumulatedFiles,
+              featureChangedFilesMap,
+              ticketChangedFilesMap: changedFixFilesMap,
+              featureDeletedFilesSet,
+              ticketDeletedFilesSet: changedDeletedFilesSet,
+              gh,
+              branch: featureBranch
+            });
+            featureTestCheck = await runTestsInIsolatedWorkspace({
+              workDir: featureSandbox.workDir,
+              files: Array.from(accumulatedFiles.entries()).map(
+                ([path, content]) => ({ path, content })
+              ),
+              deleted_files: Array.from(changedDeletedFilesSet),
+              changedPaths: [
+                ...Array.from(changedFixFilesMap.keys()),
+                ...Array.from(changedDeletedFilesSet)
+              ],
+              isTaskBranch: true,
+              verificationProfile,
+              sandboxRunner: input.sandboxRunner,
+              llmApiKey: input.llmApiKey,
+              label: `Feature PR #${featurePr.number} review-fix iteration ${featureReviewFixAttempt} test retry ${featureTestRetry}/2`
+            });
+          }
+
+          if (!featureTestCheck.passed) {
+            throw new Error(
+              `Sandbox test verification failed while addressing final feature review findings on PR #${featurePr.number}:\n${featureTestCheck.output.slice(-2000)}`
+            );
+          }
+
+          const changedFixFiles = Array.from(changedFixFilesMap.entries()).map(
+            ([path, content]) => ({ path, content })
+          );
+
+          const fixTaskBranch = `task/review-fix-${input.issueNumber}-${featureReviewFixAttempt}`;
+          const fixCommitTitle =
+            parsedFeatureFix.commit_message &&
+            /^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9._/-]+\))?!?: .+/i.test(
+              parsedFeatureFix.commit_message
+            )
+              ? parsedFeatureFix.commit_message
+              : `fix(review): address final feature review findings on #${input.issueNumber}`;
+
+          await gh.commitFilesToBranch({
+            branch: fixTaskBranch,
+            fromBranch: featureBranch,
+            commitMessage: fixCommitTitle,
+            files: changedFixFiles,
+            deletedFiles: Array.from(changedDeletedFilesSet)
+          });
+
+          const fixPr = await gh.openPullRequest({
+            head: fixTaskBranch,
+            base: featureBranch,
+            title: fixCommitTitle,
+            body: `Addresses multi-agent review findings on feature PR #${featurePr.number} (iteration ${featureReviewFixAttempt}).\n\nRefs #${input.issueNumber}`
+          });
+
+          await gh.publishCheckRun({
+            name: "PR title",
+            headSha: fixPr.head_sha,
+            conclusion: "success",
+            summary: `Conventional Commit title verified: '${fixCommitTitle}'`
+          });
+
+          await gh.publishCheckRun({
+            name: "ai-review",
+            headSha: fixPr.head_sha,
+            conclusion: "success",
+            summary:
+              "Sandbox verified remediation commit for feature synthesis PR."
+          });
+
+          await gh.publishCheckRun({
+            name: "impeccable-gate",
+            headSha: fixPr.head_sha,
+            conclusion: "success",
+            summary: "Impeccable gate verified in synthesis loop."
+          });
+
+          await gh.mergePullRequest(fixPr.number, {
+            headBranch: fixTaskBranch,
+            baseBranch: featureBranch,
+            commitTitle: `${fixCommitTitle} (#${fixPr.number})`,
+            commitMessage: `Automated remediation of synthesis review findings.\n\nRefs #${input.issueNumber}`
+          });
+
+          currentFeaturePrHeadSha =
+            (await gh.getDefaultBranchSha(featureBranch)) ??
+            currentFeaturePrHeadSha;
+
+          const nextFeaturePass = await runStage2AndStage3ForFeaturePr({
+            headSha: currentFeaturePrHeadSha,
+            isReReviewPass: true,
+            previousFailedReviewers: finalFeatureReview.failed_reviewers
+          });
+          finalFeatureReview = nextFeaturePass.reviewResult;
+          finalFeatureCiGate = nextFeaturePass.ciGateResult;
+
+          if (
+            !finalFeatureCiGate.passed &&
+            (finalFeatureCiGate.reason === "grace_window_timeout" ||
+              finalFeatureCiGate.reason === "wall_clock_budget_exhausted")
+          ) {
+            return await escalateToNeedsHuman({
+              reason: finalFeatureCiGate.reason,
+              ticketNumber: input.issueNumber,
+              branch: featureBranch,
+              prNumber: featurePr.number,
+              prUrl: featurePr.html_url,
+              featurePrUrl: featurePr.html_url,
+              codeFixAttemptsUsed: featureReviewFixAttempt,
+              failedChecks: finalFeatureCiGate.failedChecks,
+              mustFixFindings: finalFeatureReview.must_fix_findings,
+              diagnosticExcerpt: finalFeatureCiGate.formattedDiagnostics
+            });
+          }
+        } finally {
+          featureSandbox.cleanup();
+        }
+      }
+
+      if (
+        finalFeatureReview.conclusion === "failure" ||
+        !finalFeatureCiGate.passed
+      ) {
+        return await escalateToNeedsHuman({
+          reason: "remediation_exhausted",
+          ticketNumber: input.issueNumber,
+          branch: featureBranch,
+          prNumber: featurePr.number,
+          prUrl: featurePr.html_url,
+          featurePrUrl: featurePr.html_url,
+          codeFixAttemptsUsed: featureReviewFixAttempt,
+          failedChecks: finalFeatureCiGate.failedChecks,
+          mustFixFindings: finalFeatureReview.must_fix_findings,
+          diagnosticExcerpt: finalFeatureCiGate.formattedDiagnostics
+        });
       }
 
       const updatedDone = await updateIssueStateWithCas({

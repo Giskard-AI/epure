@@ -369,6 +369,18 @@ _Éviter_ : contourner la sandbox sans secret ou intégrer une branche `task/*` 
 **Étapes facultatives ou conditionnelles (Q101)** : opérations activées uniquement selon la nature du changement ou la demande explicite d'un contributeur autorisé : détour exploratoire `/prototype` (Q72) et preview GitHub Pages isolée (Q70, désactivée par défaut), génération de `DESIGN.md` + `user-advocate` (`design-gate` et `implementation-review`) + `impeccable-gate` (Q96, activés automatiquement uniquement lorsque le projet ou le diff comporte une surface UI/frontend), commandes de pilotage granulaire (`/epure to-spec`, `/epure to-tickets`, `/epure status`, `/epure cancel`), et escalade humaine (`needs-human`) en cas d'exception sensible ou d'épuisement des trois tentatives de correction.
 _Éviter_ : imposer les contrôles UI Impeccable ou un prototype exploratoire sur des projets ou tickets purement backend/CLI.
 
+## Vérification polyglotte et boucle de CI externe multi-workflows (Q104–Q111)
+
+**Profil de vérification polyglotte (`verification.targets`, Q104 & Q108)** : déclaration par sous-projet dans `.github/agents.yml` (générée par `setup-repo` et repliée au runtime par inspection hybride des manifestes Node/Python/Rust/Go, des orchestrateurs `Makefile`/`Justfile`/`Taskfile`/`turbo.json` et de l'ensemble des workflows `.github/workflows/*.{yml,yaml}` hors EPURE), toujours chargée à l'exécution depuis la branche de confiance (`dev`) et classée comme chemin sensible sur `task/*`.
+_Éviter_ : supposer un unique `package.json` à la racine, un fichier unique nommé `ci.yml`, ou autoriser une branche `task/*` à altérer ses propres commandes de test.
+
+**Vérification locale de pré-publication (Stage 1, Q105)** : exécution dans un clone Git persistant de la sandbox sans secret, avant tout commit ou ouverture de PR, des commandes d'installation, de génération de code (`codegen`), de typage statique (`typecheck`), de lint et de tests unitaires/scripts ne nécessitant aucun conteneur de service externe, ciblées selon les `path_patterns` des fichiers modifiés.
+_Éviter_ : retourner un succès par défaut en l'absence de `package.json` racine ou tenter de démarrer en sandbox locale les services lourds (PostgreSQL, Docker multi-stage) relevant de la CI GitHub Actions.
+
+**Porte de CI externe multi-workflows et boucle d'auto-réparation (Stage 3, Q106–Q110)** : attente déterministe (avec fenêtre d'amorçage et corrélation des filtres `on.pull_request`/`push` sur tous les workflows `.github/workflows/*.{yml,yaml}` hors EPURE) de la complétude des *check-runs* et *workflow_runs* externes sur le `head_sha` d'une PR, suivie en cas d'échec applicatif de l'extraction assainie des annotations et logs d'erreur (~12 Ko) pour alimenter jusqu'à 3 rondes unifiées de remédiation (*Review IA + CI externe*), avec relance sans pénalité sur panne transitoire d'infrastructure et réconciliation idempotente des PRs déjà ouvertes.
+_Éviter_ : fusionner `task/* -> feature/*` avant la fin des workflows CI externes, considérer zéro check-run à $T+0$ comme un succès, ou gaspiller une tentative de code sur un échec réseau du runner.
+
+
 
 
 

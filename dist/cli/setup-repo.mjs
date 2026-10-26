@@ -401,8 +401,8 @@ function buildDefaultReviewerRosterFiles(params) {
 }
 
 // src/bootstrap/ci-and-renovate.ts
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { basename, join } from "node:path";
 var PINNED_ACTIONS_CHECKOUT_SHA = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1";
 var PINNED_ACTIONS_SETUP_NODE_SHA = "actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0";
 var PINNED_ACTIONS_SETUP_PYTHON_SHA = "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0";
@@ -417,6 +417,656 @@ function parseMakefileTargets(makefileContent) {
     }
   }
   return Array.from(targets);
+}
+function normalizeWorkingDir(raw) {
+  if (!raw) {
+    return ".";
+  }
+  const cleaned = raw.trim().replace(/^["']+|["']+$/g, "").replace(/^\.\/+/, "").replace(/\/+$/, "");
+  return cleaned.length > 0 ? cleaned : ".";
+}
+function classifySingleShellCommand(rawCmd, hasServices, target, customScripts, markWorkflowDeferred) {
+  const cmd = rawCmd.trim();
+  if (!cmd || cmd.startsWith("#") || cmd.startsWith("echo ")) {
+    return;
+  }
+  if (/\b(?:docker(?:\s+compose|-compose|\s+build|\s+run)|playwright\s+test|cypress\s+run|test:e2e|\be2e\b)\b/i.test(
+    cmd
+  )) {
+    markWorkflowDeferred();
+    return;
+  }
+  if (/^(?:python3?|node|bash|sh)\s+(?:\.\/)?scripts\/[^\s;&|]+(?:\s+[^\s;&|]+)*$/i.test(
+    cmd
+  ) || /^\.\/scripts\/[^\s;&|]+(?:\s+[^\s;&|]+)*$/i.test(cmd)) {
+    customScripts.add(cmd);
+    return;
+  }
+  if (/\bprisma\s+generate\b/.test(cmd) || /\b(?:npm|pnpm|yarn)\s+(?:run\s+)?(?:prisma:generate|codegen)\b/.test(cmd)) {
+    target.kindHint = target.kindHint ?? "node";
+    if (!target.codegen_command) {
+      target.codegen_command = cmd;
+    }
+    return;
+  }
+  if (/^(?:npm\s+(?:ci|install)|pnpm\s+install(?:\s+--frozen-lockfile)?|yarn\s+install(?:\s+--frozen-lockfile)?)$/.test(
+    cmd
+  )) {
+    target.kindHint = target.kindHint ?? "node";
+    if (!target.install_command) {
+      target.install_command = cmd;
+    }
+    return;
+  }
+  if (/^(?:(?:python3?\s+-m\s+)?pip\s+install\s+(?!--upgrade\s+pip|-U\s+pip).+|uv\s+sync.*|poetry\s+install.*)$/.test(
+    cmd
+  )) {
+    target.kindHint = target.kindHint ?? "python";
+    if (!target.install_command) {
+      target.install_command = cmd;
+    }
+    return;
+  }
+  if (/\btsc\b/.test(cmd) || /\b(?:npm|pnpm|yarn)\s+(?:run\s+)?typecheck\b/.test(cmd)) {
+    target.kindHint = target.kindHint ?? "node";
+    if (!target.typecheck_command) {
+      target.typecheck_command = cmd.replace(/\s+--if-present\b/, "");
+    }
+    return;
+  }
+  if (/\b(?:mypy|pyright)\b/.test(cmd)) {
+    target.kindHint = target.kindHint ?? "python";
+    if (!target.typecheck_command) {
+      target.typecheck_command = cmd;
+    }
+    return;
+  }
+  if (/\bcargo\s+check\b/.test(cmd)) {
+    target.kindHint = target.kindHint ?? "rust";
+    if (!target.typecheck_command) {
+      target.typecheck_command = cmd;
+    }
+    return;
+  }
+  if (/\bgo\s+vet\b/.test(cmd)) {
+    target.kindHint = target.kindHint ?? "go";
+    if (!target.typecheck_command) {
+      target.typecheck_command = cmd;
+    }
+    return;
+  }
+  if (/\b(?:eslint|biome)\b/.test(cmd) || /\b(?:npm|pnpm|yarn)\s+(?:run\s+)?lint\b/.test(cmd)) {
+    target.kindHint = target.kindHint ?? "node";
+    const cleanLint = cmd.replace(/\s+--if-present\b/, "");
+    if (!target.lint_commands.includes(cleanLint)) {
+      target.lint_commands.push(cleanLint);
+    }
+    return;
+  }
+  if (/\b(?:ruff\s+(?:check|format)|flake8)\b/.test(cmd)) {
+    target.kindHint = target.kindHint ?? "python";
+    if (!target.lint_commands.includes(cmd)) {
+      target.lint_commands.push(cmd);
+    }
+    return;
+  }
+  if (/\bcargo\s+(?:clippy|fmt)\b/.test(cmd)) {
+    target.kindHint = target.kindHint ?? "rust";
+    if (!target.lint_commands.includes(cmd)) {
+      target.lint_commands.push(cmd);
+    }
+    return;
+  }
+  if (/\b(?:gofmt|golangci-lint)\b/.test(cmd)) {
+    target.kindHint = target.kindHint ?? "go";
+    if (!target.lint_commands.includes(cmd)) {
+      target.lint_commands.push(cmd);
+    }
+    return;
+  }
+  const isUnitOnlyTest = /\btest:unit\b|tests\/unit|\bunit\b|-m\s+["']?not\s+integration/i.test(cmd);
+  if (/\b(?:vitest|jest)\b/.test(cmd) || /\b(?:npm|pnpm|yarn)\s+(?:run\s+)?test(?::unit)?\b/.test(cmd)) {
+    target.kindHint = target.kindHint ?? "node";
+    if (!hasServices || isUnitOnlyTest) {
+      if (!target.test_command || isUnitOnlyTest) {
+        target.test_command = cmd.replace(/\s+2>\/dev\/null.*$/, "");
+      }
+    }
+    return;
+  }
+  if (/\bpytest\b/.test(cmd) || /\bpython3?\s+-m\s+(?:pytest|unittest)\b/.test(cmd)) {
+    target.kindHint = target.kindHint ?? "python";
+    if (!hasServices || isUnitOnlyTest) {
+      if (!target.test_command || isUnitOnlyTest) {
+        target.test_command = cmd;
+      }
+    }
+    return;
+  }
+  if (/\bcargo\s+test\b/.test(cmd)) {
+    target.kindHint = target.kindHint ?? "rust";
+    if (!hasServices || isUnitOnlyTest) {
+      if (!target.test_command) {
+        target.test_command = cmd;
+      }
+    }
+    return;
+  }
+  if (/\bgo\s+test\b/.test(cmd)) {
+    target.kindHint = target.kindHint ?? "go";
+    if (!hasServices || isUnitOnlyTest) {
+      if (!target.test_command) {
+        target.test_command = cmd;
+      }
+    }
+    return;
+  }
+  if (/\b(?:npm|pnpm|yarn)\s+(?:run\s+)?build\b/.test(cmd)) {
+    target.kindHint = target.kindHint ?? "node";
+    if (!target.build_command) {
+      target.build_command = cmd.replace(/\s+--if-present\b/, "");
+    }
+    return;
+  }
+  if (/\bcargo\s+build\b/.test(cmd)) {
+    target.kindHint = target.kindHint ?? "rust";
+    if (!target.build_command) {
+      target.build_command = cmd;
+    }
+    return;
+  }
+  if (/\bgo\s+build\b/.test(cmd)) {
+    target.kindHint = target.kindHint ?? "go";
+    if (!target.build_command) {
+      target.build_command = cmd;
+    }
+  }
+}
+function parseNonEpureWorkflows(workflowEntries) {
+  const byWorkingDir = /* @__PURE__ */ new Map();
+  const customScripts = /* @__PURE__ */ new Set();
+  const deferredWorkflows = /* @__PURE__ */ new Set();
+  const getOrCreateDirEntry = (dir) => {
+    const normalized = normalizeWorkingDir(dir);
+    let existing = byWorkingDir.get(normalized);
+    if (!existing) {
+      existing = {
+        hasServices: false,
+        lint_commands: []
+      };
+      byWorkingDir.set(normalized, existing);
+    }
+    return existing;
+  };
+  for (const wf of workflowEntries) {
+    const fileName = basename(wf.path);
+    if (fileName.toLowerCase().startsWith("epure-") || wf.content.includes("Giskard-AI/epure")) {
+      continue;
+    }
+    const lines = wf.content.split(/\r?\n/);
+    let inJobs = false;
+    let currentJobLines = [];
+    const jobBlocks = [];
+    for (const line of lines) {
+      if (/^jobs:\s*(?:#.*)?$/.test(line)) {
+        inJobs = true;
+        continue;
+      }
+      if (inJobs) {
+        if (/^[a-zA-Z0-9_-]+:\s*(?:#.*)?$/.test(line)) {
+          if (currentJobLines.length > 0) {
+            jobBlocks.push(currentJobLines);
+            currentJobLines = [];
+          }
+          inJobs = false;
+          continue;
+        }
+        if (/^  [a-zA-Z0-9_-]+:\s*(?:#.*)?$/.test(line)) {
+          if (currentJobLines.length > 0) {
+            jobBlocks.push(currentJobLines);
+          }
+          currentJobLines = [line];
+          continue;
+        }
+        if (currentJobLines.length > 0) {
+          currentJobLines.push(line);
+        }
+      }
+    }
+    if (currentJobLines.length > 0) {
+      jobBlocks.push(currentJobLines);
+    }
+    let workflowDeferred = false;
+    const markDeferred = () => {
+      workflowDeferred = true;
+    };
+    for (const jobLines of jobBlocks) {
+      const jobText = jobLines.join("\n");
+      const hasServices = /^    services:\s*(?:#.*)?$/m.test(jobText);
+      if (hasServices) {
+        workflowDeferred = true;
+      }
+      let jobWorkingDir = ".";
+      const stepsIdx = jobLines.findIndex((l) => /^    steps:\s*(?:#.*)?$/.test(l));
+      const headerLines = stepsIdx >= 0 ? jobLines.slice(0, stepsIdx) : jobLines;
+      for (const hl of headerLines) {
+        const wdMatch = /^\s*working-directory:\s*(.+)$/.exec(hl);
+        if (wdMatch && wdMatch[1]) {
+          jobWorkingDir = normalizeWorkingDir(wdMatch[1].replace(/#.*$/, ""));
+        }
+      }
+      if (hasServices) {
+        const targetEntry = getOrCreateDirEntry(jobWorkingDir);
+        targetEntry.hasServices = true;
+      }
+      const stepLines = stepsIdx >= 0 ? jobLines.slice(stepsIdx + 1) : [];
+      const steps = [];
+      let currentStep = [];
+      for (const sl of stepLines) {
+        if (/^ {4,6}-\s+/.test(sl)) {
+          if (currentStep.length > 0) {
+            steps.push(currentStep);
+          }
+          currentStep = [sl];
+        } else if (currentStep.length > 0) {
+          currentStep.push(sl);
+        }
+      }
+      if (currentStep.length > 0) {
+        steps.push(currentStep);
+      }
+      for (const step of steps) {
+        let stepWorkingDir = jobWorkingDir;
+        for (const sl of step) {
+          const wdMatch = /^\s*(?:-\s*)?working-directory:\s*(.+)$/.exec(sl);
+          if (wdMatch && wdMatch[1]) {
+            stepWorkingDir = normalizeWorkingDir(wdMatch[1].replace(/#.*$/, ""));
+          }
+        }
+        if (hasServices) {
+          const stepEntry = getOrCreateDirEntry(stepWorkingDir);
+          stepEntry.hasServices = true;
+        }
+        const runCommands = [];
+        for (let i = 0; i < step.length; i += 1) {
+          const sl = step[i] ?? "";
+          const runMatch = /^(\s*)(?:-\s*)?run:\s*(.*)$/.exec(sl);
+          if (!runMatch) {
+            continue;
+          }
+          const indentLen = (runMatch[1] ?? "").length;
+          const rest = (runMatch[2] ?? "").trim();
+          if (/^[|>][-+]?$/.test(rest) || rest === "") {
+            for (let j = i + 1; j < step.length; j += 1) {
+              const nextLine = step[j] ?? "";
+              if (nextLine.trim() === "") {
+                continue;
+              }
+              const nextIndent = /^(\s*)/.exec(nextLine)?.[1]?.length ?? 0;
+              if (nextIndent <= indentLen) {
+                break;
+              }
+              runCommands.push(nextLine.trim());
+              i = j;
+            }
+          } else {
+            runCommands.push(rest.replace(/^["']|["']$/g, ""));
+          }
+        }
+        let activeDir = stepWorkingDir;
+        for (const rawLine of runCommands) {
+          const stripped = rawLine.replace(/\s+#.*$/, "").trim();
+          if (!stripped || stripped.startsWith("#")) {
+            continue;
+          }
+          const parts = stripped.split(/\s*&&\s*/);
+          for (const part of parts) {
+            const cdMatch = /^cd\s+([^\s;&|]+)$/.exec(part.trim());
+            if (cdMatch && cdMatch[1]) {
+              activeDir = normalizeWorkingDir(cdMatch[1]);
+              if (hasServices) {
+                getOrCreateDirEntry(activeDir).hasServices = true;
+              }
+              continue;
+            }
+            const prefixMatch = /^npm\s+--prefix\s+([^\s]+)\s+(.+)$/.exec(
+              part.trim()
+            );
+            const effectiveDir = prefixMatch && prefixMatch[1] ? normalizeWorkingDir(prefixMatch[1]) : activeDir;
+            const effectiveCmd = prefixMatch && prefixMatch[2] ? `npm ${prefixMatch[2]}` : part.trim();
+            const dirEntry = getOrCreateDirEntry(effectiveDir);
+            if (hasServices) {
+              dirEntry.hasServices = true;
+            }
+            classifySingleShellCommand(
+              effectiveCmd,
+              hasServices,
+              dirEntry,
+              customScripts,
+              markDeferred
+            );
+          }
+        }
+      }
+    }
+    if (workflowDeferred) {
+      deferredWorkflows.add(wf.path);
+    }
+  }
+  return {
+    byWorkingDir,
+    customScriptCommands: Array.from(customScripts),
+    deferredWorkflows: Array.from(deferredWorkflows)
+  };
+}
+function discoverVerificationProfile(params) {
+  const root = params.repoRootDir;
+  const hints = (params.targetFilesHint ?? []).map(
+    (f) => f.trim().replace(/^\/+/, "")
+  );
+  const fileExists = (relPath) => {
+    const clean = relPath.replace(/^\.\/+/, "");
+    if (hints.includes(clean)) {
+      return true;
+    }
+    if (root && existsSync(join(root, clean))) {
+      return true;
+    }
+    return false;
+  };
+  const readFileSafe = (relPath) => {
+    const clean = relPath.replace(/^\.\/+/, "");
+    if (root && existsSync(join(root, clean))) {
+      try {
+        return readFileSync(join(root, clean), "utf8");
+      } catch {
+        return void 0;
+      }
+    }
+    return void 0;
+  };
+  const workflowMap = /* @__PURE__ */ new Map();
+  if (params.workflowFilesMap) {
+    for (const [rawPath, content] of Object.entries(params.workflowFilesMap)) {
+      const normalizedPath = rawPath.startsWith(".github/workflows/") ? rawPath : `.github/workflows/${rawPath.replace(/^\/+/, "")}`;
+      workflowMap.set(normalizedPath, content);
+    }
+  }
+  if (root && existsSync(join(root, ".github", "workflows"))) {
+    try {
+      const entries = readdirSync(join(root, ".github", "workflows")).sort();
+      for (const entry of entries) {
+        if (!/\.ya?ml$/i.test(entry)) {
+          continue;
+        }
+        const relWfPath = `.github/workflows/${entry}`;
+        if (!workflowMap.has(relWfPath)) {
+          const content = readFileSafe(relWfPath);
+          if (content !== void 0) {
+            workflowMap.set(relWfPath, content);
+          }
+        }
+      }
+    } catch {
+    }
+  }
+  const parsedWorkflows = parseNonEpureWorkflows(
+    Array.from(workflowMap.entries()).map(([path, content]) => ({
+      path,
+      content
+    }))
+  );
+  const candidateDirsOrdered = ["."];
+  const addCandidateDir = (dir) => {
+    const norm = normalizeWorkingDir(dir);
+    if (norm !== "scripts" && !candidateDirsOrdered.includes(norm)) {
+      candidateDirsOrdered.push(norm);
+    }
+  };
+  for (const firstLevel of ["frontend", "backend"]) {
+    addCandidateDir(firstLevel);
+  }
+  const secondLevelParents = ["packages", "services", "apps", "crates", "cmd"];
+  for (const parent of secondLevelParents) {
+    if (root && existsSync(join(root, parent))) {
+      try {
+        const subEntries = readdirSync(join(root, parent), {
+          withFileTypes: true
+        }).filter((d) => d.isDirectory()).map((d) => d.name).sort();
+        for (const sub of subEntries) {
+          addCandidateDir(`${parent}/${sub}`);
+        }
+      } catch {
+      }
+    }
+    for (const hint of hints) {
+      const match = new RegExp(`^(${parent}/[^/]+)/`).exec(hint);
+      if (match && match[1]) {
+        addCandidateDir(match[1]);
+      }
+    }
+  }
+  for (const wfDir of parsedWorkflows.byWorkingDir.keys()) {
+    addCandidateDir(wfDir);
+  }
+  const dirFile = (dir, file) => dir === "." ? file : `${dir}/${file}`;
+  const subprojectDirsWithManifestOrJob = candidateDirsOrdered.filter((dir) => {
+    if (dir === ".") {
+      return false;
+    }
+    return fileExists(dirFile(dir, "package.json")) || fileExists(dirFile(dir, "pyproject.toml")) || fileExists(dirFile(dir, "requirements.txt")) || fileExists(dirFile(dir, "Cargo.toml")) || fileExists(dirFile(dir, "go.mod")) || fileExists(dirFile(dir, "go.work")) || fileExists(dirFile(dir, "Makefile")) || fileExists(dirFile(dir, "Justfile")) || fileExists(dirFile(dir, "Taskfile.yml")) || parsedWorkflows.byWorkingDir.has(dir);
+  });
+  const targets = [];
+  for (const dir of candidateDirsOrdered) {
+    const wfEntry = parsedWorkflows.byWorkingDir.get(dir);
+    const hasPkgJson = fileExists(dirFile(dir, "package.json"));
+    const hasPyproject = fileExists(dirFile(dir, "pyproject.toml"));
+    const hasRequirements = fileExists(dirFile(dir, "requirements.txt"));
+    const hasCargo = fileExists(dirFile(dir, "Cargo.toml"));
+    const hasGoMod = fileExists(dirFile(dir, "go.mod")) || fileExists(dirFile(dir, "go.work"));
+    const hasMakefile = fileExists(dirFile(dir, "Makefile"));
+    const hasJustfile = fileExists(dirFile(dir, "Justfile")) || fileExists(dirFile(dir, "justfile"));
+    const hasTaskfile = fileExists(dirFile(dir, "Taskfile.yml")) || fileExists(dirFile(dir, "Taskfile.yaml"));
+    const hasTurboOrNx = fileExists(dirFile(dir, "turbo.json")) || fileExists(dirFile(dir, "nx.json"));
+    const hasRootHintsForLang = dir === "." && subprojectDirsWithManifestOrJob.length === 0 && hints.some((f) => /\.(?:ts|tsx|js|jsx|mjs|py|rs|go)$/.test(f));
+    const hasWfCommands = wfEntry !== void 0 && Boolean(
+      wfEntry.install_command || wfEntry.codegen_command || wfEntry.typecheck_command || wfEntry.lint_commands.length > 0 || wfEntry.test_command || wfEntry.build_command
+    );
+    if (!hasPkgJson && !hasPyproject && !hasRequirements && !hasCargo && !hasGoMod && !hasMakefile && !hasJustfile && !hasTaskfile && !hasTurboOrNx && !hasWfCommands && !hasRootHintsForLang) {
+      continue;
+    }
+    let kind = "node";
+    if (hasPkgJson || wfEntry?.kindHint === "node") {
+      kind = "node";
+    } else if (hasPyproject || hasRequirements || wfEntry?.kindHint === "python" || dir === "." && subprojectDirsWithManifestOrJob.length === 0 && hints.some((f) => f.endsWith(".py"))) {
+      kind = "python";
+    } else if (hasCargo || wfEntry?.kindHint === "rust" || dir === "." && subprojectDirsWithManifestOrJob.length === 0 && hints.some((f) => f.endsWith(".rs"))) {
+      kind = "rust";
+    } else if (hasGoMod || wfEntry?.kindHint === "go" || dir === "." && subprojectDirsWithManifestOrJob.length === 0 && hints.some((f) => f.endsWith(".go"))) {
+      kind = "go";
+    } else if (hasMakefile || hasJustfile || hasTaskfile) {
+      kind = "make";
+    } else if (hasTurboOrNx) {
+      kind = "node";
+    }
+    const name = dir === "." ? "root" : dir;
+    const pathPatterns = dir === "." ? ["**"] : [`${dir}/**`];
+    if (kind === "node") {
+      const pkgRaw = readFileSafe(dirFile(dir, "package.json"));
+      let scripts = {};
+      let allDeps = {};
+      if (pkgRaw) {
+        try {
+          const parsed = JSON.parse(pkgRaw);
+          scripts = parsed.scripts ?? {};
+          allDeps = {
+            ...parsed.dependencies ?? {},
+            ...parsed.devDependencies ?? {}
+          };
+        } catch {
+        }
+      }
+      const hasLock = fileExists(dirFile(dir, "package-lock.json"));
+      const isPnpm = fileExists(dirFile(dir, "pnpm-lock.yaml")) || fileExists("pnpm-lock.yaml");
+      const isYarn = fileExists(dirFile(dir, "yarn.lock")) || fileExists("yarn.lock");
+      const defaultInstall = isPnpm ? "pnpm install" : isYarn ? "yarn install" : hasLock ? "npm ci" : "npm install";
+      const hasPrisma = fileExists(dirFile(dir, "prisma/schema.prisma")) || hints.some(
+        (h) => h.startsWith(dir === "." ? "prisma/" : `${dir}/prisma/`) && h.endsWith(".prisma")
+      ) || "@prisma/client" in allDeps || "prisma" in allDeps || "prisma:generate" in scripts;
+      const hasTs = fileExists(dirFile(dir, "tsconfig.json")) || "typescript" in allDeps || "typecheck" in scripts || pkgRaw === void 0;
+      const install_command = wfEntry?.install_command ?? defaultInstall;
+      const codegen_command = wfEntry?.codegen_command ?? (hasPrisma ? "npx prisma generate" : void 0);
+      const typecheck_command = wfEntry?.typecheck_command ?? (scripts.typecheck ? "npm run typecheck" : hasTs ? "npx tsc --noEmit" : void 0);
+      const lint_command = wfEntry && wfEntry.lint_commands.length > 0 ? wfEntry.lint_commands.join(" && ") : scripts.lint || pkgRaw === void 0 ? "npm run lint" : void 0;
+      let test_command = wfEntry?.test_command;
+      if (!test_command) {
+        if (scripts["test:unit"]) {
+          test_command = "npm run test:unit";
+        } else if (!wfEntry?.hasServices) {
+          if (scripts.test || pkgRaw === void 0) {
+            test_command = "npm test";
+          }
+        }
+      }
+      const build_command = wfEntry?.build_command ?? (scripts.build || pkgRaw === void 0 ? "npm run build" : void 0);
+      targets.push({
+        name,
+        working_directory: dir,
+        kind: "node",
+        path_patterns: pathPatterns,
+        ...install_command ? { install_command } : {},
+        ...codegen_command ? { codegen_command } : {},
+        ...typecheck_command ? { typecheck_command } : {},
+        ...lint_command ? { lint_command } : {},
+        ...test_command ? { test_command } : {},
+        ...build_command ? { build_command } : {}
+      });
+    } else if (kind === "python") {
+      const pyRaw = readFileSafe(dirFile(dir, "pyproject.toml")) ?? "";
+      const install_command = wfEntry?.install_command ?? (hasRequirements && !hasPyproject ? "pip install -r requirements.txt" : "pip install -e .");
+      const codegen_command = wfEntry?.codegen_command;
+      const typecheck_command = wfEntry?.typecheck_command ?? (pyRaw.includes("mypy") || fileExists(dirFile(dir, "mypy.ini")) ? "mypy ." : pyRaw.includes("pyright") || fileExists(dirFile(dir, "pyrightconfig.json")) ? "pyright" : void 0);
+      const lint_command = wfEntry && wfEntry.lint_commands.length > 0 ? wfEntry.lint_commands.join(" && ") : "ruff check .";
+      const test_command = wfEntry?.test_command ?? (!wfEntry?.hasServices ? "pytest -q" : void 0);
+      targets.push({
+        name,
+        working_directory: dir,
+        kind: "python",
+        path_patterns: pathPatterns,
+        install_command,
+        ...codegen_command ? { codegen_command } : {},
+        ...typecheck_command ? { typecheck_command } : {},
+        ...lint_command ? { lint_command } : {},
+        ...test_command ? { test_command } : {}
+      });
+    } else if (kind === "rust") {
+      const typecheck_command = wfEntry?.typecheck_command ?? "cargo check --all-targets";
+      const lint_command = wfEntry && wfEntry.lint_commands.length > 0 ? wfEntry.lint_commands.join(" && ") : "cargo clippy --all-targets --all-features -- -D warnings";
+      const test_command = wfEntry?.test_command ?? (!wfEntry?.hasServices ? "cargo test --all-targets" : void 0);
+      const build_command = wfEntry?.build_command ?? "cargo build";
+      targets.push({
+        name,
+        working_directory: dir,
+        kind: "rust",
+        path_patterns: pathPatterns,
+        typecheck_command,
+        lint_command,
+        ...test_command ? { test_command } : {},
+        build_command
+      });
+    } else if (kind === "go") {
+      const typecheck_command = wfEntry?.typecheck_command ?? "go vet ./...";
+      const lint_command = wfEntry && wfEntry.lint_commands.length > 0 ? wfEntry.lint_commands.join(" && ") : void 0;
+      const test_command = wfEntry?.test_command ?? (!wfEntry?.hasServices ? "go test ./..." : void 0);
+      const build_command = wfEntry?.build_command ?? "go build ./...";
+      targets.push({
+        name,
+        working_directory: dir,
+        kind: "go",
+        path_patterns: pathPatterns,
+        typecheck_command,
+        ...lint_command ? { lint_command } : {},
+        ...test_command ? { test_command } : {},
+        build_command
+      });
+    } else if (kind === "make") {
+      const mkContent = readFileSafe(dirFile(dir, "Makefile")) ?? "";
+      const mkTargets = mkContent ? parseMakefileTargets(mkContent) : [];
+      const runnerBin = hasMakefile ? "make" : hasJustfile ? "just" : "task";
+      const lint_command = wfEntry && wfEntry.lint_commands.length > 0 ? wfEntry.lint_commands.join(" && ") : mkTargets.includes("lint") ? `${runnerBin} lint` : void 0;
+      const typecheck_command = wfEntry?.typecheck_command ?? (mkTargets.includes("typecheck") ? `${runnerBin} typecheck` : void 0);
+      const test_command = wfEntry?.test_command ?? (mkTargets.includes("check") && !mkTargets.includes("test") ? `${runnerBin} check` : `${runnerBin} test`);
+      const build_command = wfEntry?.build_command ?? (mkTargets.includes("build") ? `${runnerBin} build` : void 0);
+      targets.push({
+        name,
+        working_directory: dir,
+        kind: "make",
+        path_patterns: pathPatterns,
+        ...typecheck_command ? { typecheck_command } : {},
+        ...lint_command ? { lint_command } : {},
+        ...test_command ? { test_command } : {},
+        ...build_command ? { build_command } : {}
+      });
+    }
+  }
+  const scriptCommands = [...parsedWorkflows.customScriptCommands];
+  if (scriptCommands.length === 0) {
+    const scriptFiles = /* @__PURE__ */ new Set();
+    for (const h of hints) {
+      if (/^scripts\/[^/]+\.py$/.test(h)) {
+        scriptFiles.add(h);
+      }
+    }
+    if (root && existsSync(join(root, "scripts"))) {
+      try {
+        for (const entry of readdirSync(join(root, "scripts")).sort()) {
+          if (entry.endsWith(".py")) {
+            scriptFiles.add(`scripts/${entry}`);
+          }
+        }
+      } catch {
+      }
+    }
+    for (const sf of scriptFiles) {
+      scriptCommands.push(`python3 ${sf}`);
+    }
+  }
+  if (scriptCommands.length > 0) {
+    const scriptPatterns = ["scripts/**", "docs/**", "*.md"];
+    if (targets.some((t) => t.working_directory === "backend")) {
+      scriptPatterns.push("backend/**");
+    }
+    if (targets.some((t) => t.working_directory === "frontend")) {
+      scriptPatterns.push("frontend/**");
+    }
+    targets.push({
+      name: "scripts",
+      working_directory: ".",
+      kind: "custom",
+      path_patterns: scriptPatterns,
+      test_command: scriptCommands.join(" && ")
+    });
+  }
+  if (targets.length === 0) {
+    targets.push({
+      name: "root",
+      working_directory: ".",
+      kind: "node",
+      path_patterns: ["**"],
+      install_command: "npm install",
+      typecheck_command: "npx tsc --noEmit",
+      lint_command: "npm run lint",
+      test_command: "npm test",
+      build_command: "npm run build"
+    });
+  }
+  return {
+    wait_for_external_ci: true,
+    external_ci_timeout_minutes: 15,
+    grace_window_seconds: 45,
+    ...parsedWorkflows.deferredWorkflows.length > 0 ? { deferred_external_workflows: parsedWorkflows.deferredWorkflows } : {},
+    targets
+  };
 }
 function detectRepositoryStack(params) {
   const root = params.repoRootDir;
@@ -493,6 +1143,7 @@ function detectRepositoryStack(params) {
   } else if (isGo) {
     kind = "go";
   }
+  const verification = discoverVerificationProfile(params);
   return {
     kind,
     nodePackageManager,
@@ -502,7 +1153,8 @@ function detectRepositoryStack(params) {
     hasDockerCompose,
     hasPlaywrightOrE2e,
     nodeScripts,
-    subprojects
+    subprojects,
+    verification
   };
 }
 function buildZizmorConfigYaml() {
@@ -836,6 +1488,12 @@ function buildStackAwareCiWorkflowYaml(params) {
 // src/bootstrap/setup-repo.ts
 var DEFAULT_EPURE_PINNED_SHA = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
 var CONVENTIONAL_COMMIT_PATTERN_REGEX = "^(feat|fix|docs|style|refactor|perf|test|chore|ci|build|revert)(\\([a-z0-9/-]+\\))?(!)?: .+";
+var DEFAULT_VERIFICATION_PROFILE = {
+  wait_for_external_ci: true,
+  external_ci_timeout_minutes: 15,
+  grace_window_seconds: 45,
+  targets: []
+};
 var DEFAULT_AGENTS_CONFIG = {
   harness: "pi",
   models: {
@@ -852,7 +1510,8 @@ var DEFAULT_AGENTS_CONFIG = {
   max_concurrent_tasks_per_feature: 3,
   trace_retention_days: 30,
   preview_retention_days: 14,
-  github_pages_previews: false
+  github_pages_previews: false,
+  verification: DEFAULT_VERIFICATION_PROFILE
 };
 var DEFAULT_REPOSITORY_MERGE_SETTINGS = {
   allow_squash_merge: true,
@@ -863,6 +1522,20 @@ var DEFAULT_REPOSITORY_MERGE_SETTINGS = {
   squash_merge_commit_message: "PR_BODY"
 };
 var REPO_SLUG_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+function normalizeVerificationTarget(target) {
+  return {
+    name: target.name,
+    working_directory: target.working_directory,
+    kind: target.kind,
+    path_patterns: [...target.path_patterns],
+    ...target.install_command ? { install_command: target.install_command } : {},
+    ...target.codegen_command ? { codegen_command: target.codegen_command } : {},
+    ...target.typecheck_command ? { typecheck_command: target.typecheck_command } : {},
+    ...target.lint_command ? { lint_command: target.lint_command } : {},
+    ...target.test_command ? { test_command: target.test_command } : {},
+    ...target.build_command ? { build_command: target.build_command } : {}
+  };
+}
 function resolveAgentsConfig(overrides = {}) {
   const sec = overrides.security_overrides;
   if (sec) {
@@ -910,6 +1583,17 @@ function resolveAgentsConfig(overrides = {}) {
       };
     }
   }
+  const verification = overrides.verification ? {
+    wait_for_external_ci: overrides.verification.wait_for_external_ci ?? DEFAULT_VERIFICATION_PROFILE.wait_for_external_ci,
+    external_ci_timeout_minutes: overrides.verification.external_ci_timeout_minutes ?? DEFAULT_VERIFICATION_PROFILE.external_ci_timeout_minutes,
+    grace_window_seconds: overrides.verification.grace_window_seconds ?? DEFAULT_VERIFICATION_PROFILE.grace_window_seconds,
+    ...overrides.verification.deferred_external_workflows && overrides.verification.deferred_external_workflows.length > 0 ? {
+      deferred_external_workflows: [
+        ...overrides.verification.deferred_external_workflows
+      ]
+    } : {},
+    targets: overrides.verification.targets ? overrides.verification.targets.map(normalizeVerificationTarget) : DEFAULT_VERIFICATION_PROFILE.targets
+  } : DEFAULT_VERIFICATION_PROFILE;
   const config = {
     harness: overrides.harness ?? DEFAULT_AGENTS_CONFIG.harness,
     models: {
@@ -920,13 +1604,14 @@ function resolveAgentsConfig(overrides = {}) {
     merge_policy: overrides.merge_policy ?? DEFAULT_AGENTS_CONFIG.merge_policy,
     max_code_fix_attempts: overrides.max_code_fix_attempts ?? DEFAULT_AGENTS_CONFIG.max_code_fix_attempts,
     max_transient_api_retries: overrides.max_transient_api_retries ?? DEFAULT_AGENTS_CONFIG.max_transient_api_retries,
-    transient_retry_backoff_seconds: DEFAULT_AGENTS_CONFIG.transient_retry_backoff_seconds,
+    transient_retry_backoff_seconds: overrides.transient_retry_backoff_seconds ?? DEFAULT_AGENTS_CONFIG.transient_retry_backoff_seconds,
     job_timeout_minutes: overrides.job_timeout_minutes ?? DEFAULT_AGENTS_CONFIG.job_timeout_minutes,
     review_timeout_minutes: overrides.review_timeout_minutes ?? DEFAULT_AGENTS_CONFIG.review_timeout_minutes,
     max_concurrent_tasks_per_feature: overrides.max_concurrent_tasks_per_feature ?? DEFAULT_AGENTS_CONFIG.max_concurrent_tasks_per_feature,
     trace_retention_days: overrides.trace_retention_days ?? DEFAULT_AGENTS_CONFIG.trace_retention_days,
     preview_retention_days: overrides.preview_retention_days ?? DEFAULT_AGENTS_CONFIG.preview_retention_days,
-    github_pages_previews: pagesPreviews
+    github_pages_previews: pagesPreviews,
+    verification
   };
   return {
     valid: true,
@@ -935,7 +1620,67 @@ function resolveAgentsConfig(overrides = {}) {
     config
   };
 }
-function serializeAgentsConfigYaml(config, taskAutoMergeEnabled) {
+function escapeYamlDoubleQuoted(val) {
+  return JSON.stringify(val);
+}
+function serializeAgentsConfigYaml(config, taskAutoMergeEnabled = false) {
+  const verification = config.verification ?? DEFAULT_VERIFICATION_PROFILE;
+  const verificationLines = [
+    "verification:",
+    `  wait_for_external_ci: ${verification.wait_for_external_ci}`,
+    `  external_ci_timeout_minutes: ${verification.external_ci_timeout_minutes}`,
+    `  grace_window_seconds: ${verification.grace_window_seconds}`
+  ];
+  if (verification.deferred_external_workflows && verification.deferred_external_workflows.length > 0) {
+    const formattedDeferred = verification.deferred_external_workflows.map((w) => escapeYamlDoubleQuoted(w)).join(", ");
+    verificationLines.push(
+      `  deferred_external_workflows: [${formattedDeferred}]`
+    );
+  }
+  if (verification.targets.length === 0) {
+    verificationLines.push("  targets: []");
+  } else {
+    verificationLines.push("  targets:");
+    for (const target of verification.targets) {
+      const formattedPatterns = target.path_patterns.map((p) => escapeYamlDoubleQuoted(p)).join(", ");
+      verificationLines.push(`    - name: ${target.name}`);
+      verificationLines.push(
+        `      working_directory: ${target.working_directory}`
+      );
+      verificationLines.push(`      kind: ${target.kind}`);
+      verificationLines.push(`      path_patterns: [${formattedPatterns}]`);
+      if (target.install_command) {
+        verificationLines.push(
+          `      install_command: ${escapeYamlDoubleQuoted(target.install_command)}`
+        );
+      }
+      if (target.codegen_command) {
+        verificationLines.push(
+          `      codegen_command: ${escapeYamlDoubleQuoted(target.codegen_command)}`
+        );
+      }
+      if (target.typecheck_command) {
+        verificationLines.push(
+          `      typecheck_command: ${escapeYamlDoubleQuoted(target.typecheck_command)}`
+        );
+      }
+      if (target.lint_command) {
+        verificationLines.push(
+          `      lint_command: ${escapeYamlDoubleQuoted(target.lint_command)}`
+        );
+      }
+      if (target.test_command) {
+        verificationLines.push(
+          `      test_command: ${escapeYamlDoubleQuoted(target.test_command)}`
+        );
+      }
+      if (target.build_command) {
+        verificationLines.push(
+          `      build_command: ${escapeYamlDoubleQuoted(target.build_command)}`
+        );
+      }
+    }
+  }
   return [
     "# EPURE Consumer Repository Configuration (.github/agents.yml)",
     "# Generated by setup-repo \u2014 security boundaries are enforced by shared workflows (ADR-0010, ADR-0023).",
@@ -955,6 +1700,7 @@ function serializeAgentsConfigYaml(config, taskAutoMergeEnabled) {
     `trace_retention_days: ${config.trace_retention_days}`,
     `preview_retention_days: ${config.preview_retention_days}`,
     `github_pages_previews: ${config.github_pages_previews}`,
+    ...verificationLines,
     "security_invariants:",
     "  require_write_permission: true",
     "  sandbox_isolation: true",
@@ -963,6 +1709,370 @@ function serializeAgentsConfigYaml(config, taskAutoMergeEnabled) {
     "  auto_merge_main: false",
     ""
   ].join("\n");
+}
+function unquoteYamlScalar(raw) {
+  const trimmed = raw.trim();
+  if (trimmed.startsWith('"') && trimmed.endsWith('"') || trimmed.startsWith("'") && trimmed.endsWith("'")) {
+    if (trimmed.startsWith('"')) {
+      try {
+        return JSON.parse(trimmed);
+      } catch {
+        return trimmed.slice(1, -1);
+      }
+    }
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+function parseYamlStringArrayInline(raw) {
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) {
+    return [];
+  }
+  const inner = trimmed.slice(1, -1).trim();
+  if (!inner) {
+    return [];
+  }
+  const items = [];
+  let current = "";
+  let inQuote = null;
+  let escaped = false;
+  for (let i = 0; i < inner.length; i += 1) {
+    const ch = inner[i] ?? "";
+    if (escaped) {
+      current += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\" && inQuote === '"') {
+      current += ch;
+      escaped = true;
+      continue;
+    }
+    if ((ch === '"' || ch === "'") && !inQuote) {
+      inQuote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === inQuote) {
+      inQuote = null;
+      current += ch;
+      continue;
+    }
+    if (ch === "," && !inQuote) {
+      items.push(unquoteYamlScalar(current));
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  if (current.trim().length > 0) {
+    items.push(unquoteYamlScalar(current));
+  }
+  return items;
+}
+function parseAgentsYaml(yamlContent) {
+  let harness;
+  const models = {};
+  let merge_policy;
+  let task_auto_merge_enabled;
+  let max_code_fix_attempts;
+  let max_transient_api_retries;
+  let transient_retry_backoff_seconds;
+  let job_timeout_minutes;
+  let review_timeout_minutes;
+  let max_concurrent_tasks_per_feature;
+  let trace_retention_days;
+  let preview_retention_days;
+  let github_pages_previews;
+  let github_pages_human_consent;
+  let preview_separate_origin;
+  let wait_for_external_ci;
+  let external_ci_timeout_minutes;
+  let grace_window_seconds;
+  let deferred_external_workflows;
+  let hasTargetsKey = false;
+  const targets = [];
+  const securityOverrides = {};
+  const lines = yamlContent.split(/\r?\n/);
+  let section = "root";
+  let inTargets = false;
+  let inDeferredWorkflows = false;
+  let inCurrentTargetPathPatterns = false;
+  let currentTarget = null;
+  const parseBool = (raw) => {
+    const v = unquoteYamlScalar(raw).toLowerCase();
+    if (v === "true") return true;
+    if (v === "false") return false;
+    return void 0;
+  };
+  const parseNum = (raw) => {
+    const n = Number.parseInt(unquoteYamlScalar(raw), 10);
+    return Number.isFinite(n) ? n : void 0;
+  };
+  const assignTargetField = (targetObj, key, rawVal) => {
+    const val = unquoteYamlScalar(rawVal);
+    if (key === "name") {
+      targetObj.name = val;
+    } else if (key === "working_directory") {
+      targetObj.working_directory = val;
+    } else if (key === "kind") {
+      targetObj.kind = val;
+    } else if (key === "path_patterns") {
+      if (rawVal.trim().startsWith("[")) {
+        targetObj.path_patterns = parseYamlStringArrayInline(rawVal);
+        inCurrentTargetPathPatterns = false;
+      } else {
+        targetObj.path_patterns = [];
+        inCurrentTargetPathPatterns = true;
+      }
+    } else if (key === "install_command") {
+      targetObj.install_command = val;
+    } else if (key === "codegen_command") {
+      targetObj.codegen_command = val;
+    } else if (key === "typecheck_command") {
+      targetObj.typecheck_command = val;
+    } else if (key === "lint_command") {
+      targetObj.lint_command = val;
+    } else if (key === "test_command") {
+      targetObj.test_command = val;
+    } else if (key === "build_command") {
+      targetObj.build_command = val;
+    }
+  };
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+    const indent = /^(\s*)/.exec(rawLine)?.[1]?.length ?? 0;
+    if (indent === 0) {
+      inTargets = false;
+      inDeferredWorkflows = false;
+      inCurrentTargetPathPatterns = false;
+      currentTarget = null;
+      const kv = /^([a-zA-Z0-9_]+):\s*(.*)$/.exec(trimmed);
+      if (!kv || !kv[1]) {
+        continue;
+      }
+      const key = kv[1];
+      const val = (kv[2] ?? "").replace(/\s+#.*$/, "").trim();
+      if (key === "models" && !val) {
+        section = "models";
+        continue;
+      }
+      if (key === "verification" && !val) {
+        section = "verification";
+        continue;
+      }
+      if ((key === "security_invariants" || key === "security_overrides") && !val) {
+        section = "security";
+        continue;
+      }
+      section = "root";
+      if (key === "harness") {
+        const h = unquoteYamlScalar(val);
+        if (h === "pi" || h === "codex") {
+          harness = h;
+        }
+      } else if (key === "merge_policy") {
+        const mp = unquoteYamlScalar(val);
+        if (mp === "strict" || mp === "relaxed") {
+          merge_policy = mp;
+        }
+      } else if (key === "task_auto_merge_enabled") {
+        task_auto_merge_enabled = parseBool(val);
+      } else if (key === "max_code_fix_attempts") {
+        max_code_fix_attempts = parseNum(val);
+      } else if (key === "max_transient_api_retries") {
+        max_transient_api_retries = parseNum(val);
+      } else if (key === "transient_retry_backoff_seconds") {
+        const nums = parseYamlStringArrayInline(val).map((s) => Number.parseInt(s, 10)).filter((n) => Number.isFinite(n));
+        if (nums.length === 4) {
+          transient_retry_backoff_seconds = [
+            nums[0],
+            nums[1],
+            nums[2],
+            nums[3]
+          ];
+        }
+      } else if (key === "job_timeout_minutes") {
+        job_timeout_minutes = parseNum(val);
+      } else if (key === "review_timeout_minutes") {
+        review_timeout_minutes = parseNum(val);
+      } else if (key === "max_concurrent_tasks_per_feature") {
+        max_concurrent_tasks_per_feature = parseNum(val);
+      } else if (key === "trace_retention_days") {
+        trace_retention_days = parseNum(val);
+      } else if (key === "preview_retention_days") {
+        preview_retention_days = parseNum(val);
+      } else if (key === "github_pages_previews") {
+        github_pages_previews = parseBool(val);
+      } else if (key === "github_pages_human_consent") {
+        github_pages_human_consent = parseBool(val);
+      } else if (key === "preview_separate_origin") {
+        preview_separate_origin = parseBool(val);
+      }
+      continue;
+    }
+    if (section === "models") {
+      const kv = /^([a-zA-Z0-9_]+):\s*(.+)$/.exec(trimmed);
+      if (kv && kv[1] && kv[2]) {
+        const k = kv[1];
+        const v = unquoteYamlScalar(kv[2].replace(/\s+#.*$/, ""));
+        if (k === "planning" || k === "implementation" || k === "review") {
+          models[k] = v;
+        }
+      }
+      continue;
+    }
+    if (section === "security") {
+      const kv = /^([a-zA-Z0-9_]+):\s*(.+)$/.exec(trimmed);
+      if (kv && kv[1] && kv[2]) {
+        const k = kv[1];
+        const b = parseBool(kv[2].replace(/\s+#.*$/, ""));
+        if (b !== void 0) {
+          if (k === "require_write_permission") {
+            securityOverrides.require_write_permission = b;
+          } else if (k === "sandbox_isolation") {
+            securityOverrides.sandbox_isolation = b;
+          } else if (k === "allow_agent_release") {
+            securityOverrides.allow_agent_release = b;
+          } else if (k === "auto_merge_dev") {
+            securityOverrides.auto_merge_dev = b;
+          } else if (k === "auto_merge_main") {
+            securityOverrides.auto_merge_main = b;
+          }
+        }
+      }
+      continue;
+    }
+    if (section === "verification") {
+      if (indent === 2) {
+        inTargets = false;
+        inDeferredWorkflows = false;
+        inCurrentTargetPathPatterns = false;
+        currentTarget = null;
+        const kv = /^([a-zA-Z0-9_]+):\s*(.*)$/.exec(trimmed);
+        if (!kv || !kv[1]) {
+          continue;
+        }
+        const k = kv[1];
+        const v = (kv[2] ?? "").replace(/\s+#.*$/, "").trim();
+        if (k === "wait_for_external_ci") {
+          wait_for_external_ci = parseBool(v);
+        } else if (k === "external_ci_timeout_minutes") {
+          external_ci_timeout_minutes = parseNum(v);
+        } else if (k === "grace_window_seconds") {
+          grace_window_seconds = parseNum(v);
+        } else if (k === "deferred_external_workflows") {
+          if (v.startsWith("[")) {
+            deferred_external_workflows = parseYamlStringArrayInline(v);
+          } else {
+            deferred_external_workflows = [];
+            inDeferredWorkflows = true;
+          }
+        } else if (k === "targets") {
+          hasTargetsKey = true;
+          if (v === "[]") {
+            inTargets = false;
+          } else {
+            inTargets = true;
+          }
+        }
+        continue;
+      }
+      if (inDeferredWorkflows && trimmed.startsWith("-")) {
+        const item = unquoteYamlScalar(trimmed.replace(/^-\s*/, ""));
+        if (item) {
+          deferred_external_workflows = deferred_external_workflows ?? [];
+          deferred_external_workflows.push(item);
+        }
+        continue;
+      }
+      if (inTargets) {
+        if (indent === 4 && trimmed.startsWith("-")) {
+          inCurrentTargetPathPatterns = false;
+          currentTarget = {};
+          targets.push(currentTarget);
+          const afterDash = trimmed.replace(/^-\s*/, "");
+          const kv = /^([a-zA-Z0-9_]+):\s*(.*)$/.exec(afterDash);
+          if (kv && kv[1]) {
+            assignTargetField(
+              currentTarget,
+              kv[1],
+              (kv[2] ?? "").replace(/\s+#.*$/, "").trim()
+            );
+          }
+          continue;
+        }
+        if (currentTarget) {
+          if (inCurrentTargetPathPatterns && trimmed.startsWith("-")) {
+            const pat = unquoteYamlScalar(trimmed.replace(/^-\s*/, ""));
+            currentTarget.path_patterns = currentTarget.path_patterns ?? [];
+            currentTarget.path_patterns.push(pat);
+            continue;
+          }
+          const kv = /^([a-zA-Z0-9_]+):\s*(.*)$/.exec(trimmed);
+          if (kv && kv[1]) {
+            inCurrentTargetPathPatterns = false;
+            assignTargetField(
+              currentTarget,
+              kv[1],
+              (kv[2] ?? "").replace(/\s+#.*$/, "").trim()
+            );
+          }
+        }
+      }
+    }
+  }
+  const parsedTargets = targets.filter((t) => Boolean(t.name)).map((t) => ({
+    name: t.name ?? "root",
+    working_directory: t.working_directory ?? ".",
+    kind: t.kind ?? "node",
+    path_patterns: t.path_patterns && t.path_patterns.length > 0 ? t.path_patterns : ["**"],
+    ...t.install_command ? { install_command: t.install_command } : {},
+    ...t.codegen_command ? { codegen_command: t.codegen_command } : {},
+    ...t.typecheck_command ? { typecheck_command: t.typecheck_command } : {},
+    ...t.lint_command ? { lint_command: t.lint_command } : {},
+    ...t.test_command ? { test_command: t.test_command } : {},
+    ...t.build_command ? { build_command: t.build_command } : {}
+  }));
+  const hasVerificationOverrides = wait_for_external_ci !== void 0 || external_ci_timeout_minutes !== void 0 || grace_window_seconds !== void 0 || deferred_external_workflows !== void 0 || hasTargetsKey || parsedTargets.length > 0;
+  const overrides = {
+    ...harness ? { harness } : {},
+    ...Object.keys(models).length > 0 ? { models } : {},
+    ...merge_policy ? { merge_policy } : {},
+    ...max_code_fix_attempts !== void 0 ? { max_code_fix_attempts } : {},
+    ...max_transient_api_retries !== void 0 ? { max_transient_api_retries } : {},
+    ...transient_retry_backoff_seconds ? { transient_retry_backoff_seconds } : {},
+    ...job_timeout_minutes !== void 0 ? { job_timeout_minutes } : {},
+    ...review_timeout_minutes !== void 0 ? { review_timeout_minutes } : {},
+    ...max_concurrent_tasks_per_feature !== void 0 ? { max_concurrent_tasks_per_feature } : {},
+    ...trace_retention_days !== void 0 ? { trace_retention_days } : {},
+    ...preview_retention_days !== void 0 ? { preview_retention_days } : {},
+    ...github_pages_previews !== void 0 ? { github_pages_previews } : {},
+    ...github_pages_human_consent !== void 0 ? { github_pages_human_consent } : {},
+    ...preview_separate_origin !== void 0 ? { preview_separate_origin } : {},
+    ...hasVerificationOverrides ? {
+      verification: {
+        ...wait_for_external_ci !== void 0 ? { wait_for_external_ci } : {},
+        ...external_ci_timeout_minutes !== void 0 ? { external_ci_timeout_minutes } : {},
+        ...grace_window_seconds !== void 0 ? { grace_window_seconds } : {},
+        ...deferred_external_workflows !== void 0 ? { deferred_external_workflows } : {},
+        ...hasTargetsKey || parsedTargets.length > 0 ? { targets: parsedTargets } : {}
+      }
+    } : {},
+    ...Object.keys(securityOverrides).length > 0 ? { security_overrides: securityOverrides } : {}
+  };
+  const resolved = resolveAgentsConfig(overrides);
+  return {
+    ...resolved.config,
+    ...task_auto_merge_enabled !== void 0 ? { task_auto_merge_enabled } : {},
+    ...github_pages_human_consent !== void 0 ? { github_pages_human_consent } : {},
+    ...preview_separate_origin !== void 0 ? { preview_separate_origin } : {},
+    ...Object.keys(securityOverrides).length > 0 ? { security_overrides: securityOverrides } : {}
+  };
 }
 function buildCallerWorkflows(pinnedSha, stack) {
   const ciWorkflow = buildStackAwareCiWorkflowYaml({ pinnedSha, stack });
@@ -1330,8 +2440,87 @@ function planAndApplyRepoSetup(input) {
   const hasProtection = input.existingState?.hasBranchProtection === true;
   const taskAutoMergeEnabled = hasCi && hasProtection;
   const autoMergeWarningCode = taskAutoMergeEnabled ? "NONE" : "AUTO_MERGE_DISABLED_MISSING_PROTECTIONS";
+  const detectedStack = detectRepositoryStack({
+    repoRootDir: input.repoRootDir
+  });
+  let existingVerification;
+  if (input.repoRootDir && existsSync2(join2(input.repoRootDir, ".github", "agents.yml"))) {
+    try {
+      const existingRaw = readFileSync2(
+        join2(input.repoRootDir, ".github", "agents.yml"),
+        "utf8"
+      );
+      const parsedExisting = parseAgentsYaml(existingRaw);
+      existingVerification = parsedExisting.verification;
+    } catch {
+      existingVerification = void 0;
+    }
+  }
+  const resetTargets = input.agentsOverrides?.reset_verification_targets === true;
+  const overrideVerification = input.agentsOverrides?.verification;
+  const discoveredVerification = detectedStack.verification;
+  let mergedTargets;
+  if (overrideVerification?.targets) {
+    if (resetTargets || !existingVerification || existingVerification.targets.length === 0) {
+      mergedTargets = overrideVerification.targets.map(
+        normalizeVerificationTarget
+      );
+    } else {
+      const targetMap = /* @__PURE__ */ new Map();
+      for (const t of existingVerification.targets) {
+        targetMap.set(t.name, normalizeVerificationTarget(t));
+      }
+      for (const t of overrideVerification.targets) {
+        targetMap.set(t.name, normalizeVerificationTarget(t));
+      }
+      mergedTargets = Array.from(targetMap.values());
+    }
+  } else if (!resetTargets && existingVerification && existingVerification.targets.length > 0) {
+    const targetMap = /* @__PURE__ */ new Map();
+    for (const t of existingVerification.targets) {
+      targetMap.set(t.name, normalizeVerificationTarget(t));
+    }
+    for (const t of discoveredVerification.targets) {
+      if (!targetMap.has(t.name)) {
+        targetMap.set(t.name, normalizeVerificationTarget(t));
+      }
+    }
+    mergedTargets = Array.from(targetMap.values());
+  } else {
+    mergedTargets = discoveredVerification.targets.map(
+      normalizeVerificationTarget
+    );
+  }
+  const deferredSet = /* @__PURE__ */ new Set();
+  if (overrideVerification?.deferred_external_workflows) {
+    for (const w of overrideVerification.deferred_external_workflows) {
+      deferredSet.add(w);
+    }
+  } else {
+    if (!resetTargets && existingVerification?.deferred_external_workflows) {
+      for (const w of existingVerification.deferred_external_workflows) {
+        deferredSet.add(w);
+      }
+    }
+    if (discoveredVerification.deferred_external_workflows) {
+      for (const w of discoveredVerification.deferred_external_workflows) {
+        deferredSet.add(w);
+      }
+    }
+  }
+  const effectiveVerification = {
+    wait_for_external_ci: overrideVerification?.wait_for_external_ci ?? existingVerification?.wait_for_external_ci ?? discoveredVerification.wait_for_external_ci,
+    external_ci_timeout_minutes: overrideVerification?.external_ci_timeout_minutes ?? existingVerification?.external_ci_timeout_minutes ?? discoveredVerification.external_ci_timeout_minutes,
+    grace_window_seconds: overrideVerification?.grace_window_seconds ?? existingVerification?.grace_window_seconds ?? discoveredVerification.grace_window_seconds,
+    ...deferredSet.size > 0 ? { deferred_external_workflows: Array.from(deferredSet) } : {},
+    targets: mergedTargets
+  };
+  const effectiveAgentsConfig = {
+    ...resolvedConfig.config,
+    verification: effectiveVerification
+  };
   const agentsYamlContent = serializeAgentsConfigYaml(
-    resolvedConfig.config,
+    effectiveAgentsConfig,
     taskAutoMergeEnabled
   );
   const agentsConfigAction = computeFilePlanAction(
@@ -1339,9 +2528,6 @@ function planAndApplyRepoSetup(input) {
     ".github/agents.yml",
     agentsYamlContent
   );
-  const detectedStack = detectRepositoryStack({
-    repoRootDir: input.repoRootDir
-  });
   const zizmorConfig = buildZizmorConfigYaml();
   const renovateConfig = buildRenovateConfigJson(detectedStack);
   const zizmorAction = computeFilePlanAction(
@@ -1436,15 +2622,34 @@ function planAndApplyRepoSetup(input) {
       details: `Run 'setup-repo --apply --apply-github-settings' to enforce squash-only merges and provision 'epure-feature-governance', 'epure-dev-governance', and '${rulesetSpec.name}'.`
     }
   ];
+  const deferredWorkflowsList = effectiveVerification.deferred_external_workflows ?? [];
+  const targetTableRows = effectiveVerification.targets.map((t) => {
+    const stage1Cmds = [
+      t.install_command ? `install: \`${t.install_command}\`` : null,
+      t.codegen_command ? `codegen: \`${t.codegen_command}\`` : null,
+      t.typecheck_command ? `typecheck: \`${t.typecheck_command}\`` : null,
+      t.lint_command ? `lint: \`${t.lint_command}\`` : null,
+      t.test_command ? `test: \`${t.test_command}\`` : null,
+      t.build_command ? `build: \`${t.build_command}\`` : null
+    ].filter((item) => Boolean(item)).join(", ");
+    const patternsStr = t.path_patterns.map((p) => `\`${p}\``).join(", ");
+    return `| \`${t.name}\` | \`${t.kind}\` | \`${t.working_directory}\` | ${patternsStr} | ${stage1Cmds || "none"} |`;
+  });
   const summaryMarkdown = [
     `### EPURE setup-repo (${dryRun ? "Dry-Run Simulation" : "Guided Application"})`,
     `- **Repository**: \`${repository}\``,
     `- **Merge Governance**: \`squash-only\` (\`allow_merge_commit=false\`, \`allow_rebase_merge=false\`, \`delete_branch_on_merge=true\`)`,
-    `- **Agents Config (\`.github/agents.yml\`)**: \`${agentsConfigAction}\` (harness=\`${resolvedConfig.config.harness}\`, merge_policy=\`${resolvedConfig.config.merge_policy}\`)`,
+    `- **Agents Config (\`.github/agents.yml\`)**: \`${agentsConfigAction}\` (harness=\`${effectiveAgentsConfig.harness}\`, merge_policy=\`${effectiveAgentsConfig.merge_policy}\`)`,
     `- **Reviewer Roster (\`.cursor/agents/*.md\`)**: \`${plannedReviewerRoster.length}\` agents (specialists + cross-cutting + \`user-advocate\`)`,
     `- **Task Auto-Merge Enabled**: \`${taskAutoMergeEnabled}\` (${autoMergeWarningCode})`,
     `- **Governance Rulesets**: ${governanceRulesets.map((r) => `\`${r.name}\``).join(", ")}`,
-    `- **Mutated Files**: ${mutatedFiles.length > 0 ? mutatedFiles.map((f) => `\`${f}\``).join(", ") : "none"}`
+    `- **Deferred External Workflows**: ${deferredWorkflowsList.length > 0 ? deferredWorkflowsList.map((w) => `\`${w}\``).join(", ") : "none"}`,
+    `- **Mutated Files**: ${mutatedFiles.length > 0 ? mutatedFiles.map((f) => `\`${f}\``).join(", ") : "none"}`,
+    "",
+    "#### Discovered Verification Targets (`verification.targets`)",
+    "| Name | Kind | Working Directory | Path Patterns | Stage 1 Commands |",
+    "| :--- | :--- | :--- | :--- | :--- |",
+    ...targetTableRows
   ].join("\n");
   return {
     status: dryRun ? "dry_run" : "applied",
@@ -1452,7 +2657,7 @@ function planAndApplyRepoSetup(input) {
     error_code: "NONE",
     error_message: "",
     repository,
-    agents_config: resolvedConfig.config,
+    agents_config: effectiveAgentsConfig,
     agents_config_action: agentsConfigAction,
     planned_workflows: plannedWorkflows,
     planned_reviewer_roster: plannedReviewerRoster,

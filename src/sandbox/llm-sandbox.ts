@@ -70,7 +70,7 @@ export interface SandboxExecutionResult {
 }
 
 const SECRET_ENV_NAME_PATTERN =
-  /^(?:OPENAI_API_KEY|ANTHROPIC_API_KEY|GEMINI_API_KEY|LLM_API_KEY|GITHUB_TOKEN|GH_TOKEN|GITHUB_PAT|EPURE_.*(?:KEY|TOKEN|SECRET)|AWS_.*|AZURE_.*|GCP_.*|NPM_TOKEN|NODE_AUTH_TOKEN|ACTIONS_ID_TOKEN_REQUEST_TOKEN)$/i;
+  /^(?:OPENAI_API_KEY|ANTHROPIC_API_KEY|GOOGLE_API_KEY|GEMINI_API_KEY|LLM_API_KEY|GITHUB_TOKEN|GH_TOKEN|GITHUB_PAT|EPURE_.*(?:KEY|TOKEN|SECRET)|AWS_.*|AZURE_.*|GCP_.*|NPM_TOKEN|NODE_AUTH_TOKEN|ACTIONS_RUNTIME_TOKEN|ACTIONS_ID_TOKEN_REQUEST_TOKEN)$/i;
 
 const ALLOWED_PROXY_PATHS = new Set([
   "/v1/chat/completions",
@@ -237,6 +237,8 @@ export async function runInUntrustedCodeSandbox(
   const llmApiKey = (
     input.runnerEnv.OPENAI_API_KEY ??
     input.runnerEnv.ANTHROPIC_API_KEY ??
+    input.runnerEnv.GOOGLE_API_KEY ??
+    input.runnerEnv.GEMINI_API_KEY ??
     input.runnerEnv.LLM_API_KEY ??
     ""
   ).trim();

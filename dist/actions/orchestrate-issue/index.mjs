@@ -7,6 +7,8 @@ var SECRET_PATTERNS = [
   /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{16,255}\b/g,
   /\bgithub_pat_[A-Za-z0-9_]{20,255}\b/g,
   /\bsk-(?:ant-)?[A-Za-z0-9_-]{16,255}\b/g,
+  /\bAIza[0-9A-Za-z_-]{35}\b/g,
+  /\bAuthorization:\s*(?:Bearer|Basic|token)\s+[A-Za-z0-9._~+/=-]+/gi,
   /\bBearer\s+[A-Za-z0-9._~+/=-]{12,512}\b/gi
 ];
 function redactSecrets(text, extraSecrets = []) {
@@ -19,6 +21,10 @@ function redactSecrets(text, extraSecrets = []) {
   }
   for (const pattern of SECRET_PATTERNS) {
     result = result.replace(pattern, (match) => {
+      const authHeaderMatch = /^(Authorization:\s*(?:Bearer|Basic|token))\s+/i.exec(match);
+      if (authHeaderMatch) {
+        return `${authHeaderMatch[1]} [REDACTED]`;
+      }
       if (/^bearer\s+/i.test(match)) {
         return "Bearer [REDACTED]";
       }
@@ -27,12 +33,6 @@ function redactSecrets(text, extraSecrets = []) {
   }
   return result;
 }
-
-// src/orchestrator/issue-orchestrator.ts
-import { execFileSync } from "node:child_process";
-import { existsSync as existsSync2, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join as join2 } from "node:path";
 
 // src/auth/github-app-jwt.ts
 import { createSign } from "node:crypto";
@@ -149,8 +149,8 @@ async function revokeGitHubInstallationToken(params) {
 }
 
 // src/bootstrap/ci-and-renovate.ts
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { basename, join } from "node:path";
 var PINNED_ACTIONS_CHECKOUT_SHA = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1";
 var PINNED_ACTIONS_SETUP_NODE_SHA = "actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0";
 var PINNED_ACTIONS_SETUP_PYTHON_SHA = "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0";
@@ -165,6 +165,656 @@ function parseMakefileTargets(makefileContent) {
     }
   }
   return Array.from(targets);
+}
+function normalizeWorkingDir(raw) {
+  if (!raw) {
+    return ".";
+  }
+  const cleaned = raw.trim().replace(/^["']+|["']+$/g, "").replace(/^\.\/+/, "").replace(/\/+$/, "");
+  return cleaned.length > 0 ? cleaned : ".";
+}
+function classifySingleShellCommand(rawCmd, hasServices, target, customScripts, markWorkflowDeferred) {
+  const cmd = rawCmd.trim();
+  if (!cmd || cmd.startsWith("#") || cmd.startsWith("echo ")) {
+    return;
+  }
+  if (/\b(?:docker(?:\s+compose|-compose|\s+build|\s+run)|playwright\s+test|cypress\s+run|test:e2e|\be2e\b)\b/i.test(
+    cmd
+  )) {
+    markWorkflowDeferred();
+    return;
+  }
+  if (/^(?:python3?|node|bash|sh)\s+(?:\.\/)?scripts\/[^\s;&|]+(?:\s+[^\s;&|]+)*$/i.test(
+    cmd
+  ) || /^\.\/scripts\/[^\s;&|]+(?:\s+[^\s;&|]+)*$/i.test(cmd)) {
+    customScripts.add(cmd);
+    return;
+  }
+  if (/\bprisma\s+generate\b/.test(cmd) || /\b(?:npm|pnpm|yarn)\s+(?:run\s+)?(?:prisma:generate|codegen)\b/.test(cmd)) {
+    target.kindHint = target.kindHint ?? "node";
+    if (!target.codegen_command) {
+      target.codegen_command = cmd;
+    }
+    return;
+  }
+  if (/^(?:npm\s+(?:ci|install)|pnpm\s+install(?:\s+--frozen-lockfile)?|yarn\s+install(?:\s+--frozen-lockfile)?)$/.test(
+    cmd
+  )) {
+    target.kindHint = target.kindHint ?? "node";
+    if (!target.install_command) {
+      target.install_command = cmd;
+    }
+    return;
+  }
+  if (/^(?:(?:python3?\s+-m\s+)?pip\s+install\s+(?!--upgrade\s+pip|-U\s+pip).+|uv\s+sync.*|poetry\s+install.*)$/.test(
+    cmd
+  )) {
+    target.kindHint = target.kindHint ?? "python";
+    if (!target.install_command) {
+      target.install_command = cmd;
+    }
+    return;
+  }
+  if (/\btsc\b/.test(cmd) || /\b(?:npm|pnpm|yarn)\s+(?:run\s+)?typecheck\b/.test(cmd)) {
+    target.kindHint = target.kindHint ?? "node";
+    if (!target.typecheck_command) {
+      target.typecheck_command = cmd.replace(/\s+--if-present\b/, "");
+    }
+    return;
+  }
+  if (/\b(?:mypy|pyright)\b/.test(cmd)) {
+    target.kindHint = target.kindHint ?? "python";
+    if (!target.typecheck_command) {
+      target.typecheck_command = cmd;
+    }
+    return;
+  }
+  if (/\bcargo\s+check\b/.test(cmd)) {
+    target.kindHint = target.kindHint ?? "rust";
+    if (!target.typecheck_command) {
+      target.typecheck_command = cmd;
+    }
+    return;
+  }
+  if (/\bgo\s+vet\b/.test(cmd)) {
+    target.kindHint = target.kindHint ?? "go";
+    if (!target.typecheck_command) {
+      target.typecheck_command = cmd;
+    }
+    return;
+  }
+  if (/\b(?:eslint|biome)\b/.test(cmd) || /\b(?:npm|pnpm|yarn)\s+(?:run\s+)?lint\b/.test(cmd)) {
+    target.kindHint = target.kindHint ?? "node";
+    const cleanLint = cmd.replace(/\s+--if-present\b/, "");
+    if (!target.lint_commands.includes(cleanLint)) {
+      target.lint_commands.push(cleanLint);
+    }
+    return;
+  }
+  if (/\b(?:ruff\s+(?:check|format)|flake8)\b/.test(cmd)) {
+    target.kindHint = target.kindHint ?? "python";
+    if (!target.lint_commands.includes(cmd)) {
+      target.lint_commands.push(cmd);
+    }
+    return;
+  }
+  if (/\bcargo\s+(?:clippy|fmt)\b/.test(cmd)) {
+    target.kindHint = target.kindHint ?? "rust";
+    if (!target.lint_commands.includes(cmd)) {
+      target.lint_commands.push(cmd);
+    }
+    return;
+  }
+  if (/\b(?:gofmt|golangci-lint)\b/.test(cmd)) {
+    target.kindHint = target.kindHint ?? "go";
+    if (!target.lint_commands.includes(cmd)) {
+      target.lint_commands.push(cmd);
+    }
+    return;
+  }
+  const isUnitOnlyTest = /\btest:unit\b|tests\/unit|\bunit\b|-m\s+["']?not\s+integration/i.test(cmd);
+  if (/\b(?:vitest|jest)\b/.test(cmd) || /\b(?:npm|pnpm|yarn)\s+(?:run\s+)?test(?::unit)?\b/.test(cmd)) {
+    target.kindHint = target.kindHint ?? "node";
+    if (!hasServices || isUnitOnlyTest) {
+      if (!target.test_command || isUnitOnlyTest) {
+        target.test_command = cmd.replace(/\s+2>\/dev\/null.*$/, "");
+      }
+    }
+    return;
+  }
+  if (/\bpytest\b/.test(cmd) || /\bpython3?\s+-m\s+(?:pytest|unittest)\b/.test(cmd)) {
+    target.kindHint = target.kindHint ?? "python";
+    if (!hasServices || isUnitOnlyTest) {
+      if (!target.test_command || isUnitOnlyTest) {
+        target.test_command = cmd;
+      }
+    }
+    return;
+  }
+  if (/\bcargo\s+test\b/.test(cmd)) {
+    target.kindHint = target.kindHint ?? "rust";
+    if (!hasServices || isUnitOnlyTest) {
+      if (!target.test_command) {
+        target.test_command = cmd;
+      }
+    }
+    return;
+  }
+  if (/\bgo\s+test\b/.test(cmd)) {
+    target.kindHint = target.kindHint ?? "go";
+    if (!hasServices || isUnitOnlyTest) {
+      if (!target.test_command) {
+        target.test_command = cmd;
+      }
+    }
+    return;
+  }
+  if (/\b(?:npm|pnpm|yarn)\s+(?:run\s+)?build\b/.test(cmd)) {
+    target.kindHint = target.kindHint ?? "node";
+    if (!target.build_command) {
+      target.build_command = cmd.replace(/\s+--if-present\b/, "");
+    }
+    return;
+  }
+  if (/\bcargo\s+build\b/.test(cmd)) {
+    target.kindHint = target.kindHint ?? "rust";
+    if (!target.build_command) {
+      target.build_command = cmd;
+    }
+    return;
+  }
+  if (/\bgo\s+build\b/.test(cmd)) {
+    target.kindHint = target.kindHint ?? "go";
+    if (!target.build_command) {
+      target.build_command = cmd;
+    }
+  }
+}
+function parseNonEpureWorkflows(workflowEntries) {
+  const byWorkingDir = /* @__PURE__ */ new Map();
+  const customScripts = /* @__PURE__ */ new Set();
+  const deferredWorkflows = /* @__PURE__ */ new Set();
+  const getOrCreateDirEntry = (dir) => {
+    const normalized = normalizeWorkingDir(dir);
+    let existing = byWorkingDir.get(normalized);
+    if (!existing) {
+      existing = {
+        hasServices: false,
+        lint_commands: []
+      };
+      byWorkingDir.set(normalized, existing);
+    }
+    return existing;
+  };
+  for (const wf of workflowEntries) {
+    const fileName = basename(wf.path);
+    if (fileName.toLowerCase().startsWith("epure-") || wf.content.includes("Giskard-AI/epure")) {
+      continue;
+    }
+    const lines = wf.content.split(/\r?\n/);
+    let inJobs = false;
+    let currentJobLines = [];
+    const jobBlocks = [];
+    for (const line of lines) {
+      if (/^jobs:\s*(?:#.*)?$/.test(line)) {
+        inJobs = true;
+        continue;
+      }
+      if (inJobs) {
+        if (/^[a-zA-Z0-9_-]+:\s*(?:#.*)?$/.test(line)) {
+          if (currentJobLines.length > 0) {
+            jobBlocks.push(currentJobLines);
+            currentJobLines = [];
+          }
+          inJobs = false;
+          continue;
+        }
+        if (/^  [a-zA-Z0-9_-]+:\s*(?:#.*)?$/.test(line)) {
+          if (currentJobLines.length > 0) {
+            jobBlocks.push(currentJobLines);
+          }
+          currentJobLines = [line];
+          continue;
+        }
+        if (currentJobLines.length > 0) {
+          currentJobLines.push(line);
+        }
+      }
+    }
+    if (currentJobLines.length > 0) {
+      jobBlocks.push(currentJobLines);
+    }
+    let workflowDeferred = false;
+    const markDeferred = () => {
+      workflowDeferred = true;
+    };
+    for (const jobLines of jobBlocks) {
+      const jobText = jobLines.join("\n");
+      const hasServices = /^    services:\s*(?:#.*)?$/m.test(jobText);
+      if (hasServices) {
+        workflowDeferred = true;
+      }
+      let jobWorkingDir = ".";
+      const stepsIdx = jobLines.findIndex((l) => /^    steps:\s*(?:#.*)?$/.test(l));
+      const headerLines = stepsIdx >= 0 ? jobLines.slice(0, stepsIdx) : jobLines;
+      for (const hl of headerLines) {
+        const wdMatch = /^\s*working-directory:\s*(.+)$/.exec(hl);
+        if (wdMatch && wdMatch[1]) {
+          jobWorkingDir = normalizeWorkingDir(wdMatch[1].replace(/#.*$/, ""));
+        }
+      }
+      if (hasServices) {
+        const targetEntry = getOrCreateDirEntry(jobWorkingDir);
+        targetEntry.hasServices = true;
+      }
+      const stepLines = stepsIdx >= 0 ? jobLines.slice(stepsIdx + 1) : [];
+      const steps = [];
+      let currentStep = [];
+      for (const sl of stepLines) {
+        if (/^ {4,6}-\s+/.test(sl)) {
+          if (currentStep.length > 0) {
+            steps.push(currentStep);
+          }
+          currentStep = [sl];
+        } else if (currentStep.length > 0) {
+          currentStep.push(sl);
+        }
+      }
+      if (currentStep.length > 0) {
+        steps.push(currentStep);
+      }
+      for (const step of steps) {
+        let stepWorkingDir = jobWorkingDir;
+        for (const sl of step) {
+          const wdMatch = /^\s*(?:-\s*)?working-directory:\s*(.+)$/.exec(sl);
+          if (wdMatch && wdMatch[1]) {
+            stepWorkingDir = normalizeWorkingDir(wdMatch[1].replace(/#.*$/, ""));
+          }
+        }
+        if (hasServices) {
+          const stepEntry = getOrCreateDirEntry(stepWorkingDir);
+          stepEntry.hasServices = true;
+        }
+        const runCommands = [];
+        for (let i = 0; i < step.length; i += 1) {
+          const sl = step[i] ?? "";
+          const runMatch = /^(\s*)(?:-\s*)?run:\s*(.*)$/.exec(sl);
+          if (!runMatch) {
+            continue;
+          }
+          const indentLen = (runMatch[1] ?? "").length;
+          const rest = (runMatch[2] ?? "").trim();
+          if (/^[|>][-+]?$/.test(rest) || rest === "") {
+            for (let j = i + 1; j < step.length; j += 1) {
+              const nextLine = step[j] ?? "";
+              if (nextLine.trim() === "") {
+                continue;
+              }
+              const nextIndent = /^(\s*)/.exec(nextLine)?.[1]?.length ?? 0;
+              if (nextIndent <= indentLen) {
+                break;
+              }
+              runCommands.push(nextLine.trim());
+              i = j;
+            }
+          } else {
+            runCommands.push(rest.replace(/^["']|["']$/g, ""));
+          }
+        }
+        let activeDir = stepWorkingDir;
+        for (const rawLine of runCommands) {
+          const stripped = rawLine.replace(/\s+#.*$/, "").trim();
+          if (!stripped || stripped.startsWith("#")) {
+            continue;
+          }
+          const parts = stripped.split(/\s*&&\s*/);
+          for (const part of parts) {
+            const cdMatch = /^cd\s+([^\s;&|]+)$/.exec(part.trim());
+            if (cdMatch && cdMatch[1]) {
+              activeDir = normalizeWorkingDir(cdMatch[1]);
+              if (hasServices) {
+                getOrCreateDirEntry(activeDir).hasServices = true;
+              }
+              continue;
+            }
+            const prefixMatch = /^npm\s+--prefix\s+([^\s]+)\s+(.+)$/.exec(
+              part.trim()
+            );
+            const effectiveDir = prefixMatch && prefixMatch[1] ? normalizeWorkingDir(prefixMatch[1]) : activeDir;
+            const effectiveCmd = prefixMatch && prefixMatch[2] ? `npm ${prefixMatch[2]}` : part.trim();
+            const dirEntry = getOrCreateDirEntry(effectiveDir);
+            if (hasServices) {
+              dirEntry.hasServices = true;
+            }
+            classifySingleShellCommand(
+              effectiveCmd,
+              hasServices,
+              dirEntry,
+              customScripts,
+              markDeferred
+            );
+          }
+        }
+      }
+    }
+    if (workflowDeferred) {
+      deferredWorkflows.add(wf.path);
+    }
+  }
+  return {
+    byWorkingDir,
+    customScriptCommands: Array.from(customScripts),
+    deferredWorkflows: Array.from(deferredWorkflows)
+  };
+}
+function discoverVerificationProfile(params) {
+  const root = params.repoRootDir;
+  const hints = (params.targetFilesHint ?? []).map(
+    (f) => f.trim().replace(/^\/+/, "")
+  );
+  const fileExists = (relPath) => {
+    const clean = relPath.replace(/^\.\/+/, "");
+    if (hints.includes(clean)) {
+      return true;
+    }
+    if (root && existsSync(join(root, clean))) {
+      return true;
+    }
+    return false;
+  };
+  const readFileSafe = (relPath) => {
+    const clean = relPath.replace(/^\.\/+/, "");
+    if (root && existsSync(join(root, clean))) {
+      try {
+        return readFileSync(join(root, clean), "utf8");
+      } catch {
+        return void 0;
+      }
+    }
+    return void 0;
+  };
+  const workflowMap = /* @__PURE__ */ new Map();
+  if (params.workflowFilesMap) {
+    for (const [rawPath, content] of Object.entries(params.workflowFilesMap)) {
+      const normalizedPath = rawPath.startsWith(".github/workflows/") ? rawPath : `.github/workflows/${rawPath.replace(/^\/+/, "")}`;
+      workflowMap.set(normalizedPath, content);
+    }
+  }
+  if (root && existsSync(join(root, ".github", "workflows"))) {
+    try {
+      const entries = readdirSync(join(root, ".github", "workflows")).sort();
+      for (const entry of entries) {
+        if (!/\.ya?ml$/i.test(entry)) {
+          continue;
+        }
+        const relWfPath = `.github/workflows/${entry}`;
+        if (!workflowMap.has(relWfPath)) {
+          const content = readFileSafe(relWfPath);
+          if (content !== void 0) {
+            workflowMap.set(relWfPath, content);
+          }
+        }
+      }
+    } catch {
+    }
+  }
+  const parsedWorkflows = parseNonEpureWorkflows(
+    Array.from(workflowMap.entries()).map(([path, content]) => ({
+      path,
+      content
+    }))
+  );
+  const candidateDirsOrdered = ["."];
+  const addCandidateDir = (dir) => {
+    const norm = normalizeWorkingDir(dir);
+    if (norm !== "scripts" && !candidateDirsOrdered.includes(norm)) {
+      candidateDirsOrdered.push(norm);
+    }
+  };
+  for (const firstLevel of ["frontend", "backend"]) {
+    addCandidateDir(firstLevel);
+  }
+  const secondLevelParents = ["packages", "services", "apps", "crates", "cmd"];
+  for (const parent of secondLevelParents) {
+    if (root && existsSync(join(root, parent))) {
+      try {
+        const subEntries = readdirSync(join(root, parent), {
+          withFileTypes: true
+        }).filter((d) => d.isDirectory()).map((d) => d.name).sort();
+        for (const sub of subEntries) {
+          addCandidateDir(`${parent}/${sub}`);
+        }
+      } catch {
+      }
+    }
+    for (const hint of hints) {
+      const match = new RegExp(`^(${parent}/[^/]+)/`).exec(hint);
+      if (match && match[1]) {
+        addCandidateDir(match[1]);
+      }
+    }
+  }
+  for (const wfDir of parsedWorkflows.byWorkingDir.keys()) {
+    addCandidateDir(wfDir);
+  }
+  const dirFile = (dir, file) => dir === "." ? file : `${dir}/${file}`;
+  const subprojectDirsWithManifestOrJob = candidateDirsOrdered.filter((dir) => {
+    if (dir === ".") {
+      return false;
+    }
+    return fileExists(dirFile(dir, "package.json")) || fileExists(dirFile(dir, "pyproject.toml")) || fileExists(dirFile(dir, "requirements.txt")) || fileExists(dirFile(dir, "Cargo.toml")) || fileExists(dirFile(dir, "go.mod")) || fileExists(dirFile(dir, "go.work")) || fileExists(dirFile(dir, "Makefile")) || fileExists(dirFile(dir, "Justfile")) || fileExists(dirFile(dir, "Taskfile.yml")) || parsedWorkflows.byWorkingDir.has(dir);
+  });
+  const targets = [];
+  for (const dir of candidateDirsOrdered) {
+    const wfEntry = parsedWorkflows.byWorkingDir.get(dir);
+    const hasPkgJson = fileExists(dirFile(dir, "package.json"));
+    const hasPyproject = fileExists(dirFile(dir, "pyproject.toml"));
+    const hasRequirements = fileExists(dirFile(dir, "requirements.txt"));
+    const hasCargo = fileExists(dirFile(dir, "Cargo.toml"));
+    const hasGoMod = fileExists(dirFile(dir, "go.mod")) || fileExists(dirFile(dir, "go.work"));
+    const hasMakefile = fileExists(dirFile(dir, "Makefile"));
+    const hasJustfile = fileExists(dirFile(dir, "Justfile")) || fileExists(dirFile(dir, "justfile"));
+    const hasTaskfile = fileExists(dirFile(dir, "Taskfile.yml")) || fileExists(dirFile(dir, "Taskfile.yaml"));
+    const hasTurboOrNx = fileExists(dirFile(dir, "turbo.json")) || fileExists(dirFile(dir, "nx.json"));
+    const hasRootHintsForLang = dir === "." && subprojectDirsWithManifestOrJob.length === 0 && hints.some((f) => /\.(?:ts|tsx|js|jsx|mjs|py|rs|go)$/.test(f));
+    const hasWfCommands = wfEntry !== void 0 && Boolean(
+      wfEntry.install_command || wfEntry.codegen_command || wfEntry.typecheck_command || wfEntry.lint_commands.length > 0 || wfEntry.test_command || wfEntry.build_command
+    );
+    if (!hasPkgJson && !hasPyproject && !hasRequirements && !hasCargo && !hasGoMod && !hasMakefile && !hasJustfile && !hasTaskfile && !hasTurboOrNx && !hasWfCommands && !hasRootHintsForLang) {
+      continue;
+    }
+    let kind = "node";
+    if (hasPkgJson || wfEntry?.kindHint === "node") {
+      kind = "node";
+    } else if (hasPyproject || hasRequirements || wfEntry?.kindHint === "python" || dir === "." && subprojectDirsWithManifestOrJob.length === 0 && hints.some((f) => f.endsWith(".py"))) {
+      kind = "python";
+    } else if (hasCargo || wfEntry?.kindHint === "rust" || dir === "." && subprojectDirsWithManifestOrJob.length === 0 && hints.some((f) => f.endsWith(".rs"))) {
+      kind = "rust";
+    } else if (hasGoMod || wfEntry?.kindHint === "go" || dir === "." && subprojectDirsWithManifestOrJob.length === 0 && hints.some((f) => f.endsWith(".go"))) {
+      kind = "go";
+    } else if (hasMakefile || hasJustfile || hasTaskfile) {
+      kind = "make";
+    } else if (hasTurboOrNx) {
+      kind = "node";
+    }
+    const name = dir === "." ? "root" : dir;
+    const pathPatterns = dir === "." ? ["**"] : [`${dir}/**`];
+    if (kind === "node") {
+      const pkgRaw = readFileSafe(dirFile(dir, "package.json"));
+      let scripts = {};
+      let allDeps = {};
+      if (pkgRaw) {
+        try {
+          const parsed = JSON.parse(pkgRaw);
+          scripts = parsed.scripts ?? {};
+          allDeps = {
+            ...parsed.dependencies ?? {},
+            ...parsed.devDependencies ?? {}
+          };
+        } catch {
+        }
+      }
+      const hasLock = fileExists(dirFile(dir, "package-lock.json"));
+      const isPnpm = fileExists(dirFile(dir, "pnpm-lock.yaml")) || fileExists("pnpm-lock.yaml");
+      const isYarn = fileExists(dirFile(dir, "yarn.lock")) || fileExists("yarn.lock");
+      const defaultInstall = isPnpm ? "pnpm install" : isYarn ? "yarn install" : hasLock ? "npm ci" : "npm install";
+      const hasPrisma = fileExists(dirFile(dir, "prisma/schema.prisma")) || hints.some(
+        (h) => h.startsWith(dir === "." ? "prisma/" : `${dir}/prisma/`) && h.endsWith(".prisma")
+      ) || "@prisma/client" in allDeps || "prisma" in allDeps || "prisma:generate" in scripts;
+      const hasTs = fileExists(dirFile(dir, "tsconfig.json")) || "typescript" in allDeps || "typecheck" in scripts || pkgRaw === void 0;
+      const install_command = wfEntry?.install_command ?? defaultInstall;
+      const codegen_command = wfEntry?.codegen_command ?? (hasPrisma ? "npx prisma generate" : void 0);
+      const typecheck_command = wfEntry?.typecheck_command ?? (scripts.typecheck ? "npm run typecheck" : hasTs ? "npx tsc --noEmit" : void 0);
+      const lint_command = wfEntry && wfEntry.lint_commands.length > 0 ? wfEntry.lint_commands.join(" && ") : scripts.lint || pkgRaw === void 0 ? "npm run lint" : void 0;
+      let test_command = wfEntry?.test_command;
+      if (!test_command) {
+        if (scripts["test:unit"]) {
+          test_command = "npm run test:unit";
+        } else if (!wfEntry?.hasServices) {
+          if (scripts.test || pkgRaw === void 0) {
+            test_command = "npm test";
+          }
+        }
+      }
+      const build_command = wfEntry?.build_command ?? (scripts.build || pkgRaw === void 0 ? "npm run build" : void 0);
+      targets.push({
+        name,
+        working_directory: dir,
+        kind: "node",
+        path_patterns: pathPatterns,
+        ...install_command ? { install_command } : {},
+        ...codegen_command ? { codegen_command } : {},
+        ...typecheck_command ? { typecheck_command } : {},
+        ...lint_command ? { lint_command } : {},
+        ...test_command ? { test_command } : {},
+        ...build_command ? { build_command } : {}
+      });
+    } else if (kind === "python") {
+      const pyRaw = readFileSafe(dirFile(dir, "pyproject.toml")) ?? "";
+      const install_command = wfEntry?.install_command ?? (hasRequirements && !hasPyproject ? "pip install -r requirements.txt" : "pip install -e .");
+      const codegen_command = wfEntry?.codegen_command;
+      const typecheck_command = wfEntry?.typecheck_command ?? (pyRaw.includes("mypy") || fileExists(dirFile(dir, "mypy.ini")) ? "mypy ." : pyRaw.includes("pyright") || fileExists(dirFile(dir, "pyrightconfig.json")) ? "pyright" : void 0);
+      const lint_command = wfEntry && wfEntry.lint_commands.length > 0 ? wfEntry.lint_commands.join(" && ") : "ruff check .";
+      const test_command = wfEntry?.test_command ?? (!wfEntry?.hasServices ? "pytest -q" : void 0);
+      targets.push({
+        name,
+        working_directory: dir,
+        kind: "python",
+        path_patterns: pathPatterns,
+        install_command,
+        ...codegen_command ? { codegen_command } : {},
+        ...typecheck_command ? { typecheck_command } : {},
+        ...lint_command ? { lint_command } : {},
+        ...test_command ? { test_command } : {}
+      });
+    } else if (kind === "rust") {
+      const typecheck_command = wfEntry?.typecheck_command ?? "cargo check --all-targets";
+      const lint_command = wfEntry && wfEntry.lint_commands.length > 0 ? wfEntry.lint_commands.join(" && ") : "cargo clippy --all-targets --all-features -- -D warnings";
+      const test_command = wfEntry?.test_command ?? (!wfEntry?.hasServices ? "cargo test --all-targets" : void 0);
+      const build_command = wfEntry?.build_command ?? "cargo build";
+      targets.push({
+        name,
+        working_directory: dir,
+        kind: "rust",
+        path_patterns: pathPatterns,
+        typecheck_command,
+        lint_command,
+        ...test_command ? { test_command } : {},
+        build_command
+      });
+    } else if (kind === "go") {
+      const typecheck_command = wfEntry?.typecheck_command ?? "go vet ./...";
+      const lint_command = wfEntry && wfEntry.lint_commands.length > 0 ? wfEntry.lint_commands.join(" && ") : void 0;
+      const test_command = wfEntry?.test_command ?? (!wfEntry?.hasServices ? "go test ./..." : void 0);
+      const build_command = wfEntry?.build_command ?? "go build ./...";
+      targets.push({
+        name,
+        working_directory: dir,
+        kind: "go",
+        path_patterns: pathPatterns,
+        typecheck_command,
+        ...lint_command ? { lint_command } : {},
+        ...test_command ? { test_command } : {},
+        build_command
+      });
+    } else if (kind === "make") {
+      const mkContent = readFileSafe(dirFile(dir, "Makefile")) ?? "";
+      const mkTargets = mkContent ? parseMakefileTargets(mkContent) : [];
+      const runnerBin = hasMakefile ? "make" : hasJustfile ? "just" : "task";
+      const lint_command = wfEntry && wfEntry.lint_commands.length > 0 ? wfEntry.lint_commands.join(" && ") : mkTargets.includes("lint") ? `${runnerBin} lint` : void 0;
+      const typecheck_command = wfEntry?.typecheck_command ?? (mkTargets.includes("typecheck") ? `${runnerBin} typecheck` : void 0);
+      const test_command = wfEntry?.test_command ?? (mkTargets.includes("check") && !mkTargets.includes("test") ? `${runnerBin} check` : `${runnerBin} test`);
+      const build_command = wfEntry?.build_command ?? (mkTargets.includes("build") ? `${runnerBin} build` : void 0);
+      targets.push({
+        name,
+        working_directory: dir,
+        kind: "make",
+        path_patterns: pathPatterns,
+        ...typecheck_command ? { typecheck_command } : {},
+        ...lint_command ? { lint_command } : {},
+        ...test_command ? { test_command } : {},
+        ...build_command ? { build_command } : {}
+      });
+    }
+  }
+  const scriptCommands = [...parsedWorkflows.customScriptCommands];
+  if (scriptCommands.length === 0) {
+    const scriptFiles = /* @__PURE__ */ new Set();
+    for (const h of hints) {
+      if (/^scripts\/[^/]+\.py$/.test(h)) {
+        scriptFiles.add(h);
+      }
+    }
+    if (root && existsSync(join(root, "scripts"))) {
+      try {
+        for (const entry of readdirSync(join(root, "scripts")).sort()) {
+          if (entry.endsWith(".py")) {
+            scriptFiles.add(`scripts/${entry}`);
+          }
+        }
+      } catch {
+      }
+    }
+    for (const sf of scriptFiles) {
+      scriptCommands.push(`python3 ${sf}`);
+    }
+  }
+  if (scriptCommands.length > 0) {
+    const scriptPatterns = ["scripts/**", "docs/**", "*.md"];
+    if (targets.some((t) => t.working_directory === "backend")) {
+      scriptPatterns.push("backend/**");
+    }
+    if (targets.some((t) => t.working_directory === "frontend")) {
+      scriptPatterns.push("frontend/**");
+    }
+    targets.push({
+      name: "scripts",
+      working_directory: ".",
+      kind: "custom",
+      path_patterns: scriptPatterns,
+      test_command: scriptCommands.join(" && ")
+    });
+  }
+  if (targets.length === 0) {
+    targets.push({
+      name: "root",
+      working_directory: ".",
+      kind: "node",
+      path_patterns: ["**"],
+      install_command: "npm install",
+      typecheck_command: "npx tsc --noEmit",
+      lint_command: "npm run lint",
+      test_command: "npm test",
+      build_command: "npm run build"
+    });
+  }
+  return {
+    wait_for_external_ci: true,
+    external_ci_timeout_minutes: 15,
+    grace_window_seconds: 45,
+    ...parsedWorkflows.deferredWorkflows.length > 0 ? { deferred_external_workflows: parsedWorkflows.deferredWorkflows } : {},
+    targets
+  };
 }
 function detectRepositoryStack(params) {
   const root = params.repoRootDir;
@@ -241,6 +891,7 @@ function detectRepositoryStack(params) {
   } else if (isGo) {
     kind = "go";
   }
+  const verification = discoverVerificationProfile(params);
   return {
     kind,
     nodePackageManager,
@@ -250,7 +901,8 @@ function detectRepositoryStack(params) {
     hasDockerCompose,
     hasPlaywrightOrE2e,
     nodeScripts,
-    subprojects
+    subprojects,
+    verification
   };
 }
 function buildZizmorConfigYaml() {
@@ -581,52 +1233,10 @@ function buildStackAwareCiWorkflowYaml(params) {
   };
 }
 
-// src/frontend/impeccable-planning.ts
-function planImpeccableDesignSession(input) {
-  if (!input.touchesFrontendUi) {
-    return {
-      impeccable_invoked: false,
-      open_design_questions: [],
-      versioned_artifact_paths: []
-    };
-  }
-  const answeredSet = new Set(
-    input.alreadyAnsweredTopics.map((t) => t.trim().toLowerCase())
-  );
-  const openQuestions = input.candidateDesignTopics.filter(
-    (topic) => !answeredSet.has(topic.trim().toLowerCase())
-  );
-  const cleanSlug = input.surfaceSlug.trim().replace(/^\/+|\/+$/g, "");
-  return {
-    impeccable_invoked: true,
-    open_design_questions: openQuestions,
-    versioned_artifact_paths: [
-      ".impeccable.md",
-      "DESIGN.md",
-      `.impeccable/surfaces/${cleanSlug}.md`
-    ]
-  };
-}
-
-// src/frontend/impeccable-pr-gate.ts
-function evaluateImpeccableFrontendPr(input) {
-  const blocking = [];
-  const informational = [];
-  for (const f of input.findings) {
-    if (f.isPreExistingInBaseline || f.hasApprovedException) {
-      continue;
-    }
-    if (f.category === "subjective_aesthetic_suggestion") {
-      informational.push(f);
-      continue;
-    }
-    blocking.push(f);
-  }
-  return {
-    conclusion: blocking.length === 0 ? "success" : "failure",
-    blocking_findings: blocking,
-    informational_findings: informational
-  };
+// src/auth/github-apps.ts
+var PRIVATE_KEY_DETECTION_PATTERN = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|EPURE_(?:AGENT|RELEASE)_APP_PRIVATE_KEY\s*=\s*\S+/i;
+function containsPrivateKeyMaterial(text) {
+  return PRIVATE_KEY_DETECTION_PATTERN.test(text);
 }
 
 // src/security/prompt-injection-guard.ts
@@ -1587,6 +2197,2246 @@ function resolveTrustedReviewerPrompt(params) {
   };
 }
 
+// src/bootstrap/setup-repo.ts
+var CONVENTIONAL_COMMIT_PATTERN_REGEX = "^(feat|fix|docs|style|refactor|perf|test|chore|ci|build|revert)(\\([a-z0-9/-]+\\))?(!)?: .+";
+var DEFAULT_VERIFICATION_PROFILE = {
+  wait_for_external_ci: true,
+  external_ci_timeout_minutes: 15,
+  grace_window_seconds: 45,
+  targets: []
+};
+var DEFAULT_AGENTS_CONFIG = {
+  harness: "pi",
+  models: {
+    planning: "claude-sonnet-4-20250514",
+    implementation: "claude-sonnet-4-20250514",
+    review: "gpt-4.1"
+  },
+  merge_policy: "strict",
+  max_code_fix_attempts: 3,
+  max_transient_api_retries: 4,
+  transient_retry_backoff_seconds: [5, 15, 45, 120],
+  job_timeout_minutes: 60,
+  review_timeout_minutes: 30,
+  max_concurrent_tasks_per_feature: 3,
+  trace_retention_days: 30,
+  preview_retention_days: 14,
+  github_pages_previews: false,
+  verification: DEFAULT_VERIFICATION_PROFILE
+};
+function normalizeVerificationTarget(target) {
+  return {
+    name: target.name,
+    working_directory: target.working_directory,
+    kind: target.kind,
+    path_patterns: [...target.path_patterns],
+    ...target.install_command ? { install_command: target.install_command } : {},
+    ...target.codegen_command ? { codegen_command: target.codegen_command } : {},
+    ...target.typecheck_command ? { typecheck_command: target.typecheck_command } : {},
+    ...target.lint_command ? { lint_command: target.lint_command } : {},
+    ...target.test_command ? { test_command: target.test_command } : {},
+    ...target.build_command ? { build_command: target.build_command } : {}
+  };
+}
+function resolveAgentsConfig(overrides = {}) {
+  const sec = overrides.security_overrides;
+  if (sec) {
+    if (sec.require_write_permission === false) {
+      return {
+        valid: false,
+        error_code: "SECURITY_INVARIANT_VIOLATION",
+        error_message: "Local .github/agents.yml cannot disable effective write permission verification (ADR-0004, ADR-0010).",
+        config: DEFAULT_AGENTS_CONFIG
+      };
+    }
+    if (sec.sandbox_isolation === false) {
+      return {
+        valid: false,
+        error_code: "SECURITY_INVARIANT_VIOLATION",
+        error_message: "Local .github/agents.yml cannot disable untrusted code sandbox isolation (ADR-0011, ADR-0023).",
+        config: DEFAULT_AGENTS_CONFIG
+      };
+    }
+    if (sec.allow_agent_release === true) {
+      return {
+        valid: false,
+        error_code: "SECURITY_INVARIANT_VIOLATION",
+        error_message: "Local .github/agents.yml cannot grant release authority to the Agent App (ADR-0009, ADR-0010).",
+        config: DEFAULT_AGENTS_CONFIG
+      };
+    }
+    if (sec.auto_merge_dev === true || sec.auto_merge_main === true) {
+      return {
+        valid: false,
+        error_code: "SECURITY_INVARIANT_VIOLATION",
+        error_message: "Local .github/agents.yml cannot enable automatic merging into 'dev' or 'main' (ADR-0011).",
+        config: DEFAULT_AGENTS_CONFIG
+      };
+    }
+  }
+  const pagesPreviews = overrides.github_pages_previews ?? DEFAULT_AGENTS_CONFIG.github_pages_previews;
+  if (pagesPreviews) {
+    if (overrides.github_pages_human_consent !== true || overrides.preview_separate_origin !== true) {
+      return {
+        valid: false,
+        error_code: "PAGES_PREVIEW_CONSENT_OR_ORIGIN_REQUIRED",
+        error_message: "GitHub Pages previews require explicit human consent (github_pages_human_consent: true) and an isolated non-production origin (preview_separate_origin: true) per Q70/Q73.",
+        config: DEFAULT_AGENTS_CONFIG
+      };
+    }
+  }
+  const verification = overrides.verification ? {
+    wait_for_external_ci: overrides.verification.wait_for_external_ci ?? DEFAULT_VERIFICATION_PROFILE.wait_for_external_ci,
+    external_ci_timeout_minutes: overrides.verification.external_ci_timeout_minutes ?? DEFAULT_VERIFICATION_PROFILE.external_ci_timeout_minutes,
+    grace_window_seconds: overrides.verification.grace_window_seconds ?? DEFAULT_VERIFICATION_PROFILE.grace_window_seconds,
+    ...overrides.verification.deferred_external_workflows && overrides.verification.deferred_external_workflows.length > 0 ? {
+      deferred_external_workflows: [
+        ...overrides.verification.deferred_external_workflows
+      ]
+    } : {},
+    targets: overrides.verification.targets ? overrides.verification.targets.map(normalizeVerificationTarget) : DEFAULT_VERIFICATION_PROFILE.targets
+  } : DEFAULT_VERIFICATION_PROFILE;
+  const config = {
+    harness: overrides.harness ?? DEFAULT_AGENTS_CONFIG.harness,
+    models: {
+      planning: overrides.models?.planning ?? DEFAULT_AGENTS_CONFIG.models.planning,
+      implementation: overrides.models?.implementation ?? DEFAULT_AGENTS_CONFIG.models.implementation,
+      review: overrides.models?.review ?? DEFAULT_AGENTS_CONFIG.models.review
+    },
+    merge_policy: overrides.merge_policy ?? DEFAULT_AGENTS_CONFIG.merge_policy,
+    max_code_fix_attempts: overrides.max_code_fix_attempts ?? DEFAULT_AGENTS_CONFIG.max_code_fix_attempts,
+    max_transient_api_retries: overrides.max_transient_api_retries ?? DEFAULT_AGENTS_CONFIG.max_transient_api_retries,
+    transient_retry_backoff_seconds: overrides.transient_retry_backoff_seconds ?? DEFAULT_AGENTS_CONFIG.transient_retry_backoff_seconds,
+    job_timeout_minutes: overrides.job_timeout_minutes ?? DEFAULT_AGENTS_CONFIG.job_timeout_minutes,
+    review_timeout_minutes: overrides.review_timeout_minutes ?? DEFAULT_AGENTS_CONFIG.review_timeout_minutes,
+    max_concurrent_tasks_per_feature: overrides.max_concurrent_tasks_per_feature ?? DEFAULT_AGENTS_CONFIG.max_concurrent_tasks_per_feature,
+    trace_retention_days: overrides.trace_retention_days ?? DEFAULT_AGENTS_CONFIG.trace_retention_days,
+    preview_retention_days: overrides.preview_retention_days ?? DEFAULT_AGENTS_CONFIG.preview_retention_days,
+    github_pages_previews: pagesPreviews,
+    verification
+  };
+  return {
+    valid: true,
+    error_code: "NONE",
+    error_message: "",
+    config
+  };
+}
+function unquoteYamlScalar(raw) {
+  const trimmed = raw.trim();
+  if (trimmed.startsWith('"') && trimmed.endsWith('"') || trimmed.startsWith("'") && trimmed.endsWith("'")) {
+    if (trimmed.startsWith('"')) {
+      try {
+        return JSON.parse(trimmed);
+      } catch {
+        return trimmed.slice(1, -1);
+      }
+    }
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+function parseYamlStringArrayInline(raw) {
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) {
+    return [];
+  }
+  const inner = trimmed.slice(1, -1).trim();
+  if (!inner) {
+    return [];
+  }
+  const items = [];
+  let current = "";
+  let inQuote = null;
+  let escaped = false;
+  for (let i = 0; i < inner.length; i += 1) {
+    const ch = inner[i] ?? "";
+    if (escaped) {
+      current += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\" && inQuote === '"') {
+      current += ch;
+      escaped = true;
+      continue;
+    }
+    if ((ch === '"' || ch === "'") && !inQuote) {
+      inQuote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === inQuote) {
+      inQuote = null;
+      current += ch;
+      continue;
+    }
+    if (ch === "," && !inQuote) {
+      items.push(unquoteYamlScalar(current));
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  if (current.trim().length > 0) {
+    items.push(unquoteYamlScalar(current));
+  }
+  return items;
+}
+function parseAgentsYaml(yamlContent) {
+  let harness;
+  const models = {};
+  let merge_policy;
+  let task_auto_merge_enabled;
+  let max_code_fix_attempts;
+  let max_transient_api_retries;
+  let transient_retry_backoff_seconds;
+  let job_timeout_minutes;
+  let review_timeout_minutes;
+  let max_concurrent_tasks_per_feature;
+  let trace_retention_days;
+  let preview_retention_days;
+  let github_pages_previews;
+  let github_pages_human_consent;
+  let preview_separate_origin;
+  let wait_for_external_ci;
+  let external_ci_timeout_minutes;
+  let grace_window_seconds;
+  let deferred_external_workflows;
+  let hasTargetsKey = false;
+  const targets = [];
+  const securityOverrides = {};
+  const lines = yamlContent.split(/\r?\n/);
+  let section = "root";
+  let inTargets = false;
+  let inDeferredWorkflows = false;
+  let inCurrentTargetPathPatterns = false;
+  let currentTarget = null;
+  const parseBool = (raw) => {
+    const v = unquoteYamlScalar(raw).toLowerCase();
+    if (v === "true") return true;
+    if (v === "false") return false;
+    return void 0;
+  };
+  const parseNum = (raw) => {
+    const n = Number.parseInt(unquoteYamlScalar(raw), 10);
+    return Number.isFinite(n) ? n : void 0;
+  };
+  const assignTargetField = (targetObj, key, rawVal) => {
+    const val = unquoteYamlScalar(rawVal);
+    if (key === "name") {
+      targetObj.name = val;
+    } else if (key === "working_directory") {
+      targetObj.working_directory = val;
+    } else if (key === "kind") {
+      targetObj.kind = val;
+    } else if (key === "path_patterns") {
+      if (rawVal.trim().startsWith("[")) {
+        targetObj.path_patterns = parseYamlStringArrayInline(rawVal);
+        inCurrentTargetPathPatterns = false;
+      } else {
+        targetObj.path_patterns = [];
+        inCurrentTargetPathPatterns = true;
+      }
+    } else if (key === "install_command") {
+      targetObj.install_command = val;
+    } else if (key === "codegen_command") {
+      targetObj.codegen_command = val;
+    } else if (key === "typecheck_command") {
+      targetObj.typecheck_command = val;
+    } else if (key === "lint_command") {
+      targetObj.lint_command = val;
+    } else if (key === "test_command") {
+      targetObj.test_command = val;
+    } else if (key === "build_command") {
+      targetObj.build_command = val;
+    }
+  };
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+    const indent = /^(\s*)/.exec(rawLine)?.[1]?.length ?? 0;
+    if (indent === 0) {
+      inTargets = false;
+      inDeferredWorkflows = false;
+      inCurrentTargetPathPatterns = false;
+      currentTarget = null;
+      const kv = /^([a-zA-Z0-9_]+):\s*(.*)$/.exec(trimmed);
+      if (!kv || !kv[1]) {
+        continue;
+      }
+      const key = kv[1];
+      const val = (kv[2] ?? "").replace(/\s+#.*$/, "").trim();
+      if (key === "models" && !val) {
+        section = "models";
+        continue;
+      }
+      if (key === "verification" && !val) {
+        section = "verification";
+        continue;
+      }
+      if ((key === "security_invariants" || key === "security_overrides") && !val) {
+        section = "security";
+        continue;
+      }
+      section = "root";
+      if (key === "harness") {
+        const h = unquoteYamlScalar(val);
+        if (h === "pi" || h === "codex") {
+          harness = h;
+        }
+      } else if (key === "merge_policy") {
+        const mp = unquoteYamlScalar(val);
+        if (mp === "strict" || mp === "relaxed") {
+          merge_policy = mp;
+        }
+      } else if (key === "task_auto_merge_enabled") {
+        task_auto_merge_enabled = parseBool(val);
+      } else if (key === "max_code_fix_attempts") {
+        max_code_fix_attempts = parseNum(val);
+      } else if (key === "max_transient_api_retries") {
+        max_transient_api_retries = parseNum(val);
+      } else if (key === "transient_retry_backoff_seconds") {
+        const nums = parseYamlStringArrayInline(val).map((s) => Number.parseInt(s, 10)).filter((n) => Number.isFinite(n));
+        if (nums.length === 4) {
+          transient_retry_backoff_seconds = [
+            nums[0],
+            nums[1],
+            nums[2],
+            nums[3]
+          ];
+        }
+      } else if (key === "job_timeout_minutes") {
+        job_timeout_minutes = parseNum(val);
+      } else if (key === "review_timeout_minutes") {
+        review_timeout_minutes = parseNum(val);
+      } else if (key === "max_concurrent_tasks_per_feature") {
+        max_concurrent_tasks_per_feature = parseNum(val);
+      } else if (key === "trace_retention_days") {
+        trace_retention_days = parseNum(val);
+      } else if (key === "preview_retention_days") {
+        preview_retention_days = parseNum(val);
+      } else if (key === "github_pages_previews") {
+        github_pages_previews = parseBool(val);
+      } else if (key === "github_pages_human_consent") {
+        github_pages_human_consent = parseBool(val);
+      } else if (key === "preview_separate_origin") {
+        preview_separate_origin = parseBool(val);
+      }
+      continue;
+    }
+    if (section === "models") {
+      const kv = /^([a-zA-Z0-9_]+):\s*(.+)$/.exec(trimmed);
+      if (kv && kv[1] && kv[2]) {
+        const k = kv[1];
+        const v = unquoteYamlScalar(kv[2].replace(/\s+#.*$/, ""));
+        if (k === "planning" || k === "implementation" || k === "review") {
+          models[k] = v;
+        }
+      }
+      continue;
+    }
+    if (section === "security") {
+      const kv = /^([a-zA-Z0-9_]+):\s*(.+)$/.exec(trimmed);
+      if (kv && kv[1] && kv[2]) {
+        const k = kv[1];
+        const b = parseBool(kv[2].replace(/\s+#.*$/, ""));
+        if (b !== void 0) {
+          if (k === "require_write_permission") {
+            securityOverrides.require_write_permission = b;
+          } else if (k === "sandbox_isolation") {
+            securityOverrides.sandbox_isolation = b;
+          } else if (k === "allow_agent_release") {
+            securityOverrides.allow_agent_release = b;
+          } else if (k === "auto_merge_dev") {
+            securityOverrides.auto_merge_dev = b;
+          } else if (k === "auto_merge_main") {
+            securityOverrides.auto_merge_main = b;
+          }
+        }
+      }
+      continue;
+    }
+    if (section === "verification") {
+      if (indent === 2) {
+        inTargets = false;
+        inDeferredWorkflows = false;
+        inCurrentTargetPathPatterns = false;
+        currentTarget = null;
+        const kv = /^([a-zA-Z0-9_]+):\s*(.*)$/.exec(trimmed);
+        if (!kv || !kv[1]) {
+          continue;
+        }
+        const k = kv[1];
+        const v = (kv[2] ?? "").replace(/\s+#.*$/, "").trim();
+        if (k === "wait_for_external_ci") {
+          wait_for_external_ci = parseBool(v);
+        } else if (k === "external_ci_timeout_minutes") {
+          external_ci_timeout_minutes = parseNum(v);
+        } else if (k === "grace_window_seconds") {
+          grace_window_seconds = parseNum(v);
+        } else if (k === "deferred_external_workflows") {
+          if (v.startsWith("[")) {
+            deferred_external_workflows = parseYamlStringArrayInline(v);
+          } else {
+            deferred_external_workflows = [];
+            inDeferredWorkflows = true;
+          }
+        } else if (k === "targets") {
+          hasTargetsKey = true;
+          if (v === "[]") {
+            inTargets = false;
+          } else {
+            inTargets = true;
+          }
+        }
+        continue;
+      }
+      if (inDeferredWorkflows && trimmed.startsWith("-")) {
+        const item = unquoteYamlScalar(trimmed.replace(/^-\s*/, ""));
+        if (item) {
+          deferred_external_workflows = deferred_external_workflows ?? [];
+          deferred_external_workflows.push(item);
+        }
+        continue;
+      }
+      if (inTargets) {
+        if (indent === 4 && trimmed.startsWith("-")) {
+          inCurrentTargetPathPatterns = false;
+          currentTarget = {};
+          targets.push(currentTarget);
+          const afterDash = trimmed.replace(/^-\s*/, "");
+          const kv = /^([a-zA-Z0-9_]+):\s*(.*)$/.exec(afterDash);
+          if (kv && kv[1]) {
+            assignTargetField(
+              currentTarget,
+              kv[1],
+              (kv[2] ?? "").replace(/\s+#.*$/, "").trim()
+            );
+          }
+          continue;
+        }
+        if (currentTarget) {
+          if (inCurrentTargetPathPatterns && trimmed.startsWith("-")) {
+            const pat = unquoteYamlScalar(trimmed.replace(/^-\s*/, ""));
+            currentTarget.path_patterns = currentTarget.path_patterns ?? [];
+            currentTarget.path_patterns.push(pat);
+            continue;
+          }
+          const kv = /^([a-zA-Z0-9_]+):\s*(.*)$/.exec(trimmed);
+          if (kv && kv[1]) {
+            inCurrentTargetPathPatterns = false;
+            assignTargetField(
+              currentTarget,
+              kv[1],
+              (kv[2] ?? "").replace(/\s+#.*$/, "").trim()
+            );
+          }
+        }
+      }
+    }
+  }
+  const parsedTargets = targets.filter((t) => Boolean(t.name)).map((t) => ({
+    name: t.name ?? "root",
+    working_directory: t.working_directory ?? ".",
+    kind: t.kind ?? "node",
+    path_patterns: t.path_patterns && t.path_patterns.length > 0 ? t.path_patterns : ["**"],
+    ...t.install_command ? { install_command: t.install_command } : {},
+    ...t.codegen_command ? { codegen_command: t.codegen_command } : {},
+    ...t.typecheck_command ? { typecheck_command: t.typecheck_command } : {},
+    ...t.lint_command ? { lint_command: t.lint_command } : {},
+    ...t.test_command ? { test_command: t.test_command } : {},
+    ...t.build_command ? { build_command: t.build_command } : {}
+  }));
+  const hasVerificationOverrides = wait_for_external_ci !== void 0 || external_ci_timeout_minutes !== void 0 || grace_window_seconds !== void 0 || deferred_external_workflows !== void 0 || hasTargetsKey || parsedTargets.length > 0;
+  const overrides = {
+    ...harness ? { harness } : {},
+    ...Object.keys(models).length > 0 ? { models } : {},
+    ...merge_policy ? { merge_policy } : {},
+    ...max_code_fix_attempts !== void 0 ? { max_code_fix_attempts } : {},
+    ...max_transient_api_retries !== void 0 ? { max_transient_api_retries } : {},
+    ...transient_retry_backoff_seconds ? { transient_retry_backoff_seconds } : {},
+    ...job_timeout_minutes !== void 0 ? { job_timeout_minutes } : {},
+    ...review_timeout_minutes !== void 0 ? { review_timeout_minutes } : {},
+    ...max_concurrent_tasks_per_feature !== void 0 ? { max_concurrent_tasks_per_feature } : {},
+    ...trace_retention_days !== void 0 ? { trace_retention_days } : {},
+    ...preview_retention_days !== void 0 ? { preview_retention_days } : {},
+    ...github_pages_previews !== void 0 ? { github_pages_previews } : {},
+    ...github_pages_human_consent !== void 0 ? { github_pages_human_consent } : {},
+    ...preview_separate_origin !== void 0 ? { preview_separate_origin } : {},
+    ...hasVerificationOverrides ? {
+      verification: {
+        ...wait_for_external_ci !== void 0 ? { wait_for_external_ci } : {},
+        ...external_ci_timeout_minutes !== void 0 ? { external_ci_timeout_minutes } : {},
+        ...grace_window_seconds !== void 0 ? { grace_window_seconds } : {},
+        ...deferred_external_workflows !== void 0 ? { deferred_external_workflows } : {},
+        ...hasTargetsKey || parsedTargets.length > 0 ? { targets: parsedTargets } : {}
+      }
+    } : {},
+    ...Object.keys(securityOverrides).length > 0 ? { security_overrides: securityOverrides } : {}
+  };
+  const resolved = resolveAgentsConfig(overrides);
+  return {
+    ...resolved.config,
+    ...task_auto_merge_enabled !== void 0 ? { task_auto_merge_enabled } : {},
+    ...github_pages_human_consent !== void 0 ? { github_pages_human_consent } : {},
+    ...preview_separate_origin !== void 0 ? { preview_separate_origin } : {},
+    ...Object.keys(securityOverrides).length > 0 ? { security_overrides: securityOverrides } : {}
+  };
+}
+
+// src/execution/external-ci-gate.ts
+import { basename as basename2 } from "node:path";
+
+// src/sandbox/polyglot-workspace-runner.ts
+import { execFileSync } from "node:child_process";
+import {
+  cpSync,
+  existsSync as existsSync2,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync as readFileSync2,
+  realpathSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join as join2, resolve, sep } from "node:path";
+
+// src/sandbox/llm-sandbox.ts
+import { randomBytes } from "node:crypto";
+import { createServer } from "node:http";
+import { spawn } from "node:child_process";
+var SECRET_ENV_NAME_PATTERN = /^(?:OPENAI_API_KEY|ANTHROPIC_API_KEY|GOOGLE_API_KEY|GEMINI_API_KEY|LLM_API_KEY|GITHUB_TOKEN|GH_TOKEN|GITHUB_PAT|EPURE_.*(?:KEY|TOKEN|SECRET)|AWS_.*|AZURE_.*|GCP_.*|NPM_TOKEN|NODE_AUTH_TOKEN|ACTIONS_RUNTIME_TOKEN|ACTIONS_ID_TOKEN_REQUEST_TOKEN)$/i;
+var ALLOWED_PROXY_PATHS = /* @__PURE__ */ new Set([
+  "/v1/chat/completions",
+  "/v1/responses",
+  "/v1/messages",
+  "/chat/completions",
+  "/responses",
+  "/messages"
+]);
+function buildSanitizedSandboxEnv(runnerEnv, proxy) {
+  const sanitized = {};
+  for (const [key, value] of Object.entries(runnerEnv)) {
+    if (typeof value !== "string") {
+      continue;
+    }
+    if (SECRET_ENV_NAME_PATTERN.test(key)) {
+      continue;
+    }
+    if (containsPrivateKeyMaterial(value)) {
+      continue;
+    }
+    sanitized[key] = value;
+  }
+  sanitized.EPURE_SANDBOX_ACTIVE = "true";
+  sanitized.EPURE_LLM_PROXY_URL = proxy.proxyUrl;
+  sanitized.EPURE_LLM_PROXY_NONCE = proxy.proxyNonce;
+  sanitized.GITHUB_TOKEN_PERMISSIONS = "none";
+  return sanitized;
+}
+function readRequestBody(req) {
+  return new Promise((resolve2, reject) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => resolve2(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", reject);
+  });
+}
+async function createLlmSandboxProxy(options) {
+  const realKey = options.llmApiKey.trim();
+  const proxyNonce = randomBytes(24).toString("hex");
+  const defaultUpstream = async (req) => ({
+    status: 200,
+    body: JSON.stringify({
+      id: "chatcmpl-epure-proxy",
+      object: "chat.completion",
+      path: req.path,
+      choices: [{ index: 0, message: { role: "assistant", content: "ok" } }]
+    })
+  });
+  const handler = options.upstreamHandler ?? defaultUpstream;
+  const server = createServer(
+    async (req, res) => {
+      const providedNonce = req.headers["x-epure-proxy-nonce"];
+      if (providedNonce !== proxyNonce) {
+        res.statusCode = 401;
+        res.setHeader("content-type", "application/json");
+        res.end(
+          JSON.stringify({
+            error_code: "PROXY_UNAUTHORIZED_NONCE",
+            error_message: "Missing or invalid x-epure-proxy-nonce header for local sandbox LLM proxy."
+          })
+        );
+        return;
+      }
+      const rawUrl = req.url ?? "/";
+      const normalizedPath = rawUrl.split("?")[0] ?? "/";
+      if (!ALLOWED_PROXY_PATHS.has(normalizedPath)) {
+        res.statusCode = 403;
+        res.setHeader("content-type", "application/json");
+        res.end(
+          JSON.stringify({
+            error_code: "PROXY_FORBIDDEN_ENDPOINT",
+            error_message: `Sandbox LLM proxy forbids access to '${normalizedPath}'.`
+          })
+        );
+        return;
+      }
+      const body = await readRequestBody(req);
+      const upstreamResp = await handler(
+        {
+          method: req.method ?? "POST",
+          path: normalizedPath,
+          body
+        },
+        realKey
+      );
+      res.statusCode = upstreamResp.status;
+      res.setHeader("content-type", "application/json");
+      res.end(redactSecrets(upstreamResp.body, [realKey]));
+    }
+  );
+  await new Promise((resolve2, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => resolve2());
+  });
+  const address = server.address();
+  const proxyUrl = `http://127.0.0.1:${address.port}`;
+  return {
+    proxyUrl,
+    proxyNonce,
+    close: () => new Promise((resolve2) => {
+      server.close(() => resolve2());
+    })
+  };
+}
+function collectRunnerSecretValues(runnerEnv) {
+  const values = [];
+  for (const [key, value] of Object.entries(runnerEnv)) {
+    if (typeof value === "string" && value.trim().length >= 8) {
+      if (SECRET_ENV_NAME_PATTERN.test(key) || containsPrivateKeyMaterial(value)) {
+        values.push(value.trim());
+      }
+    }
+  }
+  return values;
+}
+async function runInUntrustedCodeSandbox(input) {
+  const startMs = Date.now();
+  if (!input.isolationAvailable) {
+    return {
+      isolated: false,
+      error_code: "SANDBOX_ISOLATION_UNAVAILABLE",
+      error_message: "Fail-closed: container/process sandbox isolation is unavailable on this runner (ADR-0011, ADR-0023).",
+      exit_code: 1,
+      stdout: "",
+      stderr: "",
+      duration_ms: Date.now() - startMs,
+      proxy_url: ""
+    };
+  }
+  const llmApiKey = (input.runnerEnv.OPENAI_API_KEY ?? input.runnerEnv.ANTHROPIC_API_KEY ?? input.runnerEnv.GOOGLE_API_KEY ?? input.runnerEnv.GEMINI_API_KEY ?? input.runnerEnv.LLM_API_KEY ?? "").trim();
+  if (!llmApiKey) {
+    return {
+      isolated: false,
+      error_code: "LLM_API_KEY_MISSING",
+      error_message: "Fail-closed: runner is missing LLM API key (OPENAI_API_KEY, ANTHROPIC_API_KEY, or LLM_API_KEY) for the local proxy sidecar.",
+      exit_code: 1,
+      stdout: "",
+      stderr: "",
+      duration_ms: Date.now() - startMs,
+      proxy_url: ""
+    };
+  }
+  const secretValues = collectRunnerSecretValues(input.runnerEnv);
+  const proxy = await createLlmSandboxProxy({
+    llmApiKey,
+    upstreamHandler: input.upstreamHandler
+  });
+  try {
+    const sanitizedEnv = buildSanitizedSandboxEnv(input.runnerEnv, {
+      proxyUrl: proxy.proxyUrl,
+      proxyNonce: proxy.proxyNonce
+    });
+    const args = input.args ? [...input.args] : [];
+    const timeoutMs = input.timeoutMs ?? 60 * 60 * 1e3;
+    const childResult = await new Promise((resolve2) => {
+      const child = spawn(input.command, args, {
+        cwd: input.cwd ?? process.cwd(),
+        env: sanitizedEnv,
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+      const stdoutChunks = [];
+      const stderrChunks = [];
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+      }, timeoutMs);
+      child.stdout.on("data", (chunk) => stdoutChunks.push(chunk));
+      child.stderr.on("data", (chunk) => stderrChunks.push(chunk));
+      child.on("error", (err) => {
+        clearTimeout(timer);
+        resolve2({
+          exitCode: 1,
+          stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+          stderr: err.message
+        });
+      });
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        resolve2({
+          exitCode: code ?? 1,
+          stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+          stderr: Buffer.concat(stderrChunks).toString("utf8")
+        });
+      });
+    });
+    const cleanStdout = redactSecrets(childResult.stdout, secretValues);
+    const cleanStderr = redactSecrets(childResult.stderr, secretValues);
+    const ok = childResult.exitCode === 0;
+    return {
+      isolated: true,
+      error_code: ok ? "NONE" : "SANDBOX_COMMAND_FAILED",
+      error_message: ok ? "" : `Sandboxed command exited with code ${childResult.exitCode}.`,
+      exit_code: childResult.exitCode,
+      stdout: cleanStdout,
+      stderr: cleanStderr,
+      duration_ms: Date.now() - startMs,
+      proxy_url: proxy.proxyUrl
+    };
+  } finally {
+    await proxy.close();
+  }
+}
+
+// src/sandbox/polyglot-workspace-runner.ts
+var SENSITIVE_TASK_BRANCH_PATH_PATTERNS = [
+  /^\.github\/agents\.ya?ml$/i,
+  /^\.github\/workflows(?:\/|$)/i,
+  /^\.cursor\/agents(?:\/|$)/i,
+  /(?:^|\/)\.env(?:\.(?!example$|sample$|template$).+)?$/i
+];
+var SHELL_INJECTION_PATTERN = /[;|`><\r\n]|\$\(|\$\{\{/;
+var ALLOWLISTED_BINARIES = /* @__PURE__ */ new Set([
+  "npm",
+  "npx",
+  "pnpm",
+  "yarn",
+  "node",
+  "tsc",
+  "vitest",
+  "jest",
+  "eslint",
+  "biome",
+  "prisma",
+  "python",
+  "python3",
+  "pytest",
+  "ruff",
+  "mypy",
+  "pyright",
+  "flake8",
+  "pip",
+  "pip3",
+  "uv",
+  "poetry",
+  "cargo",
+  "rustc",
+  "rustfmt",
+  "go",
+  "gofmt",
+  "golangci-lint",
+  "make",
+  "just",
+  "task",
+  "turbo",
+  "nx",
+  "sh",
+  "bash"
+]);
+function normalizeRelativeCandidate(rawPath) {
+  return rawPath.trim().replace(/\\/g, "/").replace(/^\.\/+/, "").replace(/^\/+/, "");
+}
+function isSensitiveTaskBranchPath(rawPath) {
+  const norm = normalizeRelativeCandidate(rawPath);
+  return SENSITIVE_TASK_BRANCH_PATH_PATTERNS.some((re) => re.test(norm));
+}
+function hasSymlinkEscapeAlongPath(resolvedRoot, rawRelPath) {
+  if (!existsSync2(resolvedRoot)) {
+    return false;
+  }
+  let realRoot = resolvedRoot;
+  try {
+    realRoot = realpathSync(resolvedRoot);
+  } catch {
+    return false;
+  }
+  const segments = rawRelPath.replace(/\\/g, "/").split("/").filter((s) => s.length > 0 && s !== ".");
+  let current = resolvedRoot;
+  for (const seg of segments) {
+    current = join2(current, seg);
+    if (!existsSync2(current)) {
+      break;
+    }
+    try {
+      const stat = lstatSync(current);
+      if (stat.isSymbolicLink()) {
+        const realTarget = realpathSync(current);
+        if (realTarget !== realRoot && !realTarget.startsWith(realRoot + sep)) {
+          return true;
+        }
+      }
+    } catch {
+      return true;
+    }
+  }
+  return false;
+}
+function isContainedRelativePath(resolvedRoot, rawPath, allowRootDot) {
+  const trimmed = rawPath.trim();
+  if (!trimmed) {
+    return false;
+  }
+  if (allowRootDot && trimmed === ".") {
+    return true;
+  }
+  if (trimmed.startsWith("/") || trimmed.startsWith("\\") || /^[A-Za-z]:[\\/]/.test(trimmed)) {
+    return false;
+  }
+  const normalizedSlashes = trimmed.replace(/\\/g, "/");
+  const segments = normalizedSlashes.split("/");
+  for (const seg of segments) {
+    if (seg === "..") {
+      return false;
+    }
+    if (seg.toLowerCase() === ".git") {
+      return false;
+    }
+  }
+  const resolvedTarget = resolve(resolvedRoot, trimmed);
+  if (allowRootDot && resolvedTarget === resolvedRoot) {
+    return true;
+  }
+  if (!resolvedTarget.startsWith(resolvedRoot + sep)) {
+    return false;
+  }
+  if (hasSymlinkEscapeAlongPath(resolvedRoot, trimmed)) {
+    return false;
+  }
+  return true;
+}
+function validateWorkspaceFileOperations(input) {
+  const resolvedRoot = resolve(input.workDir);
+  const sensitiveSet = /* @__PURE__ */ new Set();
+  const traversalSet = /* @__PURE__ */ new Set();
+  const filePaths = [];
+  for (const entry of input.files ?? []) {
+    const raw = typeof entry === "string" ? entry : entry.path;
+    filePaths.push(raw);
+  }
+  for (const del of input.deleted_files ?? []) {
+    filePaths.push(del);
+  }
+  for (const rawPath of filePaths) {
+    if (!isContainedRelativePath(resolvedRoot, rawPath, false)) {
+      traversalSet.add(rawPath);
+      continue;
+    }
+    if (input.isTaskBranch && isSensitiveTaskBranchPath(rawPath)) {
+      sensitiveSet.add(normalizeRelativeCandidate(rawPath));
+    }
+  }
+  for (const target of input.targets ?? []) {
+    if (!isContainedRelativePath(resolvedRoot, target.working_directory, true)) {
+      traversalSet.add(target.working_directory);
+    }
+  }
+  const sensitivePaths = Array.from(sensitiveSet);
+  const traversalPaths = Array.from(traversalSet);
+  const allowed = sensitivePaths.length === 0 && traversalPaths.length === 0;
+  const reasons = [];
+  if (traversalPaths.length > 0) {
+    reasons.push(
+      `Path containment violation (outside workspace or inside .git/): ${traversalPaths.join(", ")}`
+    );
+  }
+  if (sensitivePaths.length > 0) {
+    reasons.push(
+      `Forbidden modification of sensitive path(s) on task/* branch: ${sensitivePaths.join(", ")}`
+    );
+  }
+  return {
+    allowed,
+    sensitivePaths,
+    traversalPaths,
+    reason: reasons.join("; ")
+  };
+}
+function sanitizeGitConfigFile(workDir, cleanRemoteUrl) {
+  const gitDir = join2(workDir, ".git");
+  const gitConfigPath = join2(gitDir, "config");
+  if (!existsSync2(gitDir)) {
+    return;
+  }
+  if (!existsSync2(gitConfigPath)) {
+    if (cleanRemoteUrl) {
+      writeFileSync(
+        gitConfigPath,
+        [
+          "[core]",
+          "	repositoryformatversion = 0",
+          "	filemode = true",
+          "	bare = false",
+          "	hooksPath = /dev/null",
+          '[remote "origin"]',
+          `	url = ${cleanRemoteUrl}`,
+          "	fetch = +refs/heads/*:refs/remotes/origin/*",
+          ""
+        ].join("\n"),
+        "utf8"
+      );
+    }
+    return;
+  }
+  try {
+    const raw = readFileSync2(gitConfigPath, "utf8");
+    const cleanedLines = [];
+    let replacedUrl = false;
+    for (const line of raw.split(/\r?\n/)) {
+      if (/extraheader/i.test(line) || /x-access-token/i.test(line) || /Authorization:/i.test(line)) {
+        continue;
+      }
+      if (/^\s*url\s*=/i.test(line) && cleanRemoteUrl) {
+        cleanedLines.push(`	url = ${cleanRemoteUrl}`);
+        replacedUrl = true;
+        continue;
+      }
+      cleanedLines.push(line);
+    }
+    if (!replacedUrl && cleanRemoteUrl) {
+      cleanedLines.push('[remote "origin"]', `	url = ${cleanRemoteUrl}`);
+    }
+    writeFileSync(gitConfigPath, `${cleanedLines.join("\n").trim()}
+`, "utf8");
+  } catch {
+  }
+}
+function materializeSeedFilesIntoWorkspace(workDir, seedFiles) {
+  if (!seedFiles) {
+    return;
+  }
+  const resolvedRoot = resolve(workDir);
+  const entries = [];
+  if (Array.isArray(seedFiles)) {
+    for (const item of seedFiles) {
+      entries.push([item.path, item.content]);
+    }
+  } else if (seedFiles instanceof Map || typeof seedFiles.entries === "function") {
+    for (const [k, v] of seedFiles.entries()) {
+      entries.push([k, v]);
+    }
+  } else {
+    for (const [k, v] of Object.entries(seedFiles)) {
+      if (typeof v === "string") {
+        entries.push([k, v]);
+      }
+    }
+  }
+  for (const [rawPath, content] of entries) {
+    const cleanRel = rawPath.replace(/^\/+/, "");
+    if (!isContainedRelativePath(resolvedRoot, cleanRel, false)) {
+      continue;
+    }
+    const targetPath = resolve(resolvedRoot, cleanRel);
+    mkdirSync(dirname(targetPath), { recursive: true });
+    writeFileSync(targetPath, content, "utf8");
+  }
+}
+function prepareRepositorySandboxWorkspace(input) {
+  const workDir = input.workDir ?? mkdtempSync(join2(tmpdir(), "epure-polyglot-sandbox-"));
+  mkdirSync(workDir, { recursive: true });
+  const repoSlug = (input.repository ?? "").trim();
+  const [owner, repo] = repoSlug.split("/");
+  const cleanRemoteUrl = owner && repo ? `https://github.com/${owner}/${repo}.git` : "";
+  let clonedFromRemote = false;
+  try {
+    if (input.localSourceRepoDir && existsSync2(input.localSourceRepoDir)) {
+      cpSync(input.localSourceRepoDir, workDir, { recursive: true });
+    }
+    const shouldAttemptClone = Boolean(cleanRemoteUrl && input.branch && input.githubToken) && (input.enableRemoteClone === true || Boolean(input.execGitImpl));
+    if (shouldAttemptClone && input.branch && input.githubToken) {
+      const basicAuth = Buffer.from(
+        `x-access-token:${input.githubToken.trim()}`,
+        "utf8"
+      ).toString("base64");
+      const cloneArgs = [
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        `http.extraHeader=Authorization: Basic ${basicAuth}`,
+        "clone",
+        "--depth=1",
+        "--single-branch",
+        "--branch",
+        input.branch,
+        cleanRemoteUrl,
+        workDir
+      ];
+      const gitRunner = input.execGitImpl ?? ((args, opts) => {
+        execFileSync("git", [...args], {
+          cwd: opts.cwd,
+          stdio: "pipe",
+          timeout: 12e4
+        });
+      });
+      try {
+        gitRunner(cloneArgs, {});
+        clonedFromRemote = true;
+      } catch {
+        clonedFromRemote = false;
+      }
+    }
+    if (input.seedFiles) {
+      materializeSeedFilesIntoWorkspace(workDir, input.seedFiles);
+    }
+  } finally {
+    if (cleanRemoteUrl) {
+      if (clonedFromRemote && !existsSync2(join2(workDir, ".git"))) {
+        mkdirSync(join2(workDir, ".git"), { recursive: true });
+      }
+      sanitizeGitConfigFile(workDir, cleanRemoteUrl);
+    }
+  }
+  return {
+    workDir,
+    clonedFromRemote,
+    sanitizedGitConfigUrl: cleanRemoteUrl,
+    cleanup: () => {
+      rmSync(workDir, { recursive: true, force: true });
+    }
+  };
+}
+function splitCompoundCommands(rawCommand) {
+  const parts = [];
+  let current = "";
+  let inQuote = null;
+  let escaped = false;
+  for (let i = 0; i < rawCommand.length; i += 1) {
+    const ch = rawCommand[i] ?? "";
+    const next = rawCommand[i + 1] ?? "";
+    if (escaped) {
+      current += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\" && inQuote === '"') {
+      current += ch;
+      escaped = true;
+      continue;
+    }
+    if ((ch === '"' || ch === "'") && !inQuote) {
+      inQuote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === inQuote) {
+      inQuote = null;
+      current += ch;
+      continue;
+    }
+    if (!inQuote && ch === "&" && next === "&") {
+      if (current.trim().length > 0) {
+        parts.push(current.trim());
+      }
+      current = "";
+      i += 1;
+      continue;
+    }
+    current += ch;
+  }
+  if (current.trim().length > 0) {
+    parts.push(current.trim());
+  }
+  return parts;
+}
+function tokenizeAllowlistedCommand(rawAtomicCommand) {
+  const trimmed = rawAtomicCommand.trim();
+  if (!trimmed) {
+    throw new Error("Sandbox command tokenizer rejected empty command.");
+  }
+  if (SHELL_INJECTION_PATTERN.test(trimmed)) {
+    throw new Error(
+      `Sandbox command tokenizer rejected unsafe shell metacharacters or expression in '${trimmed}'.`
+    );
+  }
+  const tokens = [];
+  let current = "";
+  let inQuote = null;
+  let escaped = false;
+  for (let i = 0; i < trimmed.length; i += 1) {
+    const ch = trimmed[i] ?? "";
+    if (escaped) {
+      current += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\" && inQuote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if ((ch === '"' || ch === "'") && !inQuote) {
+      inQuote = ch;
+      continue;
+    }
+    if (ch === inQuote) {
+      inQuote = null;
+      continue;
+    }
+    if (!inQuote && /\s/.test(ch)) {
+      if (current.length > 0) {
+        tokens.push(current);
+        current = "";
+      }
+      continue;
+    }
+    current += ch;
+  }
+  if (inQuote) {
+    throw new Error(
+      `Sandbox command tokenizer rejected unterminated quote in '${trimmed}'.`
+    );
+  }
+  if (current.length > 0) {
+    tokens.push(current);
+  }
+  const binary = tokens[0] ?? "";
+  const args = tokens.slice(1);
+  const isRelativeScript = /^\.\/scripts\/[A-Za-z0-9_./-]+$/.test(binary);
+  if (!isRelativeScript && !ALLOWLISTED_BINARIES.has(binary)) {
+    throw new Error(
+      `Sandbox command tokenizer rejected non-allowlisted binary '${binary}' in '${trimmed}'.`
+    );
+  }
+  if ((binary === "sh" || binary === "bash") && args.includes("-c")) {
+    throw new Error(
+      `Sandbox command tokenizer forbids '${binary} -c' shell execution in '${trimmed}'.`
+    );
+  }
+  return {
+    command: binary,
+    args,
+    raw: trimmed
+  };
+}
+function matchesPathPattern(filePath, pattern) {
+  const cleanFile = normalizeRelativeCandidate(filePath);
+  const cleanPattern = normalizeRelativeCandidate(pattern);
+  if (!cleanPattern || cleanPattern === "**" || cleanPattern === "**/*" || cleanPattern === "*") {
+    return true;
+  }
+  if (cleanPattern.endsWith("/**")) {
+    const prefix = cleanPattern.slice(0, -3);
+    return cleanFile === prefix || cleanFile.startsWith(`${prefix}/`);
+  }
+  let regexStr = "^";
+  for (let i = 0; i < cleanPattern.length; i += 1) {
+    const ch = cleanPattern[i] ?? "";
+    const next = cleanPattern[i + 1] ?? "";
+    const afterNext = cleanPattern[i + 2] ?? "";
+    if (ch === "*" && next === "*") {
+      if (afterNext === "/") {
+        regexStr += "(?:.+/)?";
+        i += 2;
+      } else {
+        regexStr += ".*";
+        i += 1;
+      }
+      continue;
+    }
+    if (ch === "*") {
+      regexStr += "[^/]*";
+      continue;
+    }
+    if (ch === "?") {
+      regexStr += "[^/]";
+      continue;
+    }
+    if (/[.+^${}()|[\]\\]/.test(ch)) {
+      regexStr += `\\${ch}`;
+      continue;
+    }
+    regexStr += ch;
+  }
+  regexStr += "$";
+  return new RegExp(regexStr, "i").test(cleanFile);
+}
+function selectAffectedVerificationTargets(targets, changedPaths) {
+  if (targets.length === 0) {
+    return [];
+  }
+  const cleanPaths = changedPaths.map(normalizeRelativeCandidate).filter((p) => p.length > 0);
+  if (cleanPaths.length === 0) {
+    return targets;
+  }
+  const matched = targets.filter((target) => {
+    const patterns = target.path_patterns.length > 0 ? target.path_patterns : ["**"];
+    return cleanPaths.some(
+      (filePath) => patterns.some((pat) => matchesPathPattern(filePath, pat))
+    );
+  });
+  return matched.length > 0 ? matched : targets;
+}
+function formatVerificationToolingGuideMarkdown(profile) {
+  const lines = [
+    "## Verification & Tooling Guide (Stage 1 Local Sandbox & Stage 3 External CI)",
+    "",
+    "### Stage 1 \u2014 Pre-Publication Local Sandbox Targets (`shell: false`, zero secrets)",
+    "| Target | Kind | Working Directory | Path Patterns | Install | Codegen | Typecheck | Lint | Unit Test |",
+    "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |"
+  ];
+  for (const t of profile.targets) {
+    const patterns = t.path_patterns.map((p) => `\`${p}\``).join(", ") || "`**`";
+    const fmt = (cmd) => cmd ? `\`${cmd}\`` : "\u2014";
+    lines.push(
+      `| \`${t.name}\` | \`${t.kind}\` | \`${t.working_directory}\` | ${patterns} | ${fmt(t.install_command)} | ${fmt(t.codegen_command)} | ${fmt(t.typecheck_command)} | ${fmt(t.lint_command)} | ${fmt(t.test_command)} |`
+    );
+  }
+  lines.push("");
+  lines.push("### Stage 3 \u2014 Post-PR External GitHub Actions CI Gate");
+  lines.push(
+    `- **Wait for External CI**: \`${profile.wait_for_external_ci}\` (timeout: \`${profile.external_ci_timeout_minutes}m\`, registration grace window: \`${profile.grace_window_seconds}s\` fail-closed)`
+  );
+  if (profile.deferred_external_workflows && profile.deferred_external_workflows.length > 0) {
+    lines.push(
+      `- **Deferred Service/Integration Workflows (Stage 3)**: ${profile.deferred_external_workflows.map((w) => `\`${w}\``).join(", ")} (executed automatically on GitHub Actions after PR creation/update; any failure logs & annotations will be fed back into the remediation loop).`
+    );
+  } else {
+    lines.push(
+      "- All non-EPURE `.github/workflows/*.{yml,yaml}` triggered by the PR on `dev` will be awaited in Stage 3 after PR publication."
+    );
+  }
+  return lines.join("\n");
+}
+function shouldSkipDefaultNodeStepInOfflineTempDir(params) {
+  if (params.hasCustomSandboxRunner) {
+    return { skip: false, skipEntireTarget: false };
+  }
+  const pkgJsonPath = join2(params.targetCwd, "package.json");
+  if (!existsSync2(pkgJsonPath)) {
+    return { skip: true, skipEntireTarget: true };
+  }
+  let scripts = {};
+  let depCount = 0;
+  try {
+    const parsed = JSON.parse(readFileSync2(pkgJsonPath, "utf8"));
+    scripts = parsed.scripts ?? {};
+    depCount = Object.keys(parsed.dependencies ?? {}).length + Object.keys(parsed.devDependencies ?? {}).length;
+  } catch {
+    return { skip: false, skipEntireTarget: false };
+  }
+  const hasLockfile = existsSync2(join2(params.targetCwd, "package-lock.json")) || existsSync2(join2(params.targetCwd, "pnpm-lock.yaml")) || existsSync2(join2(params.targetCwd, "yarn.lock"));
+  const hasNodeModules = existsSync2(join2(params.targetCwd, "node_modules"));
+  if (params.step === "install") {
+    if (depCount === 0 && !hasLockfile || hasNodeModules) {
+      return { skip: true, skipEntireTarget: false };
+    }
+  }
+  if (params.step === "typecheck") {
+    const hasTsconfig = existsSync2(join2(params.targetCwd, "tsconfig.json"));
+    if (!hasTsconfig && !scripts.typecheck) {
+      return { skip: true, skipEntireTarget: false };
+    }
+  }
+  if (params.step === "lint") {
+    if (params.rawCommand === "npm run lint" && !scripts.lint) {
+      return { skip: true, skipEntireTarget: false };
+    }
+  }
+  if (params.step === "test") {
+    if (params.rawCommand === "npm test" && !scripts.test) {
+      return { skip: true, skipEntireTarget: false };
+    }
+  }
+  return { skip: false, skipEntireTarget: false };
+}
+async function runPolyglotStage1Verification(input) {
+  const ownsTempWorkDir = !input.workDir;
+  const workDir = input.workDir ?? mkdtempSync(join2(tmpdir(), "epure-stage1-sandbox-"));
+  mkdirSync(workDir, { recursive: true });
+  const hasCustomSandboxRunner = Boolean(input.sandboxRunner);
+  const sandboxRunner = input.sandboxRunner ?? runInUntrustedCodeSandbox;
+  const bootstrapped = input.bootstrappedTargets ?? /* @__PURE__ */ new Set();
+  try {
+    const validation = validateWorkspaceFileOperations({
+      workDir,
+      files: input.changedPaths && input.changedPaths.length > 0 ? input.changedPaths : input.files,
+      deleted_files: input.deleted_files,
+      targets: input.profile.targets,
+      isTaskBranch: input.isTaskBranch
+    });
+    const fullContainment = validateWorkspaceFileOperations({
+      workDir,
+      files: input.files,
+      deleted_files: input.deleted_files,
+      targets: input.profile.targets,
+      isTaskBranch: false
+    });
+    if (!validation.allowed || !fullContainment.allowed) {
+      const mergedTraversal = Array.from(
+        /* @__PURE__ */ new Set([
+          ...validation.traversalPaths,
+          ...fullContainment.traversalPaths
+        ])
+      );
+      return {
+        passed: false,
+        blocked_by_security_gate: true,
+        sensitive_paths: validation.sensitivePaths,
+        traversal_paths: mergedTraversal,
+        affected_targets: [],
+        target_results: [],
+        output: validation.reason || fullContainment.reason
+      };
+    }
+    const resolvedRoot = resolve(workDir);
+    for (const file of input.files ?? []) {
+      const cleanRel = file.path.replace(/^\/+/, "");
+      const fullPath = resolve(resolvedRoot, cleanRel);
+      mkdirSync(dirname(fullPath), { recursive: true });
+      writeFileSync(fullPath, file.content, "utf8");
+    }
+    for (const del of input.deleted_files ?? []) {
+      const cleanRel = del.replace(/^\/+/, "");
+      const fullPath = resolve(resolvedRoot, cleanRel);
+      if (existsSync2(fullPath)) {
+        unlinkSync(fullPath);
+      }
+    }
+    const effectiveChangedPaths = input.changedPaths ?? [
+      ...(input.files ?? []).map((f) => f.path),
+      ...input.deleted_files ?? []
+    ];
+    const affectedTargets = selectAffectedVerificationTargets(
+      input.profile.targets,
+      effectiveChangedPaths
+    );
+    const targetResults = [];
+    const outputSections = [];
+    const baseRunnerEnv = {
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+      ...input.runnerEnv ?? {},
+      LLM_API_KEY: input.llmApiKey
+    };
+    for (const target of affectedTargets) {
+      const targetCwd = target.working_directory === "." ? resolvedRoot : resolve(resolvedRoot, target.working_directory);
+      if (!existsSync2(targetCwd)) {
+        if (!hasCustomSandboxRunner) {
+          targetResults.push({
+            target_name: target.name,
+            working_directory: target.working_directory,
+            kind: target.kind,
+            passed: true,
+            skipped: true,
+            steps: [],
+            output: `Skipped target '${target.name}': directory '${target.working_directory}' not present.`
+          });
+          continue;
+        }
+        mkdirSync(targetCwd, { recursive: true });
+      }
+      if (target.kind === "node") {
+        const nodeCheck = shouldSkipDefaultNodeStepInOfflineTempDir({
+          targetCwd,
+          step: "test",
+          rawCommand: target.test_command ?? "npm test",
+          hasCustomSandboxRunner
+        });
+        if (nodeCheck.skipEntireTarget) {
+          targetResults.push({
+            target_name: target.name,
+            working_directory: target.working_directory,
+            kind: target.kind,
+            passed: true,
+            skipped: true,
+            steps: [],
+            output: "No package.json in workspace snapshot; syntax verified."
+          });
+          continue;
+        }
+      }
+      const candidateSteps = [
+        {
+          step: "install",
+          rawCommand: target.install_command,
+          bootstrapOnly: true
+        },
+        {
+          step: "codegen",
+          rawCommand: target.codegen_command,
+          bootstrapOnly: true
+        },
+        {
+          step: "typecheck",
+          rawCommand: target.typecheck_command,
+          bootstrapOnly: false
+        },
+        {
+          step: "lint",
+          rawCommand: target.lint_command,
+          bootstrapOnly: false
+        },
+        {
+          step: "test",
+          rawCommand: target.test_command,
+          bootstrapOnly: false
+        }
+      ];
+      const executedSteps = [];
+      let targetPassed = true;
+      let targetFailureOutput = "";
+      const isAlreadyBootstrapped = bootstrapped.has(target.name);
+      for (const candidate of candidateSteps) {
+        if (!candidate.rawCommand) {
+          continue;
+        }
+        if (candidate.bootstrapOnly && isAlreadyBootstrapped) {
+          continue;
+        }
+        if (target.kind === "node") {
+          const skipDecision = shouldSkipDefaultNodeStepInOfflineTempDir({
+            targetCwd,
+            step: candidate.step,
+            rawCommand: candidate.rawCommand,
+            hasCustomSandboxRunner
+          });
+          if (skipDecision.skip) {
+            continue;
+          }
+        }
+        let atomicCommands;
+        try {
+          atomicCommands = splitCompoundCommands(candidate.rawCommand);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          targetPassed = false;
+          targetFailureOutput = `[Target: ${target.name}][${candidate.step}] ${msg}`;
+          break;
+        }
+        for (const atomicRaw of atomicCommands) {
+          let tokenized;
+          try {
+            tokenized = tokenizeAllowlistedCommand(atomicRaw);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            targetPassed = false;
+            targetFailureOutput = `[Target: ${target.name}][${candidate.step}] ${msg}`;
+            executedSteps.push({
+              step: candidate.step,
+              raw_command: atomicRaw,
+              exit_code: 1,
+              passed: false,
+              stdout: "",
+              stderr: msg,
+              duration_ms: 0
+            });
+            break;
+          }
+          const execRes = await sandboxRunner({
+            isolationAvailable: true,
+            runnerEnv: baseRunnerEnv,
+            command: tokenized.command,
+            args: tokenized.args,
+            cwd: targetCwd,
+            timeoutMs: candidate.step === "install" ? 18e4 : 12e4
+          });
+          const stepPassed = execRes.isolated && execRes.exit_code === 0;
+          executedSteps.push({
+            step: candidate.step,
+            raw_command: tokenized.raw,
+            exit_code: execRes.exit_code,
+            passed: stepPassed,
+            stdout: execRes.stdout,
+            stderr: execRes.stderr,
+            duration_ms: execRes.duration_ms
+          });
+          if (!stepPassed) {
+            targetPassed = false;
+            const combined = `${execRes.stdout}
+${execRes.stderr}`.trim();
+            targetFailureOutput = `[Target: ${target.name} (${target.working_directory})][${candidate.step}: ${tokenized.raw}] failed (exit ${execRes.exit_code}):
+${combined}`;
+            break;
+          }
+        }
+        if (!targetPassed) {
+          break;
+        }
+      }
+      if (targetPassed) {
+        bootstrapped.add(target.name);
+      }
+      const stepOutSummary = targetPassed ? executedSteps.map((s) => `${s.stdout}
+${s.stderr}`.trim()).filter(Boolean).join("\n") : targetFailureOutput;
+      targetResults.push({
+        target_name: target.name,
+        working_directory: target.working_directory,
+        kind: target.kind,
+        passed: targetPassed,
+        skipped: false,
+        steps: executedSteps,
+        output: stepOutSummary
+      });
+      if (stepOutSummary) {
+        outputSections.push(stepOutSummary);
+      }
+      if (!targetPassed) {
+        return {
+          passed: false,
+          blocked_by_security_gate: false,
+          sensitive_paths: [],
+          traversal_paths: [],
+          affected_targets: affectedTargets.map((t) => t.name),
+          target_results: targetResults,
+          output: outputSections.join("\n\n").trim()
+        };
+      }
+    }
+    return {
+      passed: true,
+      blocked_by_security_gate: false,
+      sensitive_paths: [],
+      traversal_paths: [],
+      affected_targets: affectedTargets.map((t) => t.name),
+      target_results: targetResults,
+      output: outputSections.join("\n\n").trim() || "Stage 1 polyglot verification passed."
+    };
+  } finally {
+    if (ownsTempWorkDir) {
+      rmSync(workDir, { recursive: true, force: true });
+    }
+  }
+}
+
+// src/execution/external-ci-gate.ts
+var EPURE_SYNTHETIC_CHECK_NAMES = /* @__PURE__ */ new Set([
+  "ai-review",
+  "impeccable-gate",
+  "pr title",
+  "verify epure consumer contract",
+  "verify-contract / verify epure consumer contract",
+  "verify-contract",
+  "authorize /epure issue command",
+  "orchestrate authorized /epure lifecycle"
+]);
+var TEST_OR_CODE_FAILURE_PATTERNS = [
+  /(?:^|\n|\s)FAIL\s+\S+/m,
+  /---\s*FAIL:/,
+  /\bAssertionError\b/,
+  /\bTS\d{4}:/,
+  /Traceback \(most recent call last\)/,
+  /\bpanicked at\b/,
+  /\bSyntaxError:/,
+  /\bReferenceError:/,
+  /\bTypeError:/,
+  /\bexpect\(.*\)\.(?:to|not)/
+];
+var TRANSIENT_INFRA_PATTERNS = [
+  /\bETIMEDOUT\b/i,
+  /\bECONNRESET\b/i,
+  /\bEAI_AGAIN\b/i,
+  /\b502 Bad Gateway\b/i,
+  /\b503 Service Unavailable\b/i,
+  /\b504 Gateway Timeout\b/i,
+  /\bRunner\.Worker\b/i,
+  /The hosted runner lost communication/i,
+  /runner has received a shutdown signal/i,
+  /failed to fetch .* from registry/i,
+  /TLS handshake timeout/i,
+  /rate limit exceeded/i
+];
+var ANSI_ESCAPE_REGEX = /\x1B\[[0-?]*[ -/]*[@-~]/g;
+var ISO_TIMESTAMP_PREFIX_REGEX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s+/gm;
+var GHA_WORKFLOW_COMMAND_REGEX = /::(error|warning|notice|debug|group|endgroup|add-mask|set-env|set-output|save-state|stop-commands)\b/gi;
+var LOG_FAILURE_ANCHOR_REGEX = /(?:##\[error\]|:\[error\]|\bFAIL\b|---\s*FAIL:|\bError:|\bAssertionError\b|\bTS\d{4}:|Traceback \(most recent call last\)|\bpanicked at\b)/i;
+function unquoteYamlString(raw) {
+  const trimmed = raw.trim().replace(/\s+#.*$/, "").trim();
+  if (trimmed.startsWith('"') && trimmed.endsWith('"') || trimmed.startsWith("'") && trimmed.endsWith("'")) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+function parseInlineYamlList(raw) {
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) {
+    return [];
+  }
+  const inner = trimmed.slice(1, -1).trim();
+  if (!inner) {
+    return [];
+  }
+  return inner.split(",").map((s) => unquoteYamlString(s)).filter((s) => s.length > 0);
+}
+function parseWorkflowOnTriggersAndFilters(content) {
+  const lines = content.split(/\r?\n/);
+  let workflowName = "CI";
+  const triggersSet = /* @__PURE__ */ new Set();
+  const pathsInclude = [];
+  const pathsIgnore = [];
+  const branchesInclude = [];
+  const hasServices = /^\s+services:\s*(?:#.*)?$/m.test(content);
+  for (const line of lines) {
+    const nameMatch = /^name:\s*(.+)$/.exec(line);
+    if (nameMatch && nameMatch[1]) {
+      workflowName = unquoteYamlString(nameMatch[1]);
+      break;
+    }
+  }
+  let inOnBlock = false;
+  let activeEvent = null;
+  let activeFilterKey = null;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+    const indent = /^(\s*)/.exec(line)?.[1]?.length ?? 0;
+    if (indent === 0) {
+      activeEvent = null;
+      activeFilterKey = null;
+      const onMatch = /^(?:on|"on"|'on'):\s*(.*)$/.exec(trimmed);
+      if (onMatch) {
+        inOnBlock = true;
+        const rest = (onMatch[1] ?? "").replace(/\s+#.*$/, "").trim();
+        if (rest.startsWith("[")) {
+          for (const item of parseInlineYamlList(rest)) {
+            if (item === "pull_request" || item === "pull_request_target") {
+              triggersSet.add("pull_request");
+            } else if (item === "push") {
+              triggersSet.add("push");
+            }
+          }
+          inOnBlock = false;
+        } else if (rest === "pull_request") {
+          triggersSet.add("pull_request");
+          inOnBlock = false;
+        } else if (rest === "push") {
+          triggersSet.add("push");
+          inOnBlock = false;
+        }
+        continue;
+      }
+      if (inOnBlock) {
+        inOnBlock = false;
+      }
+      continue;
+    }
+    if (!inOnBlock) {
+      continue;
+    }
+    if (indent === 2) {
+      activeFilterKey = null;
+      const evMatch = /^([a-zA-Z0-9_-]+):\s*(.*)$/.exec(trimmed);
+      if (evMatch && evMatch[1]) {
+        const evName = evMatch[1];
+        if (evName === "pull_request" || evName === "pull_request_target") {
+          triggersSet.add("pull_request");
+          activeEvent = "pull_request";
+        } else if (evName === "push") {
+          triggersSet.add("push");
+          activeEvent = "push";
+        } else {
+          activeEvent = "other";
+        }
+      }
+      continue;
+    }
+    if (activeEvent === "pull_request" || activeEvent === "push") {
+      if (indent === 4) {
+        const filterMatch = /^(paths|paths-ignore|branches):\s*(.*)$/.exec(
+          trimmed
+        );
+        if (filterMatch && filterMatch[1]) {
+          const key = filterMatch[1];
+          const rest = (filterMatch[2] ?? "").replace(/\s+#.*$/, "").trim();
+          if (rest.startsWith("[")) {
+            const list = parseInlineYamlList(rest);
+            if (key === "paths") pathsInclude.push(...list);
+            else if (key === "paths-ignore") pathsIgnore.push(...list);
+            else if (key === "branches" && activeEvent === "pull_request") {
+              branchesInclude.push(...list);
+            }
+            activeFilterKey = null;
+          } else {
+            activeFilterKey = key;
+          }
+        } else {
+          activeFilterKey = null;
+        }
+        continue;
+      }
+      if (indent >= 6 && activeFilterKey && trimmed.startsWith("-")) {
+        const val = unquoteYamlString(trimmed.replace(/^-\s*/, ""));
+        if (val) {
+          if (activeFilterKey === "paths") pathsInclude.push(val);
+          else if (activeFilterKey === "paths-ignore") pathsIgnore.push(val);
+          else if (activeFilterKey === "branches" && activeEvent === "pull_request") {
+            branchesInclude.push(val);
+          }
+        }
+      }
+    }
+  }
+  return {
+    workflowName,
+    triggers: Array.from(triggersSet),
+    pathsInclude,
+    pathsIgnore,
+    branchesInclude,
+    hasServices
+  };
+}
+function isEpureManagedWorkflow(filePath, content) {
+  const fileName = basename2(filePath).toLowerCase();
+  if (fileName.startsWith("epure-") || fileName === "pr-title.yml" || fileName === "pr-title.yaml" || fileName === "release.yml" || fileName === "release.yaml") {
+    return true;
+  }
+  if (content.includes("Giskard-AI/epure/actions/") || content.includes("Giskard-AI/epure/.github/workflows/")) {
+    return true;
+  }
+  return false;
+}
+function isEpureSyntheticCheckOrRun(nameOrPath) {
+  const clean = nameOrPath.trim().toLowerCase();
+  const base = basename2(clean);
+  if (base.startsWith("epure-") || base === "pr-title.yml" || base === "release.yml") {
+    return true;
+  }
+  if (EPURE_SYNTHETIC_CHECK_NAMES.has(clean)) {
+    return true;
+  }
+  if (clean.startsWith("epure ") || clean.startsWith("verify-contract") || clean.includes("verify epure consumer contract")) {
+    return true;
+  }
+  return false;
+}
+function discoverExpectedExternalWorkflows(input) {
+  const entries = input.workflowFilesMap instanceof Map || typeof input.workflowFilesMap.entries === "function" ? Array.from(
+    input.workflowFilesMap.entries()
+  ) : Object.entries(
+    input.workflowFilesMap
+  );
+  const cleanChanged = input.changedPaths.map((p) => p.trim().replace(/^\/+/, "")).filter((p) => p.length > 0);
+  const expected = [];
+  for (const [rawPath, content] of entries) {
+    if (typeof content !== "string") {
+      continue;
+    }
+    const normalizedPath = rawPath.startsWith(".github/workflows/") ? rawPath : `.github/workflows/${rawPath.replace(/^\/+/, "")}`;
+    const fileName = basename2(normalizedPath);
+    if (!/\.ya?ml$/i.test(fileName)) {
+      continue;
+    }
+    if (isEpureManagedWorkflow(normalizedPath, content)) {
+      continue;
+    }
+    const parsed = parseWorkflowOnTriggersAndFilters(content);
+    if (parsed.triggers.length === 0) {
+      continue;
+    }
+    if (input.targetBranch && parsed.branchesInclude.length > 0 && !parsed.triggers.includes("push")) {
+      const branchMatched = parsed.branchesInclude.some(
+        (pat) => matchesPathPattern(input.targetBranch, pat)
+      );
+      if (!branchMatched) {
+        continue;
+      }
+    }
+    if (parsed.pathsInclude.length > 0 && cleanChanged.length > 0) {
+      const anyPathMatches = cleanChanged.some(
+        (filePath) => parsed.pathsInclude.some((pat) => matchesPathPattern(filePath, pat))
+      );
+      if (!anyPathMatches) {
+        continue;
+      }
+    }
+    if (parsed.pathsIgnore.length > 0 && cleanChanged.length > 0) {
+      const allIgnored = cleanChanged.every(
+        (filePath) => parsed.pathsIgnore.some((pat) => matchesPathPattern(filePath, pat))
+      );
+      if (allIgnored) {
+        continue;
+      }
+    }
+    expected.push({
+      path: normalizedPath,
+      fileName,
+      workflowName: parsed.workflowName,
+      triggers: parsed.triggers,
+      hasServices: parsed.hasServices
+    });
+  }
+  return expected;
+}
+function classifyCiFailure(input) {
+  const maxReruns = input.maxInfraRerunsPerSha ?? 1;
+  const combinedAnnotationText = (input.annotations ?? []).map((a) => `${a.title ?? ""} ${a.message ?? ""}`).join("\n");
+  const fullDiagnosticText = `${input.rawLog}
+${combinedAnnotationText}`;
+  const hasTestOrCodeFailure = TEST_OR_CODE_FAILURE_PATTERNS.some(
+    (re) => re.test(fullDiagnosticText)
+  );
+  if (hasTestOrCodeFailure) {
+    return {
+      classification: "code_or_test_failure",
+      shouldRerunWorkflow: false,
+      reason: "Test assertion or compiler failure marker detected in check logs/annotations."
+    };
+  }
+  const hasTransientInfraMarker = TRANSIENT_INFRA_PATTERNS.some((re) => re.test(fullDiagnosticText)) || input.conclusion === "timed_out" && fullDiagnosticText.trim().length === 0;
+  if (!hasTransientInfraMarker) {
+    return {
+      classification: "code_or_test_failure",
+      shouldRerunWorkflow: false,
+      reason: "Check run failed without transient infrastructure signature."
+    };
+  }
+  if (input.infraRerunsUsedForSha >= maxReruns) {
+    return {
+      classification: "code_or_test_failure",
+      shouldRerunWorkflow: false,
+      reason: `Transient infrastructure signature detected, but rerun quota (${input.infraRerunsUsedForSha}/${maxReruns}) is already exhausted for SHA ${input.headSha.slice(0, 7)}.`
+    };
+  }
+  return {
+    classification: "transient_infra",
+    shouldRerunWorkflow: true,
+    reason: `Transient infrastructure failure detected with zero test assertion failures (rerun ${input.infraRerunsUsedForSha + 1}/${maxReruns} for SHA ${input.headSha.slice(0, 7)}).`
+  };
+}
+function sanitizeAndFormatFailedCheckLogs(input) {
+  const maxBytes = input.maxBytes ?? 12288;
+  const secrets = input.extraSecrets ?? [];
+  let neutralizedCount = 0;
+  const neutralizeCommands = (text) => text.replace(GHA_WORKFLOW_COMMAND_REGEX, (_match, cmdName) => {
+    neutralizedCount += 1;
+    return `:[${cmdName.toLowerCase()}]`;
+  });
+  const annotationLines = [];
+  for (const ann of (input.annotations ?? []).slice(0, 25)) {
+    const loc = ann.path ? `${ann.path}${ann.start_line ? `:${ann.start_line}` : ""}` : "check";
+    const titlePart = ann.title ? `${ann.title}: ` : "";
+    const msgPart = ann.message ?? "";
+    const rawAnn = `[Annotation] ${loc} \u2014 ${titlePart}${msgPart}`.trim();
+    annotationLines.push(neutralizeCommands(rawAnn.replace(ANSI_ESCAPE_REGEX, "")));
+  }
+  const strippedLog = neutralizeCommands(
+    input.rawLog.replace(ANSI_ESCAPE_REGEX, "").replace(ISO_TIMESTAMP_PREFIX_REGEX, "")
+  );
+  const allLines = strippedLog.split(/\r?\n/);
+  const selectedIndices = /* @__PURE__ */ new Set();
+  for (let i = 0; i < allLines.length; i += 1) {
+    const line = allLines[i] ?? "";
+    if (LOG_FAILURE_ANCHOR_REGEX.test(line)) {
+      const start = Math.max(0, i - 5);
+      const end = Math.min(allLines.length - 1, i + 15);
+      for (let idx = start; idx <= end; idx += 1) {
+        selectedIndices.add(idx);
+      }
+    }
+  }
+  const tailStart = Math.max(0, allLines.length - 120);
+  for (let idx = tailStart; idx < allLines.length; idx += 1) {
+    selectedIndices.add(idx);
+  }
+  const sortedIndices = Array.from(selectedIndices).sort((a, b) => a - b);
+  const excerptLines = [];
+  let prevIdx = -1;
+  for (const idx of sortedIndices) {
+    if (prevIdx !== -1 && idx > prevIdx + 1) {
+      excerptLines.push("... [log lines omitted] ...");
+    }
+    excerptLines.push(allLines[idx] ?? "");
+    prevIdx = idx;
+  }
+  const header = `### External CI Failure: ${input.checkName}${input.htmlUrl ? ` (${input.htmlUrl})` : ""}`;
+  const sections = [header];
+  if (annotationLines.length > 0) {
+    sections.push("#### Check Annotations", ...annotationLines);
+  }
+  if (excerptLines.length > 0 && excerptLines.some((l) => l.trim().length > 0)) {
+    sections.push("#### Job Log Excerpt", ...excerptLines);
+  }
+  const combinedRaw = sections.join("\n");
+  const redacted = redactSecrets(combinedRaw, secrets);
+  const bounded = redacted.length > maxBytes ? redacted.slice(-maxBytes) : redacted;
+  const wrapped = wrapUntrustedContent(
+    "untrusted_test_output",
+    bounded,
+    maxBytes
+  );
+  return {
+    sanitizedExcerpt: bounded,
+    wrappedUntrustedOutput: wrapped,
+    neutralizedWorkflowCommands: neutralizedCount
+  };
+}
+function isFailedConclusion(conclusion) {
+  const norm = (conclusion ?? "").trim().toLowerCase();
+  return norm === "failure" || norm === "timed_out" || norm === "cancelled" || norm === "action_required" || norm === "startup_failure";
+}
+async function waitForExternalCiChecks(input) {
+  if (input.waitForExternalCi === false) {
+    return {
+      passed: true,
+      reason: "disabled_by_config",
+      infraRerunsTriggered: 0,
+      failedChecks: [],
+      formattedDiagnostics: "",
+      registeredWorkflowNames: [],
+      registeredCheckNames: []
+    };
+  }
+  const timeoutMs = (input.timeoutMinutes ?? 15) * 60 * 1e3;
+  const graceWindowMs = (input.graceWindowSeconds ?? 45) * 1e3;
+  const pollIntervalMs = input.pollIntervalMs ?? 5e3;
+  const sleepFn = input.sleepFn ?? ((ms) => new Promise((resolve2) => setTimeout(resolve2, ms)));
+  let simulatedElapsedMs = 0;
+  const startWallMs = input.nowFn ? input.nowFn() : Date.now();
+  const getElapsedMs = () => {
+    if (input.nowFn) {
+      return Math.max(simulatedElapsedMs, input.nowFn() - startWallMs);
+    }
+    return simulatedElapsedMs;
+  };
+  const infraRerunsMap = input.infraRerunsBySha ?? /* @__PURE__ */ new Map();
+  let infraRerunsTriggered = 0;
+  let pollIndex = 0;
+  while (true) {
+    pollIndex += 1;
+    const elapsedMs = getElapsedMs();
+    if (input.remainingWallClockMs !== void 0 && elapsedMs >= input.remainingWallClockMs) {
+      return {
+        passed: false,
+        reason: "wall_clock_budget_exhausted",
+        infraRerunsTriggered,
+        failedChecks: [],
+        formattedDiagnostics: `Runner wall-clock budget exhausted after ${Math.round(elapsedMs / 1e3)}s while waiting for external CI checks on ${input.headSha.slice(0, 7)}.`,
+        registeredWorkflowNames: [],
+        registeredCheckNames: []
+      };
+    }
+    const [allWorkflowRuns, allCheckRuns] = await Promise.all([
+      input.listWorkflowRunsForSha(input.headSha),
+      input.listCheckRunsForRef(input.headSha)
+    ]);
+    const externalWorkflowRuns = allWorkflowRuns.filter(
+      (r) => !isEpureSyntheticCheckOrRun(r.path ?? r.name ?? "")
+    );
+    const externalCheckRuns = allCheckRuns.filter(
+      (c) => !isEpureSyntheticCheckOrRun(c.name)
+    );
+    const registeredWorkflowNames = externalWorkflowRuns.map(
+      (r) => r.name ?? r.path ?? `run-${r.id}`
+    );
+    const registeredCheckNames = externalCheckRuns.map((c) => c.name);
+    const totalExternalRegistered = externalWorkflowRuns.length + externalCheckRuns.length;
+    if (input.expectedWorkflows.length === 0 && totalExternalRegistered === 0) {
+      return {
+        passed: true,
+        reason: "no_external_workflows",
+        infraRerunsTriggered,
+        failedChecks: [],
+        formattedDiagnostics: "",
+        registeredWorkflowNames: [],
+        registeredCheckNames: []
+      };
+    }
+    if (input.expectedWorkflows.length > 0 && totalExternalRegistered === 0) {
+      if (elapsedMs >= graceWindowMs) {
+        const expectedNames = input.expectedWorkflows.map(
+          (w) => typeof w === "string" ? w : w.path
+        );
+        return {
+          passed: false,
+          reason: "grace_window_timeout",
+          infraRerunsTriggered,
+          failedChecks: [],
+          formattedDiagnostics: `Fail-closed: 0 external workflow runs or check runs registered on SHA ${input.headSha.slice(0, 7)} after ${Math.round(graceWindowMs / 1e3)}s grace window (expected: ${expectedNames.join(", ")}).`,
+          registeredWorkflowNames: [],
+          registeredCheckNames: []
+        };
+      }
+      await sleepFn(pollIntervalMs);
+      simulatedElapsedMs += pollIntervalMs;
+      continue;
+    }
+    if (elapsedMs > timeoutMs) {
+      return {
+        passed: false,
+        reason: "poll_timeout",
+        infraRerunsTriggered,
+        failedChecks: [],
+        formattedDiagnostics: `External CI timed out after ${Math.round(timeoutMs / 6e4)} minutes on SHA ${input.headSha.slice(0, 7)}.`,
+        registeredWorkflowNames,
+        registeredCheckNames
+      };
+    }
+    const activeWorkflowRuns = externalWorkflowRuns.filter(
+      (r) => r.status !== "completed"
+    );
+    const activeCheckRuns = externalCheckRuns.filter(
+      (c) => c.status !== "completed"
+    );
+    if (input.onProgress) {
+      await input.onProgress({
+        pollIndex,
+        elapsedMs,
+        activeWorkflowRuns: activeWorkflowRuns.length,
+        completedWorkflowRuns: externalWorkflowRuns.length - activeWorkflowRuns.length,
+        activeCheckRuns: activeCheckRuns.length,
+        completedCheckRuns: externalCheckRuns.length - activeCheckRuns.length,
+        infraRerunsTriggered
+      });
+    }
+    const waitingOnMoreExpectedWorkflows = externalWorkflowRuns.length > 0 && externalWorkflowRuns.length < input.expectedWorkflows.length && elapsedMs < graceWindowMs;
+    if (activeWorkflowRuns.length > 0 || activeCheckRuns.length > 0 || waitingOnMoreExpectedWorkflows) {
+      await sleepFn(pollIntervalMs);
+      simulatedElapsedMs += pollIntervalMs;
+      continue;
+    }
+    const failedCheckRuns = externalCheckRuns.filter(
+      (c) => isFailedConclusion(c.conclusion)
+    );
+    const failedWorkflowRuns = externalWorkflowRuns.filter(
+      (r) => isFailedConclusion(r.conclusion)
+    );
+    if (failedCheckRuns.length === 0 && failedWorkflowRuns.length === 0) {
+      return {
+        passed: true,
+        reason: "all_passed",
+        infraRerunsTriggered,
+        failedChecks: [],
+        formattedDiagnostics: "",
+        registeredWorkflowNames,
+        registeredCheckNames
+      };
+    }
+    const failureItems = failedCheckRuns.length > 0 ? failedCheckRuns.map((c) => ({
+      id: c.id,
+      name: c.name,
+      conclusion: c.conclusion ?? "failure",
+      html_url: c.html_url ?? c.details_url ?? ""
+    })) : failedWorkflowRuns.map((r) => ({
+      id: r.id,
+      name: r.name ?? r.path ?? `workflow-${r.id}`,
+      conclusion: r.conclusion ?? "failure",
+      html_url: r.html_url ?? ""
+    }));
+    const fetchedFailureDetails = await Promise.all(
+      failureItems.map(async (item) => {
+        const [annotations, rawLog] = await Promise.all([
+          input.listCheckRunAnnotations ? input.listCheckRunAnnotations(item.id).catch(() => []) : Promise.resolve([]),
+          input.getJobLogs ? input.getJobLogs(item.id).catch(() => "") : Promise.resolve("")
+        ]);
+        const usedReruns = infraRerunsMap.get(input.headSha) ?? 0;
+        const classification = classifyCiFailure({
+          conclusion: item.conclusion,
+          checkName: item.name,
+          rawLog,
+          annotations,
+          headSha: input.headSha,
+          infraRerunsUsedForSha: usedReruns
+        });
+        return {
+          item,
+          annotations,
+          rawLog,
+          classification
+        };
+      })
+    );
+    const allTransientInfra = fetchedFailureDetails.length > 0 && fetchedFailureDetails.every(
+      (d) => d.classification.shouldRerunWorkflow
+    );
+    if (allTransientInfra && input.rerunFailedJobs) {
+      const currentUsed = infraRerunsMap.get(input.headSha) ?? 0;
+      infraRerunsMap.set(input.headSha, currentUsed + 1);
+      infraRerunsTriggered += 1;
+      const runIdsToRerun = failedWorkflowRuns.length > 0 ? failedWorkflowRuns.map((r) => r.id) : failureItems.map((f) => f.id);
+      for (const runId of runIdsToRerun) {
+        await input.rerunFailedJobs(runId);
+      }
+      await sleepFn(pollIntervalMs);
+      simulatedElapsedMs += pollIntervalMs;
+      continue;
+    }
+    const failedChecksSummary = [];
+    const diagnosticBlocks = [];
+    for (const detail of fetchedFailureDetails) {
+      const sanitized = sanitizeAndFormatFailedCheckLogs({
+        checkName: detail.item.name,
+        htmlUrl: detail.item.html_url,
+        annotations: detail.annotations,
+        rawLog: detail.rawLog,
+        extraSecrets: input.extraSecrets
+      });
+      failedChecksSummary.push({
+        id: detail.item.id,
+        name: detail.item.name,
+        conclusion: detail.item.conclusion,
+        html_url: detail.item.html_url,
+        sanitized_log: sanitized.sanitizedExcerpt,
+        wrapped_untrusted_output: sanitized.wrappedUntrustedOutput
+      });
+      diagnosticBlocks.push(sanitized.wrappedUntrustedOutput);
+    }
+    return {
+      passed: false,
+      reason: "check_failure",
+      infraRerunsTriggered,
+      failedChecks: failedChecksSummary,
+      formattedDiagnostics: diagnosticBlocks.join("\n\n"),
+      registeredWorkflowNames,
+      registeredCheckNames
+    };
+  }
+}
+function formatNeedsHumanEscalationComment(input) {
+  const ticketRef = input.ticketIssueNumber ? `Ticket #${input.ticketIssueNumber} (Plan #${input.issueNumber})` : `Issue #${input.issueNumber}`;
+  const prRef = input.prNumber && input.prUrl ? ` \u2014 [PR #${input.prNumber}](${input.prUrl})` : input.prNumber ? ` \u2014 PR #${input.prNumber}` : "";
+  let reasonHeadline = "";
+  if (input.reason === "remediation_exhausted") {
+    const used = input.codeFixAttemptsUsed ?? 3;
+    const max = input.maxCodeFixAttempts ?? 3;
+    reasonHeadline = `\`${used}/${max}\` remediation rounds exhausted (\`max_code_fix_attempts = ${max}\`)`;
+  } else if (input.reason === "grace_window_timeout") {
+    const gw = input.graceWindowSeconds ?? 45;
+    reasonHeadline = `${gw}s external CI workflow registration timeout (fail-closed)`;
+  } else if (input.reason === "sensitive_path_violation") {
+    reasonHeadline = "Forbidden modification of sensitive path or path traversal blocked pre-Stage-1";
+  } else {
+    reasonHeadline = "Runner wall-clock timeout budget exhausted";
+  }
+  const lines = [];
+  if (input.stateMirrorMarkdown) {
+    lines.push(input.stateMirrorMarkdown, "");
+  }
+  lines.push(
+    `### \u26A0\uFE0F Escalade humaine (\`needs-human\`) \u2014 ${ticketRef}${prRef}`,
+    "",
+    `- **Branche active** : \`${input.branch}\``,
+    `- **Statut d'orchestration** : \`suspended\` (label \`needs-human\` appliqu\xE9)`,
+    `- **Cause de l'escalade** : ${reasonHeadline}`
+  );
+  if (input.prUrl) {
+    lines.push(`- **Pull Request** : ${input.prUrl}`);
+  }
+  if (input.sensitivePaths && input.sensitivePaths.length > 0) {
+    lines.push(
+      `- **Chemins sensibles bloqu\xE9s** : ${input.sensitivePaths.map((p) => `\`${p}\``).join(", ")}`
+    );
+  }
+  if (input.traversalPaths && input.traversalPaths.length > 0) {
+    lines.push(
+      `- **Chemins hors p\xE9rim\xE8tre bloqu\xE9s** : ${input.traversalPaths.map((p) => `\`${p}\``).join(", ")}`
+    );
+  }
+  if (input.expectedWorkflows && input.expectedWorkflows.length > 0 && input.reason === "grace_window_timeout") {
+    lines.push(
+      `- **Workflows externes attendus depuis \`dev\`** : ${input.expectedWorkflows.map((w) => `\`${w}\``).join(", ")}`
+    );
+  }
+  if (input.failedChecks && input.failedChecks.length > 0) {
+    lines.push("", "#### Checks CI externes en \xE9chec :");
+    for (const check of input.failedChecks) {
+      const link = check.html_url ? `[${check.name}](${check.html_url})` : `\`${check.name}\``;
+      lines.push(`- \u274C ${link} (\`${check.conclusion}\`)`);
+    }
+  }
+  if (input.mustFixFindings && input.mustFixFindings.length > 0) {
+    lines.push("", "#### Constats `must_fix` restants (Revue Multi-Agents) :");
+    for (const f of input.mustFixFindings) {
+      lines.push(
+        `- **[${f.reviewer}]** (\`${f.path}:${f.line}\`) **${f.title}** \u2014 ${f.rationale}`
+      );
+    }
+  }
+  if (input.diagnosticExcerpt && input.diagnosticExcerpt.trim().length > 0) {
+    lines.push(
+      "",
+      "<details>",
+      "<summary>\u{1F4CB} Diagnostic CI & extrait des journaux assainis</summary>",
+      "",
+      "```text",
+      input.diagnosticExcerpt.trim().slice(0, 6e3),
+      "```",
+      "</details>"
+    );
+  }
+  lines.push(
+    "",
+    "#### \u{1F6E0}\uFE0F Playbook de reprise (`/epure approve`)",
+    "1. Inspectez les checks ou fichiers signal\xE9s ci-dessus (ou ajustez `verification.targets` dans `.github/agents.yml` sur `dev` si n\xE9cessaire).",
+    `2. Poussez un correctif sur \`${input.branch}\` ou mettez \xE0 jour la configuration sur \`dev\`.`,
+    `3. Postez \`/epure approve\` sur cette issue (#${input.issueNumber}) : l'orchestrateur r\xE9conciliera automatiquement la PR existante et reprendra la validation sans dupliquer le travail (ADR-0028, Q110).`
+  );
+  return lines.join("\n");
+}
+
+// src/frontend/impeccable-planning.ts
+function planImpeccableDesignSession(input) {
+  if (!input.touchesFrontendUi) {
+    return {
+      impeccable_invoked: false,
+      open_design_questions: [],
+      versioned_artifact_paths: []
+    };
+  }
+  const answeredSet = new Set(
+    input.alreadyAnsweredTopics.map((t) => t.trim().toLowerCase())
+  );
+  const openQuestions = input.candidateDesignTopics.filter(
+    (topic) => !answeredSet.has(topic.trim().toLowerCase())
+  );
+  const cleanSlug = input.surfaceSlug.trim().replace(/^\/+|\/+$/g, "");
+  return {
+    impeccable_invoked: true,
+    open_design_questions: openQuestions,
+    versioned_artifact_paths: [
+      ".impeccable.md",
+      "DESIGN.md",
+      `.impeccable/surfaces/${cleanSlug}.md`
+    ]
+  };
+}
+
+// src/frontend/impeccable-pr-gate.ts
+function evaluateImpeccableFrontendPr(input) {
+  const blocking = [];
+  const informational = [];
+  for (const f of input.findings) {
+    if (f.isPreExistingInBaseline || f.hasApprovedException) {
+      continue;
+    }
+    if (f.category === "subjective_aesthetic_suggestion") {
+      informational.push(f);
+      continue;
+    }
+    blocking.push(f);
+  }
+  return {
+    conclusion: blocking.length === 0 ? "success" : "failure",
+    blocking_findings: blocking,
+    informational_findings: informational
+  };
+}
+
 // src/review/multi-agent-pr-review.ts
 var UI_FILE_PATTERN = /(?:\.(?:tsx|jsx|css|scss|html)$|^(?:src\/)?(?:components|pages|ui|views|styles)\/|^(?:src\/)?App\.[tj]sx?$)/i;
 var DOMAIN_BACKEND_FILE_PATTERN = /(?:^(?:src\/)?(?:domain|services|api|server|backend|models|engine|core)\/|\.(?:ts|js)$)/i;
@@ -2164,15 +5014,6 @@ async function runMultiAgentPrReviewPass(input) {
   };
 }
 
-// src/auth/github-apps.ts
-var PRIVATE_KEY_DETECTION_PATTERN = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|EPURE_(?:AGENT|RELEASE)_APP_PRIVATE_KEY\s*=\s*\S+/i;
-function containsPrivateKeyMaterial(text) {
-  return PRIVATE_KEY_DETECTION_PATTERN.test(text);
-}
-
-// src/bootstrap/setup-repo.ts
-var CONVENTIONAL_COMMIT_PATTERN_REGEX = "^(feat|fix|docs|style|refactor|perf|test|chore|ci|build|revert)(\\([a-z0-9/-]+\\))?(!)?: .+";
-
 // src/review/squash-commit-generator.ts
 var CONVENTIONAL_REGEX = new RegExp(CONVENTIONAL_COMMIT_PATTERN_REGEX);
 function normalizeConventionalCommitTitle(rawTitle, defaultScope = "core") {
@@ -2300,213 +5141,6 @@ ${snippet}`;
       commit_message: commitMessage,
       uses_closes_keyword: trailers.usesClosesKeyword
     };
-  }
-}
-
-// src/sandbox/llm-sandbox.ts
-import { randomBytes } from "node:crypto";
-import { createServer } from "node:http";
-import { spawn } from "node:child_process";
-var SECRET_ENV_NAME_PATTERN = /^(?:OPENAI_API_KEY|ANTHROPIC_API_KEY|GEMINI_API_KEY|LLM_API_KEY|GITHUB_TOKEN|GH_TOKEN|GITHUB_PAT|EPURE_.*(?:KEY|TOKEN|SECRET)|AWS_.*|AZURE_.*|GCP_.*|NPM_TOKEN|NODE_AUTH_TOKEN|ACTIONS_ID_TOKEN_REQUEST_TOKEN)$/i;
-var ALLOWED_PROXY_PATHS = /* @__PURE__ */ new Set([
-  "/v1/chat/completions",
-  "/v1/responses",
-  "/v1/messages",
-  "/chat/completions",
-  "/responses",
-  "/messages"
-]);
-function buildSanitizedSandboxEnv(runnerEnv, proxy) {
-  const sanitized = {};
-  for (const [key, value] of Object.entries(runnerEnv)) {
-    if (typeof value !== "string") {
-      continue;
-    }
-    if (SECRET_ENV_NAME_PATTERN.test(key)) {
-      continue;
-    }
-    if (containsPrivateKeyMaterial(value)) {
-      continue;
-    }
-    sanitized[key] = value;
-  }
-  sanitized.EPURE_SANDBOX_ACTIVE = "true";
-  sanitized.EPURE_LLM_PROXY_URL = proxy.proxyUrl;
-  sanitized.EPURE_LLM_PROXY_NONCE = proxy.proxyNonce;
-  sanitized.GITHUB_TOKEN_PERMISSIONS = "none";
-  return sanitized;
-}
-function readRequestBody(req) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    req.on("data", (chunk) => chunks.push(chunk));
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    req.on("error", reject);
-  });
-}
-async function createLlmSandboxProxy(options) {
-  const realKey = options.llmApiKey.trim();
-  const proxyNonce = randomBytes(24).toString("hex");
-  const defaultUpstream = async (req) => ({
-    status: 200,
-    body: JSON.stringify({
-      id: "chatcmpl-epure-proxy",
-      object: "chat.completion",
-      path: req.path,
-      choices: [{ index: 0, message: { role: "assistant", content: "ok" } }]
-    })
-  });
-  const handler = options.upstreamHandler ?? defaultUpstream;
-  const server = createServer(
-    async (req, res) => {
-      const providedNonce = req.headers["x-epure-proxy-nonce"];
-      if (providedNonce !== proxyNonce) {
-        res.statusCode = 401;
-        res.setHeader("content-type", "application/json");
-        res.end(
-          JSON.stringify({
-            error_code: "PROXY_UNAUTHORIZED_NONCE",
-            error_message: "Missing or invalid x-epure-proxy-nonce header for local sandbox LLM proxy."
-          })
-        );
-        return;
-      }
-      const rawUrl = req.url ?? "/";
-      const normalizedPath = rawUrl.split("?")[0] ?? "/";
-      if (!ALLOWED_PROXY_PATHS.has(normalizedPath)) {
-        res.statusCode = 403;
-        res.setHeader("content-type", "application/json");
-        res.end(
-          JSON.stringify({
-            error_code: "PROXY_FORBIDDEN_ENDPOINT",
-            error_message: `Sandbox LLM proxy forbids access to '${normalizedPath}'.`
-          })
-        );
-        return;
-      }
-      const body = await readRequestBody(req);
-      const upstreamResp = await handler(
-        {
-          method: req.method ?? "POST",
-          path: normalizedPath,
-          body
-        },
-        realKey
-      );
-      res.statusCode = upstreamResp.status;
-      res.setHeader("content-type", "application/json");
-      res.end(redactSecrets(upstreamResp.body, [realKey]));
-    }
-  );
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => resolve());
-  });
-  const address = server.address();
-  const proxyUrl = `http://127.0.0.1:${address.port}`;
-  return {
-    proxyUrl,
-    proxyNonce,
-    close: () => new Promise((resolve) => {
-      server.close(() => resolve());
-    })
-  };
-}
-function collectRunnerSecretValues(runnerEnv) {
-  const values = [];
-  for (const [key, value] of Object.entries(runnerEnv)) {
-    if (typeof value === "string" && value.trim().length >= 8) {
-      if (SECRET_ENV_NAME_PATTERN.test(key) || containsPrivateKeyMaterial(value)) {
-        values.push(value.trim());
-      }
-    }
-  }
-  return values;
-}
-async function runInUntrustedCodeSandbox(input) {
-  const startMs = Date.now();
-  if (!input.isolationAvailable) {
-    return {
-      isolated: false,
-      error_code: "SANDBOX_ISOLATION_UNAVAILABLE",
-      error_message: "Fail-closed: container/process sandbox isolation is unavailable on this runner (ADR-0011, ADR-0023).",
-      exit_code: 1,
-      stdout: "",
-      stderr: "",
-      duration_ms: Date.now() - startMs,
-      proxy_url: ""
-    };
-  }
-  const llmApiKey = (input.runnerEnv.OPENAI_API_KEY ?? input.runnerEnv.ANTHROPIC_API_KEY ?? input.runnerEnv.LLM_API_KEY ?? "").trim();
-  if (!llmApiKey) {
-    return {
-      isolated: false,
-      error_code: "LLM_API_KEY_MISSING",
-      error_message: "Fail-closed: runner is missing LLM API key (OPENAI_API_KEY, ANTHROPIC_API_KEY, or LLM_API_KEY) for the local proxy sidecar.",
-      exit_code: 1,
-      stdout: "",
-      stderr: "",
-      duration_ms: Date.now() - startMs,
-      proxy_url: ""
-    };
-  }
-  const secretValues = collectRunnerSecretValues(input.runnerEnv);
-  const proxy = await createLlmSandboxProxy({
-    llmApiKey,
-    upstreamHandler: input.upstreamHandler
-  });
-  try {
-    const sanitizedEnv = buildSanitizedSandboxEnv(input.runnerEnv, {
-      proxyUrl: proxy.proxyUrl,
-      proxyNonce: proxy.proxyNonce
-    });
-    const args = input.args ? [...input.args] : [];
-    const timeoutMs = input.timeoutMs ?? 60 * 60 * 1e3;
-    const childResult = await new Promise((resolve) => {
-      const child = spawn(input.command, args, {
-        cwd: input.cwd ?? process.cwd(),
-        env: sanitizedEnv,
-        stdio: ["ignore", "pipe", "pipe"]
-      });
-      const stdoutChunks = [];
-      const stderrChunks = [];
-      const timer = setTimeout(() => {
-        child.kill("SIGKILL");
-      }, timeoutMs);
-      child.stdout.on("data", (chunk) => stdoutChunks.push(chunk));
-      child.stderr.on("data", (chunk) => stderrChunks.push(chunk));
-      child.on("error", (err) => {
-        clearTimeout(timer);
-        resolve({
-          exitCode: 1,
-          stdout: Buffer.concat(stdoutChunks).toString("utf8"),
-          stderr: err.message
-        });
-      });
-      child.on("close", (code) => {
-        clearTimeout(timer);
-        resolve({
-          exitCode: code ?? 1,
-          stdout: Buffer.concat(stdoutChunks).toString("utf8"),
-          stderr: Buffer.concat(stderrChunks).toString("utf8")
-        });
-      });
-    });
-    const cleanStdout = redactSecrets(childResult.stdout, secretValues);
-    const cleanStderr = redactSecrets(childResult.stderr, secretValues);
-    const ok = childResult.exitCode === 0;
-    return {
-      isolated: true,
-      error_code: ok ? "NONE" : "SANDBOX_COMMAND_FAILED",
-      error_message: ok ? "" : `Sandboxed command exited with code ${childResult.exitCode}.`,
-      exit_code: childResult.exitCode,
-      stdout: cleanStdout,
-      stderr: cleanStderr,
-      duration_ms: Date.now() - startMs,
-      proxy_url: proxy.proxyUrl
-    };
-  } finally {
-    await proxy.close();
   }
 }
 
@@ -2704,6 +5338,16 @@ async function applyTicketImplementationPayload(params) {
     params.accumulatedFiles.set(cleanPath, f.content);
     params.featureChangedFilesMap.set(cleanPath, f.content);
     params.ticketChangedFilesMap.set(cleanPath, f.content);
+    params.featureDeletedFilesSet?.delete(cleanPath);
+    params.ticketDeletedFilesSet?.delete(cleanPath);
+  }
+  for (const del of params.parsed.deleted_files ?? []) {
+    const cleanPath = del.replace(/^\/+/, "");
+    params.accumulatedFiles.delete(cleanPath);
+    params.featureChangedFilesMap.delete(cleanPath);
+    params.ticketChangedFilesMap.delete(cleanPath);
+    params.featureDeletedFilesSet?.add(cleanPath);
+    params.ticketDeletedFilesSet?.add(cleanPath);
   }
   for (const patch of params.parsed.patches ?? []) {
     const cleanPath = patch.path.replace(/^\/+/, "");
@@ -2729,6 +5373,8 @@ async function applyTicketImplementationPayload(params) {
     params.accumulatedFiles.set(cleanPath, updatedContent);
     params.featureChangedFilesMap.set(cleanPath, updatedContent);
     params.ticketChangedFilesMap.set(cleanPath, updatedContent);
+    params.featureDeletedFilesSet?.delete(cleanPath);
+    params.ticketDeletedFilesSet?.delete(cleanPath);
   }
   return Array.from(params.ticketChangedFilesMap.entries()).map(
     ([path, content]) => ({ path, content })
@@ -2842,6 +5488,16 @@ function createGitHubRestHelper(params) {
           color,
           description
         });
+      }
+    },
+    async addIssueLabels(issueNumber, labels) {
+      try {
+        await apiRequest(
+          "POST",
+          `/repos/${owner}/${repo}/issues/${issueNumber}/labels`,
+          { labels: [...labels] }
+        );
+      } catch {
       }
     },
     async createIssue(input) {
@@ -3141,6 +5797,41 @@ function createGitHubRestHelper(params) {
       }
       return filesMap;
     },
+    async readDevWorkflowsMap(branch) {
+      const workflowsMap = /* @__PURE__ */ new Map();
+      try {
+        const treeRes = await apiRequest(
+          "GET",
+          `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
+          void 0,
+          true
+        );
+        const entries = treeRes.data?.tree ?? [];
+        for (const entry of entries) {
+          if (entry.type !== "blob" || !entry.path || !entry.sha) {
+            continue;
+          }
+          if (!/^\.github\/workflows\/[^/]+\.ya?ml$/i.test(entry.path)) {
+            continue;
+          }
+          const blobRes = await apiRequest(
+            "GET",
+            `/repos/${owner}/${repo}/git/blobs/${entry.sha}`,
+            void 0,
+            true
+          );
+          if (blobRes.data?.content && blobRes.data.encoding === "base64") {
+            const decoded = Buffer.from(
+              blobRes.data.content.replace(/\s+/g, ""),
+              "base64"
+            ).toString("utf8");
+            workflowsMap.set(entry.path, decoded);
+          }
+        }
+      } catch {
+      }
+      return workflowsMap;
+    },
     async ensureBranch(branch, fromBranch = "main") {
       const existingSha = await this.getDefaultBranchSha(branch);
       if (existingSha) {
@@ -3175,6 +5866,7 @@ function createGitHubRestHelper(params) {
       );
       const baseTreeSha = parentCommit.data.tree.sha;
       const treeEntries = [];
+      const seenTreePaths = /* @__PURE__ */ new Set();
       for (const file of input.files) {
         const cleanPath = file.path.trim().replace(/^\/+/, "");
         const blobRes = await apiRequest(
@@ -3185,11 +5877,25 @@ function createGitHubRestHelper(params) {
             encoding: "utf-8"
           }
         );
+        seenTreePaths.add(cleanPath);
         treeEntries.push({
           path: cleanPath,
           mode: "100644",
           type: "blob",
           sha: blobRes.data.sha
+        });
+      }
+      for (const delPath of input.deletedFiles ?? []) {
+        const cleanPath = delPath.trim().replace(/^\/+/, "");
+        if (!cleanPath || seenTreePaths.has(cleanPath)) {
+          continue;
+        }
+        seenTreePaths.add(cleanPath);
+        treeEntries.push({
+          path: cleanPath,
+          mode: "100644",
+          type: "blob",
+          sha: null
         });
       }
       const newTree = await apiRequest(
@@ -3219,19 +5925,60 @@ function createGitHubRestHelper(params) {
       );
       return newCommit.data.sha;
     },
+    async listPullRequestFiles(prNumber) {
+      try {
+        const existing = await apiRequest(
+          "GET",
+          `/repos/${owner}/${repo}/pulls/${prNumber}/files`,
+          void 0,
+          true
+        );
+        if (Array.isArray(existing.data)) {
+          return existing.data.filter(
+            (item) => typeof item?.filename === "string" && item.filename.trim().length > 0
+          ).map((item) => ({
+            filename: item.filename.trim().replace(/^\/+/, ""),
+            status: item.status ?? "modified"
+          }));
+        }
+      } catch {
+      }
+      return [];
+    },
+    async findOpenPullRequestByHead(headBranch, baseBranch) {
+      try {
+        const existing = await apiRequest(
+          "GET",
+          `/repos/${owner}/${repo}/pulls?state=open&head=${encodeURIComponent(
+            `${owner}:${headBranch}`
+          )}&base=${encodeURIComponent(baseBranch)}`,
+          void 0,
+          true
+        );
+        if (Array.isArray(existing.data) && existing.data.length > 0 && existing.data[0]?.head?.sha) {
+          const first = existing.data[0];
+          return {
+            number: first.number,
+            html_url: first.html_url,
+            head_sha: first.head.sha,
+            title: first.title ?? "",
+            body: first.body ?? ""
+          };
+        }
+      } catch {
+      }
+      return null;
+    },
     async openPullRequest(input) {
-      const existing = await apiRequest(
-        "GET",
-        `/repos/${owner}/${repo}/pulls?state=open&head=${encodeURIComponent(
-          `${owner}:${input.head}`
-        )}&base=${encodeURIComponent(input.base)}`
+      const existingPr = await this.findOpenPullRequestByHead(
+        input.head,
+        input.base
       );
-      if (existing.data && existing.data.length > 0) {
-        const first = existing.data[0];
+      if (existingPr) {
         return {
-          number: first.number,
-          html_url: first.html_url,
-          head_sha: first.head.sha
+          number: existingPr.number,
+          html_url: existingPr.html_url,
+          head_sha: existingPr.head_sha
         };
       }
       const created = await apiRequest("POST", `/repos/${owner}/${repo}/pulls`, {
@@ -3324,6 +6071,76 @@ function createGitHubRestHelper(params) {
         });
       } catch {
       }
+    },
+    async listWorkflowRunsForSha(headSha) {
+      try {
+        const res = await apiRequest(
+          "GET",
+          `/repos/${owner}/${repo}/actions/runs?head_sha=${encodeURIComponent(headSha)}&per_page=100`,
+          void 0,
+          true
+        );
+        return Array.isArray(res.data?.workflow_runs) ? res.data.workflow_runs : [];
+      } catch {
+        return [];
+      }
+    },
+    async listCheckRunsForRef(headSha) {
+      try {
+        const res = await apiRequest(
+          "GET",
+          `/repos/${owner}/${repo}/commits/${encodeURIComponent(headSha)}/check-runs?per_page=100`,
+          void 0,
+          true
+        );
+        return Array.isArray(res.data?.check_runs) ? res.data.check_runs : [];
+      } catch {
+        return [];
+      }
+    },
+    async listCheckRunAnnotations(checkRunId) {
+      try {
+        const res = await apiRequest(
+          "GET",
+          `/repos/${owner}/${repo}/check-runs/${checkRunId}/annotations?per_page=50`,
+          void 0,
+          true
+        );
+        return Array.isArray(res.data) ? res.data : [];
+      } catch {
+        return [];
+      }
+    },
+    async getActionJobLogs(jobId) {
+      try {
+        const resp = await fetchFn(
+          `${baseUrl}/repos/${owner}/${repo}/actions/jobs/${jobId}/logs`,
+          {
+            method: "GET",
+            headers
+          }
+        );
+        if (!resp.ok) {
+          return "";
+        }
+        const text = await resp.text();
+        if (text.trim() === '{"ok":true}') {
+          return "";
+        }
+        return text;
+      } catch {
+        return "";
+      }
+    },
+    async rerunFailedWorkflowJobs(runId) {
+      try {
+        await apiRequest(
+          "POST",
+          `/repos/${owner}/${repo}/actions/runs/${runId}/rerun-failed-jobs`,
+          {}
+        );
+      } catch {
+      }
     }
   };
 }
@@ -3345,82 +6162,40 @@ function parseTrackedTicketsFromComments(comments) {
 }
 async function runTestsInIsolatedWorkspace(params) {
   const isGha = process.env.GITHUB_ACTIONS === "true";
-  const groupTitle = params.label ? `[EPURE][Sandbox] ${params.label}` : "[EPURE][Sandbox] Verify TypeScript & Vitest suite";
+  const groupTitle = params.label ? `[EPURE][Sandbox] ${params.label}` : "[EPURE][Sandbox] Verify Polyglot Stage 1 Suite";
   if (isGha) {
     process.stdout.write(`::group::${groupTitle}
 `);
   }
-  const workDir = mkdtempSync(join2(tmpdir(), "epure-task-sandbox-"));
   try {
-    for (const file of params.files) {
-      const target = join2(workDir, file.path.replace(/^\/+/, ""));
-      mkdirSync(dirname(target), { recursive: true });
-      writeFileSync(target, file.content, "utf8");
-    }
-    const pkgJsonPath = join2(workDir, "package.json");
-    if (!existsSync2(pkgJsonPath)) {
-      return { passed: true, output: "No package.json in workspace snapshot; syntax verified." };
-    }
-    execFileSync("npm", ["install", "--no-audit", "--no-fund"], {
-      cwd: workDir,
-      stdio: "pipe",
-      timeout: 18e4
+    const profile = params.verificationProfile ?? discoverVerificationProfile({
+      targetFilesHint: params.files.map((f) => f.path)
     });
-    if (existsSync2(join2(workDir, "tsconfig.json"))) {
-      const tscRun = await runInUntrustedCodeSandbox({
-        isolationAvailable: true,
-        runnerEnv: {
-          PATH: process.env.PATH,
-          HOME: process.env.HOME,
-          LLM_API_KEY: params.llmApiKey
-        },
-        command: "npx",
-        args: ["tsc", "--noEmit"],
-        cwd: workDir,
-        timeoutMs: 6e4
-      });
-      if (!tscRun.isolated || tscRun.exit_code !== 0) {
-        const failOut = `TypeScript strict typecheck (tsc --noEmit) failed:
-${tscRun.stdout}
-${tscRun.stderr}`.trim();
-        if (isGha) {
-          process.stdout.write(`${failOut.slice(-4e3)}
-`);
-        }
-        return {
-          passed: false,
-          output: failOut
-        };
-      }
-      if (isGha) {
-        process.stdout.write("[EPURE][Sandbox] tsc --noEmit passed (0 errors)\n");
-      }
-    }
-    const sandboxRun = await runInUntrustedCodeSandbox({
-      isolationAvailable: true,
-      runnerEnv: {
-        PATH: process.env.PATH,
-        HOME: process.env.HOME,
-        LLM_API_KEY: params.llmApiKey
-      },
-      command: "npm",
-      args: ["test", "--", "--run"],
-      cwd: workDir,
-      timeoutMs: 12e4
+    const stage1Result = await runPolyglotStage1Verification({
+      workDir: params.workDir,
+      profile,
+      files: params.files,
+      deleted_files: params.deleted_files,
+      changedPaths: params.changedPaths,
+      isTaskBranch: params.isTaskBranch,
+      llmApiKey: params.llmApiKey,
+      bootstrappedTargets: params.bootstrappedTargets,
+      sandboxRunner: params.sandboxRunner,
+      label: params.label
     });
-    const combinedOut = `${sandboxRun.stdout}
-${sandboxRun.stderr}`.trim();
-    const passed = sandboxRun.isolated && sandboxRun.exit_code === 0;
     if (isGha) {
       process.stdout.write(
-        `[EPURE][Sandbox] vitest run -> ${passed ? "PASSED" : "FAILED"}
-${combinedOut.slice(-4e3)}
+        `[EPURE][Sandbox] Stage 1 -> ${stage1Result.passed ? "PASSED" : "FAILED"}
+${stage1Result.output.slice(-4e3)}
 `
       );
     }
     return {
-      passed,
-      output: combinedOut
+      passed: stage1Result.passed,
+      output: stage1Result.output,
+      blocked_by_security_gate: stage1Result.blocked_by_security_gate,
+      sensitive_paths: stage1Result.sensitive_paths,
+      traversal_paths: stage1Result.traversal_paths
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -3433,7 +6208,6 @@ ${combinedOut.slice(-4e3)}
     if (isGha) {
       process.stdout.write("::endgroup::\n");
     }
-    rmSync(workDir, { recursive: true, force: true });
   }
 }
 async function orchestrateIssueCommand(input) {
@@ -3970,6 +6744,95 @@ Refs #${input.issueNumber}`
       for (const [relPath, content] of remoteTrustedRoster.entries()) {
         trustedBaseFilesMap.set(relPath, content);
       }
+      const rawDevAgentsYaml = await gh.readSingleBranchFile("dev", ".github/agents.yml") ?? await gh.readSingleBranchFile("dev", ".github/agents.yaml");
+      let parsedDevAgentsConfig = null;
+      if (rawDevAgentsYaml) {
+        try {
+          parsedDevAgentsConfig = parseAgentsYaml(rawDevAgentsYaml);
+        } catch {
+          parsedDevAgentsConfig = null;
+        }
+      }
+      const devWorkflowsMap = await gh.readDevWorkflowsMap("dev");
+      const devBranchPaths = await gh.listBranchPaths("dev");
+      const maxCodeFixAttempts = parsedDevAgentsConfig?.max_code_fix_attempts ?? 3;
+      const discoveredDevProfile = discoverVerificationProfile({
+        targetFilesHint: [
+          ...devBranchPaths,
+          ...ticketsManifest.flatMap((t) => t.filesToTouch)
+        ],
+        workflowFilesMap: Object.fromEntries(devWorkflowsMap)
+      });
+      let verificationProfile = parsedDevAgentsConfig?.verification?.targets && parsedDevAgentsConfig.verification.targets.length > 0 ? {
+        ...parsedDevAgentsConfig.verification,
+        deferred_external_workflows: parsedDevAgentsConfig.verification.deferred_external_workflows?.length ? parsedDevAgentsConfig.verification.deferred_external_workflows : discoveredDevProfile.deferred_external_workflows
+      } : {
+        ...discoveredDevProfile,
+        wait_for_external_ci: parsedDevAgentsConfig?.verification?.wait_for_external_ci ?? discoveredDevProfile.wait_for_external_ci,
+        external_ci_timeout_minutes: parsedDevAgentsConfig?.verification?.external_ci_timeout_minutes ?? discoveredDevProfile.external_ci_timeout_minutes,
+        grace_window_seconds: parsedDevAgentsConfig?.verification?.grace_window_seconds ?? discoveredDevProfile.grace_window_seconds
+      };
+      let verificationGuideMarkdown = formatVerificationToolingGuideMarkdown(verificationProfile);
+      const effectiveSleepFn = input.sleepFn ?? (input.fetchImpl ? async () => {
+      } : void 0);
+      const infraRerunsBySha = /* @__PURE__ */ new Map();
+      let totalTransientRetriesUsed = 0;
+      const escalateToNeedsHuman = async (params) => {
+        await gh.ensureLabel(
+          "needs-human",
+          "D93F0B",
+          "Requires human maintainer intervention"
+        );
+        await gh.addIssueLabels(input.issueNumber, ["needs-human"]);
+        if (params.ticketNumber !== input.issueNumber) {
+          await gh.addIssueLabels(params.ticketNumber, ["needs-human"]);
+        }
+        const updatedSuspended = await updateIssueStateWithCas({
+          issueNumber: input.issueNumber,
+          store,
+          mutator: (prev) => ({
+            ...prev,
+            phase: "implementation",
+            status: "suspended",
+            active_branch: params.branch,
+            code_fix_attempts_used: params.codeFixAttemptsUsed ?? prev.code_fix_attempts_used,
+            transient_retries_used: totalTransientRetriesUsed || prev.transient_retries_used,
+            last_processed_comment_id: input.commentId ?? prev.last_processed_comment_id
+          })
+        });
+        const escalationMarkdown = [
+          updatedSuspended.issue_mirror_markdown,
+          "",
+          formatNeedsHumanEscalationComment({
+            reason: params.reason,
+            issueNumber: input.issueNumber,
+            ticketIssueNumber: params.ticketNumber,
+            prNumber: params.prNumber,
+            prUrl: params.prUrl,
+            branch: params.branch,
+            codeFixAttemptsUsed: params.codeFixAttemptsUsed,
+            maxCodeFixAttempts,
+            graceWindowSeconds: verificationProfile.grace_window_seconds,
+            failedChecks: params.failedChecks,
+            mustFixFindings: params.mustFixFindings,
+            sensitivePaths: params.sensitivePaths,
+            traversalPaths: params.traversalPaths,
+            diagnosticExcerpt: params.diagnosticExcerpt
+          })
+        ].join("\n");
+        await gh.postIssueComment(input.issueNumber, escalationMarkdown);
+        return {
+          executed: true,
+          phase: updatedSuspended.state.phase,
+          status: updatedSuspended.state.status,
+          active_branch: params.branch,
+          summary_markdown: escalationMarkdown,
+          created_ticket_numbers: ticketsManifest.map(
+            (t) => t.ticketIssueNumber
+          ),
+          feature_pr_url: params.featurePrUrl ?? params.prUrl ?? ""
+        };
+      };
       await gh.ensureBranch(featureBranch, "dev");
       const updatedStart = await updateIssueStateWithCas({
         issueNumber: input.issueNumber,
@@ -3996,8 +6859,194 @@ ${t.filesToTouch.join(" ")}`
         hintForWorkspace
       );
       const featureChangedFilesMap = /* @__PURE__ */ new Map();
+      const featureDeletedFilesSet = /* @__PURE__ */ new Set();
       const completedTicketsSummary = [];
-      for (const ticket of ticketsManifest) {
+      const checkIsBrownfieldSubpackageRepo = () => accumulatedFiles.size > 0 && !accumulatedFiles.has("package.json") && Array.from(accumulatedFiles.keys()).some(
+        (k) => k.startsWith("backend/") || k.startsWith("frontend/")
+      ) || !devBranchPaths.includes("package.json") && devBranchPaths.some(
+        (k) => k.startsWith("backend/") || k.startsWith("frontend/")
+      );
+      const buildRepoExplorationToolsAndHandlers = (branch) => checkIsBrownfieldSubpackageRepo() || process.env.GITHUB_ACTIONS === "true" ? {
+        tools: [
+          {
+            name: "list_repo_files",
+            description: "Search file paths in the repository matching a substring or keyword (e.g. 'toast', 'fog', 'CampaignContext', 'sessionStore').",
+            parameters: {
+              type: "OBJECT",
+              properties: {
+                query: {
+                  type: "STRING",
+                  description: "Case-insensitive path substring to match"
+                }
+              },
+              required: ["query"]
+            }
+          },
+          {
+            name: "search_in_repo_file",
+            description: "Search for a substring inside a repository file and return matching line numbers with surrounding lines.",
+            parameters: {
+              type: "OBJECT",
+              properties: {
+                path: {
+                  type: "STRING",
+                  description: "Repository-relative file path"
+                },
+                query: {
+                  type: "STRING",
+                  description: "Substring or identifier to search for"
+                }
+              },
+              required: ["path", "query"]
+            }
+          },
+          {
+            name: "read_repo_file",
+            description: "Read a file (or line range start_line..end_line) from the repository branch.",
+            parameters: {
+              type: "OBJECT",
+              properties: {
+                path: {
+                  type: "STRING",
+                  description: "Repository-relative file path"
+                },
+                start_line: {
+                  type: "INTEGER",
+                  description: "Optional 1-based start line"
+                },
+                end_line: {
+                  type: "INTEGER",
+                  description: "Optional 1-based end line"
+                }
+              },
+              required: ["path"]
+            }
+          }
+        ],
+        toolHandlers: {
+          list_repo_files: async (args) => {
+            const q = String(args.query ?? "").trim().toLowerCase();
+            let allPaths = await gh.listBranchPaths(branch);
+            if (allPaths.length === 0 && branch !== featureBranch) {
+              allPaths = await gh.listBranchPaths(featureBranch);
+            }
+            const matches = allPaths.filter((p) => p.toLowerCase().includes(q)).slice(0, 60);
+            return { matches };
+          },
+          search_in_repo_file: async (args) => {
+            const p = String(args.path ?? "").trim().replace(/^\/+/, "");
+            const q = String(args.query ?? "").trim();
+            let content = accumulatedFiles.get(p) ?? null;
+            if (content === null) {
+              content = await gh.readSingleBranchFile(branch, p) ?? (branch !== featureBranch ? await gh.readSingleBranchFile(featureBranch, p) : null);
+              if (content !== null) {
+                accumulatedFiles.set(p, content);
+              }
+            }
+            if (content === null) {
+              return { error: `File not found: ${p}` };
+            }
+            const lines = content.split("\n");
+            const snippets = [];
+            for (let i = 0; i < lines.length; i += 1) {
+              if (lines[i].toLowerCase().includes(q.toLowerCase())) {
+                const start = Math.max(0, i - 15);
+                const end = Math.min(lines.length, i + 20);
+                snippets.push(
+                  `Lines ${start + 1}-${end}:
+` + lines.slice(start, end).map((l, idx) => `${start + idx + 1}| ${l}`).join("\n")
+                );
+                i = end - 1;
+                if (snippets.length >= 8) {
+                  break;
+                }
+              }
+            }
+            return {
+              path: p,
+              total_lines: lines.length,
+              matches: snippets
+            };
+          },
+          read_repo_file: async (args) => {
+            const p = String(args.path ?? "").trim().replace(/^\/+/, "");
+            let content = accumulatedFiles.get(p) ?? null;
+            if (content === null) {
+              content = await gh.readSingleBranchFile(branch, p) ?? (branch !== featureBranch ? await gh.readSingleBranchFile(featureBranch, p) : null);
+              if (content !== null) {
+                accumulatedFiles.set(p, content);
+              }
+            }
+            if (content === null) {
+              return { error: `File not found: ${p}` };
+            }
+            const lines = content.split("\n");
+            const startLine = Math.max(
+              1,
+              Number(args.start_line ?? 1) || 1
+            );
+            const endLine = Math.min(
+              lines.length,
+              Number(
+                args.end_line ?? Math.min(lines.length, startLine + 250)
+              ) || lines.length
+            );
+            return {
+              path: p,
+              total_lines: lines.length,
+              start_line: startLine,
+              end_line: endLine,
+              content: lines.slice(startLine - 1, endLine).join("\n")
+            };
+          }
+        }
+      } : {};
+      const existingFeaturePrAtStart = await gh.findOpenPullRequestByHead(
+        featureBranch,
+        "dev"
+      );
+      let skipTicketLoopForExistingFeaturePr = false;
+      if (existingFeaturePrAtStart) {
+        let hasOpenTaskPr = false;
+        for (const ticket of ticketsManifest) {
+          const candidateTaskBranch = `task/${ticket.ticketIssueNumber}-${ticket.slug}`;
+          const openTaskPr = await gh.findOpenPullRequestByHead(
+            candidateTaskBranch,
+            featureBranch
+          );
+          if (openTaskPr) {
+            hasOpenTaskPr = true;
+            break;
+          }
+        }
+        if (!hasOpenTaskPr) {
+          skipTicketLoopForExistingFeaturePr = true;
+          const featurePrFiles = await gh.listPullRequestFiles(
+            existingFeaturePrAtStart.number
+          );
+          for (const prFile of featurePrFiles) {
+            const cleanPath = prFile.filename.replace(/^\/+/, "");
+            if (prFile.status === "removed") {
+              accumulatedFiles.delete(cleanPath);
+              featureChangedFilesMap.delete(cleanPath);
+              featureDeletedFilesSet.add(cleanPath);
+            } else {
+              const content = await gh.readSingleBranchFile(featureBranch, cleanPath) ?? accumulatedFiles.get(cleanPath) ?? null;
+              if (content !== null) {
+                accumulatedFiles.set(cleanPath, content);
+                featureChangedFilesMap.set(cleanPath, content);
+                featureDeletedFilesSet.delete(cleanPath);
+              }
+            }
+          }
+          for (const ticket of ticketsManifest) {
+            completedTicketsSummary.push(
+              `- **#${ticket.ticketIssueNumber}** (${ticket.title}) \u2014 previously squash-merged into \`${featureBranch}\``
+            );
+          }
+        }
+      }
+      for (const ticket of skipTicketLoopForExistingFeaturePr ? [] : ticketsManifest) {
         const ticketIssueMeta = await gh.getIssue(ticket.ticketIssueNumber);
         if (ticket.ticketIssueNumber !== input.issueNumber && ticketIssueMeta.state === "closed" && accumulatedFiles.size > 0) {
           if (process.env.GITHUB_ACTIONS === "true") {
@@ -4019,581 +7068,783 @@ ${t.filesToTouch.join(" ")}`
           );
         }
         await gh.ensureBranch(taskBranch, featureBranch);
-        const existingFilesContext = Array.from(accumulatedFiles.entries()).map(([path, content]) => `--- FILE: ${path} ---
+        const sandboxWorkspace = prepareRepositorySandboxWorkspace({
+          repository: input.repository,
+          branch: featureBranch,
+          githubToken: activeToken,
+          seedFiles: accumulatedFiles,
+          enableRemoteClone: Boolean(
+            process.env.GITHUB_ACTIONS === "true" && !input.fetchImpl
+          )
+        });
+        if (sandboxWorkspace.clonedFromRemote && !parsedDevAgentsConfig?.verification?.targets?.length) {
+          const clonedProfile = discoverVerificationProfile({
+            repoRootDir: sandboxWorkspace.workDir,
+            targetFilesHint: [
+              ...devBranchPaths,
+              ...ticketsManifest.flatMap((t) => t.filesToTouch)
+            ],
+            workflowFilesMap: Object.fromEntries(devWorkflowsMap)
+          });
+          verificationProfile = {
+            ...clonedProfile,
+            wait_for_external_ci: parsedDevAgentsConfig?.verification?.wait_for_external_ci ?? clonedProfile.wait_for_external_ci,
+            external_ci_timeout_minutes: parsedDevAgentsConfig?.verification?.external_ci_timeout_minutes ?? clonedProfile.external_ci_timeout_minutes,
+            grace_window_seconds: parsedDevAgentsConfig?.verification?.grace_window_seconds ?? clonedProfile.grace_window_seconds
+          };
+          verificationGuideMarkdown = formatVerificationToolingGuideMarkdown(verificationProfile);
+        }
+        const bootstrappedTargets = /* @__PURE__ */ new Set();
+        try {
+          const ticketChangedFilesMap = /* @__PURE__ */ new Map();
+          const ticketDeletedFilesSet = /* @__PURE__ */ new Set();
+          let impl;
+          let taskPr;
+          let currentPrHeadSha;
+          let fixAttempt = 0;
+          const existingTaskPr = await gh.findOpenPullRequestByHead(
+            taskBranch,
+            featureBranch
+          );
+          if (existingTaskPr) {
+            const taskPrFiles = await gh.listPullRequestFiles(
+              existingTaskPr.number
+            );
+            if (taskPrFiles.length > 0) {
+              for (const prFile of taskPrFiles) {
+                const cleanPath = prFile.filename.replace(/^\/+/, "");
+                if (prFile.status === "removed") {
+                  accumulatedFiles.delete(cleanPath);
+                  featureChangedFilesMap.delete(cleanPath);
+                  ticketChangedFilesMap.delete(cleanPath);
+                  featureDeletedFilesSet.add(cleanPath);
+                  ticketDeletedFilesSet.add(cleanPath);
+                } else {
+                  const content = await gh.readSingleBranchFile(taskBranch, cleanPath) ?? accumulatedFiles.get(cleanPath) ?? null;
+                  if (content !== null) {
+                    accumulatedFiles.set(cleanPath, content);
+                    featureChangedFilesMap.set(cleanPath, content);
+                    ticketChangedFilesMap.set(cleanPath, content);
+                    featureDeletedFilesSet.delete(cleanPath);
+                    ticketDeletedFilesSet.delete(cleanPath);
+                  }
+                }
+              }
+            } else {
+              const taskBranchFiles = await gh.readBranchWorkspaceFiles(
+                taskBranch,
+                hintForWorkspace
+              );
+              for (const [p, c] of taskBranchFiles.entries()) {
+                accumulatedFiles.set(p, c);
+                featureChangedFilesMap.set(p, c);
+                ticketChangedFilesMap.set(p, c);
+              }
+            }
+            const existingPreCheck = validateWorkspaceFileOperations({
+              workDir: sandboxWorkspace.workDir,
+              files: Array.from(ticketChangedFilesMap.keys()).map((p) => ({
+                path: p
+              })),
+              deleted_files: Array.from(ticketDeletedFilesSet),
+              targets: verificationProfile.targets,
+              isTaskBranch: true
+            });
+            if (!existingPreCheck.allowed) {
+              return await escalateToNeedsHuman({
+                reason: "sensitive_path_violation",
+                ticketNumber: ticket.ticketIssueNumber,
+                branch: taskBranch,
+                prNumber: existingTaskPr.number,
+                prUrl: existingTaskPr.html_url,
+                sensitivePaths: existingPreCheck.sensitivePaths,
+                traversalPaths: existingPreCheck.traversalPaths
+              });
+            }
+            impl = {
+              commit_message: existingTaskPr.title || `feat(ticket-${ticket.ticketIssueNumber}): ${ticket.title}`,
+              test_summary: "Reconciled existing open Pull Request on task branch (Q110)",
+              files: Array.from(ticketChangedFilesMap.entries()).map(
+                ([path, content]) => ({ path, content })
+              )
+            };
+            taskPr = existingTaskPr;
+            currentPrHeadSha = existingTaskPr.head_sha;
+          } else {
+            const existingFilesContext = Array.from(accumulatedFiles.entries()).map(([path, content]) => `--- FILE: ${path} ---
 ${content}`).join("\n\n");
-        const isBrownfieldSubpackageRepo = accumulatedFiles.size > 0 && !accumulatedFiles.has("package.json") && Array.from(accumulatedFiles.keys()).some(
-          (k) => k.startsWith("backend/") || k.startsWith("frontend/")
-        );
-        const tddSystemInstruction = [
-          "Tu es un ing\xE9nieur TDD EPURE impl\xE9mentant un ticket approuv\xE9 en TypeScript.",
-          PROMPT_INJECTION_IMMUNITY_CLAUSE,
-          "R\xE8gles strictes :",
-          "1. \xC9cris des tests couvrant tous les crit\xE8res d'acceptation et cas limites.",
-          "2. Impl\xE9mente le code propre et complet faisant passer 100% des tests.",
-          "3. N'utilise aucune d\xE9pendance externe exotique non d\xE9clar\xE9e dans package.json.",
-          "4. Ne modifie JAMAIS .cursor/agents/**, .github/workflows/** ou .github/agents.yml.",
-          ...isBrownfieldSubpackageRepo ? [
-            "5. Il s'agit d'un d\xE9p\xF4t existant multi-packages (`backend/`, `frontend/`). Utilise les outils `list_repo_files`, `search_in_repo_file` et `read_repo_file` pour inspecter les fichiers pertinents avant de coder.",
-            "6. Pour modifier un fichier existant du d\xE9p\xF4t, utilise de pr\xE9f\xE9rence `patches` (`old_string` -> `new_string` exact) afin de faire une modification chirurgicale sans r\xE9\xE9crire des milliers de lignes inchang\xE9es. Pour cr\xE9er un nouveau fichier (ex: nouveau fichier de test), utilise `files` avec son contenu complet. Ne cr\xE9e PAS de package.json \xE0 la racine.",
-            "Renvoie un objet JSON strictement valide respectant ce sch\xE9ma :",
-            "{",
-            '  "commit_message": "fix: ...",',
-            '  "test_summary": "Tests and acceptance criteria verified",',
-            '  "patches": [',
-            '    { "path": "backend/src/...", "edits": [{ "old_string": "...", "new_string": "..." }] }',
-            "  ],",
-            '  "files": [',
-            '    { "path": "backend/src/__tests__/...", "content": "..." }',
-            "  ]",
-            "}"
-          ] : [
-            "5. Renvoie un objet JSON strictement valide respectant exactement ce sch\xE9ma :",
-            "{",
-            `  "commit_message": "feat(ticket-${ticket.ticketIssueNumber}): ...",`,
-            '  "test_summary": "Vitest parameterized suite verified",',
-            '  "files": [',
-            '    { "path": "package.json", "content": "..." },',
-            '    { "path": "src/...", "content": "..." },',
-            '    { "path": "tests/...", "content": "..." }',
-            "  ]",
-            "}"
-          ]
-        ].join("\n");
-        const tddPrompt = [
-          `Plan parent (#${input.issueNumber}) et cahier des charges :`,
-          wrapUntrustedContent(
-            "untrusted_issue_content",
-            `Titre : ${issue.title}
+            const isBrownfieldSubpackageRepo = checkIsBrownfieldSubpackageRepo();
+            const tddSystemInstruction = [
+              "Tu es un ing\xE9nieur TDD EPURE impl\xE9mentant un ticket approuv\xE9.",
+              PROMPT_INJECTION_IMMUNITY_CLAUSE,
+              "R\xE8gles strictes :",
+              "1. \xC9cris des tests couvrant tous les crit\xE8res d'acceptation et cas limites.",
+              "2. Impl\xE9mente le code propre et complet faisant passer 100% des tests.",
+              "3. N'utilise aucune d\xE9pendance externe exotique non d\xE9clar\xE9e.",
+              "4. Ne modifie JAMAIS .cursor/agents/**, .github/workflows/**, .github/agents.yml ou .env*.",
+              "",
+              verificationGuideMarkdown,
+              "",
+              ...isBrownfieldSubpackageRepo ? [
+                "5. Il s'agit d'un d\xE9p\xF4t existant multi-packages (`backend/`, `frontend/`). Utilise les outils `list_repo_files`, `search_in_repo_file` et `read_repo_file` pour inspecter les fichiers pertinents avant de coder.",
+                "6. Pour modifier un fichier existant du d\xE9p\xF4t, utilise de pr\xE9f\xE9rence `patches` (`old_string` -> `new_string` exact) afin de faire une modification chirurgicale sans r\xE9\xE9crire des milliers de lignes inchang\xE9es. Pour cr\xE9er un nouveau fichier (ex: nouveau fichier de test), utilise `files` avec son contenu complet. Pour supprimer un fichier obsol\xE8te, utilise `deleted_files`. Ne cr\xE9e PAS de package.json \xE0 la racine.",
+                "Renvoie un objet JSON strictement valide respectant ce sch\xE9ma :",
+                "{",
+                '  "commit_message": "fix: ...",',
+                '  "test_summary": "Tests and acceptance criteria verified",',
+                '  "patches": [',
+                '    { "path": "backend/src/...", "edits": [{ "old_string": "...", "new_string": "..." }] }',
+                "  ],",
+                '  "files": [',
+                '    { "path": "backend/src/__tests__/...", "content": "..." }',
+                "  ],",
+                '  "deleted_files": []',
+                "}"
+              ] : [
+                "5. Renvoie un objet JSON strictement valide respectant exactement ce sch\xE9ma :",
+                "{",
+                `  "commit_message": "feat(ticket-${ticket.ticketIssueNumber}): ...",`,
+                '  "test_summary": "Vitest parameterized suite verified",',
+                '  "files": [',
+                '    { "path": "package.json", "content": "..." },',
+                '    { "path": "src/...", "content": "..." },',
+                '    { "path": "tests/...", "content": "..." }',
+                "  ]",
+                "}"
+              ]
+            ].join("\n");
+            const tddPrompt = [
+              `Plan parent (#${input.issueNumber}) et cahier des charges :`,
+              wrapUntrustedContent(
+                "untrusted_issue_content",
+                `Titre : ${issue.title}
 
 Cahier des charges :
 ${issue.body}`
-          ),
-          "",
-          "Ticket \xE0 impl\xE9menter :",
-          wrapUntrustedContent(
-            "untrusted_issue_content",
-            [
-              `Ticket #${ticket.ticketIssueNumber} : ${ticket.title}`,
-              `Description : ${ticket.description}`,
-              `Crit\xE8res d'acceptation : ${ticket.acceptanceCriteria.join(" ; ")}`,
-              `Fichiers cibles : ${ticket.filesToTouch.join(", ")}`
-            ].join("\n")
-          ),
-          "",
-          existingFilesContext ? `Fichiers d\xE9j\xE0 pr\xE9sents sur la branche feature :
+              ),
+              "",
+              "Ticket \xE0 impl\xE9menter :",
+              wrapUntrustedContent(
+                "untrusted_issue_content",
+                [
+                  `Ticket #${ticket.ticketIssueNumber} : ${ticket.title}`,
+                  `Description : ${ticket.description}`,
+                  `Crit\xE8res d'acceptation : ${ticket.acceptanceCriteria.join(" ; ")}`,
+                  `Fichiers cibles : ${ticket.filesToTouch.join(", ")}`
+                ].join("\n")
+              ),
+              "",
+              verificationGuideMarkdown,
+              "",
+              existingFilesContext ? `Fichiers d\xE9j\xE0 pr\xE9sents sur la branche feature :
 ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C'est le premier ticket : inclus un package.json complet (avec scripts 'test': 'vitest run' et 'build': 'vite build', dependencies react/react-dom, devDependencies typescript/vite/vitest/@vitejs/plugin-react/@types/react/@types/react-dom) ainsi que tsconfig.json et vite.config.ts."
-        ].join("\n");
-        const brownfieldTools = isBrownfieldSubpackageRepo ? {
-          tools: [
-            {
-              name: "list_repo_files",
-              description: "Search file paths in the repository matching a substring or keyword (e.g. 'toast', 'fog', 'CampaignContext', 'sessionStore').",
-              parameters: {
-                type: "OBJECT",
-                properties: {
-                  query: {
-                    type: "STRING",
-                    description: "Case-insensitive path substring to match"
-                  }
-                },
-                required: ["query"]
-              }
-            },
-            {
-              name: "search_in_repo_file",
-              description: "Search for a substring inside a repository file and return matching line numbers with surrounding lines.",
-              parameters: {
-                type: "OBJECT",
-                properties: {
-                  path: {
-                    type: "STRING",
-                    description: "Repository-relative file path"
-                  },
-                  query: {
-                    type: "STRING",
-                    description: "Substring or identifier to search for"
-                  }
-                },
-                required: ["path", "query"]
-              }
-            },
-            {
-              name: "read_repo_file",
-              description: "Read a file (or line range start_line..end_line) from the repository branch.",
-              parameters: {
-                type: "OBJECT",
-                properties: {
-                  path: {
-                    type: "STRING",
-                    description: "Repository-relative file path"
-                  },
-                  start_line: {
-                    type: "INTEGER",
-                    description: "Optional 1-based start line"
-                  },
-                  end_line: {
-                    type: "INTEGER",
-                    description: "Optional 1-based end line"
-                  }
-                },
-                required: ["path"]
-              }
-            }
-          ],
-          toolHandlers: {
-            list_repo_files: async (args) => {
-              const q = String(args.query ?? "").trim().toLowerCase();
-              const allPaths = await gh.listBranchPaths(featureBranch);
-              const matches = allPaths.filter((p) => p.toLowerCase().includes(q)).slice(0, 60);
-              return { matches };
-            },
-            search_in_repo_file: async (args) => {
-              const p = String(args.path ?? "").trim().replace(/^\/+/, "");
-              const q = String(args.query ?? "").trim();
-              let content = accumulatedFiles.get(p) ?? null;
-              if (content === null) {
-                content = await gh.readSingleBranchFile(featureBranch, p);
-                if (content !== null) {
-                  accumulatedFiles.set(p, content);
-                }
-              }
-              if (content === null) {
-                return { error: `File not found: ${p}` };
-              }
-              const lines = content.split("\n");
-              const snippets = [];
-              for (let i = 0; i < lines.length; i += 1) {
-                if (lines[i].toLowerCase().includes(q.toLowerCase())) {
-                  const start = Math.max(0, i - 15);
-                  const end = Math.min(lines.length, i + 20);
-                  snippets.push(
-                    `Lines ${start + 1}-${end}:
-` + lines.slice(start, end).map((l, idx) => `${start + idx + 1}| ${l}`).join("\n")
-                  );
-                  i = end - 1;
-                  if (snippets.length >= 8) {
-                    break;
-                  }
-                }
-              }
-              return {
-                path: p,
-                total_lines: lines.length,
-                matches: snippets
-              };
-            },
-            read_repo_file: async (args) => {
-              const p = String(args.path ?? "").trim().replace(/^\/+/, "");
-              let content = accumulatedFiles.get(p) ?? null;
-              if (content === null) {
-                content = await gh.readSingleBranchFile(featureBranch, p);
-                if (content !== null) {
-                  accumulatedFiles.set(p, content);
-                }
-              }
-              if (content === null) {
-                return { error: `File not found: ${p}` };
-              }
-              const lines = content.split("\n");
-              const startLine = Math.max(
-                1,
-                Number(args.start_line ?? 1) || 1
-              );
-              const endLine = Math.min(
-                lines.length,
-                Number(args.end_line ?? Math.min(lines.length, startLine + 250)) || lines.length
-              );
-              return {
-                path: p,
-                total_lines: lines.length,
-                start_line: startLine,
-                end_line: endLine,
-                content: lines.slice(startLine - 1, endLine).join("\n")
-              };
-            }
-          }
-        } : {};
-        const rawImpl = await callGeminiGenerateContent({
-          apiKey: input.llmApiKey,
-          model,
-          systemInstruction: tddSystemInstruction,
-          prompt: tddPrompt,
-          responseMimeType: "application/json",
-          temperature: 0.1,
-          ...brownfieldTools,
-          fetchImpl: input.fetchImpl
-        });
-        const parsedImpl = extractJsonObject(rawImpl);
-        const ticketChangedFilesMap = /* @__PURE__ */ new Map();
-        const initialChangedFiles = await applyTicketImplementationPayload({
-          parsed: parsedImpl,
-          accumulatedFiles,
-          featureChangedFilesMap,
-          ticketChangedFilesMap,
-          gh,
-          branch: featureBranch
-        });
-        let impl = {
-          commit_message: parsedImpl.commit_message,
-          test_summary: parsedImpl.test_summary,
-          files: initialChangedFiles
-        };
-        if (process.env.GITHUB_ACTIONS === "true") {
-          process.stdout.write(
-            `[EPURE][Ticket #${ticket.ticketIssueNumber}] Generated ${impl.files.length} file(s): ${impl.files.map((f) => f.path).join(", ")}
-::endgroup::
-`
-          );
-        }
-        let fixAttempt = 0;
-        const maxCodeFixAttempts = 3;
-        let testCheck = await runTestsInIsolatedWorkspace({
-          files: Array.from(accumulatedFiles.entries()).map(
-            ([path, content]) => ({ path, content })
-          ),
-          llmApiKey: input.llmApiKey,
-          label: `Ticket #${ticket.ticketIssueNumber} initial TDD suite`
-        });
-        while (!testCheck.passed && fixAttempt < maxCodeFixAttempts) {
-          fixAttempt += 1;
-          const currentFilesContext = Array.from(accumulatedFiles.entries()).map(([p, c]) => `--- FILE: ${p} ---
-${c}`).join("\n\n");
-          const fixSystemInstruction = [
-            "Tu es un ing\xE9nieur TDD EPURE corrigeant un \xE9chec de test Vitest en sandbox isol\xE9e.",
-            PROMPT_INJECTION_IMMUNITY_CLAUSE,
-            "Corrige les fichiers en d\xE9faut (code ou assertions de test comme les espaces ins\xE9cables Unicode U+202F de toLocaleString('fr-FR')) pour que 100% des tests Vitest passent (`vitest run`).",
-            "Ne modifie JAMAIS .cursor/agents/**, .github/workflows/** ou .github/agents.yml.",
-            "Renvoie un objet JSON strictement valide respectant exactement ce sch\xE9ma :",
-            "{",
-            `  "commit_message": "feat(ticket-${ticket.ticketIssueNumber}): ...",`,
-            '  "test_summary": "Vitest parameterized suite verified",',
-            '  "files": [',
-            '    { "path": "...", "content": "..." }',
-            "  ]",
-            "}"
-          ].join("\n");
-          const fixPrompt = [
-            `La suite de tests Vitest du Ticket #${ticket.ticketIssueNumber} a \xE9chou\xE9 dans la sandbox avec la sortie suivante :`,
-            wrapUntrustedContent(
-              "untrusted_test_output",
-              testCheck.output
-            ),
-            "",
-            "Fichiers actuels du workspace :",
-            wrapUntrustedContent(
-              "untrusted_workspace_files",
-              currentFilesContext
-            )
-          ].join("\n");
-          const rawFix = await callGeminiGenerateContent({
-            apiKey: input.llmApiKey,
-            model,
-            systemInstruction: fixSystemInstruction,
-            prompt: fixPrompt,
-            responseMimeType: "application/json",
-            temperature: 0.1,
-            fetchImpl: input.fetchImpl
-          });
-          const fixedImpl = extractJsonObject(rawFix);
-          const updatedFiles = await applyTicketImplementationPayload({
-            parsed: fixedImpl,
-            accumulatedFiles,
-            featureChangedFilesMap,
-            ticketChangedFilesMap,
-            gh,
-            branch: featureBranch
-          });
-          impl = {
-            commit_message: fixedImpl.commit_message || impl.commit_message,
-            test_summary: fixedImpl.test_summary || impl.test_summary,
-            files: updatedFiles
-          };
-          testCheck = await runTestsInIsolatedWorkspace({
-            files: Array.from(accumulatedFiles.entries()).map(
-              ([path, content]) => ({ path, content })
-            ),
-            llmApiKey: input.llmApiKey,
-            label: `Ticket #${ticket.ticketIssueNumber} TDD auto-fix attempt ${fixAttempt}/${maxCodeFixAttempts}`
-          });
-        }
-        if (!testCheck.passed) {
-          throw new Error(
-            `TDD sandbox verification failed for ticket #${ticket.ticketIssueNumber} after ${fixAttempt} auto-fix attempts:
-${testCheck.output.slice(-2e3)}`
-          );
-        }
-        await gh.commitFilesToBranch({
-          branch: taskBranch,
-          fromBranch: featureBranch,
-          commitMessage: impl.commit_message,
-          files: impl.files
-        });
-        const prBody = [
-          "## Summary",
-          `Automated TDD implementation of #${ticket.ticketIssueNumber} for plan #${input.issueNumber}.`,
-          "",
-          `Refs #${ticket.ticketIssueNumber}`,
-          `Part of #${input.issueNumber}`,
-          "",
-          "## TDD & Sandbox Verification",
-          `- **Sandbox Test Execution**: \`passed\``,
-          `- **Summary**: ${impl.test_summary}`
-        ].join("\n");
-        const taskPr = await gh.openPullRequest({
-          head: taskBranch,
-          base: featureBranch,
-          title: impl.commit_message,
-          body: prBody
-        });
-        let currentPrHeadSha = taskPr.head_sha;
-        let reviewResult = await runMultiAgentPrReviewPass({
-          repository: input.repository,
-          prNumber: taskPr.number,
-          headBranch: taskBranch,
-          baseBranch: featureBranch,
-          ticketNumber: ticket.ticketIssueNumber,
-          ticketTitle: ticket.title,
-          acceptanceCriteria: ticket.acceptanceCriteria,
-          glossaryMarkdown: issue.body,
-          designMarkdown: trustedBaseRoster.designMarkdown,
-          changedFiles: impl.files,
-          workspaceFiles: accumulatedFiles,
-          trustedBaseBranchFiles: trustedBaseFilesMap,
-          isReReviewPass: false,
-          llmApiKey: input.llmApiKey,
-          model,
-          fetchImpl: input.fetchImpl
-        });
-        await gh.postPullRequestReview(taskPr.number, {
-          commitId: currentPrHeadSha,
-          body: reviewResult.review_body_markdown
-        });
-        await gh.publishCheckRun({
-          name: "ai-review",
-          headSha: currentPrHeadSha,
-          conclusion: reviewResult.conclusion,
-          summary: reviewResult.check_summary_markdown
-        });
-        if (reviewResult.touches_frontend_ui) {
-          await gh.publishCheckRun({
-            name: "impeccable-gate",
-            headSha: currentPrHeadSha,
-            conclusion: reviewResult.impeccable_conclusion === "failure" ? "failure" : "success",
-            summary: `Impeccable UI & Accessibility Gate: ${reviewResult.impeccable_conclusion}`
-          });
-        }
-        let reviewFixAttempt = 0;
-        while (reviewResult.conclusion === "failure" && reviewFixAttempt < maxCodeFixAttempts) {
-          reviewFixAttempt += 1;
-          process.stdout.write(
-            `[EPURE][Ticket #${ticket.ticketIssueNumber}][PR #${taskPr.number}] Multi-agent review fix iteration ${reviewFixAttempt}/${maxCodeFixAttempts} (${reviewResult.must_fix_findings.length} must_fix finding(s))
-`
-          );
-          const findingsText = reviewResult.must_fix_findings.map(
-            (f, idx) => `${idx + 1}. [${f.reviewer}] (${f.path}:${f.line}) ${f.title} \u2014 ${f.rationale} -> Action: ${f.suggested_action}`
-          ).join("\n");
-          const currentFilesContext = Array.from(accumulatedFiles.entries()).map(([p, c]) => `--- FILE: ${p} ---
-${c}`).join("\n\n");
-          const reviewFixSystemInstruction = [
-            "Tu es un ing\xE9nieur TDD EPURE corrigeant les constats bloquants ('must_fix') \xE9mis par le roster de revue multi-agents.",
-            PROMPT_INJECTION_IMMUNITY_CLAUSE,
-            "Corrige pr\xE9cis\xE9ment chaque 'must_fix' tout en maintenant 100% des tests au vert.",
-            "Ne modifie JAMAIS .cursor/agents/**, .github/workflows/** ou .github/agents.yml.",
-            "Pour modifier un fichier existant volumineux, utilise de pr\xE9f\xE9rence `patches` (`old_string` -> `new_string` exact). Sinon utilise `files` avec le contenu int\xE9gral du fichier.",
-            "Renvoie un objet JSON strictement valide :",
-            "{",
-            `  "commit_message": "fix(review): address reviewer findings on #${ticket.ticketIssueNumber}",`,
-            '  "test_summary": "Addressed must_fix review findings and verified test suite",',
-            '  "patches": [',
-            '    { "path": "...", "edits": [{ "old_string": "...", "new_string": "..." }] }',
-            "  ],",
-            '  "files": [',
-            '    { "path": "...", "content": "..." }',
-            "  ]",
-            "}"
-          ].join("\n");
-          const reviewFixPrompt = [
-            `Les reviewers multi-agents EPURE ont \xE9mis ${reviewResult.must_fix_findings.length} constat(s) bloquant(s) ('must_fix') sur la PR #${taskPr.number} du Ticket #${ticket.ticketIssueNumber} :`,
-            wrapUntrustedContent("untrusted_issue_content", findingsText),
-            "",
-            "Fichiers actuels du workspace :",
-            wrapUntrustedContent(
-              "untrusted_workspace_files",
-              currentFilesContext
-            )
-          ].join("\n");
-          const rawReviewFix = await callGeminiGenerateContent({
-            apiKey: input.llmApiKey,
-            model,
-            thinkingLevel: "HIGH",
-            logLabel: `review-fix:#${ticket.ticketIssueNumber}/iter-${reviewFixAttempt}`,
-            systemInstruction: reviewFixSystemInstruction,
-            prompt: reviewFixPrompt,
-            responseMimeType: "application/json",
-            temperature: 0.1,
-            fetchImpl: input.fetchImpl
-          });
-          const reviewFixedImpl = extractJsonObject(rawReviewFix);
-          const updatedReviewFiles = await applyTicketImplementationPayload({
-            parsed: reviewFixedImpl,
-            accumulatedFiles,
-            featureChangedFilesMap,
-            ticketChangedFilesMap,
-            gh,
-            branch: featureBranch
-          });
-          impl = {
-            commit_message: reviewFixedImpl.commit_message || `fix(review): address reviewer findings on #${ticket.ticketIssueNumber}`,
-            test_summary: reviewFixedImpl.test_summary || impl.test_summary,
-            files: updatedReviewFiles
-          };
-          testCheck = await runTestsInIsolatedWorkspace({
-            files: Array.from(accumulatedFiles.entries()).map(
-              ([path, content]) => ({ path, content })
-            ),
-            llmApiKey: input.llmApiKey,
-            label: `Ticket #${ticket.ticketIssueNumber} review-fix iteration ${reviewFixAttempt}/${maxCodeFixAttempts}`
-          });
-          let reviewTestRetry = 0;
-          while (!testCheck.passed && reviewTestRetry < 2) {
-            reviewTestRetry += 1;
-            const retryFilesContext = Array.from(accumulatedFiles.entries()).map(([p, c]) => `--- FILE: ${p} ---
-${c}`).join("\n\n");
-            const rawRetryFix = await callGeminiGenerateContent({
+            ].join("\n");
+            const rawImpl = await callGeminiGenerateContent({
               apiKey: input.llmApiKey,
               model,
-              thinkingLevel: "HIGH",
-              systemInstruction: reviewFixSystemInstruction,
-              prompt: [
-                `La correction de review a fait \xE9chouer la suite de tests Vitest/TypeScript (tentative ${reviewTestRetry}/2) :`,
-                wrapUntrustedContent("untrusted_test_output", testCheck.output.slice(-6e3)),
-                "",
-                "Constats must_fix \xE0 maintenir corrig\xE9s :",
-                wrapUntrustedContent("untrusted_issue_content", findingsText),
-                "",
-                "Fichiers actuels du workspace :",
-                wrapUntrustedContent("untrusted_workspace_files", retryFilesContext)
-              ].join("\n"),
+              systemInstruction: tddSystemInstruction,
+              prompt: tddPrompt,
               responseMimeType: "application/json",
               temperature: 0.1,
+              ...buildRepoExplorationToolsAndHandlers(featureBranch),
               fetchImpl: input.fetchImpl
             });
-            const retryImpl = extractJsonObject(rawRetryFix);
-            const updatedRetryFiles = await applyTicketImplementationPayload({
-              parsed: retryImpl,
+            const parsedImpl = extractJsonObject(rawImpl);
+            const preStage1Check = validateWorkspaceFileOperations({
+              workDir: sandboxWorkspace.workDir,
+              files: [
+                ...(parsedImpl.files ?? []).map((f) => ({ path: f.path })),
+                ...(parsedImpl.patches ?? []).map((p) => ({ path: p.path }))
+              ],
+              deleted_files: parsedImpl.deleted_files,
+              targets: verificationProfile.targets,
+              isTaskBranch: true
+            });
+            if (!preStage1Check.allowed) {
+              return await escalateToNeedsHuman({
+                reason: "sensitive_path_violation",
+                ticketNumber: ticket.ticketIssueNumber,
+                branch: taskBranch,
+                sensitivePaths: preStage1Check.sensitivePaths,
+                traversalPaths: preStage1Check.traversalPaths
+              });
+            }
+            const initialChangedFiles = await applyTicketImplementationPayload({
+              parsed: parsedImpl,
               accumulatedFiles,
               featureChangedFilesMap,
               ticketChangedFilesMap,
+              featureDeletedFilesSet,
+              ticketDeletedFilesSet,
               gh,
               branch: featureBranch
             });
             impl = {
-              commit_message: impl.commit_message,
-              test_summary: retryImpl.test_summary || impl.test_summary,
-              files: updatedRetryFiles
+              commit_message: parsedImpl.commit_message,
+              test_summary: parsedImpl.test_summary,
+              files: initialChangedFiles
             };
-            testCheck = await runTestsInIsolatedWorkspace({
+            if (process.env.GITHUB_ACTIONS === "true") {
+              process.stdout.write(
+                `[EPURE][Ticket #${ticket.ticketIssueNumber}] Generated ${impl.files.length} file(s): ${impl.files.map((f) => f.path).join(", ")}
+::endgroup::
+`
+              );
+            }
+            let testCheck = await runTestsInIsolatedWorkspace({
+              workDir: sandboxWorkspace.workDir,
               files: Array.from(accumulatedFiles.entries()).map(
                 ([path, content]) => ({ path, content })
               ),
+              deleted_files: Array.from(ticketDeletedFilesSet),
+              changedPaths: [
+                ...impl.files.map((f) => f.path),
+                ...Array.from(ticketDeletedFilesSet)
+              ],
+              isTaskBranch: true,
+              verificationProfile,
+              bootstrappedTargets,
+              sandboxRunner: input.sandboxRunner,
               llmApiKey: input.llmApiKey,
-              label: `Ticket #${ticket.ticketIssueNumber} review-fix iteration ${reviewFixAttempt} test retry ${reviewTestRetry}/2`
+              label: `Ticket #${ticket.ticketIssueNumber} initial TDD suite`
+            });
+            while (!testCheck.passed && fixAttempt < maxCodeFixAttempts) {
+              fixAttempt += 1;
+              const currentFilesContext = Array.from(accumulatedFiles.entries()).map(([p, c]) => `--- FILE: ${p} ---
+${c}`).join("\n\n");
+              const fixSystemInstruction = [
+                "Tu es un ing\xE9nieur TDD EPURE corrigeant un \xE9chec de v\xE9rification Stage 1 en sandbox isol\xE9e.",
+                PROMPT_INJECTION_IMMUNITY_CLAUSE,
+                "Corrige les fichiers en d\xE9faut (code ou assertions de test) pour que 100% des cibles Stage 1 passent.",
+                "Ne modifie JAMAIS .cursor/agents/**, .github/workflows/**, .github/agents.yml ou .env*.",
+                "Tu peux utiliser les outils `list_repo_files`, `search_in_repo_file` et `read_repo_file` pour inspecter les fichiers du d\xE9p\xF4t.",
+                "Pour modifier un fichier existant volumineux, utilise de pr\xE9f\xE9rence `patches` (`old_string` -> `new_string` exact). Pour supprimer un fichier obsol\xE8te, utilise `deleted_files`.",
+                "",
+                verificationGuideMarkdown,
+                "",
+                "Renvoie un objet JSON strictement valide respectant exactement ce sch\xE9ma :",
+                "{",
+                `  "commit_message": "feat(ticket-${ticket.ticketIssueNumber}): ...",`,
+                '  "test_summary": "Stage 1 verification suite verified",',
+                '  "patches": [',
+                '    { "path": "...", "edits": [{ "old_string": "...", "new_string": "..." }] }',
+                "  ],",
+                '  "files": [',
+                '    { "path": "...", "content": "..." }',
+                "  ],",
+                '  "deleted_files": []',
+                "}"
+              ].join("\n");
+              const fixPrompt = [
+                `La v\xE9rification Stage 1 du Ticket #${ticket.ticketIssueNumber} a \xE9chou\xE9 dans la sandbox avec la sortie suivante :`,
+                wrapUntrustedContent("untrusted_test_output", testCheck.output),
+                "",
+                verificationGuideMarkdown,
+                "",
+                "Fichiers actuels du workspace :",
+                wrapUntrustedContent(
+                  "untrusted_workspace_files",
+                  currentFilesContext
+                )
+              ].join("\n");
+              const rawFix = await callGeminiGenerateContent({
+                apiKey: input.llmApiKey,
+                model,
+                systemInstruction: fixSystemInstruction,
+                prompt: fixPrompt,
+                responseMimeType: "application/json",
+                temperature: 0.1,
+                ...buildRepoExplorationToolsAndHandlers(featureBranch),
+                fetchImpl: input.fetchImpl
+              });
+              const fixedImpl = extractJsonObject(rawFix);
+              const fixPreCheck = validateWorkspaceFileOperations({
+                workDir: sandboxWorkspace.workDir,
+                files: [
+                  ...(fixedImpl.files ?? []).map((f) => ({ path: f.path })),
+                  ...(fixedImpl.patches ?? []).map((p) => ({ path: p.path }))
+                ],
+                deleted_files: fixedImpl.deleted_files,
+                targets: verificationProfile.targets,
+                isTaskBranch: true
+              });
+              if (!fixPreCheck.allowed) {
+                return await escalateToNeedsHuman({
+                  reason: "sensitive_path_violation",
+                  ticketNumber: ticket.ticketIssueNumber,
+                  branch: taskBranch,
+                  codeFixAttemptsUsed: fixAttempt,
+                  sensitivePaths: fixPreCheck.sensitivePaths,
+                  traversalPaths: fixPreCheck.traversalPaths
+                });
+              }
+              const updatedFiles = await applyTicketImplementationPayload({
+                parsed: fixedImpl,
+                accumulatedFiles,
+                featureChangedFilesMap,
+                ticketChangedFilesMap,
+                featureDeletedFilesSet,
+                ticketDeletedFilesSet,
+                gh,
+                branch: featureBranch
+              });
+              impl = {
+                commit_message: fixedImpl.commit_message || impl.commit_message,
+                test_summary: fixedImpl.test_summary || impl.test_summary,
+                files: updatedFiles
+              };
+              testCheck = await runTestsInIsolatedWorkspace({
+                workDir: sandboxWorkspace.workDir,
+                files: Array.from(accumulatedFiles.entries()).map(
+                  ([path, content]) => ({ path, content })
+                ),
+                deleted_files: Array.from(ticketDeletedFilesSet),
+                changedPaths: [
+                  ...impl.files.map((f) => f.path),
+                  ...Array.from(ticketDeletedFilesSet)
+                ],
+                isTaskBranch: true,
+                verificationProfile,
+                bootstrappedTargets,
+                sandboxRunner: input.sandboxRunner,
+                llmApiKey: input.llmApiKey,
+                label: `Ticket #${ticket.ticketIssueNumber} TDD auto-fix attempt ${fixAttempt}/${maxCodeFixAttempts}`
+              });
+            }
+            if (!testCheck.passed) {
+              throw new Error(
+                `TDD sandbox verification failed for ticket #${ticket.ticketIssueNumber} after ${fixAttempt} auto-fix attempts:
+${testCheck.output.slice(-2e3)}`
+              );
+            }
+            await gh.commitFilesToBranch({
+              branch: taskBranch,
+              fromBranch: featureBranch,
+              commitMessage: impl.commit_message,
+              files: impl.files,
+              deletedFiles: Array.from(ticketDeletedFilesSet)
+            });
+            const prBody = [
+              "## Summary",
+              `Automated TDD implementation of #${ticket.ticketIssueNumber} for plan #${input.issueNumber}.`,
+              "",
+              `Refs #${ticket.ticketIssueNumber}`,
+              `Part of #${input.issueNumber}`,
+              "",
+              "## TDD & Sandbox Verification",
+              `- **Sandbox Test Execution**: \`passed\``,
+              `- **Summary**: ${impl.test_summary}`
+            ].join("\n");
+            taskPr = await gh.openPullRequest({
+              head: taskBranch,
+              base: featureBranch,
+              title: impl.commit_message,
+              body: prBody
+            });
+            currentPrHeadSha = taskPr.head_sha;
+          }
+          const runStage2AndStage3ForTaskPr = async (params) => {
+            const changedPaths = impl.files.map((f) => f.path);
+            const expectedWorkflows = discoverExpectedExternalWorkflows({
+              workflowFilesMap: devWorkflowsMap,
+              changedPaths,
+              targetBranch: featureBranch
+            });
+            const reviewRes = await runMultiAgentPrReviewPass({
+              repository: input.repository,
+              prNumber: taskPr.number,
+              headBranch: taskBranch,
+              baseBranch: featureBranch,
+              ticketNumber: ticket.ticketIssueNumber,
+              ticketTitle: ticket.title,
+              acceptanceCriteria: ticket.acceptanceCriteria,
+              glossaryMarkdown: issue.body,
+              designMarkdown: trustedBaseRoster.designMarkdown,
+              changedFiles: impl.files,
+              workspaceFiles: accumulatedFiles,
+              trustedBaseBranchFiles: trustedBaseFilesMap,
+              isReReviewPass: params.isReReviewPass,
+              previousFailedReviewers: params.previousFailedReviewers,
+              llmApiKey: input.llmApiKey,
+              model,
+              fetchImpl: input.fetchImpl
+            });
+            await gh.postPullRequestReview(taskPr.number, {
+              commitId: params.headSha,
+              body: reviewRes.review_body_markdown
+            });
+            await gh.publishCheckRun({
+              name: "ai-review",
+              headSha: params.headSha,
+              conclusion: reviewRes.conclusion,
+              summary: reviewRes.check_summary_markdown
+            });
+            if (reviewRes.touches_frontend_ui) {
+              await gh.publishCheckRun({
+                name: "impeccable-gate",
+                headSha: params.headSha,
+                conclusion: reviewRes.impeccable_conclusion === "failure" ? "failure" : "success",
+                summary: `Impeccable UI & Accessibility Gate: ${reviewRes.impeccable_conclusion}`
+              });
+            }
+            const ciRes = await waitForExternalCiChecks({
+              headSha: params.headSha,
+              expectedWorkflows,
+              waitForExternalCi: verificationProfile.wait_for_external_ci,
+              timeoutMinutes: verificationProfile.external_ci_timeout_minutes,
+              graceWindowSeconds: verificationProfile.grace_window_seconds,
+              pollIntervalMs: input.pollIntervalMs,
+              extraSecrets: [activeToken, input.llmApiKey],
+              infraRerunsBySha,
+              listWorkflowRunsForSha: (sha) => gh.listWorkflowRunsForSha(sha),
+              listCheckRunsForRef: (sha) => gh.listCheckRunsForRef(sha),
+              listCheckRunAnnotations: (id) => gh.listCheckRunAnnotations(id),
+              getJobLogs: (id) => gh.getActionJobLogs(id),
+              rerunFailedJobs: (runId) => gh.rerunFailedWorkflowJobs(runId),
+              sleepFn: effectiveSleepFn
+            });
+            if (ciRes.infraRerunsTriggered > 0) {
+              totalTransientRetriesUsed += ciRes.infraRerunsTriggered;
+              await updateIssueStateWithCas({
+                issueNumber: input.issueNumber,
+                store,
+                mutator: (prev) => ({
+                  ...prev,
+                  transient_retries_used: totalTransientRetriesUsed
+                })
+              });
+            }
+            return { reviewResult: reviewRes, ciGateResult: ciRes };
+          };
+          let { reviewResult, ciGateResult } = await runStage2AndStage3ForTaskPr({
+            headSha: currentPrHeadSha,
+            isReReviewPass: false
+          });
+          if (!ciGateResult.passed && (ciGateResult.reason === "grace_window_timeout" || ciGateResult.reason === "wall_clock_budget_exhausted")) {
+            return await escalateToNeedsHuman({
+              reason: ciGateResult.reason,
+              ticketNumber: ticket.ticketIssueNumber,
+              branch: taskBranch,
+              prNumber: taskPr.number,
+              prUrl: taskPr.html_url,
+              codeFixAttemptsUsed: 0,
+              failedChecks: ciGateResult.failedChecks,
+              mustFixFindings: reviewResult.must_fix_findings,
+              diagnosticExcerpt: ciGateResult.formattedDiagnostics
             });
           }
-          if (!testCheck.passed) {
-            throw new Error(
-              `Sandbox test verification failed while addressing review findings on #${ticket.ticketIssueNumber}:
-${testCheck.output.slice(-2e3)}`
+          let reviewFixAttempt = 0;
+          while ((reviewResult.conclusion === "failure" || !ciGateResult.passed) && reviewFixAttempt < maxCodeFixAttempts) {
+            reviewFixAttempt += 1;
+            await updateIssueStateWithCas({
+              issueNumber: input.issueNumber,
+              store,
+              mutator: (prev) => ({
+                ...prev,
+                code_fix_attempts_used: reviewFixAttempt,
+                transient_retries_used: totalTransientRetriesUsed || prev.transient_retries_used
+              })
+            });
+            process.stdout.write(
+              `[EPURE][Ticket #${ticket.ticketIssueNumber}][PR #${taskPr.number}] Post-PR remediation round ${reviewFixAttempt}/${maxCodeFixAttempts} (${reviewResult.must_fix_findings.length} must_fix finding(s), CI passed=${ciGateResult.passed})
+`
             );
+            const findingsText = reviewResult.must_fix_findings.map(
+              (f, idx) => `${idx + 1}. [${f.reviewer}] (${f.path}:${f.line}) ${f.title} \u2014 ${f.rationale} -> Action: ${f.suggested_action}`
+            ).join("\n");
+            const currentFilesContext = Array.from(accumulatedFiles.entries()).map(([p, c]) => `--- FILE: ${p} ---
+${c}`).join("\n\n");
+            const reviewFixSystemInstruction = [
+              "Tu es un ing\xE9nieur TDD EPURE corrigeant les constats bloquants ('must_fix') de revue multi-agents et/ou les \xE9checs CI externes.",
+              PROMPT_INJECTION_IMMUNITY_CLAUSE,
+              "Corrige pr\xE9cis\xE9ment chaque anomalie tout en maintenant 100% des cibles Stage 1 au vert.",
+              "Ne modifie JAMAIS .cursor/agents/**, .github/workflows/**, .github/agents.yml ou .env*.",
+              "Utilise les outils `list_repo_files`, `search_in_repo_file` et `read_repo_file` pour inspecter les fichiers pertinents du d\xE9p\xF4t avant de coder.",
+              "",
+              verificationGuideMarkdown,
+              "",
+              "Pour modifier un fichier existant volumineux, utilise de pr\xE9f\xE9rence `patches` (`old_string` -> `new_string` exact). Sinon utilise `files` avec le contenu int\xE9gral du fichier. Pour supprimer un fichier obsol\xE8te, utilise `deleted_files`.",
+              "Renvoie un objet JSON strictement valide :",
+              "{",
+              `  "commit_message": "fix(review): address post-PR findings on #${ticket.ticketIssueNumber}",`,
+              '  "test_summary": "Addressed review and CI findings and verified test suite",',
+              '  "patches": [',
+              '    { "path": "...", "edits": [{ "old_string": "...", "new_string": "..." }] }',
+              "  ],",
+              '  "files": [',
+              '    { "path": "...", "content": "..." }',
+              "  ],",
+              '  "deleted_files": ["..."]',
+              "}"
+            ].join("\n");
+            const promptParts = [];
+            if (reviewResult.must_fix_findings.length > 0) {
+              promptParts.push(
+                `Les reviewers multi-agents EPURE ont \xE9mis ${reviewResult.must_fix_findings.length} constat(s) bloquant(s) ('must_fix') sur la PR #${taskPr.number} du Ticket #${ticket.ticketIssueNumber} :`,
+                wrapUntrustedContent("untrusted_issue_content", findingsText),
+                ""
+              );
+            }
+            if (!ciGateResult.passed && ciGateResult.formattedDiagnostics) {
+              promptParts.push(
+                `Les workflows CI externes sur la PR #${taskPr.number} (SHA \`${currentPrHeadSha}\`) ont \xE9chou\xE9 :`,
+                ciGateResult.formattedDiagnostics,
+                ""
+              );
+            }
+            promptParts.push(
+              verificationGuideMarkdown,
+              "",
+              "Fichiers actuels du workspace :",
+              wrapUntrustedContent(
+                "untrusted_workspace_files",
+                currentFilesContext
+              )
+            );
+            const rawReviewFix = await callGeminiGenerateContent({
+              apiKey: input.llmApiKey,
+              model,
+              thinkingLevel: "HIGH",
+              logLabel: `review-fix:#${ticket.ticketIssueNumber}/iter-${reviewFixAttempt}`,
+              systemInstruction: reviewFixSystemInstruction,
+              prompt: promptParts.join("\n"),
+              responseMimeType: "application/json",
+              temperature: 0.1,
+              ...buildRepoExplorationToolsAndHandlers(taskBranch),
+              fetchImpl: input.fetchImpl
+            });
+            const reviewFixedImpl = extractJsonObject(rawReviewFix);
+            const remediationPreCheck = validateWorkspaceFileOperations({
+              workDir: sandboxWorkspace.workDir,
+              files: [
+                ...(reviewFixedImpl.files ?? []).map((f) => ({ path: f.path })),
+                ...(reviewFixedImpl.patches ?? []).map((p) => ({
+                  path: p.path
+                }))
+              ],
+              deleted_files: reviewFixedImpl.deleted_files,
+              targets: verificationProfile.targets,
+              isTaskBranch: true
+            });
+            if (!remediationPreCheck.allowed) {
+              return await escalateToNeedsHuman({
+                reason: "sensitive_path_violation",
+                ticketNumber: ticket.ticketIssueNumber,
+                branch: taskBranch,
+                prNumber: taskPr.number,
+                prUrl: taskPr.html_url,
+                codeFixAttemptsUsed: reviewFixAttempt,
+                sensitivePaths: remediationPreCheck.sensitivePaths,
+                traversalPaths: remediationPreCheck.traversalPaths
+              });
+            }
+            const updatedReviewFiles = await applyTicketImplementationPayload({
+              parsed: reviewFixedImpl,
+              accumulatedFiles,
+              featureChangedFilesMap,
+              ticketChangedFilesMap,
+              featureDeletedFilesSet,
+              ticketDeletedFilesSet,
+              gh,
+              branch: featureBranch
+            });
+            impl = {
+              commit_message: reviewFixedImpl.commit_message || `fix(review): address reviewer findings on #${ticket.ticketIssueNumber}`,
+              test_summary: reviewFixedImpl.test_summary || impl.test_summary,
+              files: updatedReviewFiles
+            };
+            let testCheck = await runTestsInIsolatedWorkspace({
+              workDir: sandboxWorkspace.workDir,
+              files: Array.from(accumulatedFiles.entries()).map(
+                ([path, content]) => ({ path, content })
+              ),
+              deleted_files: Array.from(ticketDeletedFilesSet),
+              changedPaths: [
+                ...impl.files.map((f) => f.path),
+                ...Array.from(ticketDeletedFilesSet)
+              ],
+              isTaskBranch: true,
+              verificationProfile,
+              bootstrappedTargets,
+              sandboxRunner: input.sandboxRunner,
+              llmApiKey: input.llmApiKey,
+              label: `Ticket #${ticket.ticketIssueNumber} review-fix iteration ${reviewFixAttempt}/${maxCodeFixAttempts}`
+            });
+            let reviewTestRetry = 0;
+            while (!testCheck.passed && reviewTestRetry < 2) {
+              reviewTestRetry += 1;
+              const retryFilesContext = Array.from(accumulatedFiles.entries()).map(([p, c]) => `--- FILE: ${p} ---
+${c}`).join("\n\n");
+              const rawRetryFix = await callGeminiGenerateContent({
+                apiKey: input.llmApiKey,
+                model,
+                thinkingLevel: "HIGH",
+                systemInstruction: reviewFixSystemInstruction,
+                prompt: [
+                  `La correction a fait \xE9chouer la v\xE9rification Stage 1 en sandbox (tentative ${reviewTestRetry}/2) :`,
+                  wrapUntrustedContent(
+                    "untrusted_test_output",
+                    testCheck.output.slice(-6e3)
+                  ),
+                  "",
+                  ...findingsText ? [
+                    "Constats must_fix \xE0 maintenir corrig\xE9s :",
+                    wrapUntrustedContent(
+                      "untrusted_issue_content",
+                      findingsText
+                    ),
+                    ""
+                  ] : [],
+                  "Fichiers actuels du workspace :",
+                  wrapUntrustedContent(
+                    "untrusted_workspace_files",
+                    retryFilesContext
+                  )
+                ].join("\n"),
+                responseMimeType: "application/json",
+                temperature: 0.1,
+                ...buildRepoExplorationToolsAndHandlers(taskBranch),
+                fetchImpl: input.fetchImpl
+              });
+              const retryImpl = extractJsonObject(rawRetryFix);
+              const retryPreCheck = validateWorkspaceFileOperations({
+                workDir: sandboxWorkspace.workDir,
+                files: [
+                  ...(retryImpl.files ?? []).map((f) => ({ path: f.path })),
+                  ...(retryImpl.patches ?? []).map((p) => ({ path: p.path }))
+                ],
+                deleted_files: retryImpl.deleted_files,
+                targets: verificationProfile.targets,
+                isTaskBranch: true
+              });
+              if (!retryPreCheck.allowed) {
+                return await escalateToNeedsHuman({
+                  reason: "sensitive_path_violation",
+                  ticketNumber: ticket.ticketIssueNumber,
+                  branch: taskBranch,
+                  prNumber: taskPr.number,
+                  prUrl: taskPr.html_url,
+                  codeFixAttemptsUsed: reviewFixAttempt,
+                  sensitivePaths: retryPreCheck.sensitivePaths,
+                  traversalPaths: retryPreCheck.traversalPaths
+                });
+              }
+              const updatedRetryFiles = await applyTicketImplementationPayload({
+                parsed: retryImpl,
+                accumulatedFiles,
+                featureChangedFilesMap,
+                ticketChangedFilesMap,
+                featureDeletedFilesSet,
+                ticketDeletedFilesSet,
+                gh,
+                branch: featureBranch
+              });
+              impl = {
+                commit_message: impl.commit_message,
+                test_summary: retryImpl.test_summary || impl.test_summary,
+                files: updatedRetryFiles
+              };
+              testCheck = await runTestsInIsolatedWorkspace({
+                workDir: sandboxWorkspace.workDir,
+                files: Array.from(accumulatedFiles.entries()).map(
+                  ([path, content]) => ({ path, content })
+                ),
+                deleted_files: Array.from(ticketDeletedFilesSet),
+                changedPaths: [
+                  ...impl.files.map((f) => f.path),
+                  ...Array.from(ticketDeletedFilesSet)
+                ],
+                isTaskBranch: true,
+                verificationProfile,
+                bootstrappedTargets,
+                sandboxRunner: input.sandboxRunner,
+                llmApiKey: input.llmApiKey,
+                label: `Ticket #${ticket.ticketIssueNumber} review-fix iteration ${reviewFixAttempt} test retry ${reviewTestRetry}/2`
+              });
+            }
+            if (!testCheck.passed) {
+              throw new Error(
+                `Sandbox test verification failed while addressing review/CI findings on #${ticket.ticketIssueNumber}:
+${testCheck.output.slice(-2e3)}`
+              );
+            }
+            currentPrHeadSha = await gh.commitFilesToBranch({
+              branch: taskBranch,
+              fromBranch: featureBranch,
+              commitMessage: `fix(review): address reviewer findings on #${ticket.ticketIssueNumber}`,
+              files: impl.files,
+              deletedFiles: Array.from(ticketDeletedFilesSet)
+            });
+            const nextPass = await runStage2AndStage3ForTaskPr({
+              headSha: currentPrHeadSha,
+              isReReviewPass: true,
+              previousFailedReviewers: reviewResult.failed_reviewers
+            });
+            reviewResult = nextPass.reviewResult;
+            ciGateResult = nextPass.ciGateResult;
+            if (!ciGateResult.passed && (ciGateResult.reason === "grace_window_timeout" || ciGateResult.reason === "wall_clock_budget_exhausted")) {
+              return await escalateToNeedsHuman({
+                reason: ciGateResult.reason,
+                ticketNumber: ticket.ticketIssueNumber,
+                branch: taskBranch,
+                prNumber: taskPr.number,
+                prUrl: taskPr.html_url,
+                codeFixAttemptsUsed: reviewFixAttempt,
+                failedChecks: ciGateResult.failedChecks,
+                mustFixFindings: reviewResult.must_fix_findings,
+                diagnosticExcerpt: ciGateResult.formattedDiagnostics
+              });
+            }
           }
-          currentPrHeadSha = await gh.commitFilesToBranch({
-            branch: taskBranch,
-            fromBranch: featureBranch,
-            commitMessage: `fix(review): address reviewer findings on #${ticket.ticketIssueNumber}`,
-            files: impl.files
-          });
-          reviewResult = await runMultiAgentPrReviewPass({
-            repository: input.repository,
+          if (reviewResult.conclusion === "failure" || !ciGateResult.passed) {
+            return await escalateToNeedsHuman({
+              reason: "remediation_exhausted",
+              ticketNumber: ticket.ticketIssueNumber,
+              branch: taskBranch,
+              prNumber: taskPr.number,
+              prUrl: taskPr.html_url,
+              codeFixAttemptsUsed: reviewFixAttempt,
+              failedChecks: ciGateResult.failedChecks,
+              mustFixFindings: reviewResult.must_fix_findings,
+              diagnosticExcerpt: ciGateResult.formattedDiagnostics
+            });
+          }
+          const squashCommit = await generateSemanticSquashCommitFromDiff({
             prNumber: taskPr.number,
-            headBranch: taskBranch,
-            baseBranch: featureBranch,
-            ticketNumber: ticket.ticketIssueNumber,
-            ticketTitle: ticket.title,
-            acceptanceCriteria: ticket.acceptanceCriteria,
-            glossaryMarkdown: issue.body,
-            designMarkdown: trustedBaseRoster.designMarkdown,
+            targetBranch: featureBranch,
+            defaultBranch: "dev",
+            planIssueNumber: input.issueNumber,
+            ticketNumbers: [ticket.ticketIssueNumber],
+            fallbackTitle: impl.commit_message,
             changedFiles: impl.files,
-            workspaceFiles: accumulatedFiles,
-            trustedBaseBranchFiles: trustedBaseFilesMap,
-            isReReviewPass: true,
-            previousFailedReviewers: reviewResult.failed_reviewers,
             llmApiKey: input.llmApiKey,
             model,
             fetchImpl: input.fetchImpl
           });
-          await gh.postPullRequestReview(taskPr.number, {
-            commitId: currentPrHeadSha,
-            body: reviewResult.review_body_markdown
+          await gh.updatePullRequest(taskPr.number, {
+            title: squashCommit.pr_title
           });
           await gh.publishCheckRun({
-            name: "ai-review",
+            name: "PR title",
             headSha: currentPrHeadSha,
-            conclusion: reviewResult.conclusion,
-            summary: reviewResult.check_summary_markdown
+            conclusion: "success",
+            summary: `Conventional Commit title verified: '${squashCommit.pr_title}'`
           });
-          if (reviewResult.touches_frontend_ui) {
-            await gh.publishCheckRun({
-              name: "impeccable-gate",
-              headSha: currentPrHeadSha,
-              conclusion: reviewResult.impeccable_conclusion === "failure" ? "failure" : "success",
-              summary: `Impeccable UI & Accessibility Gate: ${reviewResult.impeccable_conclusion}`
-            });
+          await gh.mergePullRequest(taskPr.number, {
+            headBranch: taskBranch,
+            baseBranch: featureBranch,
+            commitTitle: squashCommit.commit_title,
+            commitMessage: squashCommit.commit_message
+          });
+          if (ticket.ticketIssueNumber !== input.issueNumber) {
+            await gh.closeIssue(ticket.ticketIssueNumber);
           }
-        }
-        if (reviewResult.conclusion === "failure") {
-          await gh.postIssueComment(
-            input.issueNumber,
-            `### Escalation \u2014 Multi-Agent Review Blocked on PR #${taskPr.number} (Ticket #${ticket.ticketIssueNumber})
-
-After \`${fixAttempt}\` attempts (\`max_code_fix_attempts = ${maxCodeFixAttempts}\`), \`${reviewResult.must_fix_findings.length}\` blocking finding(s) remain open on \`${taskBranch}\`. Human intervention is required.`
+          completedTicketsSummary.push(
+            `- **#${ticket.ticketIssueNumber}** (${ticket.title}) \u2014 PR #${taskPr.number} squash-merged into \`${featureBranch}\` as \`${squashCommit.commit_title}\` (Reviewers: ${reviewResult.selected_reviewers.map((r) => `\`${r}\``).join(", ")})`
           );
-          throw new Error(
-            `Multi-agent PR review blocked merge for ticket #${ticket.ticketIssueNumber} (PR #${taskPr.number}) with ${reviewResult.must_fix_findings.length} open must_fix finding(s).`
-          );
+        } finally {
+          sandboxWorkspace.cleanup();
         }
-        const squashCommit = await generateSemanticSquashCommitFromDiff({
-          prNumber: taskPr.number,
-          targetBranch: featureBranch,
-          defaultBranch: "dev",
-          planIssueNumber: input.issueNumber,
-          ticketNumbers: [ticket.ticketIssueNumber],
-          fallbackTitle: impl.commit_message,
-          changedFiles: impl.files,
-          llmApiKey: input.llmApiKey,
-          model,
-          fetchImpl: input.fetchImpl
-        });
-        await gh.updatePullRequest(taskPr.number, {
-          title: squashCommit.pr_title
-        });
-        await gh.publishCheckRun({
-          name: "PR title",
-          headSha: currentPrHeadSha,
-          conclusion: "success",
-          summary: `Conventional Commit title verified: '${squashCommit.pr_title}'`
-        });
-        await gh.mergePullRequest(taskPr.number, {
-          headBranch: taskBranch,
-          baseBranch: featureBranch,
-          commitTitle: squashCommit.commit_title,
-          commitMessage: squashCommit.commit_message
-        });
-        if (ticket.ticketIssueNumber !== input.issueNumber) {
-          await gh.closeIssue(ticket.ticketIssueNumber);
-        }
-        completedTicketsSummary.push(
-          `- **#${ticket.ticketIssueNumber}** (${ticket.title}) \u2014 PR #${taskPr.number} squash-merged into \`${featureBranch}\` as \`${squashCommit.commit_title}\` (Reviewers: ${reviewResult.selected_reviewers.map((r) => `\`${r}\``).join(", ")})`
-        );
       }
       const effectiveFeatureEntries = featureChangedFilesMap.size > 0 ? Array.from(featureChangedFilesMap.entries()) : Array.from(accumulatedFiles.entries());
       const allFeatureFiles = effectiveFeatureEntries.map(
@@ -4612,7 +7863,8 @@ After \`${fixAttempt}\` attempts (\`max_code_fix_attempts = ${maxCodeFixAttempts
         model,
         fetchImpl: input.fetchImpl
       });
-      const featurePr = await gh.openPullRequest({
+      const existingFeaturePr = existingFeaturePrAtStart ?? await gh.findOpenPullRequestByHead(featureBranch, "dev");
+      const featurePr = existingFeaturePr ? existingFeaturePr : await gh.openPullRequest({
         head: featureBranch,
         base: "dev",
         title: featureSquashPreview.pr_title,
@@ -4632,214 +7884,16 @@ After \`${fixAttempt}\` attempts (\`max_code_fix_attempts = ${maxCodeFixAttempts
         ].join("\n")
       });
       let currentFeaturePrHeadSha = featurePr.head_sha;
-      let finalFeatureReview = await runMultiAgentPrReviewPass({
-        repository: input.repository,
-        prNumber: featurePr.number,
-        headBranch: featureBranch,
-        baseBranch: "dev",
-        ticketTitle: issue.title,
-        acceptanceCriteria: ticketsManifest.flatMap((t) => t.acceptanceCriteria),
-        glossaryMarkdown: issue.body,
-        designMarkdown: trustedBaseRoster.designMarkdown,
-        changedFiles: Array.from(
+      const runStage2AndStage3ForFeaturePr = async (params) => {
+        const currentChangedFeatureFiles = Array.from(
           (featureChangedFilesMap.size > 0 ? featureChangedFilesMap : accumulatedFiles).entries()
-        ).map(([path, content]) => ({ path, content })),
-        workspaceFiles: accumulatedFiles,
-        trustedBaseBranchFiles: trustedBaseFilesMap,
-        isReReviewPass: false,
-        llmApiKey: input.llmApiKey,
-        model,
-        fetchImpl: input.fetchImpl
-      });
-      await gh.postPullRequestReview(featurePr.number, {
-        commitId: currentFeaturePrHeadSha,
-        body: finalFeatureReview.review_body_markdown
-      });
-      await gh.publishCheckRun({
-        name: "PR title",
-        headSha: currentFeaturePrHeadSha,
-        conclusion: "success",
-        summary: `Conventional Commit title verified: '${featureSquashPreview.pr_title}'`
-      });
-      await gh.publishCheckRun({
-        name: "ai-review",
-        headSha: currentFeaturePrHeadSha,
-        conclusion: finalFeatureReview.conclusion,
-        summary: finalFeatureReview.check_summary_markdown
-      });
-      if (finalFeatureReview.touches_frontend_ui) {
-        await gh.publishCheckRun({
-          name: "impeccable-gate",
-          headSha: currentFeaturePrHeadSha,
-          conclusion: finalFeatureReview.impeccable_conclusion === "failure" ? "failure" : "success",
-          summary: `Impeccable UI & Accessibility Gate: ${finalFeatureReview.impeccable_conclusion}`
+        ).map(([path, content]) => ({ path, content }));
+        const expectedFeatureWorkflows = discoverExpectedExternalWorkflows({
+          workflowFilesMap: devWorkflowsMap,
+          changedPaths: currentChangedFeatureFiles.map((f) => f.path),
+          targetBranch: "dev"
         });
-      }
-      let featureReviewFixAttempt = 0;
-      const maxFeatureReviewFixAttempts = 3;
-      while (finalFeatureReview.conclusion === "failure" && featureReviewFixAttempt < maxFeatureReviewFixAttempts) {
-        featureReviewFixAttempt += 1;
-        process.stdout.write(
-          `[EPURE][Feature PR #${featurePr.number}] Multi-agent synthesis review fix iteration ${featureReviewFixAttempt}/${maxFeatureReviewFixAttempts} (${finalFeatureReview.must_fix_findings.length} must_fix finding(s))
-`
-        );
-        const findingsText = finalFeatureReview.must_fix_findings.map(
-          (f, idx) => `${idx + 1}. [${f.reviewer}] (${f.path}:${f.line}) ${f.title} \u2014 ${f.rationale} -> Action: ${f.suggested_action}`
-        ).join("\n");
-        const currentFilesContext = Array.from(accumulatedFiles.entries()).map(([p, c]) => `--- FILE: ${p} ---
-${c}`).join("\n\n");
-        const featureFixSystemInstruction = [
-          "Tu es un ing\xE9nieur TDD EPURE corrigeant les constats bloquants ('must_fix') \xE9mis par le roster de revue multi-agents sur la PR finale de feature.",
-          PROMPT_INJECTION_IMMUNITY_CLAUSE,
-          "Corrige pr\xE9cis\xE9ment chaque 'must_fix' tout en maintenant 100% des tests et TypeScript au vert.",
-          "Ne modifie JAMAIS .cursor/agents/**, .github/workflows/** ou .github/agents.yml.",
-          "Pour modifier un fichier existant volumineux, utilise de pr\xE9f\xE9rence `patches` (`old_string` -> `new_string` exact). Sinon utilise `files` avec le contenu int\xE9gral du fichier.",
-          "Renvoie un objet JSON strictement valide :",
-          "{",
-          `  "commit_message": "fix(review): address final feature review findings on #${input.issueNumber}",`,
-          '  "test_summary": "Addressed final feature review findings and verified test suite",',
-          '  "patches": [',
-          '    { "path": "...", "edits": [{ "old_string": "...", "new_string": "..." }] }',
-          "  ],",
-          '  "files": [',
-          '    { "path": "...", "content": "..." }',
-          "  ]",
-          "}"
-        ].join("\n");
-        const rawFeatureFix = await callGeminiGenerateContent({
-          apiKey: input.llmApiKey,
-          model,
-          thinkingLevel: "HIGH",
-          logLabel: `feature-review-fix:#PR${featurePr.number}/iter-${featureReviewFixAttempt}`,
-          systemInstruction: featureFixSystemInstruction,
-          prompt: [
-            `Les reviewers multi-agents EPURE ont \xE9mis ${finalFeatureReview.must_fix_findings.length} constat(s) bloquant(s) ('must_fix') sur la PR finale #${featurePr.number} (\`${featureBranch} -> dev\`) :`,
-            wrapUntrustedContent("untrusted_issue_content", findingsText),
-            "",
-            "Fichiers actuels du workspace :",
-            wrapUntrustedContent("untrusted_workspace_files", currentFilesContext)
-          ].join("\n"),
-          responseMimeType: "application/json",
-          temperature: 0.1,
-          fetchImpl: input.fetchImpl
-        });
-        const parsedFeatureFix = extractJsonObject(rawFeatureFix);
-        const changedFixFilesMap = /* @__PURE__ */ new Map();
-        await applyTicketImplementationPayload({
-          parsed: parsedFeatureFix,
-          accumulatedFiles,
-          featureChangedFilesMap,
-          ticketChangedFilesMap: changedFixFilesMap,
-          gh,
-          branch: featureBranch
-        });
-        let featureTestCheck = await runTestsInIsolatedWorkspace({
-          files: Array.from(accumulatedFiles.entries()).map(
-            ([path, content]) => ({ path, content })
-          ),
-          llmApiKey: input.llmApiKey,
-          label: `Feature PR #${featurePr.number} review-fix iteration ${featureReviewFixAttempt}/${maxFeatureReviewFixAttempts}`
-        });
-        let featureTestRetry = 0;
-        while (!featureTestCheck.passed && featureTestRetry < 2) {
-          featureTestRetry += 1;
-          const retryFilesContext = Array.from(accumulatedFiles.entries()).map(([p, c]) => `--- FILE: ${p} ---
-${c}`).join("\n\n");
-          const rawRetryFeatureFix = await callGeminiGenerateContent({
-            apiKey: input.llmApiKey,
-            model,
-            thinkingLevel: "HIGH",
-            logLabel: `feature-review-test-retry:#PR${featurePr.number}/iter-${featureReviewFixAttempt}-retry-${featureTestRetry}`,
-            systemInstruction: featureFixSystemInstruction,
-            prompt: [
-              `La correction de review finale a \xE9chou\xE9 \xE0 la v\xE9rification TypeScript/Vitest (tentative ${featureTestRetry}/2) :`,
-              wrapUntrustedContent(
-                "untrusted_test_output",
-                featureTestCheck.output.slice(-6e3)
-              ),
-              "",
-              "Constats must_fix \xE0 maintenir corrig\xE9s :",
-              wrapUntrustedContent("untrusted_issue_content", findingsText),
-              "",
-              "Fichiers actuels du workspace :",
-              wrapUntrustedContent("untrusted_workspace_files", retryFilesContext)
-            ].join("\n"),
-            responseMimeType: "application/json",
-            temperature: 0.1,
-            fetchImpl: input.fetchImpl
-          });
-          const retryParsed = extractJsonObject(rawRetryFeatureFix);
-          await applyTicketImplementationPayload({
-            parsed: retryParsed,
-            accumulatedFiles,
-            featureChangedFilesMap,
-            ticketChangedFilesMap: changedFixFilesMap,
-            gh,
-            branch: featureBranch
-          });
-          featureTestCheck = await runTestsInIsolatedWorkspace({
-            files: Array.from(accumulatedFiles.entries()).map(
-              ([path, content]) => ({ path, content })
-            ),
-            llmApiKey: input.llmApiKey,
-            label: `Feature PR #${featurePr.number} review-fix iteration ${featureReviewFixAttempt} test retry ${featureTestRetry}/2`
-          });
-        }
-        if (!featureTestCheck.passed) {
-          throw new Error(
-            `Sandbox test verification failed while addressing final feature review findings on PR #${featurePr.number}:
-${featureTestCheck.output.slice(-2e3)}`
-          );
-        }
-        const changedFixFiles = Array.from(changedFixFilesMap.entries()).map(
-          ([path, content]) => ({ path, content })
-        );
-        const fixTaskBranch = `task/review-fix-${input.issueNumber}-${featureReviewFixAttempt}`;
-        const fixCommitTitle = parsedFeatureFix.commit_message && /^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9._/-]+\))?!?: .+/i.test(
-          parsedFeatureFix.commit_message
-        ) ? parsedFeatureFix.commit_message : `fix(review): address final feature review findings on #${input.issueNumber}`;
-        await gh.commitFilesToBranch({
-          branch: fixTaskBranch,
-          fromBranch: featureBranch,
-          commitMessage: fixCommitTitle,
-          files: changedFixFiles
-        });
-        const fixPr = await gh.openPullRequest({
-          head: fixTaskBranch,
-          base: featureBranch,
-          title: fixCommitTitle,
-          body: `Addresses multi-agent review findings on feature PR #${featurePr.number} (iteration ${featureReviewFixAttempt}).
-
-Refs #${input.issueNumber}`
-        });
-        await gh.publishCheckRun({
-          name: "PR title",
-          headSha: fixPr.head_sha,
-          conclusion: "success",
-          summary: `Conventional Commit title verified: '${fixCommitTitle}'`
-        });
-        await gh.publishCheckRun({
-          name: "ai-review",
-          headSha: fixPr.head_sha,
-          conclusion: "success",
-          summary: "Sandbox verified remediation commit for feature synthesis PR."
-        });
-        await gh.publishCheckRun({
-          name: "impeccable-gate",
-          headSha: fixPr.head_sha,
-          conclusion: "success",
-          summary: "Impeccable gate verified in synthesis loop."
-        });
-        await gh.mergePullRequest(fixPr.number, {
-          headBranch: fixTaskBranch,
-          baseBranch: featureBranch,
-          commitTitle: `${fixCommitTitle} (#${fixPr.number})`,
-          commitMessage: `Automated remediation of synthesis review findings.
-
-Refs #${input.issueNumber}`
-        });
-        currentFeaturePrHeadSha = await gh.getDefaultBranchSha(featureBranch) ?? currentFeaturePrHeadSha;
-        finalFeatureReview = await runMultiAgentPrReviewPass({
+        const reviewRes = await runMultiAgentPrReviewPass({
           repository: input.repository,
           prNumber: featurePr.number,
           headBranch: featureBranch,
@@ -4850,41 +7904,434 @@ Refs #${input.issueNumber}`
           ),
           glossaryMarkdown: issue.body,
           designMarkdown: trustedBaseRoster.designMarkdown,
-          changedFiles: Array.from(
-            (featureChangedFilesMap.size > 0 ? featureChangedFilesMap : accumulatedFiles).entries()
-          ).map(([path, content]) => ({ path, content })),
+          changedFiles: currentChangedFeatureFiles,
           workspaceFiles: accumulatedFiles,
           trustedBaseBranchFiles: trustedBaseFilesMap,
-          isReReviewPass: true,
-          previousFailedReviewers: finalFeatureReview.failed_reviewers,
+          isReReviewPass: params.isReReviewPass,
+          previousFailedReviewers: params.previousFailedReviewers,
           llmApiKey: input.llmApiKey,
           model,
           fetchImpl: input.fetchImpl
         });
         await gh.postPullRequestReview(featurePr.number, {
-          commitId: currentFeaturePrHeadSha,
-          body: finalFeatureReview.review_body_markdown
+          commitId: params.headSha,
+          body: reviewRes.review_body_markdown
         });
         await gh.publishCheckRun({
           name: "PR title",
-          headSha: currentFeaturePrHeadSha,
+          headSha: params.headSha,
           conclusion: "success",
           summary: `Conventional Commit title verified: '${featureSquashPreview.pr_title}'`
         });
         await gh.publishCheckRun({
           name: "ai-review",
-          headSha: currentFeaturePrHeadSha,
-          conclusion: finalFeatureReview.conclusion,
-          summary: finalFeatureReview.check_summary_markdown
+          headSha: params.headSha,
+          conclusion: reviewRes.conclusion,
+          summary: reviewRes.check_summary_markdown
         });
-        if (finalFeatureReview.touches_frontend_ui) {
+        if (reviewRes.touches_frontend_ui) {
           await gh.publishCheckRun({
             name: "impeccable-gate",
-            headSha: currentFeaturePrHeadSha,
-            conclusion: finalFeatureReview.impeccable_conclusion === "failure" ? "failure" : "success",
-            summary: `Impeccable UI & Accessibility Gate: ${finalFeatureReview.impeccable_conclusion}`
+            headSha: params.headSha,
+            conclusion: reviewRes.impeccable_conclusion === "failure" ? "failure" : "success",
+            summary: `Impeccable UI & Accessibility Gate: ${reviewRes.impeccable_conclusion}`
           });
         }
+        const ciRes = await waitForExternalCiChecks({
+          headSha: params.headSha,
+          expectedWorkflows: expectedFeatureWorkflows,
+          waitForExternalCi: verificationProfile.wait_for_external_ci,
+          timeoutMinutes: verificationProfile.external_ci_timeout_minutes,
+          graceWindowSeconds: verificationProfile.grace_window_seconds,
+          pollIntervalMs: input.pollIntervalMs,
+          extraSecrets: [activeToken, input.llmApiKey],
+          infraRerunsBySha,
+          listWorkflowRunsForSha: (sha) => gh.listWorkflowRunsForSha(sha),
+          listCheckRunsForRef: (sha) => gh.listCheckRunsForRef(sha),
+          listCheckRunAnnotations: (id) => gh.listCheckRunAnnotations(id),
+          getJobLogs: (id) => gh.getActionJobLogs(id),
+          rerunFailedJobs: (runId) => gh.rerunFailedWorkflowJobs(runId),
+          sleepFn: effectiveSleepFn
+        });
+        if (ciRes.infraRerunsTriggered > 0) {
+          totalTransientRetriesUsed += ciRes.infraRerunsTriggered;
+          await updateIssueStateWithCas({
+            issueNumber: input.issueNumber,
+            store,
+            mutator: (prev) => ({
+              ...prev,
+              transient_retries_used: totalTransientRetriesUsed
+            })
+          });
+        }
+        return { reviewResult: reviewRes, ciGateResult: ciRes };
+      };
+      let {
+        reviewResult: finalFeatureReview,
+        ciGateResult: finalFeatureCiGate
+      } = await runStage2AndStage3ForFeaturePr({
+        headSha: currentFeaturePrHeadSha,
+        isReReviewPass: false
+      });
+      if (!finalFeatureCiGate.passed && (finalFeatureCiGate.reason === "grace_window_timeout" || finalFeatureCiGate.reason === "wall_clock_budget_exhausted")) {
+        return await escalateToNeedsHuman({
+          reason: finalFeatureCiGate.reason,
+          ticketNumber: input.issueNumber,
+          branch: featureBranch,
+          prNumber: featurePr.number,
+          prUrl: featurePr.html_url,
+          featurePrUrl: featurePr.html_url,
+          codeFixAttemptsUsed: 0,
+          failedChecks: finalFeatureCiGate.failedChecks,
+          mustFixFindings: finalFeatureReview.must_fix_findings,
+          diagnosticExcerpt: finalFeatureCiGate.formattedDiagnostics
+        });
+      }
+      let featureReviewFixAttempt = 0;
+      const maxFeatureReviewFixAttempts = maxCodeFixAttempts;
+      while ((finalFeatureReview.conclusion === "failure" || !finalFeatureCiGate.passed) && featureReviewFixAttempt < maxFeatureReviewFixAttempts) {
+        featureReviewFixAttempt += 1;
+        await updateIssueStateWithCas({
+          issueNumber: input.issueNumber,
+          store,
+          mutator: (prev) => ({
+            ...prev,
+            code_fix_attempts_used: featureReviewFixAttempt,
+            transient_retries_used: totalTransientRetriesUsed || prev.transient_retries_used
+          })
+        });
+        process.stdout.write(
+          `[EPURE][Feature PR #${featurePr.number}] Multi-agent synthesis review + CI fix iteration ${featureReviewFixAttempt}/${maxFeatureReviewFixAttempts} (${finalFeatureReview.must_fix_findings.length} must_fix finding(s), CI passed=${finalFeatureCiGate.passed})
+`
+        );
+        const findingsText = finalFeatureReview.must_fix_findings.map(
+          (f, idx) => `${idx + 1}. [${f.reviewer}] (${f.path}:${f.line}) ${f.title} \u2014 ${f.rationale} -> Action: ${f.suggested_action}`
+        ).join("\n");
+        const featureSandbox = prepareRepositorySandboxWorkspace({
+          repository: input.repository,
+          branch: featureBranch,
+          githubToken: activeToken,
+          seedFiles: accumulatedFiles,
+          enableRemoteClone: Boolean(
+            process.env.GITHUB_ACTIONS === "true" && !input.fetchImpl
+          )
+        });
+        if (featureSandbox.clonedFromRemote && !parsedDevAgentsConfig?.verification?.targets?.length) {
+          const clonedProfile = discoverVerificationProfile({
+            repoRootDir: featureSandbox.workDir,
+            targetFilesHint: [
+              ...devBranchPaths,
+              ...ticketsManifest.flatMap((t) => t.filesToTouch)
+            ],
+            workflowFilesMap: Object.fromEntries(devWorkflowsMap)
+          });
+          verificationProfile = {
+            ...clonedProfile,
+            wait_for_external_ci: parsedDevAgentsConfig?.verification?.wait_for_external_ci ?? clonedProfile.wait_for_external_ci,
+            external_ci_timeout_minutes: parsedDevAgentsConfig?.verification?.external_ci_timeout_minutes ?? clonedProfile.external_ci_timeout_minutes,
+            grace_window_seconds: parsedDevAgentsConfig?.verification?.grace_window_seconds ?? clonedProfile.grace_window_seconds
+          };
+          verificationGuideMarkdown = formatVerificationToolingGuideMarkdown(verificationProfile);
+        }
+        try {
+          const currentFilesContext = Array.from(accumulatedFiles.entries()).map(([p, c]) => `--- FILE: ${p} ---
+${c}`).join("\n\n");
+          const featureFixSystemInstruction = [
+            "Tu es un ing\xE9nieur TDD EPURE corrigeant les constats bloquants ('must_fix') et/ou \xE9checs CI sur la PR finale de feature.",
+            PROMPT_INJECTION_IMMUNITY_CLAUSE,
+            "Corrige pr\xE9cis\xE9ment chaque anomalie tout en maintenant 100% des cibles Stage 1 au vert.",
+            "Ne modifie JAMAIS .cursor/agents/**, .github/workflows/**, .github/agents.yml ou .env*.",
+            "Utilise les outils `list_repo_files`, `search_in_repo_file` et `read_repo_file` pour inspecter les fichiers pertinents du d\xE9p\xF4t avant de coder.",
+            "",
+            verificationGuideMarkdown,
+            "",
+            "Pour modifier un fichier existant volumineux, utilise de pr\xE9f\xE9rence `patches` (`old_string` -> `new_string` exact). Sinon utilise `files` avec le contenu int\xE9gral du fichier. Pour supprimer un fichier obsol\xE8te, utilise `deleted_files`.",
+            "Renvoie un objet JSON strictement valide :",
+            "{",
+            `  "commit_message": "fix(review): address final feature review findings on #${input.issueNumber}",`,
+            '  "test_summary": "Addressed final feature review findings and verified test suite",',
+            '  "patches": [',
+            '    { "path": "...", "edits": [{ "old_string": "...", "new_string": "..." }] }',
+            "  ],",
+            '  "files": [',
+            '    { "path": "...", "content": "..." }',
+            "  ],",
+            '  "deleted_files": ["..."]',
+            "}"
+          ].join("\n");
+          const featureFixPromptParts = [];
+          if (finalFeatureReview.must_fix_findings.length > 0) {
+            featureFixPromptParts.push(
+              `Les reviewers multi-agents EPURE ont \xE9mis ${finalFeatureReview.must_fix_findings.length} constat(s) bloquant(s) ('must_fix') sur la PR finale #${featurePr.number} (\`${featureBranch} -> dev\`) :`,
+              wrapUntrustedContent("untrusted_issue_content", findingsText),
+              ""
+            );
+          }
+          if (!finalFeatureCiGate.passed && finalFeatureCiGate.formattedDiagnostics) {
+            featureFixPromptParts.push(
+              `Les workflows CI externes sur la PR finale #${featurePr.number} (\`${featureBranch} -> dev\`) ont \xE9chou\xE9 :`,
+              finalFeatureCiGate.formattedDiagnostics,
+              ""
+            );
+          }
+          featureFixPromptParts.push(
+            verificationGuideMarkdown,
+            "",
+            "Fichiers actuels du workspace :",
+            wrapUntrustedContent(
+              "untrusted_workspace_files",
+              currentFilesContext
+            )
+          );
+          const rawFeatureFix = await callGeminiGenerateContent({
+            apiKey: input.llmApiKey,
+            model,
+            thinkingLevel: "HIGH",
+            logLabel: `feature-review-fix:#PR${featurePr.number}/iter-${featureReviewFixAttempt}`,
+            systemInstruction: featureFixSystemInstruction,
+            prompt: featureFixPromptParts.join("\n"),
+            responseMimeType: "application/json",
+            temperature: 0.1,
+            ...buildRepoExplorationToolsAndHandlers(featureBranch),
+            fetchImpl: input.fetchImpl
+          });
+          const parsedFeatureFix = extractJsonObject(rawFeatureFix);
+          const featureFixPreCheck = validateWorkspaceFileOperations({
+            workDir: featureSandbox.workDir,
+            files: [
+              ...(parsedFeatureFix.files ?? []).map((f) => ({ path: f.path })),
+              ...(parsedFeatureFix.patches ?? []).map((p) => ({
+                path: p.path
+              }))
+            ],
+            deleted_files: parsedFeatureFix.deleted_files,
+            targets: verificationProfile.targets,
+            isTaskBranch: true
+          });
+          if (!featureFixPreCheck.allowed) {
+            return await escalateToNeedsHuman({
+              reason: "sensitive_path_violation",
+              ticketNumber: input.issueNumber,
+              branch: featureBranch,
+              prNumber: featurePr.number,
+              prUrl: featurePr.html_url,
+              featurePrUrl: featurePr.html_url,
+              codeFixAttemptsUsed: featureReviewFixAttempt,
+              sensitivePaths: featureFixPreCheck.sensitivePaths,
+              traversalPaths: featureFixPreCheck.traversalPaths
+            });
+          }
+          const changedFixFilesMap = /* @__PURE__ */ new Map();
+          const changedDeletedFilesSet = /* @__PURE__ */ new Set();
+          await applyTicketImplementationPayload({
+            parsed: parsedFeatureFix,
+            accumulatedFiles,
+            featureChangedFilesMap,
+            ticketChangedFilesMap: changedFixFilesMap,
+            featureDeletedFilesSet,
+            ticketDeletedFilesSet: changedDeletedFilesSet,
+            gh,
+            branch: featureBranch
+          });
+          let featureTestCheck = await runTestsInIsolatedWorkspace({
+            workDir: featureSandbox.workDir,
+            files: Array.from(accumulatedFiles.entries()).map(
+              ([path, content]) => ({ path, content })
+            ),
+            deleted_files: Array.from(changedDeletedFilesSet),
+            changedPaths: [
+              ...Array.from(changedFixFilesMap.keys()),
+              ...Array.from(changedDeletedFilesSet)
+            ],
+            isTaskBranch: true,
+            verificationProfile,
+            sandboxRunner: input.sandboxRunner,
+            llmApiKey: input.llmApiKey,
+            label: `Feature PR #${featurePr.number} review-fix iteration ${featureReviewFixAttempt}/${maxFeatureReviewFixAttempts}`
+          });
+          let featureTestRetry = 0;
+          while (!featureTestCheck.passed && featureTestRetry < 2) {
+            featureTestRetry += 1;
+            const retryFilesContext = Array.from(accumulatedFiles.entries()).map(([p, c]) => `--- FILE: ${p} ---
+${c}`).join("\n\n");
+            const rawRetryFeatureFix = await callGeminiGenerateContent({
+              apiKey: input.llmApiKey,
+              model,
+              thinkingLevel: "HIGH",
+              logLabel: `feature-review-test-retry:#PR${featurePr.number}/iter-${featureReviewFixAttempt}-retry-${featureTestRetry}`,
+              systemInstruction: featureFixSystemInstruction,
+              prompt: [
+                `La correction de review finale a \xE9chou\xE9 \xE0 la v\xE9rification Stage 1 (tentative ${featureTestRetry}/2) :`,
+                wrapUntrustedContent(
+                  "untrusted_test_output",
+                  featureTestCheck.output.slice(-6e3)
+                ),
+                "",
+                ...findingsText ? [
+                  "Constats must_fix \xE0 maintenir corrig\xE9s :",
+                  wrapUntrustedContent(
+                    "untrusted_issue_content",
+                    findingsText
+                  ),
+                  ""
+                ] : [],
+                "Fichiers actuels du workspace :",
+                wrapUntrustedContent(
+                  "untrusted_workspace_files",
+                  retryFilesContext
+                )
+              ].join("\n"),
+              responseMimeType: "application/json",
+              temperature: 0.1,
+              ...buildRepoExplorationToolsAndHandlers(featureBranch),
+              fetchImpl: input.fetchImpl
+            });
+            const retryParsed = extractJsonObject(
+              rawRetryFeatureFix
+            );
+            const retryPreCheck = validateWorkspaceFileOperations({
+              workDir: featureSandbox.workDir,
+              files: [
+                ...(retryParsed.files ?? []).map((f) => ({ path: f.path })),
+                ...(retryParsed.patches ?? []).map((p) => ({ path: p.path }))
+              ],
+              deleted_files: retryParsed.deleted_files,
+              targets: verificationProfile.targets,
+              isTaskBranch: true
+            });
+            if (!retryPreCheck.allowed) {
+              return await escalateToNeedsHuman({
+                reason: "sensitive_path_violation",
+                ticketNumber: input.issueNumber,
+                branch: featureBranch,
+                prNumber: featurePr.number,
+                prUrl: featurePr.html_url,
+                featurePrUrl: featurePr.html_url,
+                codeFixAttemptsUsed: featureReviewFixAttempt,
+                sensitivePaths: retryPreCheck.sensitivePaths,
+                traversalPaths: retryPreCheck.traversalPaths
+              });
+            }
+            await applyTicketImplementationPayload({
+              parsed: retryParsed,
+              accumulatedFiles,
+              featureChangedFilesMap,
+              ticketChangedFilesMap: changedFixFilesMap,
+              featureDeletedFilesSet,
+              ticketDeletedFilesSet: changedDeletedFilesSet,
+              gh,
+              branch: featureBranch
+            });
+            featureTestCheck = await runTestsInIsolatedWorkspace({
+              workDir: featureSandbox.workDir,
+              files: Array.from(accumulatedFiles.entries()).map(
+                ([path, content]) => ({ path, content })
+              ),
+              deleted_files: Array.from(changedDeletedFilesSet),
+              changedPaths: [
+                ...Array.from(changedFixFilesMap.keys()),
+                ...Array.from(changedDeletedFilesSet)
+              ],
+              isTaskBranch: true,
+              verificationProfile,
+              sandboxRunner: input.sandboxRunner,
+              llmApiKey: input.llmApiKey,
+              label: `Feature PR #${featurePr.number} review-fix iteration ${featureReviewFixAttempt} test retry ${featureTestRetry}/2`
+            });
+          }
+          if (!featureTestCheck.passed) {
+            throw new Error(
+              `Sandbox test verification failed while addressing final feature review findings on PR #${featurePr.number}:
+${featureTestCheck.output.slice(-2e3)}`
+            );
+          }
+          const changedFixFiles = Array.from(changedFixFilesMap.entries()).map(
+            ([path, content]) => ({ path, content })
+          );
+          const fixTaskBranch = `task/review-fix-${input.issueNumber}-${featureReviewFixAttempt}`;
+          const fixCommitTitle = parsedFeatureFix.commit_message && /^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9._/-]+\))?!?: .+/i.test(
+            parsedFeatureFix.commit_message
+          ) ? parsedFeatureFix.commit_message : `fix(review): address final feature review findings on #${input.issueNumber}`;
+          await gh.commitFilesToBranch({
+            branch: fixTaskBranch,
+            fromBranch: featureBranch,
+            commitMessage: fixCommitTitle,
+            files: changedFixFiles,
+            deletedFiles: Array.from(changedDeletedFilesSet)
+          });
+          const fixPr = await gh.openPullRequest({
+            head: fixTaskBranch,
+            base: featureBranch,
+            title: fixCommitTitle,
+            body: `Addresses multi-agent review findings on feature PR #${featurePr.number} (iteration ${featureReviewFixAttempt}).
+
+Refs #${input.issueNumber}`
+          });
+          await gh.publishCheckRun({
+            name: "PR title",
+            headSha: fixPr.head_sha,
+            conclusion: "success",
+            summary: `Conventional Commit title verified: '${fixCommitTitle}'`
+          });
+          await gh.publishCheckRun({
+            name: "ai-review",
+            headSha: fixPr.head_sha,
+            conclusion: "success",
+            summary: "Sandbox verified remediation commit for feature synthesis PR."
+          });
+          await gh.publishCheckRun({
+            name: "impeccable-gate",
+            headSha: fixPr.head_sha,
+            conclusion: "success",
+            summary: "Impeccable gate verified in synthesis loop."
+          });
+          await gh.mergePullRequest(fixPr.number, {
+            headBranch: fixTaskBranch,
+            baseBranch: featureBranch,
+            commitTitle: `${fixCommitTitle} (#${fixPr.number})`,
+            commitMessage: `Automated remediation of synthesis review findings.
+
+Refs #${input.issueNumber}`
+          });
+          currentFeaturePrHeadSha = await gh.getDefaultBranchSha(featureBranch) ?? currentFeaturePrHeadSha;
+          const nextFeaturePass = await runStage2AndStage3ForFeaturePr({
+            headSha: currentFeaturePrHeadSha,
+            isReReviewPass: true,
+            previousFailedReviewers: finalFeatureReview.failed_reviewers
+          });
+          finalFeatureReview = nextFeaturePass.reviewResult;
+          finalFeatureCiGate = nextFeaturePass.ciGateResult;
+          if (!finalFeatureCiGate.passed && (finalFeatureCiGate.reason === "grace_window_timeout" || finalFeatureCiGate.reason === "wall_clock_budget_exhausted")) {
+            return await escalateToNeedsHuman({
+              reason: finalFeatureCiGate.reason,
+              ticketNumber: input.issueNumber,
+              branch: featureBranch,
+              prNumber: featurePr.number,
+              prUrl: featurePr.html_url,
+              featurePrUrl: featurePr.html_url,
+              codeFixAttemptsUsed: featureReviewFixAttempt,
+              failedChecks: finalFeatureCiGate.failedChecks,
+              mustFixFindings: finalFeatureReview.must_fix_findings,
+              diagnosticExcerpt: finalFeatureCiGate.formattedDiagnostics
+            });
+          }
+        } finally {
+          featureSandbox.cleanup();
+        }
+      }
+      if (finalFeatureReview.conclusion === "failure" || !finalFeatureCiGate.passed) {
+        return await escalateToNeedsHuman({
+          reason: "remediation_exhausted",
+          ticketNumber: input.issueNumber,
+          branch: featureBranch,
+          prNumber: featurePr.number,
+          prUrl: featurePr.html_url,
+          featurePrUrl: featurePr.html_url,
+          codeFixAttemptsUsed: featureReviewFixAttempt,
+          failedChecks: finalFeatureCiGate.failedChecks,
+          mustFixFindings: finalFeatureReview.must_fix_findings,
+          diagnosticExcerpt: finalFeatureCiGate.formattedDiagnostics
+        });
       }
       const updatedDone = await updateIssueStateWithCas({
         issueNumber: input.issueNumber,
