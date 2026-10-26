@@ -2679,6 +2679,42 @@ function createGitHubApiRefStateStore(options) {
 }
 
 // src/orchestrator/issue-orchestrator.ts
+async function applyTicketImplementationPayload(params) {
+  for (const f of params.parsed.files ?? []) {
+    const cleanPath = f.path.replace(/^\/+/, "");
+    params.accumulatedFiles.set(cleanPath, f.content);
+    params.featureChangedFilesMap.set(cleanPath, f.content);
+    params.ticketChangedFilesMap.set(cleanPath, f.content);
+  }
+  for (const patch of params.parsed.patches ?? []) {
+    const cleanPath = patch.path.replace(/^\/+/, "");
+    let baseContent = params.accumulatedFiles.get(cleanPath) ?? null;
+    if (baseContent === null) {
+      baseContent = await params.gh.readSingleBranchFile(
+        params.branch,
+        cleanPath
+      );
+    }
+    if (baseContent === null) {
+      continue;
+    }
+    let updatedContent = baseContent;
+    for (const edit of patch.edits ?? []) {
+      if (edit.old_string && updatedContent.includes(edit.old_string)) {
+        updatedContent = updatedContent.replace(
+          edit.old_string,
+          edit.new_string
+        );
+      }
+    }
+    params.accumulatedFiles.set(cleanPath, updatedContent);
+    params.featureChangedFilesMap.set(cleanPath, updatedContent);
+    params.ticketChangedFilesMap.set(cleanPath, updatedContent);
+  }
+  return Array.from(params.ticketChangedFilesMap.entries()).map(
+    ([path, content]) => ({ path, content })
+  );
+}
 function verifyPublisherMergeBoundary(params) {
   const cleanHead = params.headBranch.trim().replace(/^refs\/heads\//, "");
   const cleanBase = params.baseBranch.trim().replace(/^refs\/heads\//, "");
@@ -2819,7 +2855,52 @@ function createGitHubRestHelper(params) {
       );
       return res.data?.object?.sha ?? null;
     },
-    async readBranchWorkspaceFiles(branch) {
+    async listBranchPaths(branch) {
+      try {
+        const treeRes = await apiRequest(
+          "GET",
+          `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
+          void 0,
+          true
+        );
+        return (treeRes.data?.tree ?? []).filter((e) => e.type === "blob" && typeof e.path === "string").map((e) => e.path);
+      } catch {
+        return [];
+      }
+    },
+    async readSingleBranchFile(branch, filePath) {
+      try {
+        const cleanPath = filePath.trim().replace(/^\/+/, "");
+        const treeRes = await apiRequest(
+          "GET",
+          `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
+          void 0,
+          true
+        );
+        const match = (treeRes.data?.tree ?? []).find(
+          (e) => e.type === "blob" && e.path === cleanPath
+        );
+        if (!match?.sha) {
+          return null;
+        }
+        const blobRes = await apiRequest(
+          "GET",
+          `/repos/${owner}/${repo}/git/blobs/${match.sha}`,
+          void 0,
+          true
+        );
+        if (blobRes.data?.content && blobRes.data.encoding === "base64") {
+          return Buffer.from(
+            blobRes.data.content.replace(/\s+/g, ""),
+            "base64"
+          ).toString("utf8");
+        }
+        return null;
+      } catch {
+        return null;
+      }
+    },
+    async readBranchWorkspaceFiles(branch, hintText = "") {
       const filesMap = /* @__PURE__ */ new Map();
       try {
         const treeRes = await apiRequest(
@@ -2829,14 +2910,164 @@ function createGitHubRestHelper(params) {
           true
         );
         const entries = treeRes.data?.tree ?? [];
-        for (const entry of entries) {
+        const candidates = entries.filter((entry) => {
           if (entry.type !== "blob" || !entry.path || !entry.sha) {
-            continue;
+            return false;
           }
           const p = entry.path;
-          if (p.startsWith(".github/") || p.startsWith(".cursor/") || p.startsWith("docs/") || p === ".gitignore" || p === "renovate.json" || p === "GLOSSARY.md") {
-            continue;
+          if (p.startsWith(".github/") || p.startsWith(".cursor/") || p.startsWith(".agents/") || p.startsWith("docs/") || p === ".gitignore" || p === "renovate.json" || p === "GLOSSARY.md" || /(?:^|\/)(?:package-lock\.json|pnpm-lock\.yaml|yarn\.lock)$/i.test(p) || /\.(?:png|jpe?g|gif|webp|svg|ico|woff2?|ttf|eot|mp3|ogg|wav|mp4|webm|pdf|zip|tar|gz)$/i.test(p)) {
+            return false;
           }
+          if (typeof entry.size === "number" && entry.size > 26e4) {
+            return false;
+          }
+          return true;
+        });
+        let selectedEntries = candidates;
+        if (candidates.length > 40) {
+          const stopWords = /* @__PURE__ */ new Set([
+            "read",
+            "write",
+            "test",
+            "tests",
+            "spec",
+            "from",
+            "with",
+            "when",
+            "that",
+            "this",
+            "into",
+            "only",
+            "once",
+            "does",
+            "after",
+            "before",
+            "still",
+            "never",
+            "drop",
+            "wait",
+            "waits",
+            "full",
+            "user",
+            "users",
+            "data",
+            "file",
+            "files",
+            "route",
+            "routes",
+            "check",
+            "pass",
+            "fail",
+            "true",
+            "false",
+            "null",
+            "type",
+            "name",
+            "code",
+            "list",
+            "item",
+            "page",
+            "view",
+            "open",
+            "close",
+            "keep",
+            "make",
+            "call",
+            "send",
+            "load",
+            "save",
+            "state",
+            "store",
+            "table",
+            "live",
+            "token",
+            "tokens",
+            "what",
+            "build",
+            "acceptance",
+            "criteria",
+            "part",
+            "issue",
+            "client",
+            "server",
+            "socket",
+            "request",
+            "response",
+            "error",
+            "errors",
+            "value",
+            "values",
+            "update",
+            "updates",
+            "create",
+            "delete",
+            "remove",
+            "existing",
+            "current",
+            "second",
+            "first",
+            "other",
+            "same",
+            "each",
+            "more",
+            "less"
+          ]);
+          const lowerHint = hintText.toLowerCase();
+          const backtickedTokens = Array.from(
+            hintText.matchAll(/`([A-Za-z0-9_./-]+)`/g)
+          ).map((m) => m[1].trim().toLowerCase()).filter((t) => t.length >= 3 && !stopWords.has(t));
+          const wordTokens = Array.from(
+            new Set(
+              lowerHint.split(/[^a-z0-9_]+/).filter((w) => w.length >= 5 && !stopWords.has(w))
+            )
+          );
+          const scored = candidates.map((entry) => {
+            const p = entry.path;
+            const lowerPath = p.toLowerCase();
+            const baseName = lowerPath.split("/").pop() ?? lowerPath;
+            const stem = baseName.replace(/\.(?:e2e\.test|integration\.test|test|spec)\.[a-z0-9]+$/i, "").replace(/\.[a-z0-9]+$/i, "");
+            let score = 0;
+            for (const bt of backtickedTokens) {
+              if (lowerPath === bt || lowerPath.endsWith(`/${bt}`) || baseName === bt) {
+                score += 150;
+              } else if (bt.length >= 4 && stem === bt) {
+                score += 100;
+              } else if (bt.length >= 6 && (stem.includes(bt) || bt.includes(stem)) && stem.length >= 5) {
+                score += 70;
+              }
+            }
+            if (stem.length >= 5 && !stopWords.has(stem) && lowerHint.includes(stem)) {
+              score += 60;
+            }
+            for (const w of wordTokens) {
+              if (stem === w) {
+                score += 45;
+              } else if (w.length >= 6 && stem.includes(w)) {
+                score += 25;
+              }
+            }
+            if (score > 0 && /(?:\.test\.|__tests__)/.test(lowerPath)) {
+              score += 10;
+            }
+            return { entry, score, size: entry.size ?? 4e3 };
+          });
+          scored.sort((a, b) => b.score - a.score);
+          const picked = [];
+          let totalBytes = 0;
+          for (const s of scored) {
+            if (s.score < 25 || picked.length >= 16) {
+              break;
+            }
+            if (totalBytes + s.size > 38e4) {
+              continue;
+            }
+            picked.push(s.entry);
+            totalBytes += s.size;
+          }
+          selectedEntries = picked;
+        }
+        for (const entry of selectedEntries) {
+          const p = entry.path;
           const blobRes = await apiRequest(
             "GET",
             `/repos/${owner}/${repo}/git/blobs/${entry.sha}`,
@@ -3534,7 +3765,11 @@ ${issue.body}`
         pinnedSha: "main",
         stack: plannedStack
       });
-      const planningFiles = [
+      const existingBaseRoster = await gh.readTrustedBaseRosterFiles("dev");
+      const hasExistingConfiguredRoster = existingBaseRoster.size > 0;
+      const planningFiles = hasExistingConfiguredRoster ? [
+        { path: bundle.spec_path, content: bundle.spec_markdown }
+      ] : [
         { path: "GLOSSARY.md", content: bundle.glossary_markdown },
         { path: bundle.spec_path, content: bundle.spec_markdown },
         ...bundle.adrs.map((a) => ({ path: a.path, content: a.content })),
@@ -3648,11 +3883,26 @@ ${issue.body}`
       };
     }
     if (input.command === "approve") {
-      const ticketsManifest = parseTrackedTicketsFromComments(allComments);
-      if (ticketsManifest.length === 0) {
-        throw new Error(
-          `Cannot execute '/epure approve' on issue #${input.issueNumber}: no ticket manifest found. Run '/epure plan' and complete the grill first.`
-        );
+      let ticketsManifest = parseTrackedTicketsFromComments(allComments);
+      const hasExplicitPlanManifest = ticketsManifest.length > 0;
+      if (!hasExplicitPlanManifest) {
+        const parsedCriteria = Array.from(
+          issue.body.matchAll(/^\s*-\s*\[[ xX]\]\s+(.+)$/gm)
+        ).map((m) => m[1].trim());
+        const parsedFiles = Array.from(
+          issue.body.matchAll(/`([A-Za-z0-9_./-]+\.[A-Za-z0-9]+)`/g)
+        ).map((m) => m[1].trim());
+        ticketsManifest = [
+          {
+            ticketIssueNumber: issue.number,
+            slug: planSlug,
+            title: issue.title,
+            description: issue.body,
+            acceptanceCriteria: parsedCriteria.length > 0 ? parsedCriteria : [issue.title],
+            blockedByIssueNumbers: [],
+            filesToTouch: parsedFiles
+          }
+        ];
       }
       await gh.ensureBranch("dev", "main");
       const trustedBaseRoster = adaptReviewerRosterForDomain({
@@ -3666,34 +3916,36 @@ ${issue.body}`
       for (const f of trustedBaseRoster.files) {
         trustedBaseFilesMap.set(f.path, f.content);
       }
-      try {
-        const planPr = await gh.openPullRequest({
-          head: planBranch,
-          base: "dev",
-          title: `docs(plan): integrate approved specification and ADRs for #${input.issueNumber}`,
-          body: `Integrates approved planning artifacts and reviewer roster from \`${planBranch}\` for #${input.issueNumber}.`
-        });
-        await gh.publishCheckRun({
-          name: "PR title",
-          headSha: planPr.head_sha,
-          conclusion: "success",
-          summary: "Conventional Commit PR title verified."
-        });
-        await gh.publishCheckRun({
-          name: "ai-review",
-          headSha: planPr.head_sha,
-          conclusion: "success",
-          summary: `Human-approved planning bundle #${input.issueNumber} verified.`
-        });
-        await gh.mergePullRequest(planPr.number, {
-          headBranch: planBranch,
-          baseBranch: "dev",
-          commitTitle: `docs(plan): integrate approved plan #${input.issueNumber} (#${planPr.number})`,
-          commitMessage: `Integrates GLOSSARY.md, ADRs, specification, DESIGN.md, and .cursor/agents/ roster.
+      if (hasExplicitPlanManifest) {
+        try {
+          const planPr = await gh.openPullRequest({
+            head: planBranch,
+            base: "dev",
+            title: `docs(plan): integrate approved specification and ADRs for #${input.issueNumber}`,
+            body: `Integrates approved planning artifacts and reviewer roster from \`${planBranch}\` for #${input.issueNumber}.`
+          });
+          await gh.publishCheckRun({
+            name: "PR title",
+            headSha: planPr.head_sha,
+            conclusion: "success",
+            summary: "Conventional Commit PR title verified."
+          });
+          await gh.publishCheckRun({
+            name: "ai-review",
+            headSha: planPr.head_sha,
+            conclusion: "success",
+            summary: `Human-approved planning bundle #${input.issueNumber} verified.`
+          });
+          await gh.mergePullRequest(planPr.number, {
+            headBranch: planBranch,
+            baseBranch: "dev",
+            commitTitle: `docs(plan): integrate approved plan #${input.issueNumber} (#${planPr.number})`,
+            commitMessage: `Integrates GLOSSARY.md, ADRs, specification, DESIGN.md, and .cursor/agents/ roster.
 
 Refs #${input.issueNumber}`
-        });
-      } catch {
+          });
+        } catch {
+        }
       }
       const remoteTrustedRoster = await gh.readTrustedBaseRosterFiles("dev");
       for (const [relPath, content] of remoteTrustedRoster.entries()) {
@@ -3711,11 +3963,24 @@ Refs #${input.issueNumber}`
           last_processed_comment_id: input.commentId ?? prev.last_processed_comment_id
         })
       });
-      const accumulatedFiles = await gh.readBranchWorkspaceFiles(featureBranch);
+      const hintForWorkspace = [
+        issue.title,
+        issue.body,
+        ...ticketsManifest.map(
+          (t) => `${t.title}
+${t.description}
+${t.filesToTouch.join(" ")}`
+        )
+      ].join("\n");
+      const accumulatedFiles = await gh.readBranchWorkspaceFiles(
+        featureBranch,
+        hintForWorkspace
+      );
+      const featureChangedFilesMap = /* @__PURE__ */ new Map();
       const completedTicketsSummary = [];
       for (const ticket of ticketsManifest) {
         const ticketIssueMeta = await gh.getIssue(ticket.ticketIssueNumber);
-        if (ticketIssueMeta.state === "closed" && accumulatedFiles.size > 0) {
+        if (ticket.ticketIssueNumber !== input.issueNumber && ticketIssueMeta.state === "closed" && accumulatedFiles.size > 0) {
           if (process.env.GITHUB_ACTIONS === "true") {
             process.stdout.write(
               `[EPURE][Ticket #${ticket.ticketIssueNumber}] Already merged & closed on ${featureBranch} \u2014 skipping
@@ -3737,24 +4002,43 @@ Refs #${input.issueNumber}`
         await gh.ensureBranch(taskBranch, featureBranch);
         const existingFilesContext = Array.from(accumulatedFiles.entries()).map(([path, content]) => `--- FILE: ${path} ---
 ${content}`).join("\n\n");
+        const isBrownfieldSubpackageRepo = accumulatedFiles.size > 0 && !accumulatedFiles.has("package.json") && Array.from(accumulatedFiles.keys()).some(
+          (k) => k.startsWith("backend/") || k.startsWith("frontend/")
+        );
         const tddSystemInstruction = [
-          "Tu es un ing\xE9nieur TDD EPURE impl\xE9mentant un ticket approuv\xE9 en TypeScript / React / Vite / Vitest.",
+          "Tu es un ing\xE9nieur TDD EPURE impl\xE9mentant un ticket approuv\xE9 en TypeScript.",
           PROMPT_INJECTION_IMMUNITY_CLAUSE,
           "R\xE8gles strictes :",
-          "1. \xC9cris des tests unitaires Vitest param\xE9tr\xE9s (it.each) couvrant tous les crit\xE8res d'acceptation et cas limites.",
+          "1. \xC9cris des tests couvrant tous les crit\xE8res d'acceptation et cas limites.",
           "2. Impl\xE9mente le code propre et complet faisant passer 100% des tests.",
           "3. N'utilise aucune d\xE9pendance externe exotique non d\xE9clar\xE9e dans package.json.",
           "4. Ne modifie JAMAIS .cursor/agents/**, .github/workflows/** ou .github/agents.yml.",
-          "5. Renvoie un objet JSON strictement valide respectant exactement ce sch\xE9ma :",
-          "{",
-          `  "commit_message": "feat(ticket-${ticket.ticketIssueNumber}): ...",`,
-          '  "test_summary": "Vitest parameterized suite verified",',
-          '  "files": [',
-          '    { "path": "package.json", "content": "..." },',
-          '    { "path": "src/...", "content": "..." },',
-          '    { "path": "tests/...", "content": "..." }',
-          "  ]",
-          "}"
+          ...isBrownfieldSubpackageRepo ? [
+            "5. Il s'agit d'un d\xE9p\xF4t existant multi-packages (`backend/`, `frontend/`). Utilise les outils `list_repo_files`, `search_in_repo_file` et `read_repo_file` pour inspecter les fichiers pertinents avant de coder.",
+            "6. Pour modifier un fichier existant du d\xE9p\xF4t, utilise de pr\xE9f\xE9rence `patches` (`old_string` -> `new_string` exact) afin de faire une modification chirurgicale sans r\xE9\xE9crire des milliers de lignes inchang\xE9es. Pour cr\xE9er un nouveau fichier (ex: nouveau fichier de test), utilise `files` avec son contenu complet. Ne cr\xE9e PAS de package.json \xE0 la racine.",
+            "Renvoie un objet JSON strictement valide respectant ce sch\xE9ma :",
+            "{",
+            '  "commit_message": "fix: ...",',
+            '  "test_summary": "Tests and acceptance criteria verified",',
+            '  "patches": [',
+            '    { "path": "backend/src/...", "edits": [{ "old_string": "...", "new_string": "..." }] }',
+            "  ],",
+            '  "files": [',
+            '    { "path": "backend/src/__tests__/...", "content": "..." }',
+            "  ]",
+            "}"
+          ] : [
+            "5. Renvoie un objet JSON strictement valide respectant exactement ce sch\xE9ma :",
+            "{",
+            `  "commit_message": "feat(ticket-${ticket.ticketIssueNumber}): ...",`,
+            '  "test_summary": "Vitest parameterized suite verified",',
+            '  "files": [',
+            '    { "path": "package.json", "content": "..." },',
+            '    { "path": "src/...", "content": "..." },',
+            '    { "path": "tests/...", "content": "..." }',
+            "  ]",
+            "}"
+          ]
         ].join("\n");
         const tddPrompt = [
           `Plan parent (#${input.issueNumber}) et cahier des charges :`,
@@ -3780,6 +4064,136 @@ ${issue.body}`
           existingFilesContext ? `Fichiers d\xE9j\xE0 pr\xE9sents sur la branche feature :
 ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C'est le premier ticket : inclus un package.json complet (avec scripts 'test': 'vitest run' et 'build': 'vite build', dependencies react/react-dom, devDependencies typescript/vite/vitest/@vitejs/plugin-react/@types/react/@types/react-dom) ainsi que tsconfig.json et vite.config.ts."
         ].join("\n");
+        const brownfieldTools = isBrownfieldSubpackageRepo ? {
+          tools: [
+            {
+              name: "list_repo_files",
+              description: "Search file paths in the repository matching a substring or keyword (e.g. 'toast', 'fog', 'CampaignContext', 'sessionStore').",
+              parameters: {
+                type: "OBJECT",
+                properties: {
+                  query: {
+                    type: "STRING",
+                    description: "Case-insensitive path substring to match"
+                  }
+                },
+                required: ["query"]
+              }
+            },
+            {
+              name: "search_in_repo_file",
+              description: "Search for a substring inside a repository file and return matching line numbers with surrounding lines.",
+              parameters: {
+                type: "OBJECT",
+                properties: {
+                  path: {
+                    type: "STRING",
+                    description: "Repository-relative file path"
+                  },
+                  query: {
+                    type: "STRING",
+                    description: "Substring or identifier to search for"
+                  }
+                },
+                required: ["path", "query"]
+              }
+            },
+            {
+              name: "read_repo_file",
+              description: "Read a file (or line range start_line..end_line) from the repository branch.",
+              parameters: {
+                type: "OBJECT",
+                properties: {
+                  path: {
+                    type: "STRING",
+                    description: "Repository-relative file path"
+                  },
+                  start_line: {
+                    type: "INTEGER",
+                    description: "Optional 1-based start line"
+                  },
+                  end_line: {
+                    type: "INTEGER",
+                    description: "Optional 1-based end line"
+                  }
+                },
+                required: ["path"]
+              }
+            }
+          ],
+          toolHandlers: {
+            list_repo_files: async (args) => {
+              const q = String(args.query ?? "").trim().toLowerCase();
+              const allPaths = await gh.listBranchPaths(featureBranch);
+              const matches = allPaths.filter((p) => p.toLowerCase().includes(q)).slice(0, 60);
+              return { matches };
+            },
+            search_in_repo_file: async (args) => {
+              const p = String(args.path ?? "").trim().replace(/^\/+/, "");
+              const q = String(args.query ?? "").trim();
+              let content = accumulatedFiles.get(p) ?? null;
+              if (content === null) {
+                content = await gh.readSingleBranchFile(featureBranch, p);
+                if (content !== null) {
+                  accumulatedFiles.set(p, content);
+                }
+              }
+              if (content === null) {
+                return { error: `File not found: ${p}` };
+              }
+              const lines = content.split("\n");
+              const snippets = [];
+              for (let i = 0; i < lines.length; i += 1) {
+                if (lines[i].toLowerCase().includes(q.toLowerCase())) {
+                  const start = Math.max(0, i - 15);
+                  const end = Math.min(lines.length, i + 20);
+                  snippets.push(
+                    `Lines ${start + 1}-${end}:
+` + lines.slice(start, end).map((l, idx) => `${start + idx + 1}| ${l}`).join("\n")
+                  );
+                  i = end - 1;
+                  if (snippets.length >= 8) {
+                    break;
+                  }
+                }
+              }
+              return {
+                path: p,
+                total_lines: lines.length,
+                matches: snippets
+              };
+            },
+            read_repo_file: async (args) => {
+              const p = String(args.path ?? "").trim().replace(/^\/+/, "");
+              let content = accumulatedFiles.get(p) ?? null;
+              if (content === null) {
+                content = await gh.readSingleBranchFile(featureBranch, p);
+                if (content !== null) {
+                  accumulatedFiles.set(p, content);
+                }
+              }
+              if (content === null) {
+                return { error: `File not found: ${p}` };
+              }
+              const lines = content.split("\n");
+              const startLine = Math.max(
+                1,
+                Number(args.start_line ?? 1) || 1
+              );
+              const endLine = Math.min(
+                lines.length,
+                Number(args.end_line ?? Math.min(lines.length, startLine + 250)) || lines.length
+              );
+              return {
+                path: p,
+                total_lines: lines.length,
+                start_line: startLine,
+                end_line: endLine,
+                content: lines.slice(startLine - 1, endLine).join("\n")
+              };
+            }
+          }
+        } : {};
         const rawImpl = await callGeminiGenerateContent({
           apiKey: input.llmApiKey,
           model,
@@ -3787,12 +4201,24 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
           prompt: tddPrompt,
           responseMimeType: "application/json",
           temperature: 0.1,
+          ...brownfieldTools,
           fetchImpl: input.fetchImpl
         });
-        let impl = extractJsonObject(rawImpl);
-        for (const f of impl.files) {
-          accumulatedFiles.set(f.path.replace(/^\/+/, ""), f.content);
-        }
+        const parsedImpl = extractJsonObject(rawImpl);
+        const ticketChangedFilesMap = /* @__PURE__ */ new Map();
+        const initialChangedFiles = await applyTicketImplementationPayload({
+          parsed: parsedImpl,
+          accumulatedFiles,
+          featureChangedFilesMap,
+          ticketChangedFilesMap,
+          gh,
+          branch: featureBranch
+        });
+        let impl = {
+          commit_message: parsedImpl.commit_message,
+          test_summary: parsedImpl.test_summary,
+          files: initialChangedFiles
+        };
         if (process.env.GITHUB_ACTIONS === "true") {
           process.stdout.write(
             `[EPURE][Ticket #${ticket.ticketIssueNumber}] Generated ${impl.files.length} file(s): ${impl.files.map((f) => f.path).join(", ")}
@@ -3850,22 +4276,18 @@ ${c}`).join("\n\n");
             fetchImpl: input.fetchImpl
           });
           const fixedImpl = extractJsonObject(rawFix);
-          const mergedFilesMap = /* @__PURE__ */ new Map();
-          for (const f of impl.files) {
-            mergedFilesMap.set(f.path.replace(/^\/+/, ""), f.content);
-          }
-          for (const f of fixedImpl.files) {
-            const cleanPath = f.path.replace(/^\/+/, "");
-            mergedFilesMap.set(cleanPath, f.content);
-            accumulatedFiles.set(cleanPath, f.content);
-          }
+          const updatedFiles = await applyTicketImplementationPayload({
+            parsed: fixedImpl,
+            accumulatedFiles,
+            featureChangedFilesMap,
+            ticketChangedFilesMap,
+            gh,
+            branch: featureBranch
+          });
           impl = {
             commit_message: fixedImpl.commit_message || impl.commit_message,
             test_summary: fixedImpl.test_summary || impl.test_summary,
-            files: Array.from(mergedFilesMap.entries()).map(([path, content]) => ({
-              path,
-              content
-            }))
+            files: updatedFiles
           };
           testCheck = await runTestsInIsolatedWorkspace({
             files: Array.from(accumulatedFiles.entries()).map(
@@ -3956,12 +4378,16 @@ ${c}`).join("\n\n");
           const reviewFixSystemInstruction = [
             "Tu es un ing\xE9nieur TDD EPURE corrigeant les constats bloquants ('must_fix') \xE9mis par le roster de revue multi-agents.",
             PROMPT_INJECTION_IMMUNITY_CLAUSE,
-            "Corrige pr\xE9cis\xE9ment chaque 'must_fix' tout en maintenant 100% des tests Vitest au vert.",
+            "Corrige pr\xE9cis\xE9ment chaque 'must_fix' tout en maintenant 100% des tests au vert.",
             "Ne modifie JAMAIS .cursor/agents/**, .github/workflows/** ou .github/agents.yml.",
+            "Pour modifier un fichier existant volumineux, utilise de pr\xE9f\xE9rence `patches` (`old_string` -> `new_string` exact). Sinon utilise `files` avec le contenu int\xE9gral du fichier.",
             "Renvoie un objet JSON strictement valide :",
             "{",
             `  "commit_message": "fix(review): address reviewer findings on #${ticket.ticketIssueNumber}",`,
-            '  "test_summary": "Addressed must_fix review findings and verified Vitest suite",',
+            '  "test_summary": "Addressed must_fix review findings and verified test suite",',
+            '  "patches": [',
+            '    { "path": "...", "edits": [{ "old_string": "...", "new_string": "..." }] }',
+            "  ],",
             '  "files": [',
             '    { "path": "...", "content": "..." }',
             "  ]",
@@ -3989,22 +4415,18 @@ ${c}`).join("\n\n");
             fetchImpl: input.fetchImpl
           });
           const reviewFixedImpl = extractJsonObject(rawReviewFix);
-          const mergedFilesMap = /* @__PURE__ */ new Map();
-          for (const f of impl.files) {
-            mergedFilesMap.set(f.path.replace(/^\/+/, ""), f.content);
-          }
-          for (const f of reviewFixedImpl.files) {
-            const cleanPath = f.path.replace(/^\/+/, "");
-            mergedFilesMap.set(cleanPath, f.content);
-            accumulatedFiles.set(cleanPath, f.content);
-          }
+          const updatedReviewFiles = await applyTicketImplementationPayload({
+            parsed: reviewFixedImpl,
+            accumulatedFiles,
+            featureChangedFilesMap,
+            ticketChangedFilesMap,
+            gh,
+            branch: featureBranch
+          });
           impl = {
             commit_message: reviewFixedImpl.commit_message || `fix(review): address reviewer findings on #${ticket.ticketIssueNumber}`,
             test_summary: reviewFixedImpl.test_summary || impl.test_summary,
-            files: Array.from(mergedFilesMap.entries()).map(([path, content]) => ({
-              path,
-              content
-            }))
+            files: updatedReviewFiles
           };
           testCheck = await runTestsInIsolatedWorkspace({
             files: Array.from(accumulatedFiles.entries()).map(
@@ -4038,18 +4460,18 @@ ${c}`).join("\n\n");
               fetchImpl: input.fetchImpl
             });
             const retryImpl = extractJsonObject(rawRetryFix);
-            for (const f of retryImpl.files) {
-              const cleanPath = f.path.replace(/^\/+/, "");
-              mergedFilesMap.set(cleanPath, f.content);
-              accumulatedFiles.set(cleanPath, f.content);
-            }
+            const updatedRetryFiles = await applyTicketImplementationPayload({
+              parsed: retryImpl,
+              accumulatedFiles,
+              featureChangedFilesMap,
+              ticketChangedFilesMap,
+              gh,
+              branch: featureBranch
+            });
             impl = {
               commit_message: impl.commit_message,
               test_summary: retryImpl.test_summary || impl.test_summary,
-              files: Array.from(mergedFilesMap.entries()).map(([path, content]) => ({
-                path,
-                content
-              }))
+              files: updatedRetryFiles
             };
             testCheck = await runTestsInIsolatedWorkspace({
               files: Array.from(accumulatedFiles.entries()).map(
@@ -4147,12 +4569,15 @@ After \`${fixAttempt}\` attempts (\`max_code_fix_attempts = ${maxCodeFixAttempts
           commitTitle: squashCommit.commit_title,
           commitMessage: squashCommit.commit_message
         });
-        await gh.closeIssue(ticket.ticketIssueNumber);
+        if (ticket.ticketIssueNumber !== input.issueNumber) {
+          await gh.closeIssue(ticket.ticketIssueNumber);
+        }
         completedTicketsSummary.push(
           `- **#${ticket.ticketIssueNumber}** (${ticket.title}) \u2014 PR #${taskPr.number} squash-merged into \`${featureBranch}\` as \`${squashCommit.commit_title}\` (Reviewers: ${reviewResult.selected_reviewers.map((r) => `\`${r}\``).join(", ")})`
         );
       }
-      const allFeatureFiles = Array.from(accumulatedFiles.entries()).map(
+      const effectiveFeatureEntries = featureChangedFilesMap.size > 0 ? Array.from(featureChangedFilesMap.entries()) : Array.from(accumulatedFiles.entries());
+      const allFeatureFiles = effectiveFeatureEntries.map(
         ([path, content]) => ({ path, content })
       );
       const allTicketNumbers = ticketsManifest.map((t) => t.ticketIssueNumber);
@@ -4174,7 +4599,9 @@ After \`${fixAttempt}\` attempts (\`max_code_fix_attempts = ${maxCodeFixAttempts
         title: featureSquashPreview.pr_title,
         body: [
           "## Summary",
-          `Completes all implementation tickets for plan #${input.issueNumber}.`,
+          `Completes implementation for #${input.issueNumber}.`,
+          "",
+          `Closes #${input.issueNumber}`,
           "",
           featureSquashPreview.commit_message,
           "",
@@ -4195,9 +4622,9 @@ After \`${fixAttempt}\` attempts (\`max_code_fix_attempts = ${maxCodeFixAttempts
         acceptanceCriteria: ticketsManifest.flatMap((t) => t.acceptanceCriteria),
         glossaryMarkdown: issue.body,
         designMarkdown: trustedBaseRoster.designMarkdown,
-        changedFiles: Array.from(accumulatedFiles.entries()).map(
-          ([path, content]) => ({ path, content })
-        ),
+        changedFiles: Array.from(
+          (featureChangedFilesMap.size > 0 ? featureChangedFilesMap : accumulatedFiles).entries()
+        ).map(([path, content]) => ({ path, content })),
         workspaceFiles: accumulatedFiles,
         trustedBaseBranchFiles: trustedBaseFilesMap,
         isReReviewPass: false,
@@ -4245,12 +4672,16 @@ ${c}`).join("\n\n");
         const featureFixSystemInstruction = [
           "Tu es un ing\xE9nieur TDD EPURE corrigeant les constats bloquants ('must_fix') \xE9mis par le roster de revue multi-agents sur la PR finale de feature.",
           PROMPT_INJECTION_IMMUNITY_CLAUSE,
-          "Corrige pr\xE9cis\xE9ment chaque 'must_fix' tout en maintenant 100% des tests Vitest et TypeScript au vert.",
+          "Corrige pr\xE9cis\xE9ment chaque 'must_fix' tout en maintenant 100% des tests et TypeScript au vert.",
           "Ne modifie JAMAIS .cursor/agents/**, .github/workflows/** ou .github/agents.yml.",
+          "Pour modifier un fichier existant volumineux, utilise de pr\xE9f\xE9rence `patches` (`old_string` -> `new_string` exact). Sinon utilise `files` avec le contenu int\xE9gral du fichier.",
           "Renvoie un objet JSON strictement valide :",
           "{",
           `  "commit_message": "fix(review): address final feature review findings on #${input.issueNumber}",`,
-          '  "test_summary": "Addressed final feature review findings and verified Vitest suite",',
+          '  "test_summary": "Addressed final feature review findings and verified test suite",',
+          '  "patches": [',
+          '    { "path": "...", "edits": [{ "old_string": "...", "new_string": "..." }] }',
+          "  ],",
           '  "files": [',
           '    { "path": "...", "content": "..." }',
           "  ]",
@@ -4275,11 +4706,14 @@ ${c}`).join("\n\n");
         });
         const parsedFeatureFix = extractJsonObject(rawFeatureFix);
         const changedFixFilesMap = /* @__PURE__ */ new Map();
-        for (const f of parsedFeatureFix.files) {
-          const cleanPath = f.path.replace(/^\/+/, "");
-          accumulatedFiles.set(cleanPath, f.content);
-          changedFixFilesMap.set(cleanPath, f.content);
-        }
+        await applyTicketImplementationPayload({
+          parsed: parsedFeatureFix,
+          accumulatedFiles,
+          featureChangedFilesMap,
+          ticketChangedFilesMap: changedFixFilesMap,
+          gh,
+          branch: featureBranch
+        });
         let featureTestCheck = await runTestsInIsolatedWorkspace({
           files: Array.from(accumulatedFiles.entries()).map(
             ([path, content]) => ({ path, content })
@@ -4316,11 +4750,14 @@ ${c}`).join("\n\n");
             fetchImpl: input.fetchImpl
           });
           const retryParsed = extractJsonObject(rawRetryFeatureFix);
-          for (const f of retryParsed.files) {
-            const cleanPath = f.path.replace(/^\/+/, "");
-            accumulatedFiles.set(cleanPath, f.content);
-            changedFixFilesMap.set(cleanPath, f.content);
-          }
+          await applyTicketImplementationPayload({
+            parsed: retryParsed,
+            accumulatedFiles,
+            featureChangedFilesMap,
+            ticketChangedFilesMap: changedFixFilesMap,
+            gh,
+            branch: featureBranch
+          });
           featureTestCheck = await runTestsInIsolatedWorkspace({
             files: Array.from(accumulatedFiles.entries()).map(
               ([path, content]) => ({ path, content })
@@ -4394,9 +4831,9 @@ Refs #${input.issueNumber}`
           ),
           glossaryMarkdown: issue.body,
           designMarkdown: trustedBaseRoster.designMarkdown,
-          changedFiles: Array.from(accumulatedFiles.entries()).map(
-            ([path, content]) => ({ path, content })
-          ),
+          changedFiles: Array.from(
+            (featureChangedFilesMap.size > 0 ? featureChangedFilesMap : accumulatedFiles).entries()
+          ).map(([path, content]) => ({ path, content })),
           workspaceFiles: accumulatedFiles,
           trustedBaseBranchFiles: trustedBaseFilesMap,
           isReReviewPass: true,
