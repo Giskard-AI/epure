@@ -617,9 +617,18 @@ export function sanitizeAndFormatFailedCheckLogs(
       .replace(ISO_TIMESTAMP_PREFIX_REGEX, "")
   );
 
-  const allLines = strippedLog
+  const rawLines = strippedLog
     .split(/\r?\n/)
     .filter((line) => !COVERAGE_TABLE_ROW_REGEX.test(line));
+  // Truncate GitHub Actions post-job cleanup & service container teardown dumps
+  // (e.g. `Post job cleanup.` / `Stop containers` dumping thousands of lines of `docker logs`)
+  const postJobCleanupIdx = rawLines.findIndex((line) =>
+    /^(?:Post job cleanup\.|##\[group\]Stop containers\b|Stop and remove container:)/.test(
+      line.trim()
+    )
+  );
+  const allLines =
+    postJobCleanupIdx > 0 ? rawLines.slice(0, postJobCleanupIdx) : rawLines;
   const selectedIndices = new Set<number>();
 
   // Extract lines around failure markers (-5 .. +18 lines), ignoring structured app logger lines

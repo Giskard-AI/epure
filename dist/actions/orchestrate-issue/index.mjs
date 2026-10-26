@@ -4097,7 +4097,13 @@ function sanitizeAndFormatFailedCheckLogs(input) {
   const strippedLog = neutralizeCommands(
     input.rawLog.replace(ANSI_ESCAPE_REGEX, "").replace(ISO_TIMESTAMP_PREFIX_REGEX, "")
   );
-  const allLines = strippedLog.split(/\r?\n/).filter((line) => !COVERAGE_TABLE_ROW_REGEX.test(line));
+  const rawLines = strippedLog.split(/\r?\n/).filter((line) => !COVERAGE_TABLE_ROW_REGEX.test(line));
+  const postJobCleanupIdx = rawLines.findIndex(
+    (line) => /^(?:Post job cleanup\.|##\[group\]Stop containers\b|Stop and remove container:)/.test(
+      line.trim()
+    )
+  );
+  const allLines = postJobCleanupIdx > 0 ? rawLines.slice(0, postJobCleanupIdx) : rawLines;
   const selectedIndices = /* @__PURE__ */ new Set();
   for (let i = 0; i < allLines.length; i += 1) {
     const line = allLines[i] ?? "";
