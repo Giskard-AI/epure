@@ -230,7 +230,13 @@ const GHA_WORKFLOW_COMMAND_REGEX =
   /::(error|warning|notice|debug|group|endgroup|add-mask|set-env|set-output|save-state|stop-commands)\b/gi;
 
 const LOG_FAILURE_ANCHOR_REGEX =
-  /(?:##\[error\]|:\[error\]|\bFAIL\b|---\s*FAIL:|\bError:|\bAssertionError\b|\bTS\d{4}:|Traceback \(most recent call last\)|\bpanicked at\b)/i;
+  /(?:##\[error\]|:\[error\]|\bFAIL\s+\S+|---\s*FAIL:|^\s*(?:●|✕|×|❯)\s+|\b(?:AssertionError|RangeError|TypeError|ReferenceError|SyntaxError)\b|\bError:|\bTS\d{4}:|Traceback \(most recent call last\)|\bpanicked at\b)/i;
+
+const APP_LOGGER_NOISE_REGEX =
+  /^\d{2}:\d{2}:\d{2}\s+\[(?:error|warn|info|debug)\]/i;
+
+const COVERAGE_TABLE_ROW_REGEX =
+  /^(?:\s*[^|]+\|\s*[\d.]+\s*\|\s*[\d.]+\s*\|\s*[\d.]+\s*\|\s*[\d.]+|\s*[-|]{20,}\s*|\s*File\s*\|\s*% Stmts\s*\|)/;
 
 function unquoteYamlString(raw: string): string {
   const trimmed = raw.trim().replace(/\s+#.*$/, "").trim();
@@ -611,15 +617,20 @@ export function sanitizeAndFormatFailedCheckLogs(
       .replace(ISO_TIMESTAMP_PREFIX_REGEX, "")
   );
 
-  const allLines = strippedLog.split(/\r?\n/);
+  const allLines = strippedLog
+    .split(/\r?\n/)
+    .filter((line) => !COVERAGE_TABLE_ROW_REGEX.test(line));
   const selectedIndices = new Set<number>();
 
-  // Extract lines around failure markers (-5 .. +15 lines)
+  // Extract lines around failure markers (-5 .. +18 lines), ignoring structured app logger lines
   for (let i = 0; i < allLines.length; i += 1) {
     const line = allLines[i] ?? "";
+    if (APP_LOGGER_NOISE_REGEX.test(line)) {
+      continue;
+    }
     if (LOG_FAILURE_ANCHOR_REGEX.test(line)) {
       const start = Math.max(0, i - 5);
-      const end = Math.min(allLines.length - 1, i + 15);
+      const end = Math.min(allLines.length - 1, i + 18);
       for (let idx = start; idx <= end; idx += 1) {
         selectedIndices.add(idx);
       }

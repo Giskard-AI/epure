@@ -1387,20 +1387,21 @@ ${PROMPT_INJECTION_IMMUNITY_CLAUSE}` : PROMPT_INJECTION_IMMUNITY_CLAUSE;
       parts: [{ text: options.prompt }]
     }
   ];
-  async function fetchWithRetry(reqUrl, reqInit, maxRetries = 3) {
+  async function fetchWithRetry(reqUrl, reqInit, maxRetries = 4) {
     let lastError;
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
       try {
-        const res = await fetchFn(reqUrl, reqInit);
-        if (res.status >= 500 && attempt < maxRetries) {
-          await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+        const effectiveInit = options.fetchImpl || reqInit.signal ? reqInit : { ...reqInit, signal: AbortSignal.timeout(18e4) };
+        const res = await fetchFn(reqUrl, effectiveInit);
+        if ((res.status === 429 || res.status >= 500) && attempt < maxRetries) {
+          await new Promise((r) => setTimeout(r, 500 * 2 ** attempt));
           continue;
         }
         return res;
       } catch (err) {
         lastError = err;
         if (attempt < maxRetries) {
-          await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+          await new Promise((r) => setTimeout(r, 500 * 2 ** attempt));
           continue;
         }
       }
@@ -1516,6 +1517,23 @@ ${PROMPT_INJECTION_IMMUNITY_CLAUSE}` : PROMPT_INJECTION_IMMUNITY_CLAUSE;
     const nonThoughtText = parts.filter((p) => !p.thought).map((p) => p.text ?? "").join("");
     const text = nonThoughtText.trim() ? nonThoughtText : parts.map((p) => p.text ?? "").join("");
     if (!text.trim()) {
+      if (hasTools && round < maxToolRounds) {
+        if (parts.length > 0) {
+          contents.push({
+            role: "model",
+            parts
+          });
+        }
+        contents.push({
+          role: "user",
+          parts: [
+            {
+              text: "Your previous response was empty. Output ONLY the final valid JSON object matching the required schema (or call a tool if needed)."
+            }
+          ]
+        });
+        continue;
+      }
       throw new Error(`Gemini API returned empty content for model '${model}'.`);
     }
     return text.trim();
@@ -3802,7 +3820,9 @@ var TRANSIENT_INFRA_PATTERNS = [
 var ANSI_ESCAPE_REGEX = /\x1B\[[0-?]*[ -/]*[@-~]/g;
 var ISO_TIMESTAMP_PREFIX_REGEX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s+/gm;
 var GHA_WORKFLOW_COMMAND_REGEX = /::(error|warning|notice|debug|group|endgroup|add-mask|set-env|set-output|save-state|stop-commands)\b/gi;
-var LOG_FAILURE_ANCHOR_REGEX = /(?:##\[error\]|:\[error\]|\bFAIL\b|---\s*FAIL:|\bError:|\bAssertionError\b|\bTS\d{4}:|Traceback \(most recent call last\)|\bpanicked at\b)/i;
+var LOG_FAILURE_ANCHOR_REGEX = /(?:##\[error\]|:\[error\]|\bFAIL\s+\S+|---\s*FAIL:|^\s*(?:●|✕|×|❯)\s+|\b(?:AssertionError|RangeError|TypeError|ReferenceError|SyntaxError)\b|\bError:|\bTS\d{4}:|Traceback \(most recent call last\)|\bpanicked at\b)/i;
+var APP_LOGGER_NOISE_REGEX = /^\d{2}:\d{2}:\d{2}\s+\[(?:error|warn|info|debug)\]/i;
+var COVERAGE_TABLE_ROW_REGEX = /^(?:\s*[^|]+\|\s*[\d.]+\s*\|\s*[\d.]+\s*\|\s*[\d.]+\s*\|\s*[\d.]+|\s*[-|]{20,}\s*|\s*File\s*\|\s*% Stmts\s*\|)/;
 function unquoteYamlString(raw) {
   const trimmed = raw.trim().replace(/\s+#.*$/, "").trim();
   if (trimmed.startsWith('"') && trimmed.endsWith('"') || trimmed.startsWith("'") && trimmed.endsWith("'")) {
@@ -4077,13 +4097,16 @@ function sanitizeAndFormatFailedCheckLogs(input) {
   const strippedLog = neutralizeCommands(
     input.rawLog.replace(ANSI_ESCAPE_REGEX, "").replace(ISO_TIMESTAMP_PREFIX_REGEX, "")
   );
-  const allLines = strippedLog.split(/\r?\n/);
+  const allLines = strippedLog.split(/\r?\n/).filter((line) => !COVERAGE_TABLE_ROW_REGEX.test(line));
   const selectedIndices = /* @__PURE__ */ new Set();
   for (let i = 0; i < allLines.length; i += 1) {
     const line = allLines[i] ?? "";
+    if (APP_LOGGER_NOISE_REGEX.test(line)) {
+      continue;
+    }
     if (LOG_FAILURE_ANCHOR_REGEX.test(line)) {
       const start = Math.max(0, i - 5);
-      const end = Math.min(allLines.length - 1, i + 15);
+      const end = Math.min(allLines.length - 1, i + 18);
       for (let idx = start; idx <= end; idx += 1) {
         selectedIndices.add(idx);
       }
@@ -7922,6 +7945,29 @@ ${testCheck.output.slice(-2e3)}`
           "- Requires human review and squash-merge into `dev` in the GitHub UI (ADR-0001, ADR-0027, Q45, Q91, Q95)."
         ].join("\n")
       });
+      if (featureChangedFilesMap.size === 0) {
+        const existingFeaturePrFiles = await gh.listPullRequestFiles(
+          featurePr.number
+        );
+        for (const prFile of existingFeaturePrFiles) {
+          const cleanPath = prFile.filename.replace(/^\/+/, "");
+          if (prFile.status === "removed") {
+            accumulatedFiles.delete(cleanPath);
+            featureChangedFilesMap.delete(cleanPath);
+            featureDeletedFilesSet.add(cleanPath);
+          } else {
+            const content = await gh.readSingleBranchFile(
+              featureBranch,
+              cleanPath
+            );
+            if (content !== null) {
+              accumulatedFiles.set(cleanPath, content);
+              featureChangedFilesMap.set(cleanPath, content);
+              featureDeletedFilesSet.delete(cleanPath);
+            }
+          }
+        }
+      }
       let currentFeaturePrHeadSha = featurePr.head_sha;
       const runStage2AndStage3ForFeaturePr = async (params) => {
         const currentChangedFeatureFiles = Array.from(
@@ -8178,10 +8224,13 @@ ${c}`).join("\n\n");
               ([path, content]) => ({ path, content })
             ),
             deleted_files: Array.from(changedDeletedFilesSet),
-            changedPaths: [
-              ...Array.from(changedFixFilesMap.keys()),
-              ...Array.from(changedDeletedFilesSet)
-            ],
+            changedPaths: Array.from(
+              /* @__PURE__ */ new Set([
+                ...Array.from(featureChangedFilesMap.keys()),
+                ...Array.from(changedFixFilesMap.keys()),
+                ...Array.from(changedDeletedFilesSet)
+              ])
+            ),
             isTaskBranch: true,
             verificationProfile,
             sandboxRunner: input.sandboxRunner,
@@ -8267,10 +8316,13 @@ ${c}`).join("\n\n");
                 ([path, content]) => ({ path, content })
               ),
               deleted_files: Array.from(changedDeletedFilesSet),
-              changedPaths: [
-                ...Array.from(changedFixFilesMap.keys()),
-                ...Array.from(changedDeletedFilesSet)
-              ],
+              changedPaths: Array.from(
+                /* @__PURE__ */ new Set([
+                  ...Array.from(featureChangedFilesMap.keys()),
+                  ...Array.from(changedFixFilesMap.keys()),
+                  ...Array.from(changedDeletedFilesSet)
+                ])
+              ),
               isTaskBranch: true,
               verificationProfile,
               sandboxRunner: input.sandboxRunner,

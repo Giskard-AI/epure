@@ -82,21 +82,25 @@ export async function callGeminiGenerateContent(
   async function fetchWithRetry(
     reqUrl: string,
     reqInit: RequestInit,
-    maxRetries = 3
+    maxRetries = 4
   ): Promise<Response> {
     let lastError: unknown;
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
       try {
-        const res = await fetchFn(reqUrl, reqInit);
-        if (res.status >= 500 && attempt < maxRetries) {
-          await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+        const effectiveInit: RequestInit =
+          options.fetchImpl || reqInit.signal
+            ? reqInit
+            : { ...reqInit, signal: AbortSignal.timeout(180_000) };
+        const res = await fetchFn(reqUrl, effectiveInit);
+        if ((res.status === 429 || res.status >= 500) && attempt < maxRetries) {
+          await new Promise((r) => setTimeout(r, 500 * 2 ** attempt));
           continue;
         }
         return res;
       } catch (err) {
         lastError = err;
         if (attempt < maxRetries) {
-          await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+          await new Promise((r) => setTimeout(r, 500 * 2 ** attempt));
           continue;
         }
       }
@@ -252,6 +256,23 @@ export async function callGeminiGenerateContent(
       ? nonThoughtText
       : parts.map((p) => p.text ?? "").join("");
     if (!text.trim()) {
+      if (hasTools && round < maxToolRounds) {
+        if (parts.length > 0) {
+          contents.push({
+            role: "model",
+            parts
+          });
+        }
+        contents.push({
+          role: "user",
+          parts: [
+            {
+              text: "Your previous response was empty. Output ONLY the final valid JSON object matching the required schema (or call a tool if needed)."
+            }
+          ]
+        });
+        continue;
+      }
       throw new Error(`Gemini API returned empty content for model '${model}'.`);
     }
 

@@ -3314,6 +3314,29 @@ export async function orchestrateIssueCommand(
           });
 
       // Q93 + Stage 3: Run final synthesis Multi-Agent Review pass + External CI Gate on feature/* -> dev PR
+      if (featureChangedFilesMap.size === 0) {
+        const existingFeaturePrFiles = await gh.listPullRequestFiles(
+          featurePr.number
+        );
+        for (const prFile of existingFeaturePrFiles) {
+          const cleanPath = prFile.filename.replace(/^\/+/, "");
+          if (prFile.status === "removed") {
+            accumulatedFiles.delete(cleanPath);
+            featureChangedFilesMap.delete(cleanPath);
+            featureDeletedFilesSet.add(cleanPath);
+          } else {
+            const content = await gh.readSingleBranchFile(
+              featureBranch,
+              cleanPath
+            );
+            if (content !== null) {
+              accumulatedFiles.set(cleanPath, content);
+              featureChangedFilesMap.set(cleanPath, content);
+              featureDeletedFilesSet.delete(cleanPath);
+            }
+          }
+        }
+      }
       let currentFeaturePrHeadSha = featurePr.head_sha;
       const runStage2AndStage3ForFeaturePr = async (params: {
         headSha: string;
@@ -3631,10 +3654,13 @@ export async function orchestrateIssueCommand(
               ([path, content]) => ({ path, content })
             ),
             deleted_files: Array.from(changedDeletedFilesSet),
-            changedPaths: [
-              ...Array.from(changedFixFilesMap.keys()),
-              ...Array.from(changedDeletedFilesSet)
-            ],
+            changedPaths: Array.from(
+              new Set([
+                ...Array.from(featureChangedFilesMap.keys()),
+                ...Array.from(changedFixFilesMap.keys()),
+                ...Array.from(changedDeletedFilesSet)
+              ])
+            ),
             isTaskBranch: true,
             verificationProfile,
             sandboxRunner: input.sandboxRunner,
@@ -3727,10 +3753,13 @@ export async function orchestrateIssueCommand(
                 ([path, content]) => ({ path, content })
               ),
               deleted_files: Array.from(changedDeletedFilesSet),
-              changedPaths: [
-                ...Array.from(changedFixFilesMap.keys()),
-                ...Array.from(changedDeletedFilesSet)
-              ],
+              changedPaths: Array.from(
+                new Set([
+                  ...Array.from(featureChangedFilesMap.keys()),
+                  ...Array.from(changedFixFilesMap.keys()),
+                  ...Array.from(changedDeletedFilesSet)
+                ])
+              ),
               isTaskBranch: true,
               verificationProfile,
               sandboxRunner: input.sandboxRunner,
