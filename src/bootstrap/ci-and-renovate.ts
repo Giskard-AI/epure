@@ -137,6 +137,19 @@ function classifySingleShellCommand(
     ) ||
     /^\.\/scripts\/[^\s;&|]+(?:\s+[^\s;&|]+)*$/i.test(cmd)
   ) {
+    if (
+      !/\b(?:conventional-commit-title|coverage-summary|image-advisories|nginx-check)\b/i.test(
+        cmd
+      )
+    ) {
+      customScripts.add(cmd);
+    }
+    return;
+  }
+  if (
+    !hasServices &&
+    /^\s*python3?\s+-m\s+unittest\s+discover\s+-s\s+scripts\/tests\b/i.test(cmd)
+  ) {
     customScripts.add(cmd);
     return;
   }
@@ -254,7 +267,11 @@ function classifySingleShellCommand(
     target.kindHint = target.kindHint ?? "node";
     if (!hasServices || isUnitOnlyTest) {
       if (!target.test_command || isUnitOnlyTest) {
-        target.test_command = cmd.replace(/\s+2>\/dev\/null.*$/, "");
+        target.test_command = cmd
+          .replace(/\s+2>\/dev\/null.*$/, "")
+          .replace(/\s+--coverage(?:\.[A-Za-z0-9_.-]+)?(?:=\S+)?/g, "")
+          .replace(/\s+--coverageReporters=\S+/g, "")
+          .trim();
       }
     }
     return;
@@ -385,8 +402,15 @@ function parseNonEpureWorkflows(
     for (const jobLines of jobBlocks) {
       const jobText = jobLines.join("\n");
       const hasServices = /^    services:\s*(?:#.*)?$/m.test(jobText);
-      if (hasServices) {
+      const isContainerOrE2eJob =
+        /\bdocker(?:\s+compose|\s+build|\s+run)\b|\bplaywright\s+(?:install|test)\b/i.test(
+          jobText
+        );
+      if (hasServices || isContainerOrE2eJob) {
         workflowDeferred = true;
+      }
+      if (isContainerOrE2eJob) {
+        continue;
       }
 
       // Extract job-level default working-directory (before steps:)
@@ -844,6 +868,17 @@ export function discoverVerificationProfile(params: {
         ...(build_command ? { build_command } : {})
       });
     } else if (kind === "python") {
+      if (
+        dir === "." &&
+        !hasPyproject &&
+        !hasRequirements &&
+        subprojectDirsWithManifestOrJob.length > 0 &&
+        !wfEntry?.typecheck_command &&
+        (!wfEntry || wfEntry.lint_commands.length === 0) &&
+        !wfEntry?.test_command
+      ) {
+        continue;
+      }
       const pyRaw = readFileSafe(dirFile(dir, "pyproject.toml")) ?? "";
       const install_command =
         wfEntry?.install_command ??
@@ -990,11 +1025,17 @@ export function discoverVerificationProfile(params: {
     if (targets.some((t) => t.working_directory === "frontend")) {
       scriptPatterns.push("frontend/**");
     }
+    const rootWfInstall = parsedWorkflows.byWorkingDir.get(".")?.install_command;
+    const scriptsInstallCommand =
+      rootWfInstall && !targets.some((t) => t.working_directory === ".")
+        ? rootWfInstall
+        : undefined;
     targets.push({
       name: "scripts",
       working_directory: ".",
       kind: "custom",
       path_patterns: scriptPatterns,
+      ...(scriptsInstallCommand ? { install_command: scriptsInstallCommand } : {}),
       test_command: scriptCommands.join(" && ")
     });
   }

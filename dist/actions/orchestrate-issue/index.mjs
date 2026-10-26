@@ -187,6 +187,14 @@ function classifySingleShellCommand(rawCmd, hasServices, target, customScripts, 
   if (/^(?:python3?|node|bash|sh)\s+(?:\.\/)?scripts\/[^\s;&|]+(?:\s+[^\s;&|]+)*$/i.test(
     cmd
   ) || /^\.\/scripts\/[^\s;&|]+(?:\s+[^\s;&|]+)*$/i.test(cmd)) {
+    if (!/\b(?:conventional-commit-title|coverage-summary|image-advisories|nginx-check)\b/i.test(
+      cmd
+    )) {
+      customScripts.add(cmd);
+    }
+    return;
+  }
+  if (!hasServices && /^\s*python3?\s+-m\s+unittest\s+discover\s+-s\s+scripts\/tests\b/i.test(cmd)) {
     customScripts.add(cmd);
     return;
   }
@@ -277,7 +285,7 @@ function classifySingleShellCommand(rawCmd, hasServices, target, customScripts, 
     target.kindHint = target.kindHint ?? "node";
     if (!hasServices || isUnitOnlyTest) {
       if (!target.test_command || isUnitOnlyTest) {
-        target.test_command = cmd.replace(/\s+2>\/dev\/null.*$/, "");
+        target.test_command = cmd.replace(/\s+2>\/dev\/null.*$/, "").replace(/\s+--coverage(?:\.[A-Za-z0-9_.-]+)?(?:=\S+)?/g, "").replace(/\s+--coverageReporters=\S+/g, "").trim();
       }
     }
     return;
@@ -391,8 +399,14 @@ function parseNonEpureWorkflows(workflowEntries) {
     for (const jobLines of jobBlocks) {
       const jobText = jobLines.join("\n");
       const hasServices = /^    services:\s*(?:#.*)?$/m.test(jobText);
-      if (hasServices) {
+      const isContainerOrE2eJob = /\bdocker(?:\s+compose|\s+build|\s+run)\b|\bplaywright\s+(?:install|test)\b/i.test(
+        jobText
+      );
+      if (hasServices || isContainerOrE2eJob) {
         workflowDeferred = true;
+      }
+      if (isContainerOrE2eJob) {
+        continue;
       }
       let jobWorkingDir = ".";
       const stepsIdx = jobLines.findIndex((l) => /^    steps:\s*(?:#.*)?$/.test(l));
@@ -690,6 +704,9 @@ function discoverVerificationProfile(params) {
         ...build_command ? { build_command } : {}
       });
     } else if (kind === "python") {
+      if (dir === "." && !hasPyproject && !hasRequirements && subprojectDirsWithManifestOrJob.length > 0 && !wfEntry?.typecheck_command && (!wfEntry || wfEntry.lint_commands.length === 0) && !wfEntry?.test_command) {
+        continue;
+      }
       const pyRaw = readFileSafe(dirFile(dir, "pyproject.toml")) ?? "";
       const install_command = wfEntry?.install_command ?? (hasRequirements && !hasPyproject ? "pip install -r requirements.txt" : "pip install -e .");
       const codegen_command = wfEntry?.codegen_command;
@@ -787,11 +804,14 @@ function discoverVerificationProfile(params) {
     if (targets.some((t) => t.working_directory === "frontend")) {
       scriptPatterns.push("frontend/**");
     }
+    const rootWfInstall = parsedWorkflows.byWorkingDir.get(".")?.install_command;
+    const scriptsInstallCommand = rootWfInstall && !targets.some((t) => t.working_directory === ".") ? rootWfInstall : void 0;
     targets.push({
       name: "scripts",
       working_directory: ".",
       kind: "custom",
       path_patterns: scriptPatterns,
+      ...scriptsInstallCommand ? { install_command: scriptsInstallCommand } : {},
       test_command: scriptCommands.join(" && ")
     });
   }
@@ -3647,14 +3667,33 @@ async function runPolyglotStage1Verification(input) {
             });
             break;
           }
-          const execRes = await sandboxRunner({
+          let execRes = await sandboxRunner({
             isolationAvailable: true,
             runnerEnv: baseRunnerEnv,
             command: tokenized.command,
             args: tokenized.args,
             cwd: targetCwd,
-            timeoutMs: candidate.step === "install" ? 18e4 : 12e4
+            timeoutMs: candidate.step === "install" || candidate.step === "test" ? 3e5 : 18e4
           });
+          if (!execRes.isolated || execRes.exit_code !== 0 && (tokenized.command === "pip" || tokenized.command === "pip3") && tokenized.args[0] === "install" && /externally-managed-environment/i.test(
+            `${execRes.stdout}
+${execRes.stderr}`
+          )) {
+            if (execRes.isolated && (tokenized.command === "pip" || tokenized.command === "pip3")) {
+              execRes = await sandboxRunner({
+                isolationAvailable: true,
+                runnerEnv: baseRunnerEnv,
+                command: tokenized.command,
+                args: [
+                  ...tokenized.args,
+                  "--break-system-packages",
+                  "--user"
+                ],
+                cwd: targetCwd,
+                timeoutMs: 3e5
+              });
+            }
+          }
           const stepPassed = execRes.isolated && execRes.exit_code === 0;
           executedSteps.push({
             step: candidate.step,

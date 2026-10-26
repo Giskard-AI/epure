@@ -1037,14 +1037,45 @@ export async function runPolyglotStage1Verification(
             break;
           }
 
-          const execRes = await sandboxRunner({
+          let execRes = await sandboxRunner({
             isolationAvailable: true,
             runnerEnv: baseRunnerEnv,
             command: tokenized.command,
             args: tokenized.args,
             cwd: targetCwd,
-            timeoutMs: candidate.step === "install" ? 180_000 : 120_000
+            timeoutMs:
+              candidate.step === "install" || candidate.step === "test"
+                ? 300_000
+                : 180_000
           });
+
+          if (
+            !execRes.isolated ||
+            (execRes.exit_code !== 0 &&
+              (tokenized.command === "pip" || tokenized.command === "pip3") &&
+              tokenized.args[0] === "install" &&
+              /externally-managed-environment/i.test(
+                `${execRes.stdout}\n${execRes.stderr}`
+              ))
+          ) {
+            if (
+              execRes.isolated &&
+              (tokenized.command === "pip" || tokenized.command === "pip3")
+            ) {
+              execRes = await sandboxRunner({
+                isolationAvailable: true,
+                runnerEnv: baseRunnerEnv,
+                command: tokenized.command,
+                args: [
+                  ...tokenized.args,
+                  "--break-system-packages",
+                  "--user"
+                ],
+                cwd: targetCwd,
+                timeoutMs: 300_000
+              });
+            }
+          }
 
           const stepPassed = execRes.isolated && execRes.exit_code === 0;
           executedSteps.push({
