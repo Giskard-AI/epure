@@ -375,13 +375,15 @@ All `/epure` commands are posted as comments on a GitHub Issue. Every command is
 
 | Command | Category (Q101) | Target Phase | Description |
 | --- | --- | --- | --- |
-| `/epure plan` | <span class="epure-badge epure-badge--human">Mandatory Human Gate 1</span> | `grilling` | Initializes `refs/epure/state/<issue>`, inspects the repository, and starts the structured architectural Grill interview. |
-| *(Any human comment during Grill)* | <span class="epure-badge epure-badge--human">Mandatory Human Gate 1</span> | `grilling -> awaiting_approval` | Implicit Grill continuity (Q84): processes human answers via the batch cursor (`last_processed_comment_id`). Once all ambiguities are settled, automatically generates `plan/*` artifacts and the ticket DAG. |
+| `/epure plan` | <span class="epure-badge epure-badge--human">Mandatory Human Gate 1</span> | `grilling` | Initializes `refs/epure/state/<issue>`, inspects the repository via read-only exploration tools (`list_repo_files`, `read_repo_file`, `search_in_repo_file`), and starts the structured architectural Grill interview. |
+| *(Any human comment during Grill)* | <span class="epure-badge epure-badge--human">Mandatory Human Gate 1</span> | `grilling` | Implicit Grill continuity (Q84): processes human answers via the batch cursor (`last_processed_comment_id`). If follow-up questions remain (`frontier_resolved: false`), posts the next Grill round. Once all ambiguities are settled (`frontier_resolved: true`), posts a **Settled Decisions Summary** and pauses in `grilling` (`awaiting_human_approval`) so the human validates the decision frontier before `/epure to-spec`. |
+| `/epure to-spec` | <span class="epure-badge epure-badge--human">Human Frontier Validation</span> | `tickets` | Validates the Grill decision frontier (or forces an early transition) and generates `GLOSSARY.md`, ADRs, `DESIGN.md`, `docs/specs/<slug>.md` on `plan/*`, and the dependency-ordered GitHub Issue DAG (`blocked_by`). |
 | `/epure approve` | <span class="epure-badge epure-badge--human">Mandatory Human Gate 2</span> | `implementation` | Squash-merges the documentation-only `plan/* -> dev` PR, locks the signed `spec_sha` mandate in `refs/epure/state/<issue>`, opens `feature/<issue>-<slug>`, and executes the ticket DAG (`task/* -> feature/*`). Also supports **idempotent resumption** if re-run after an error. |
-| `/epure to-spec` | <span class="epure-badge epure-badge--optional">Optional Override</span> | `spec` | Forces an immediate transition from the Grill to writing `GLOSSARY.md`, ADRs, `DESIGN.md`, and `docs/specs/<slug>.md` on `plan/*`. |
-| `/epure to-tickets` | <span class="epure-badge epure-badge--optional">Optional Override</span> | `tickets` | Forces immediate decomposition of the specification on `plan/*` into a dependency-ordered GitHub Issue DAG (`blocked_by`). |
+| `/epure to-tickets` | <span class="epure-badge epure-badge--optional">Optional Override</span> | `tickets` | Alias / override to decompose the specification on `plan/*` into a dependency-ordered GitHub Issue DAG (`blocked_by`). |
 | `/epure status` | <span class="epure-badge epure-badge--optional">Optional Override</span> | *(Read-only)* | Reads `refs/epure/state/<issue>` and posts a fresh summary of the current phase, locked `spec_sha`, and per-ticket progress without mutating code. |
 | `/epure cancel` | <span class="epure-badge epure-badge--optional">Optional Override</span> | `cancelled` | Marks the mandate as `cancelled` in `refs/epure/state/<issue>`, stops any new ticket execution, and preserves existing branches and audit logs. |
+
+> **Contextual `/epure` Command Cheat-Sheet Spoiler (`<details>`)**: Every issue comment, sub-issue body, and pull request description posted by EPURE automatically includes a collapsible `<details>` block at the bottom (`⌨️ Commandes /epure disponibles`) summarizing the available slash commands and highlighting the recommended next action for the current lifecycle phase (`grilling`, `tickets`, `implementation`, `suspended`, `cancelled`, or `completed`).
 
 ---
 
@@ -479,6 +481,24 @@ llm:
   squash_summary_model: "gemini-3.8-flash"
   squash_summary_temperature: 0.0
 
+# Per-phase model routing (<provider>/<model> or bare model identifier, ADR-0029)
+models:
+  planning: "anthropic/claude-sonnet-4-20250514"
+  implementation: "openai/gpt-5.4"
+  review: "google/gemini-3.8-flash"
+
+# Optional custom provider endpoints & secret-free environment variable references (ADR-0029)
+providers:
+  azure-prod:
+    provider: "azure"
+    api_key: "os.environ/AZURE_OPENAI_API_KEY"
+    base_url: "os.environ/AZURE_OPENAI_ENDPOINT"
+    api_version: "2024-10-21"
+  foundry-deepseek:
+    provider: "azure_ai"
+    api_key: "os.environ/AZURE_AI_API_KEY"
+    base_url: "https://my-foundry.services.ai.azure.com"
+
 orchestration:
   # Out-of-branch atomic CAS state prefix
   state_ref_prefix: "refs/epure/state/"
@@ -535,14 +555,27 @@ sensitive_paths:
 | `default_integration` | `string` | `"dev"` | Default branch of the repository where approved `plan/*` and human-reviewed `feature/*` PRs land. |
 | `release` | `string` | `"main"` | Immutable release branch updated exclusively by `release-promote.yml` via fast-forward from `dev`. |
 
-### `llm`
+### `llm`, `models` & `providers` (Multi-Provider Routing — ADR-0029)
+
+EPURE includes a zero-dependency multi-provider `LLMClient` inspired by `giskard-llm` that supports **Google Gemini** (`google/` or `gemini/`), **OpenAI** (`openai/`), **Azure OpenAI** (`azure/`), **Azure AI Foundry** (`azure_ai/`), and **Anthropic** (`anthropic/`).
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `provider` | `string` | `"google-gemini"` | LLM provider managed by the runner-local proxy sidecar. |
-| `model` | `string` | `"gemini-3.8-flash"` | Model used for Grill interviews, specification writing, TDD coding, and multi-agent reviews. |
-| `thinking_level` | `"LOW" \| "MEDIUM" \| "HIGH"` | `"HIGH"` | Reasoning depth passed to Gemini `thinkingConfig`. |
-| `squash_summary_temperature` | `number` | `0.0` | Deterministic temperature used to synthesize Conventional Commit titles and bodies before squash-merge (Q94). |
+| `models.planning` | `string` | `"claude-sonnet-4-20250514"` (or `"gemini-3.8-flash"` fallback) | Model used for `/grill-with-docs` interviews and specification/DAG generation (`<provider>/<model>` or bare model). |
+| `models.implementation` | `string` | `"claude-sonnet-4-20250514"` (or `"gemini-3.8-flash"` fallback) | Model used for TDD code generation and Stage 1/2/3 auto-remediation loops. |
+| `models.review` | `string` | `"gpt-4.1"` (or `"gemini-3.8-flash"` fallback) | Model used for the multi-agent PR review roster, `user-advocate` design-gate, and zero-temperature squash commit synthesis. |
+| `providers.<alias>.provider` | `"google" \| "openai" \| "azure" \| "azure_ai" \| "anthropic"` | *(Optional)* | Underlying protocol family for a custom provider alias referenced in `models.*` (`<alias>/<model>`). |
+| `providers.<alias>.api_key` | `string` | `os.environ/<VAR>` | Secret-free environment variable reference (`os.environ/VAR_NAME`) resolved at runtime from `process.env`. Never commit literal API keys in `.github/agents.yml`. |
+| `providers.<alias>.base_url` | `string` | Provider default | Custom base URL or `os.environ/VAR_NAME` (for `azure_ai`, trailing `/models` suffixes on `*.services.ai.azure.com` are stripped automatically). |
+| `providers.<alias>.api_version` | `string` | `"2024-10-21"` | Azure OpenAI deployment API version (`?api-version=...`). |
+| `providers.<alias>.default_headers` | `Record<string, string>` | `{}` | Optional custom HTTP headers attached to every request for this provider alias. |
+
+#### API Key Resolution Order
+
+For each phase call, `LLMClient` resolves the API key deterministically without silent cross-provider fallback (ADR-0012, ADR-0029):
+1. `providers[alias].api_key` (resolving `os.environ/VAR_NAME` from `process.env`).
+2. Standard provider environment variable (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `AZURE_API_KEY` / `AZURE_OPENAI_API_KEY`, `AZURE_AI_API_KEY`).
+3. Explicit `LLM_API_KEY` passed to the orchestrator action.
 
 ### `orchestration`
 
@@ -639,6 +672,20 @@ EPURE is built from the ground up around **Defense-in-Depth**, **Least Privilege
    - **[Archify (`tt-a1i/archify`)](https://github.com/tt-a1i/archify)** — Showcase-validated interactive architecture diagrams (`scripts/archify/`).
    - **[zizmor (`woodruffw/zizmor`)](https://github.com/woodruffw/zizmor)** — GitHub Actions workflow static security analysis (`actions/zizmor-audit`).
    - **[Renovate (`renovatebot/renovate`)](https://github.com/renovatebot/renovate)** — Automated updates of SHA-pinned workflows and dependencies (`auto_migrate`).
+
+---
+
+## 3. Multi-Provider `LLMClient`, Native Structured Outputs & Modular Orchestrator (ADR-0029)
+
+1. **Multi-Provider HTTP Router (`src/llm/`)**:
+   - Zero-dependency TypeScript `LLMClient` routing `<provider>/<model>` identifiers across **Google Gemini** (`google/`, `gemini/`), **OpenAI** (`openai/`), **Azure OpenAI** (`azure/`), **Azure AI Foundry** (`azure_ai/`), and **Anthropic** (`anthropic/`), with `os.environ/VAR_NAME` lazy resolution from `.github/agents.yml`.
+   - Enforces ADR-0012 fail-fast resilience: HTTP `401`/`403` (`AuthenticationError`) and `402` (`QuotaExhaustedError`) immediately halt without silent fallback, while transient `408`/`429`/`5xx` errors apply bounded exponential backoff.
+2. **Native Schema-Enforced Structured Outputs (`ResponseSchemaSpec<T>`) & 2-Phase Gemini Tool Loop**:
+   - All 11 structured LLM calls (`GrillRoundEvaluation`, `GeneratedPlanningBundle`, `GeneratedTicketImplementation`, multi-agent reviewer findings, `user-advocate`, and squash commit synthesis) send formal JSON Schemas (`responseSchema`, `response_format.json_schema` with recursive `additionalProperties: false`, or `output_config.format`) paired with runtime TypeScript validators in `src/orchestrator/prompts/schemas.ts`.
+   - When Google Gemini calls combine repository exploration tools (`list_repo_files`, `search_in_repo_file`, `read_repo_file`) with a `ResponseSchemaSpec`, **Phase 1** executes tool rounds with `functionDeclarations` (preserving Gemini 3 `thoughtSignature` tokens), and **Phase 2** finalizes with `functionCallingConfig.mode = "NONE"` + `responseMimeType: "application/json"` + `responseSchema`.
+3. **Modular `src/orchestrator/` Architecture & Wired Safety Guards**:
+   - `src/orchestrator/issue-orchestrator.ts` acts as a clean coordinator delegating to `github/rest-client.ts`, `workspace/repo-tools.ts`, `prompts/schemas.ts`, `formatting/comments.ts`, and the phase modules `phases/grill-and-plan.ts`, `phases/ticket-execution.ts`, and `phases/feature-integration.ts`.
+   - Enforces DAG cycle detection (`validatePlanningArtifactsAndGraph`), proven blocker resolution (`reconcileProvenTicketDependencies`, escalating to `needs-human` on `not_planned` closures), mid-run `/epure cancel` batch cursor checks (`processPendingIssueCommentsBatch`), and commit-SHA review loop guards (`evaluateReviewFeedbackTrigger`).
 
 ---
 ## [EN] How-To: Onboard a Repository
@@ -1313,13 +1360,15 @@ Toutes les commandes `/epure` se postent sous forme de commentaires sur une Issu
 
 | Commande | Catégorie (Q101) | Phase Cible | Description |
 | --- | --- | --- | --- |
-| `/epure plan` | <span class="epure-badge epure-badge--human">Jalon Humain Obligatoire 1</span> | `grilling` | Initialise `refs/epure/state/<issue>`, inspecte le dépôt et démarre l'entretien d'architecture structuré (Grill). |
-| *(Tout commentaire humain pendant le Grill)* | <span class="epure-badge epure-badge--human">Jalon Humain Obligatoire 1</span> | `grilling -> awaiting_approval` | Continuité implicite du Grill (Q84) : traite les réponses humaines en lot via le curseur `last_processed_comment_id`. Dès que toutes les ambiguïtés sont levées, génère automatiquement les artefacts sur `plan/*` et le DAG de tickets. |
+| `/epure plan` | <span class="epure-badge epure-badge--human">Jalon Humain Obligatoire 1</span> | `grilling` | Initialise `refs/epure/state/<issue>`, inspecte les fichiers du dépôt via les outils d'exploration (`list_repo_files`, `read_repo_file`, `search_in_repo_file`) et démarre l'entretien d'architecture structuré (Grill). |
+| *(Tout commentaire humain pendant le Grill)* | <span class="epure-badge epure-badge--human">Jalon Humain Obligatoire 1</span> | `grilling` | Continuité implicite du Grill (Q84) : traite les réponses humaines via `last_processed_comment_id`. S'il reste des points ouverts (`frontier_resolved: false`), publie le round suivant. Dès que la frontière est résolue (`frontier_resolved: true`), publie une **Synthèse des Décisions** et attend la validation humaine (`/epure to-spec`) avant de générer la spec et les tickets. |
+| `/epure to-spec` | <span class="epure-badge epure-badge--human">Validation Humaine de la Frontière</span> | `tickets` | Valide la frontière de cadrage du Grill (ou force la fin du cadrage) et génère `GLOSSARY.md`, les ADRs, `DESIGN.md`, `docs/specs/<slug>.md` sur `plan/*` ainsi que le graphe orienté acyclique (DAG) de sous-issues GitHub (`blocked_by`). |
 | `/epure approve` | <span class="epure-badge epure-badge--human">Jalon Humain Obligatoire 2</span> | `implementation` | Fusionne en squash la PR documentaire `plan/* -> dev`, scelle le mandat signé `spec_sha` dans `refs/epure/state/<issue>`, ouvre `feature/<issue>-<slug>` et exécute le DAG de tickets (`task/* -> feature/*`). Permet aussi la **reprise idempotente** après un échec. |
-| `/epure to-spec` | <span class="epure-badge epure-badge--optional">Commande Facultative</span> | `spec` | Force le passage immédiat du Grill à la génération de `GLOSSARY.md`, des ADRs, de `DESIGN.md` et de `docs/specs/<slug>.md` sur `plan/*`. |
-| `/epure to-tickets` | <span class="epure-badge epure-badge--optional">Commande Facultative</span> | `tickets` | Force le découpage immédiat de la spécification présente sur `plan/*` en un graphe orienté acyclique (DAG) d'issues GitHub (`blocked_by`). |
+| `/epure to-tickets` | <span class="epure-badge epure-badge--optional">Commande Facultative</span> | `tickets` | Alias / commande permettant de générer le graphe orienté acyclique (DAG) d'issues GitHub (`blocked_by`) à partir du plan sur `plan/*`. |
 | `/epure status` | <span class="epure-badge epure-badge--optional">Commande Facultative</span> | *(Lecture seule)* | Lit `refs/epure/state/<issue>` et publie un rapport à jour de la phase courante, du `spec_sha` verrouillé et de l'état de chaque ticket sans modifier le code. |
 | `/epure cancel` | <span class="epure-badge epure-badge--optional">Commande Facultative</span> | `cancelled` | Marque le mandat comme `cancelled` dans `refs/epure/state/<issue>`, bloque toute nouvelle exécution de ticket et conserve les branches et traces d'audit existantes. |
+
+> **Aide-mémoire contextuel repliable (`<details>`)** : Chaque commentaire d'issue, corps de sous-issue de ticket et description de Pull Request publié par EPURE intègre automatiquement en pied de message un bloc repliable `<details>` (`⌨️ Commandes /epure disponibles`) récapitulant les commandes disponibles et mettant en évidence la prochaine action recommandée selon la phase courante (`grilling`, `tickets`, `implementation`, `suspended`, `cancelled` ou `completed`).
 
 ---
 
@@ -1417,6 +1466,24 @@ llm:
   squash_summary_model: "gemini-3.8-flash"
   squash_summary_temperature: 0.0
 
+# Routage de modèle par phase (<fournisseur>/<modèle> ou identifiant court, ADR-0029)
+models:
+  planning: "anthropic/claude-sonnet-4-20250514"
+  implementation: "openai/gpt-5.4"
+  review: "google/gemini-3.8-flash"
+
+# Endpoints de fournisseurs personnalisés & références os.environ/VAR_NAME sans secret en clair (ADR-0029)
+providers:
+  azure-prod:
+    provider: "azure"
+    api_key: "os.environ/AZURE_OPENAI_API_KEY"
+    base_url: "os.environ/AZURE_OPENAI_ENDPOINT"
+    api_version: "2024-10-21"
+  foundry-deepseek:
+    provider: "azure_ai"
+    api_key: "os.environ/AZURE_AI_API_KEY"
+    base_url: "https://my-foundry.services.ai.azure.com"
+
 orchestration:
   # Préfixe des références Git atomiques hors-branches (CAS)
   state_ref_prefix: "refs/epure/state/"
@@ -1473,14 +1540,27 @@ sensitive_paths:
 | `default_integration` | `string` | `"dev"` | Branche par défaut du dépôt où atterrissent les PRs documentaires `plan/*` approuvées et les PRs applicatives `feature/*` mergées par un humain. |
 | `release` | `string` | `"main"` | Branche de production immuable mise à jour exclusivement par `release-promote.yml` en fast-forward depuis `dev`. |
 
-### `llm`
+### `llm`, `models` & `providers` (Routage Multi-Fournisseurs — ADR-0029)
+
+EPURE intègre un client `LLMClient` multi-fournisseurs sans dépendance externe inspiré de `giskard-llm`, compatible avec **Google Gemini** (`google/` ou `gemini/`), **OpenAI** (`openai/`), **Azure OpenAI** (`azure/`), **Azure AI Foundry** (`azure_ai/`) et **Anthropic** (`anthropic/`).
 
 | Clé | Type | Défaut | Description |
 | --- | --- | --- | --- |
-| `provider` | `string` | `"google-gemini"` | Fournisseur LLM géré par le sidecar proxy local au runner. |
-| `model` | `string` | `"gemini-3.8-flash"` | Modèle utilisé pour le Grill, la rédaction des specs, la boucle TDD et la revue multi-agents. |
-| `thinking_level` | `"LOW" \| "MEDIUM" \| "HIGH"` | `"HIGH"` | Niveau de réflexion transmis à `thinkingConfig` de Gemini. |
-| `squash_summary_temperature` | `number` | `0.0` | Température déterministe utilisée pour synthétiser le titre et le corps Conventional Commit avant chaque squash-merge (Q94). |
+| `models.planning` | `string` | `"claude-sonnet-4-20250514"` (ou repli `"gemini-3.8-flash"`) | Modèle utilisé pour l'entretien `/grill-with-docs` et la génération de la spécification et du DAG de tickets (`<fournisseur>/<modèle>` ou nom court). |
+| `models.implementation` | `string` | `"claude-sonnet-4-20250514"` (ou repli `"gemini-3.8-flash"`) | Modèle utilisé pour l'implémentation TDD et les boucles d'auto-remédiation Stage 1/2/3. |
+| `models.review` | `string` | `"gpt-4.1"` (ou repli `"gemini-3.8-flash"`) | Modèle utilisé pour le roster de revue multi-agents, le `design-gate` `user-advocate` et la synthèse du message de squash à température `0.0`. |
+| `providers.<alias>.provider` | `"google" \| "openai" \| "azure" \| "azure_ai" \| "anthropic"` | *(Optionnel)* | Famille de protocole associée à un alias personnalisé référencé dans `models.*` (`<alias>/<modèle>`). |
+| `providers.<alias>.api_key` | `string` | `os.environ/<VAR>` | Référence de variable d'environnement (`os.environ/VAR_NAME`) résolue à l'exécution depuis `process.env`. Ne commitez jamais de clé API en clair dans `.github/agents.yml`. |
+| `providers.<alias>.base_url` | `string` | Défaut du fournisseur | URL de base personnalisée ou `os.environ/VAR_NAME` (pour `azure_ai`, tout suffixe `/models` sur `*.services.ai.azure.com` est normalisé automatiquement). |
+| `providers.<alias>.api_version` | `string` | `"2024-10-21"` | Version d'API du déploiement Azure OpenAI (`?api-version=...`). |
+| `providers.<alias>.default_headers` | `Record<string, string>` | `{}` | En-têtes HTTP additionnels transmis à chaque requête vers cet alias. |
+
+#### Ordre de Résolution des Clés API
+
+Pour chaque appel LLM, `LLMClient` résout la clé API de manière déterministe et sans bascule silencieuse vers un autre fournisseur en cas d'erreur `401`/`402`/`403` (ADR-0012, ADR-0029) :
+1. `providers[alias].api_key` (avec résolution de `os.environ/VAR_NAME` dans `process.env`).
+2. Variable d'environnement standard du fournisseur (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `AZURE_API_KEY` / `AZURE_OPENAI_API_KEY`, `AZURE_AI_API_KEY`).
+3. Clé `LLM_API_KEY` passée à l'action d'orchestration.
 
 ### `orchestration`
 
@@ -1577,6 +1657,20 @@ EPURE a été conçu dès l'origine autour de trois principes d'ingénierie : **
    - **[Archify (`tt-a1i/archify`)](https://github.com/tt-a1i/archify)** — Schémas d'architecture interactifs validés en qualité showcase (`scripts/archify/`).
    - **[zizmor (`woodruffw/zizmor`)](https://github.com/woodruffw/zizmor)** — Analyse statique de sécurité des workflows GitHub Actions (`actions/zizmor-audit`).
    - **[Renovate (`renovatebot/renovate`)](https://github.com/renovatebot/renovate)** — Mise à jour automatisée des workflows épinglés par SHA et des dépendances (`auto_migrate`).
+
+---
+
+## 3. Routeur `LLMClient` Multi-Fournisseurs, Sorties Structurées & Orchestrateur Modulaire (ADR-0029)
+
+1. **Routeur HTTP Multi-Fournisseurs (`src/llm/`)** :
+   - Client TypeScript `LLMClient` sans dépendance externe routant les identifiants `<fournisseur>/<modèle>` vers **Google Gemini** (`google/`, `gemini/`), **OpenAI** (`openai/`), **Azure OpenAI** (`azure/`), **Azure AI Foundry** (`azure_ai/`) et **Anthropic** (`anthropic/`), avec résolution différée `os.environ/VAR_NAME` depuis `.github/agents.yml`.
+   - Respect strict de l'ADR-0012 : les erreurs HTTP `401`/`403` (`AuthenticationError`) et `402` (`QuotaExhaustedError`) interrompent immédiatement l'exécution sans bascule silencieuse, tandis que les erreurs transitoires (`408`, `429`, `5xx`) appliquent un backoff exponentiel borné.
+2. **Sorties Structurées par Schéma (`ResponseSchemaSpec<T>`) & Boucle d'Outils Gemini en 2 Phases** :
+   - Les 11 appels LLM structurés du système (`GrillRoundEvaluation`, `GeneratedPlanningBundle`, `GeneratedTicketImplementation`, constats des reviewers, `user-advocate` et synthèse de squash) transmettent un JSON Schema natif (`responseSchema`, `response_format.json_schema` avec fermeture récursive `additionalProperties: false`, ou `output_config.format`) couplé aux validateurs TypeScript de `src/orchestrator/prompts/schemas.ts`.
+   - Sur Google Gemini, lorsqu'un appel combine les outils d'exploration (`list_repo_files`, `search_in_repo_file`, `read_repo_file`) et un schéma JSON, la **Phase 1** exécute les tours d'outils avec `functionDeclarations` (en préservant les `thoughtSignature` Gemini 3), puis la **Phase 2** verrouille `functionCallingConfig.mode = "NONE"` avec `responseMimeType: "application/json"` et `responseSchema`.
+3. **Architecture Modulaire `src/orchestrator/` & Garde-fous Branchés** :
+   - `src/orchestrator/issue-orchestrator.ts` orchestre les sous-modules spécialisés `github/rest-client.ts`, `workspace/repo-tools.ts`, `prompts/schemas.ts`, `formatting/comments.ts` ainsi que les 3 phases `phases/grill-and-plan.ts`, `phases/ticket-execution.ts` et `phases/feature-integration.ts`.
+   - Branche directement la détection de cycles du DAG (`validatePlanningArtifactsAndGraph`), le déblocage sur dépendance prouvée (`reconcileProvenTicketDependencies`, escaladant en `needs-human` si un ticket bloquant est fermé en `not_planned`), la détection d'annulation `/epure cancel` inter-tickets (`processPendingIssueCommentsBatch`) et la garde anti-boucle de revue par SHA (`evaluateReviewFeedbackTrigger`).
 
 ---
 ## [FR] Guide : Onboarder un Dépôt

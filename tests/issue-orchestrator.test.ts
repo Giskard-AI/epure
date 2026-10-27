@@ -181,12 +181,12 @@ describe("EPURE v1.1.0 — Real Orchestration Wiring (Q84–Q90, ADR-0026)", () 
         expectedInSummary: "Round 2"
       },
       {
-        id: "transitions-to-tickets-and-generates-spec-when-frontier-is-resolved",
+        id: "remains-in-grilling-awaiting-human-approval-when-frontier-is-resolved-on-reply",
         frontierResolved: true,
         followUpQuestions: "",
-        expectedPhase: "tickets",
+        expectedPhase: "grilling",
         expectedStatus: "awaiting_human_approval",
-        expectedInSummary: "Spécification, Roster Adapté et Graphe de Tickets générés"
+        expectedInSummary: "Frontière de Cadrage Résolue"
       }
     ])(
       "$id",

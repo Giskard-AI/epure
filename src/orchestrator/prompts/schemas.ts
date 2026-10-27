@@ -4,6 +4,7 @@ export interface GrillRoundEvaluation {
   readonly frontier_resolved: boolean;
   readonly round_number: number;
   readonly follow_up_questions_markdown: string;
+  readonly settled_decisions_summary_markdown?: string | undefined;
   readonly rationale: string;
 }
 
@@ -192,6 +193,11 @@ export const GRILL_ROUND_EVALUATION_SCHEMA: ResponseSchemaSpec<GrillRoundEvaluat
           description:
             "Follow-up questions in Markdown when frontier_resolved is false; empty string otherwise."
         },
+        settled_decisions_summary_markdown: {
+          type: "string",
+          description:
+            "Markdown summary of settled decisions across all grill rounds when frontier_resolved is true; empty string otherwise."
+        },
         rationale: {
           type: "string",
           description: "Concise explanation of the decision frontier state."
@@ -221,12 +227,17 @@ export const GRILL_ROUND_EVALUATION_SCHEMA: ResponseSchemaSpec<GrillRoundEvaluat
         typeof obj.follow_up_questions_markdown === "string"
           ? obj.follow_up_questions_markdown
           : "";
+      const settledSummary =
+        typeof obj.settled_decisions_summary_markdown === "string"
+          ? obj.settled_decisions_summary_markdown
+          : "";
       const rationale =
         typeof obj.rationale === "string" ? obj.rationale : "";
       return {
         frontier_resolved: obj.frontier_resolved,
         round_number: roundNumber,
         follow_up_questions_markdown: followUp,
+        settled_decisions_summary_markdown: settledSummary,
         rationale
       };
     }

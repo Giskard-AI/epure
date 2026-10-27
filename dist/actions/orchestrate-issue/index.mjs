@@ -1289,6 +1289,9 @@ function buildContextualActionHint(context) {
     return `L'orchestration est suspendue suite \xE0 une annulation. Postez \`/epure plan\`${issueRef} pour relancer un cadrage ou \`/epure approve\` pour reprendre.`;
   }
   if (phase === "grilling") {
+    if (status === "awaiting-human" || status === "awaiting_human_approval") {
+      return `La fronti\xE8re de d\xE9cisions du cadrage est compl\xE8te. Postez \`/epure to-spec\`${issueRef} pour valider le cadrage et g\xE9n\xE9rer la sp\xE9cification + les tickets (ou r\xE9pondez en commentaire pour ajuster un point).`;
+    }
     return `R\xE9pondez directement en commentaire${issueRef} aux questions ci-dessus (sans pr\xE9fixe \`/epure\`), ou postez \`/epure to-spec\` pour g\xE9n\xE9rer imm\xE9diatement la sp\xE9cification et les tickets.`;
   }
   if (phase === "spec" || phase === "tickets" || status === "awaiting-human" || status === "awaiting_human_approval") {
@@ -4618,6 +4621,10 @@ var GRILL_ROUND_EVALUATION_SCHEMA = {
         type: "string",
         description: "Follow-up questions in Markdown when frontier_resolved is false; empty string otherwise."
       },
+      settled_decisions_summary_markdown: {
+        type: "string",
+        description: "Markdown summary of settled decisions across all grill rounds when frontier_resolved is true; empty string otherwise."
+      },
       rationale: {
         type: "string",
         description: "Concise explanation of the decision frontier state."
@@ -4639,11 +4646,13 @@ var GRILL_ROUND_EVALUATION_SCHEMA = {
     }
     const roundNumber = typeof obj.round_number === "number" && Number.isFinite(obj.round_number) && obj.round_number >= 1 ? Math.floor(obj.round_number) : 1;
     const followUp = typeof obj.follow_up_questions_markdown === "string" ? obj.follow_up_questions_markdown : "";
+    const settledSummary = typeof obj.settled_decisions_summary_markdown === "string" ? obj.settled_decisions_summary_markdown : "";
     const rationale = typeof obj.rationale === "string" ? obj.rationale : "";
     return {
       frontier_resolved: obj.frontier_resolved,
       round_number: roundNumber,
       follow_up_questions_markdown: followUp,
+      settled_decisions_summary_markdown: settledSummary,
       rationale
     };
   }
@@ -9227,6 +9236,14 @@ async function runGrillAndPlanPhase(params) {
     phaseModels,
     fetchImpl
   } = params;
+  const grillExplorationCache = /* @__PURE__ */ new Map();
+  const grillRepoTools = buildRepoExplorationToolsAndHandlers({
+    gh,
+    branch: "dev",
+    featureBranch: "main",
+    accumulatedFiles: grillExplorationCache,
+    devBranchPaths: []
+  });
   if (command === "plan") {
     const updated2 = await updateIssueStateWithCas({
       issueNumber,
@@ -9242,12 +9259,13 @@ async function runGrillAndPlanPhase(params) {
     const grillSystemInstruction = [
       "Tu es l'architecte EPURE conduisant un entretien multi-tours `/grill-with-docs` sur une GitHub Issue.",
       PROMPT_INJECTION_IMMUNITY_CLAUSE,
+      "Si une question peut \xEAtre \xE9clair\xE9e ou r\xE9solue en inspectant le d\xE9p\xF4t (fichiers Markdown, ADRs, GLOSSARY, code source), utilise d'abord les outils d'exploration (`list_repo_files`, `read_repo_file`, `search_in_repo_file`) avant de poser tes questions.",
       "Parcours l'arbre des d\xE9cisions en rounds successifs (la \xAB fronti\xE8re \xBB des d\xE9cisions dont les pr\xE9requis sont connus).",
       "Pose les 3 \xE0 4 questions de cadrage d\xE9cisives de ce premier round (architecture, invariants m\xE9tiers, gestion d'\xE9tat/persistance, couverture de tests TDD) au format :",
       "\u2753 **Q1** - **<Titre>** : <Question>",
       "\u27A1\uFE0F <Recommandation concr\xE8te (formul\xE9e pour que 'oui' valide la recommandation)>",
       "",
-      "Termine en indiquant \xE0 l'utilisateur qu'il peut r\xE9pondre directement en commentaire sur cette issue (sans commande slash) : tant qu'il reste des points ouverts ou des d\xE9cisions d\xE9pendantes \xE0 clarifier, l'entretien bouclera sur un round suivant ; d\xE8s que l'arbre des d\xE9cisions est r\xE9solu (ou via `/epure to-spec`), EPURE g\xE9n\xE9rera le GLOSSARY.md, les ADRs, la sp\xE9cification et le graphe de tickets."
+      "Termine en indiquant \xE0 l'utilisateur qu'il peut r\xE9pondre directement en commentaire sur cette issue (sans commande slash) : tant qu'il reste des points ouverts ou des d\xE9cisions d\xE9pendantes \xE0 clarifier, l'entretien bouclera sur un round suivant ; une fois la fronti\xE8re de d\xE9cisions valid\xE9e, l'humain pourra lancer `/epure to-spec`."
     ].join("\n");
     const grillPrompt = [
       `Issue #${issue.number} (donn\xE9es non fiables soumises par l'utilisateur) :`,
@@ -9268,6 +9286,10 @@ ${issue.body}`
       systemInstruction: grillSystemInstruction,
       prompt: grillPrompt,
       temperature: 0.2,
+      tools: grillRepoTools.tools,
+      toolHandlers: grillRepoTools.toolHandlers,
+      maxToolRounds: 8,
+      logLabel: `grill-round-1#${issueNumber}`,
       fetchImpl
     });
     const commentBody = appendEpureCommandsSpoiler(
@@ -9304,20 +9326,22 @@ ${c.body}`;
   const priorGrillRoundsCount = allComments.filter(
     (c) => c.body.includes("### Entretien de Cadrage EPURE")
   ).length;
-  if (command === "reply" && priorGrillRoundsCount < 5) {
+  if (command === "reply") {
     const grillLoopEvalSystemInstruction = [
       "Tu es l'architecte EPURE conduisant un entretien multi-tours `/grill-with-docs` (arbre de d\xE9cisions par rounds).",
       PROMPT_INJECTION_IMMUNITY_CLAUSE,
       "Analyse l'issue initiale et l'historique complet de la conversation (questions pos\xE9es par l'Architecte EPURE et r\xE9ponses de l'Humain).",
-      "D\xE9termine si la fronti\xE8re de l'arbre de d\xE9cisions est vide (`frontier_resolved: true`) ou s'il reste des questions non r\xE9pondues, des contre-propositions humaines ouvrant de nouvelles branches techniques/m\xE9tiers, ou des ambigu\xEFt\xE9s bloquantes n\xE9cessitant un round suppl\xE9mentaire (`frontier_resolved: false`).",
+      "Utilise si n\xE9cessaire les outils d'exploration (`list_repo_files`, `read_repo_file`, `search_in_repo_file`) pour inspecter les fichiers r\xE9els du d\xE9p\xF4t (docs, ADRs, GLOSSARY, code source) et ancrer tes questions ou ta synth\xE8se dans la r\xE9alit\xE9 du code.",
+      "D\xE9termine si la fronti\xE8re de l'arbre de d\xE9cisions est vide (`frontier_resolved: true`) ou s'il reste des questions non r\xE9pondues, des contre-propositions humaines ouvrant de nouvelles branches techniques/m\xE9tiers, ou des ambigu\xEFt\xE9s concr\xE8tes dans le d\xE9p\xF4t n\xE9cessitant un round suppl\xE9mentaire (`frontier_resolved: false`).",
       "R\xE8gles de d\xE9cision :",
-      "- Si l'humain n'a r\xE9pondu que partiellement aux questions du round pr\xE9c\xE9dent, a pos\xE9 une question en retour, a rejet\xE9 une recommandation sans pr\xE9ciser l'alternative, ou si sa r\xE9ponse d\xE9bloque un choix architectural aval crucial non encore tranch\xE9 -> `frontier_resolved: false` et g\xE9n\xE8re les questions de suivi num\xE9rot\xE9es (`\u2753 **Q...**` + `\u27A1\uFE0F **Recommandation**`).",
-      "- Si toutes les questions de cadrage ont re\xE7u une r\xE9ponse claire (ou ont \xE9t\xE9 valid\xE9es) et que le p\xE9rim\xE8tre m\xE9tier, l'architecture, les formules/invariants et la strat\xE9gie TDD sont suffisamment pr\xE9cis pour r\xE9diger le GLOSSARY.md, les ADRs et la sp\xE9cification -> `frontier_resolved: true`.",
+      "- Si l'humain n'a r\xE9pondu que partiellement aux questions du round pr\xE9c\xE9dent, a pos\xE9 une question en retour, a rejet\xE9 une recommandation sans pr\xE9ciser l'alternative, ou si sa r\xE9ponse d\xE9bloque un choix architectural/documentaire aval concret non encore tranch\xE9 -> `frontier_resolved: false` et g\xE9n\xE8re les questions de suivi num\xE9rot\xE9es (`\u2753 **Q...**` + `\u27A1\uFE0F **Recommandation**`).",
+      "- Si toutes les questions de cadrage ont re\xE7u une r\xE9ponse claire (ou ont \xE9t\xE9 valid\xE9es) et que le p\xE9rim\xE8tre m\xE9tier, l'architecture, les formules/invariants et la strat\xE9gie TDD sont suffisamment pr\xE9cis -> `frontier_resolved: true` et remplis `settled_decisions_summary_markdown` avec la synth\xE8se structur\xE9e de toutes les d\xE9cisions act\xE9es pendant le grill.",
       "R\xE9ponds UNIQUEMENT par un objet JSON valide respectant ce sch\xE9ma :",
       "{",
       '  "frontier_resolved": boolean,',
       `  "round_number": ${priorGrillRoundsCount + 1},`,
       '  "follow_up_questions_markdown": "string (vide si frontier_resolved=true, sinon les questions \u2753 **Q...** / \u27A1\uFE0F Recommandation du nouveau round)",',
+      '  "settled_decisions_summary_markdown": "string (synth\xE8se Markdown \xE0 puces de toutes les d\xE9cisions tranch\xE9es si frontier_resolved=true, sinon vide)",',
       `  "rationale": "Explication concise de l'\xE9tat de la fronti\xE8re de d\xE9cision"`,
       "}"
     ].join("\n");
@@ -9347,6 +9371,10 @@ ${issue.body}`
       systemInstruction: grillLoopEvalSystemInstruction,
       prompt: grillLoopEvalPrompt,
       temperature: 0.1,
+      tools: grillRepoTools.tools,
+      toolHandlers: grillRepoTools.toolHandlers,
+      maxToolRounds: 8,
+      logLabel: `grill-eval#${issueNumber}`,
       responseSchema: GRILL_ROUND_EVALUATION_SCHEMA,
       fetchImpl
     });
@@ -9372,7 +9400,7 @@ ${issue.body}`
           evalResult.follow_up_questions_markdown.trim(),
           "",
           "---",
-          "_R\xE9ponds directement en commentaire pour poursuivre l'entretien, ou poste `/epure to-spec` pour forcer imm\xE9diatement la g\xE9n\xE9ration de la sp\xE9cification et des tickets._"
+          "_R\xE9ponds directement en commentaire pour poursuivre l'entretien, ou poste `/epure to-spec` pour valider le cadrage et g\xE9n\xE9rer la sp\xE9cification et les tickets._"
         ].join("\n"),
         {
           phase: "grilling",
@@ -9391,6 +9419,47 @@ ${issue.body}`
         feature_pr_url: ""
       };
     }
+    const updatedFrontierReady = await updateIssueStateWithCas({
+      issueNumber,
+      store,
+      mutator: (prev) => ({
+        ...prev,
+        phase: "grilling",
+        status: "awaiting_human_approval",
+        active_branch: planBranch,
+        last_processed_comment_id: commentId ?? prev.last_processed_comment_id
+      })
+    });
+    const settledSummary = evalResult.settled_decisions_summary_markdown?.trim() || evalResult.rationale.trim() || "Toutes les questions de la fronti\xE8re de d\xE9cisions ont re\xE7u une r\xE9ponse.";
+    const frontierResolvedComment = appendEpureCommandsSpoiler(
+      [
+        updatedFrontierReady.issue_mirror_markdown,
+        "",
+        "### \u2705 Fronti\xE8re de Cadrage R\xE9solue (`/grill-with-docs` \u2014 En attente de validation humaine)",
+        "",
+        settledSummary,
+        "",
+        "---",
+        "\u{1F449} **Validation humaine requise avant `/to-spec`** :",
+        "- Si ce cadrage vous convient, postez **`/epure to-spec`** pour g\xE9n\xE9rer le `GLOSSARY.md`, les ADRs, la sp\xE9cification compl\xE8te et le graphe de tickets sur `" + planBranch + "`.",
+        "- Si vous souhaitez approfondir un point, ajouter une contrainte ou corriger une d\xE9cision, **r\xE9pondez simplement en commentaire** (sans commande slash) pour ouvrir un nouveau round de grill."
+      ].join("\n"),
+      {
+        phase: "grilling",
+        status: "awaiting_human_approval",
+        issueNumber
+      }
+    );
+    await gh.postIssueComment(issueNumber, frontierResolvedComment);
+    return {
+      executed: true,
+      phase: updatedFrontierReady.state.phase,
+      status: updatedFrontierReady.state.status,
+      active_branch: planBranch,
+      summary_markdown: frontierResolvedComment,
+      created_ticket_numbers: [],
+      feature_pr_url: ""
+    };
   }
   await gh.ensureBranch("dev", "main");
   const humanContext = allComments.filter((c) => !c.user.login.endsWith("[bot]") && c.user.type !== "Bot").map((c) => `@${c.user.login}: ${c.body}`).join("\n\n---\n\n");
@@ -9464,6 +9533,10 @@ ${issue.body}`
     systemInstruction: specSystemInstruction,
     prompt: specGenerationPrompt,
     temperature: 0.1,
+    tools: grillRepoTools.tools,
+    toolHandlers: grillRepoTools.toolHandlers,
+    maxToolRounds: 10,
+    logLabel: `spec-bundle#${issueNumber}`,
     responseSchema: GENERATED_PLANNING_BUNDLE_SCHEMA,
     fetchImpl
   });

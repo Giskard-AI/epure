@@ -558,6 +558,7 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
           frontier_resolved: true,
           round_number: 2,
           follow_up_questions_markdown: "",
+          settled_decisions_summary_markdown: "",
           rationale: "Validated via Phase 2 structured output"
         });
 

@@ -46,6 +46,12 @@ function buildContextualActionHint(
   }
 
   if (phase === "grilling") {
+    if (
+      status === "awaiting-human" ||
+      status === "awaiting_human_approval"
+    ) {
+      return `La frontière de décisions du cadrage est complète. Postez \`/epure to-spec\`${issueRef} pour valider le cadrage et générer la spécification + les tickets (ou répondez en commentaire pour ajuster un point).`;
+    }
     return `Répondez directement en commentaire${issueRef} aux questions ci-dessus (sans préfixe \`/epure\`), ou postez \`/epure to-spec\` pour générer immédiatement la spécification et les tickets.`;
   }
 
