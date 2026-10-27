@@ -22,7 +22,10 @@ import {
   orchestrateIssueCommand,
   resolvePhaseModels
 } from "../src/orchestrator/issue-orchestrator.js";
-import { GRILL_ROUND_EVALUATION_SCHEMA } from "../src/orchestrator/prompts/schemas.js";
+import {
+  GENERATED_PLANNING_BUNDLE_SCHEMA,
+  GRILL_ROUND_EVALUATION_SCHEMA
+} from "../src/orchestrator/prompts/schemas.js";
 import { runMultiAgentPrReviewPass } from "../src/review/multi-agent-pr-review.js";
 import { runUserAdvocateDesignGate } from "../src/review/reviewer-roster.js";
 import { generateSemanticSquashCommitFromDiff } from "../src/review/squash-commit-generator.js";
@@ -1405,6 +1408,57 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
       );
       expect(parsed.nested.count).toBe(expectedCount);
       expect(parsed.summary).toContain("```mermaid");
+    });
+
+    it.each([
+      {
+        scenario: "rejects ellipsis placeholder in spec_markdown ('# Spécification...')",
+        payload: {
+          plan_slug: "cleanup",
+          glossary_markdown: "# GLOSSARY\n\nReal terms.",
+          adrs: [{ path: "docs/adr/0001-clean.md", content: "# ADR 1\nReal content." }],
+          spec_path: "docs/specs/cleanup.md",
+          spec_markdown: "# Spécification...",
+          tickets: [
+            {
+              index: 1,
+              slug: "t1",
+              title: "[Ticket 1] Audit docs",
+              description: "Audit all markdown docs",
+              acceptance_criteria: ["All docs listed"],
+              blocked_by_indices: [],
+              files_to_create_or_update: ["docs/FUTURE_FEATURES.md"]
+            }
+          ]
+        },
+        expectedErrorSubstring: "spec_markdown cannot be an ellipsis placeholder"
+      },
+      {
+        scenario: "rejects ellipsis placeholder in ticket title ('...')",
+        payload: {
+          plan_slug: "cleanup",
+          glossary_markdown: "# GLOSSARY\n\nReal terms.",
+          adrs: [{ path: "docs/adr/0001-clean.md", content: "# ADR 1\nReal content." }],
+          spec_path: "docs/specs/cleanup.md",
+          spec_markdown: "# Spécification\n\nComplete specification body.",
+          tickets: [
+            {
+              index: 1,
+              slug: "t1",
+              title: "...",
+              description: "...",
+              acceptance_criteria: [],
+              blocked_by_indices: [],
+              files_to_create_or_update: []
+            }
+          ]
+        },
+        expectedErrorSubstring: "title cannot be an ellipsis placeholder"
+      }
+    ])("$scenario", ({ payload, expectedErrorSubstring }) => {
+      expect(() =>
+        GENERATED_PLANNING_BUNDLE_SCHEMA.validate(payload)
+      ).toThrow(expectedErrorSubstring);
     });
   });
 });

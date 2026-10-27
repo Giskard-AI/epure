@@ -332,6 +332,26 @@ export const GENERATED_PLANNING_BUNDLE_SCHEMA: ResponseSchemaSpec<GeneratedPlann
       const specMarkdown =
         typeof obj.spec_markdown === "string" ? obj.spec_markdown : "";
 
+      const isSingleLineEllipsisPlaceholder = (val: string): boolean => {
+        const trimmed = val.trim();
+        return (
+          trimmed === "..." ||
+          trimmed === "…" ||
+          /^(?:#+\s*)?[^\n]{0,60}(?:\.{3,}|…)\s*$/.test(trimmed)
+        );
+      };
+
+      if (isSingleLineEllipsisPlaceholder(specMarkdown)) {
+        throw new Error(
+          "GeneratedPlanningBundle.spec_markdown cannot be an ellipsis placeholder ('...'). Provide the full specification Markdown."
+        );
+      }
+      if (isSingleLineEllipsisPlaceholder(glossaryMarkdown)) {
+        throw new Error(
+          "GeneratedPlanningBundle.glossary_markdown cannot be an ellipsis placeholder ('...')."
+        );
+      }
+
       const rawAdrs = Array.isArray(obj.adrs) ? obj.adrs : [];
       const adrs: GeneratedAdrDocument[] = rawAdrs.map((item, idx) => {
         const rec = asRecord(item, `GeneratedAdrDocument[${idx}]`);
@@ -378,6 +398,11 @@ export const GENERATED_PLANNING_BUNDLE_SCHEMA: ResponseSchemaSpec<GeneratedPlann
           typeof rec.title === "string" && rec.title.trim().length > 0
             ? rec.title.trim()
             : `[Ticket ${index}] Implementation`;
+        if (isSingleLineEllipsisPlaceholder(title)) {
+          throw new Error(
+            `GeneratedTicketSpec[${idx}].title cannot be an ellipsis placeholder ('${title}').`
+          );
+        }
         const slug =
           typeof rec.slug === "string" && rec.slug.trim().length > 0
             ? rec.slug.trim()
@@ -388,6 +413,11 @@ export const GENERATED_PLANNING_BUNDLE_SCHEMA: ResponseSchemaSpec<GeneratedPlann
             : typeof rec.summary === "string"
               ? rec.summary
               : title;
+        if (isSingleLineEllipsisPlaceholder(description)) {
+          throw new Error(
+            `GeneratedTicketSpec[${idx}].description cannot be an ellipsis placeholder ('${description}').`
+          );
+        }
         const summary =
           typeof rec.summary === "string" && rec.summary.trim().length > 0
             ? rec.summary

@@ -330,44 +330,26 @@ export async function runGrillAndPlanPhase(params: {
   const specSystemInstruction = [
     "Tu es l'architecte EPURE chargé de produire le dossier de spécification complet et le découpage en tickets atomiques TDD.",
     PROMPT_INJECTION_IMMUNITY_CLAUSE,
-    "Produis un objet JSON strictement valide (sans markdown autour) respectant exactement ce schéma TypeScript :",
+    "Si tu as besoin de vérifier des chemins ou le contenu existant de GLOSSARY.md / docs/adr/ avant de rédiger, utilise les outils d'exploration avec parcimonie (1 à 3 appels maximum), puis génère immédiatement l'objet JSON final.",
+    "RÈGLE CRITIQUE : INTERDICTION STRICTE d'utiliser des ellipses ('...', '# Spécification...', etc.) ou des valeurs tronquées. Chaque champ ('glossary_markdown', 'adrs[*].content', 'spec_markdown', 'tickets[*].title', 'tickets[*].description', 'tickets[*].acceptance_criteria', 'tickets[*].files_to_create_or_update') DOIT contenir le texte intégral, détaillé et complet prêt à être commité dans le dépôt.",
+    "Produis un objet JSON strictement valide (sans markdown autour) respectant exactement cette structure :",
     "{",
     `  "plan_slug": "${planSlug}",`,
-    '  "glossary_markdown": "# GLOSSARY\\n\\n...",',
+    '  "glossary_markdown": "<Contenu Markdown intégral de GLOSSARY.md intégrant les termes du domaine>",',
     '  "adrs": [',
-    '    { "path": "docs/adr/0001-architecture-et-domaine.md", "content": "---\\nstatus: accepted\\n---\\n# ..." },',
-    '    { "path": "docs/adr/0002-formules-et-invariants.md", "content": "---\\nstatus: accepted\\n---\\n# ..." },',
-    '    { "path": "docs/adr/0003-strategie-tdd-et-ui.md", "content": "---\\nstatus: accepted\\n---\\n# ..." }',
+    '    { "path": "docs/adr/NNNN-decision-architecturale.md", "content": "<Contenu Markdown intégral de l\'ADR avec Context, Decision et Consequences>" }',
     "  ],",
     `  "spec_path": "docs/specs/${planSlug}.md",`,
-    '  "spec_markdown": "# Spécification — ...",',
+    '  "spec_markdown": "<Contenu Markdown intégral et détaillé de la spécification technique et fonctionnelle>",',
     '  "tickets": [',
     "    {",
     '      "index": 1,',
-    '      "slug": "socle-domaine-et-formules",',
-    '      "title": "[Ticket 1] Socle du domaine, types et formules mathématiques",',
-    '      "description": "Implémenter en TypeScript strict les types et les formules métier avec tests unitaires Vitest paramétrés.",',
-    '      "acceptance_criteria": ["Formule quadratique exacte", "Invariant S <= B", "Règle munitions /50"],',
+    '      "slug": "<slug-court-du-ticket-1>",',
+    '      "title": "[Ticket 1] <Titre explicite et complet du ticket 1>",',
+    '      "description": "<Description technique complète et détaillée du ticket 1>",',
+    '      "acceptance_criteria": ["<Critère d\'acceptation vérifiable 1>", "<Critère d\'acceptation vérifiable 2>"],',
     '      "blocked_by_indices": [],',
-    '      "files_to_create_or_update": ["package.json", "tsconfig.json", "vite.config.ts", "src/domain/forge.ts", "tests/forge.test.ts"]',
-    "    },",
-    "    {",
-    '      "index": 2,',
-    '      "slug": "catalogue-et-marche-d20",',
-    '      "title": "[Ticket 2] Catalogue d\'enchantements, marché d20 et complications",',
-    '      "description": "Implémenter le catalogue complet des enchantements, les tables de marché d20 et les complications narratives avec tests Vitest.",',
-    '      "acceptance_criteria": ["Catalogue armes, armures, boucliers, focus", "Table de disponibilité et prix d20", "Tests unitaires paramétrés"],',
-    '      "blocked_by_indices": [1],',
-    '      "files_to_create_or_update": ["src/domain/catalog.ts", "src/domain/market.ts", "tests/market.test.ts"]',
-    "    },",
-    "    {",
-    '      "index": 3,',
-    '      "slug": "interface-react-craft-calculator",',
-    '      "title": "[Ticket 3] Interface interactive React du calculateur et persistance locale",',
-    '      "description": "Construire l\'application React/Vite complète (calculateur de forge, simulateur de marché, grimoire du MJ, sauvegarde localStorage) et vérifier le build.",',
-    '      "acceptance_criteria": ["Calculateur interactif avec garde-fou S <= B", "Simulateur de marché d20", "Build Vite et suite de tests Vitest 100% verts"],',
-    '      "blocked_by_indices": [1, 2],',
-    '      "files_to_create_or_update": ["index.html", "src/main.tsx", "src/App.tsx", "src/styles.css", "tests/app.test.ts"]',
+    '      "files_to_create_or_update": ["<chemin/fichier1>", "<chemin/fichier2>"]',
     "    }",
     "  ]",
     "}"
@@ -526,13 +508,19 @@ export async function runGrillAndPlanPhase(params: {
   const existingBaseRoster = await gh.readTrustedBaseRosterFiles("dev");
   const hasExistingConfiguredRoster = existingBaseRoster.size > 0;
 
+  const corePlanningDocs: Array<{ path: string; content: string }> = [
+    ...(bundle.glossary_markdown.trim().length > 0
+      ? [{ path: "GLOSSARY.md", content: bundle.glossary_markdown }]
+      : []),
+    { path: bundle.spec_path, content: bundle.spec_markdown },
+    ...bundle.adrs.map((a) => ({ path: a.path, content: a.content }))
+  ];
+
   const planningFiles: Array<{ path: string; content: string }> =
     hasExistingConfiguredRoster
-      ? [{ path: bundle.spec_path, content: bundle.spec_markdown }]
+      ? corePlanningDocs
       : [
-          { path: "GLOSSARY.md", content: bundle.glossary_markdown },
-          { path: bundle.spec_path, content: bundle.spec_markdown },
-          ...bundle.adrs.map((a) => ({ path: a.path, content: a.content })),
+          ...corePlanningDocs,
           ...adaptedRoster.files,
           zizmorFile,
           renovateFile,

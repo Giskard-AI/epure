@@ -318,9 +318,17 @@ export async function executeGoogleProvider<T = unknown>(
         }
       }
       if (parts.length > 0) {
+        const preservedThoughtSignature =
+          parts.find((p) => Boolean(p.thoughtSignature))?.thoughtSignature ??
+          GEMINI_SKIP_THOUGHT_SIGNATURE_SENTINEL;
         contents.push({
           role: "model",
-          parts: attachThoughtSignaturesToModelParts(parts)
+          parts: [
+            {
+              text: "I have completed the repository inspection and gathered all required context.",
+              thoughtSignature: preservedThoughtSignature
+            }
+          ]
         });
       }
       break;
@@ -364,7 +372,7 @@ export async function executeGoogleProvider<T = unknown>(
         role: "user",
         parts: [
           {
-            text: "Produce the final JSON response strictly matching the required schema."
+            text: "Produce the final JSON response strictly matching the required schema. Write the FULL, COMPLETE, UNABBREVIATED content for every string and array field in the JSON object. NEVER use '...' or ellipsis placeholders, even if you already drafted or summarized the content in an earlier turn."
           }
         ]
       }

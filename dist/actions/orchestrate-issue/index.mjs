@@ -3921,9 +3921,15 @@ async function executeGoogleProvider(input) {
         }
       }
       if (parts.length > 0) {
+        const preservedThoughtSignature = parts.find((p) => Boolean(p.thoughtSignature))?.thoughtSignature ?? GEMINI_SKIP_THOUGHT_SIGNATURE_SENTINEL;
         contents.push({
           role: "model",
-          parts: attachThoughtSignaturesToModelParts(parts)
+          parts: [
+            {
+              text: "I have completed the repository inspection and gathered all required context.",
+              thoughtSignature: preservedThoughtSignature
+            }
+          ]
         });
       }
       break;
@@ -3962,7 +3968,7 @@ async function executeGoogleProvider(input) {
         role: "user",
         parts: [
           {
-            text: "Produce the final JSON response strictly matching the required schema."
+            text: "Produce the final JSON response strictly matching the required schema. Write the FULL, COMPLETE, UNABBREVIATED content for every string and array field in the JSON object. NEVER use '...' or ellipsis placeholders, even if you already drafted or summarized the content in an earlier turn."
           }
         ]
       }
@@ -4734,6 +4740,20 @@ var GENERATED_PLANNING_BUNDLE_SCHEMA = {
     const glossaryMarkdown = typeof obj.glossary_markdown === "string" ? obj.glossary_markdown : "";
     const specPath = typeof obj.spec_path === "string" && obj.spec_path.trim().length > 0 ? obj.spec_path.trim() : `docs/specs/${planSlug}.md`;
     const specMarkdown = typeof obj.spec_markdown === "string" ? obj.spec_markdown : "";
+    const isSingleLineEllipsisPlaceholder = (val) => {
+      const trimmed = val.trim();
+      return trimmed === "..." || trimmed === "\u2026" || /^(?:#+\s*)?[^\n]{0,60}(?:\.{3,}|…)\s*$/.test(trimmed);
+    };
+    if (isSingleLineEllipsisPlaceholder(specMarkdown)) {
+      throw new Error(
+        "GeneratedPlanningBundle.spec_markdown cannot be an ellipsis placeholder ('...'). Provide the full specification Markdown."
+      );
+    }
+    if (isSingleLineEllipsisPlaceholder(glossaryMarkdown)) {
+      throw new Error(
+        "GeneratedPlanningBundle.glossary_markdown cannot be an ellipsis placeholder ('...')."
+      );
+    }
     const rawAdrs = Array.isArray(obj.adrs) ? obj.adrs : [];
     const adrs = rawAdrs.map((item, idx) => {
       const rec = asRecord(item, `GeneratedAdrDocument[${idx}]`);
@@ -4754,8 +4774,18 @@ var GENERATED_PLANNING_BUNDLE_SCHEMA = {
       const rec = asRecord(item, `GeneratedTicketSpec[${idx}]`);
       const index = typeof rec.index === "number" && Number.isFinite(rec.index) ? Math.floor(rec.index) : idx + 1;
       const title = typeof rec.title === "string" && rec.title.trim().length > 0 ? rec.title.trim() : `[Ticket ${index}] Implementation`;
+      if (isSingleLineEllipsisPlaceholder(title)) {
+        throw new Error(
+          `GeneratedTicketSpec[${idx}].title cannot be an ellipsis placeholder ('${title}').`
+        );
+      }
       const slug = typeof rec.slug === "string" && rec.slug.trim().length > 0 ? rec.slug.trim() : deriveTicketSlug(title, index);
       const description = typeof rec.description === "string" && rec.description.trim().length > 0 ? rec.description : typeof rec.summary === "string" ? rec.summary : title;
+      if (isSingleLineEllipsisPlaceholder(description)) {
+        throw new Error(
+          `GeneratedTicketSpec[${idx}].description cannot be an ellipsis placeholder ('${description}').`
+        );
+      }
       const summary = typeof rec.summary === "string" && rec.summary.trim().length > 0 ? rec.summary : description;
       const acceptanceCriteria = asStringArray(rec.acceptance_criteria);
       const blockedByIndices = asNumberArray(rec.blocked_by_indices);
@@ -9466,44 +9496,26 @@ ${issue.body}`
   const specSystemInstruction = [
     "Tu es l'architecte EPURE charg\xE9 de produire le dossier de sp\xE9cification complet et le d\xE9coupage en tickets atomiques TDD.",
     PROMPT_INJECTION_IMMUNITY_CLAUSE,
-    "Produis un objet JSON strictement valide (sans markdown autour) respectant exactement ce sch\xE9ma TypeScript :",
+    "Si tu as besoin de v\xE9rifier des chemins ou le contenu existant de GLOSSARY.md / docs/adr/ avant de r\xE9diger, utilise les outils d'exploration avec parcimonie (1 \xE0 3 appels maximum), puis g\xE9n\xE8re imm\xE9diatement l'objet JSON final.",
+    "R\xC8GLE CRITIQUE : INTERDICTION STRICTE d'utiliser des ellipses ('...', '# Sp\xE9cification...', etc.) ou des valeurs tronqu\xE9es. Chaque champ ('glossary_markdown', 'adrs[*].content', 'spec_markdown', 'tickets[*].title', 'tickets[*].description', 'tickets[*].acceptance_criteria', 'tickets[*].files_to_create_or_update') DOIT contenir le texte int\xE9gral, d\xE9taill\xE9 et complet pr\xEAt \xE0 \xEAtre commit\xE9 dans le d\xE9p\xF4t.",
+    "Produis un objet JSON strictement valide (sans markdown autour) respectant exactement cette structure :",
     "{",
     `  "plan_slug": "${planSlug}",`,
-    '  "glossary_markdown": "# GLOSSARY\\n\\n...",',
+    '  "glossary_markdown": "<Contenu Markdown int\xE9gral de GLOSSARY.md int\xE9grant les termes du domaine>",',
     '  "adrs": [',
-    '    { "path": "docs/adr/0001-architecture-et-domaine.md", "content": "---\\nstatus: accepted\\n---\\n# ..." },',
-    '    { "path": "docs/adr/0002-formules-et-invariants.md", "content": "---\\nstatus: accepted\\n---\\n# ..." },',
-    '    { "path": "docs/adr/0003-strategie-tdd-et-ui.md", "content": "---\\nstatus: accepted\\n---\\n# ..." }',
+    `    { "path": "docs/adr/NNNN-decision-architecturale.md", "content": "<Contenu Markdown int\xE9gral de l'ADR avec Context, Decision et Consequences>" }`,
     "  ],",
     `  "spec_path": "docs/specs/${planSlug}.md",`,
-    '  "spec_markdown": "# Sp\xE9cification \u2014 ...",',
+    '  "spec_markdown": "<Contenu Markdown int\xE9gral et d\xE9taill\xE9 de la sp\xE9cification technique et fonctionnelle>",',
     '  "tickets": [',
     "    {",
     '      "index": 1,',
-    '      "slug": "socle-domaine-et-formules",',
-    '      "title": "[Ticket 1] Socle du domaine, types et formules math\xE9matiques",',
-    '      "description": "Impl\xE9menter en TypeScript strict les types et les formules m\xE9tier avec tests unitaires Vitest param\xE9tr\xE9s.",',
-    '      "acceptance_criteria": ["Formule quadratique exacte", "Invariant S <= B", "R\xE8gle munitions /50"],',
+    '      "slug": "<slug-court-du-ticket-1>",',
+    '      "title": "[Ticket 1] <Titre explicite et complet du ticket 1>",',
+    '      "description": "<Description technique compl\xE8te et d\xE9taill\xE9e du ticket 1>",',
+    `      "acceptance_criteria": ["<Crit\xE8re d'acceptation v\xE9rifiable 1>", "<Crit\xE8re d'acceptation v\xE9rifiable 2>"],`,
     '      "blocked_by_indices": [],',
-    '      "files_to_create_or_update": ["package.json", "tsconfig.json", "vite.config.ts", "src/domain/forge.ts", "tests/forge.test.ts"]',
-    "    },",
-    "    {",
-    '      "index": 2,',
-    '      "slug": "catalogue-et-marche-d20",',
-    `      "title": "[Ticket 2] Catalogue d'enchantements, march\xE9 d20 et complications",`,
-    '      "description": "Impl\xE9menter le catalogue complet des enchantements, les tables de march\xE9 d20 et les complications narratives avec tests Vitest.",',
-    '      "acceptance_criteria": ["Catalogue armes, armures, boucliers, focus", "Table de disponibilit\xE9 et prix d20", "Tests unitaires param\xE9tr\xE9s"],',
-    '      "blocked_by_indices": [1],',
-    '      "files_to_create_or_update": ["src/domain/catalog.ts", "src/domain/market.ts", "tests/market.test.ts"]',
-    "    },",
-    "    {",
-    '      "index": 3,',
-    '      "slug": "interface-react-craft-calculator",',
-    '      "title": "[Ticket 3] Interface interactive React du calculateur et persistance locale",',
-    `      "description": "Construire l'application React/Vite compl\xE8te (calculateur de forge, simulateur de march\xE9, grimoire du MJ, sauvegarde localStorage) et v\xE9rifier le build.",`,
-    '      "acceptance_criteria": ["Calculateur interactif avec garde-fou S <= B", "Simulateur de march\xE9 d20", "Build Vite et suite de tests Vitest 100% verts"],',
-    '      "blocked_by_indices": [1, 2],',
-    '      "files_to_create_or_update": ["index.html", "src/main.tsx", "src/App.tsx", "src/styles.css", "tests/app.test.ts"]',
+    '      "files_to_create_or_update": ["<chemin/fichier1>", "<chemin/fichier2>"]',
     "    }",
     "  ]",
     "}"
@@ -9647,10 +9659,13 @@ ${issue.body}`
   });
   const existingBaseRoster = await gh.readTrustedBaseRosterFiles("dev");
   const hasExistingConfiguredRoster = existingBaseRoster.size > 0;
-  const planningFiles = hasExistingConfiguredRoster ? [{ path: bundle.spec_path, content: bundle.spec_markdown }] : [
-    { path: "GLOSSARY.md", content: bundle.glossary_markdown },
+  const corePlanningDocs = [
+    ...bundle.glossary_markdown.trim().length > 0 ? [{ path: "GLOSSARY.md", content: bundle.glossary_markdown }] : [],
     { path: bundle.spec_path, content: bundle.spec_markdown },
-    ...bundle.adrs.map((a) => ({ path: a.path, content: a.content })),
+    ...bundle.adrs.map((a) => ({ path: a.path, content: a.content }))
+  ];
+  const planningFiles = hasExistingConfiguredRoster ? corePlanningDocs : [
+    ...corePlanningDocs,
     ...adaptedRoster.files,
     zizmorFile,
     renovateFile,
