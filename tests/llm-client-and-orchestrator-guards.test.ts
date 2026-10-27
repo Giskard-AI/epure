@@ -9,6 +9,7 @@ import {
   AuthenticationError,
   GEMINI_SKIP_THOUGHT_SIGNATURE_SENTINEL,
   LLMClient,
+  parseAndValidateStructuredOutput,
   QuotaExhaustedError,
   type ProviderConfig,
   type ResponseSchemaSpec
@@ -31,34 +32,35 @@ import {
 } from "../src/state/git-ref-state.js";
 
 describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bucket A Guards (ADR-0029)", () => {
-  describe("1. Multi-provider routing & URL/Header translation", () => {
-    const sampleNestedSchema: ResponseSchemaSpec<{
-      summary: string;
-      nested: { count: number };
-    }> = {
-      name: "test_nested_schema",
-      description: "Sample nested schema for strict structured output testing",
-      schema: {
-        type: "object",
-        properties: {
-          summary: { type: "string" },
-          nested: {
-            type: "object",
-            properties: {
-              count: { type: "integer" }
-            }
+  const sampleNestedSchema: ResponseSchemaSpec<{
+    summary: string;
+    nested: { count: number };
+  }> = {
+    name: "test_nested_schema",
+    description: "Sample nested schema for strict structured output testing",
+    schema: {
+      type: "object",
+      properties: {
+        summary: { type: "string" },
+        nested: {
+          type: "object",
+          properties: {
+            count: { type: "integer" }
           }
-        },
-        required: ["summary", "nested"]
+        }
       },
-      validate: (parsed: unknown) => {
-        const obj = parsed as { summary: string; nested: { count: number } };
-        return {
-          summary: String(obj.summary),
-          nested: { count: Number(obj.nested.count) }
-        };
-      }
-    };
+      required: ["summary", "nested"]
+    },
+    validate: (parsed: unknown) => {
+      const obj = parsed as { summary: string; nested: { count: number } };
+      return {
+        summary: String(obj.summary),
+        nested: { count: Number(obj.nested.count) }
+      };
+    }
+  };
+
+  describe("1. Multi-provider routing & URL/Header translation", () => {
 
     it.each([
       {
@@ -1370,5 +1372,38 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
         }
       }
     );
+  });
+
+  describe("7. extractJsonObject and parseAndValidateStructuredOutput with embedded markdown code fences", () => {
+    it.each([
+      {
+        scenario:
+          "raw JSON object containing ```mermaid and ```typescript code fences inside string properties is preserved intact",
+        rawInput: JSON.stringify({
+          summary: "# Spec\n\n```mermaid\nflowchart TD\n  A --> B\n```\n\n```typescript\nconst x = { a: 1 };\n```",
+          nested: { count: 7 }
+        }),
+        expectedCount: 7
+      },
+      {
+        scenario:
+          "outer ```json fence wrapping a JSON object that itself contains inner ```mermaid fences is extracted cleanly",
+        rawInput:
+          "```json\n" +
+          JSON.stringify({
+            summary: "Doc with ```mermaid\ngraph LR\n``` block",
+            nested: { count: 9 }
+          }) +
+          "\n```",
+        expectedCount: 9
+      }
+    ])("$scenario", ({ rawInput, expectedCount }) => {
+      const parsed = parseAndValidateStructuredOutput(
+        rawInput,
+        sampleNestedSchema
+      );
+      expect(parsed.nested.count).toBe(expectedCount);
+      expect(parsed.summary).toContain("```mermaid");
+    });
   });
 });

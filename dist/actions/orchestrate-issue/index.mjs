@@ -3381,16 +3381,25 @@ function sanitizeJsonStringLiterals(candidate) {
   return out;
 }
 function extractJsonObject(raw) {
-  const fenceMatch = /```(?:json)?\s*([\s\S]*?)\s*```/i.exec(raw);
-  if (fenceMatch && fenceMatch[1]) {
-    return fenceMatch[1].trim();
+  const trimmed = raw.trim();
+  if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+    return trimmed;
+  }
+  const outerFenceMatch = /^```(?:json)?\s*\r?\n?([\s\S]*?)\r?\n?```\s*$/i.exec(
+    trimmed
+  );
+  if (outerFenceMatch && outerFenceMatch[1]) {
+    const inner = outerFenceMatch[1].trim();
+    if (inner.startsWith("{")) {
+      return inner;
+    }
   }
   const firstBrace = raw.indexOf("{");
   const lastBrace = raw.lastIndexOf("}");
   if (firstBrace >= 0 && lastBrace > firstBrace) {
     return raw.slice(firstBrace, lastBrace + 1);
   }
-  return raw.trim();
+  return trimmed;
 }
 function parseAndValidateStructuredOutput(rawText, schemaSpec) {
   const extracted = extractJsonObject(rawText);
