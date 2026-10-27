@@ -3118,6 +3118,10 @@ function formatNeedsHumanEscalationComment(input) {
     reasonHeadline = `${gw}s external CI workflow registration timeout (fail-closed)`;
   } else if (input.reason === "sensitive_path_violation") {
     reasonHeadline = "Forbidden modification of sensitive path or path traversal blocked pre-Stage-1";
+  } else if (input.reason === "transient_llm_api_exhausted") {
+    reasonHeadline = "Transient LLM API retries or unitary request timeout exhausted (`max_transient_api_retries`) \u2014 code-fix budget preserved";
+  } else if (input.reason === "llm_quota_or_auth_failure") {
+    reasonHeadline = "LLM provider quota/billing exhaustion or authentication failure (ADR-0012: no automatic fallback)";
   } else {
     reasonHeadline = "Runner wall-clock timeout budget exhausted";
   }
@@ -3283,12 +3287,41 @@ var StructuredOutputValidationError = class extends LLMError {
     this.rawText = normalized.rawText;
   }
 };
-function parseRetryAfterHeader(headerVal) {
-  if (!headerVal) {
-    return void 0;
+function parseRetryAfterSeconds(headerVal, bodyText, nowMs = Date.now()) {
+  if (headerVal) {
+    const trimmed = headerVal.trim();
+    if (/^\d+(?:\.\d+)?$/.test(trimmed)) {
+      const num = Number.parseFloat(trimmed);
+      if (Number.isFinite(num) && num >= 0) {
+        return Math.ceil(num);
+      }
+    }
+    const parsedDateMs = Date.parse(trimmed);
+    if (!Number.isNaN(parsedDateMs)) {
+      return Math.max(0, Math.ceil((parsedDateMs - nowMs) / 1e3));
+    }
   }
-  const num = Number.parseFloat(headerVal.trim());
-  return Number.isFinite(num) && num >= 0 ? num : void 0;
+  if (bodyText) {
+    const jsonDelayMatch = /"(?:retryDelay|retry_delay|retryAfter|retry_after)"\s*:\s*"?(\d+(?:\.\d+)?)s?"?/i.exec(
+      bodyText
+    );
+    if (jsonDelayMatch?.[1]) {
+      const sec = Number.parseFloat(jsonDelayMatch[1]);
+      if (Number.isFinite(sec) && sec >= 0) {
+        return Math.ceil(sec);
+      }
+    }
+    const proseDelayMatch = /(?:retry\s+after|try\s+again\s+in|retry\s+in)\s+(\d+(?:\.\d+)?)\s*(?:s|sec|seconds)\b/i.exec(
+      bodyText
+    );
+    if (proseDelayMatch?.[1]) {
+      const sec = Number.parseFloat(proseDelayMatch[1]);
+      if (Number.isFinite(sec) && sec >= 0) {
+        return Math.ceil(sec);
+      }
+    }
+  }
+  return void 0;
 }
 function classifyHttpError(params) {
   const { status, bodyText, provider, model, retryAfterHeader } = params;
@@ -3310,7 +3343,7 @@ function classifyHttpError(params) {
     return new RateLimitError(message, {
       status,
       provider,
-      retryAfterSeconds: parseRetryAfterHeader(retryAfterHeader)
+      retryAfterSeconds: parseRetryAfterSeconds(retryAfterHeader, bodyText)
     });
   }
   if (status === 400 || status === 422) {
@@ -3847,11 +3880,31 @@ async function executeGoogleProvider(input) {
       );
     }
     if (options.responseSchema) {
-      const validated = parseAndValidateStructuredOutput(
-        text,
-        options.responseSchema
-      );
-      return { text, data: validated };
+      try {
+        const validated = parseAndValidateStructuredOutput(
+          text,
+          options.responseSchema
+        );
+        return { text, data: validated };
+      } catch (err) {
+        if (err instanceof StructuredOutputValidationError) {
+          await input.onStructuredValidationRetry?.();
+          const retryParts = await sendGenerateContent({
+            systemInstruction: {
+              parts: [{ text: effectiveSystemInstruction }]
+            },
+            contents,
+            generationConfig
+          });
+          const retryText = extractTextFromParts(retryParts).trim();
+          const validatedRetry = parseAndValidateStructuredOutput(
+            retryText,
+            options.responseSchema
+          );
+          return { text: retryText, data: validatedRetry };
+        }
+        throw err;
+      }
     }
     return { text };
   }
@@ -3982,24 +4035,35 @@ async function executeGoogleProvider(input) {
         ]
       }
     ];
-    const finalParts = await sendGenerateContent({
-      systemInstruction: {
-        parts: [{ text: effectiveSystemInstruction }]
-      },
-      contents: finalContents,
-      toolConfig: {
-        functionCallingConfig: {
-          mode: "NONE"
-        }
-      },
-      generationConfig: finalGenerationConfig
-    });
-    const finalText = extractTextFromParts(finalParts).trim();
-    const validated = parseAndValidateStructuredOutput(
-      finalText,
-      options.responseSchema
-    );
-    return { text: finalText, data: validated };
+    const sendFinalStructuredTurn = async () => {
+      const finalParts = await sendGenerateContent({
+        systemInstruction: {
+          parts: [{ text: effectiveSystemInstruction }]
+        },
+        contents: finalContents,
+        toolConfig: {
+          functionCallingConfig: {
+            mode: "NONE"
+          }
+        },
+        generationConfig: finalGenerationConfig
+      });
+      const finalText = extractTextFromParts(finalParts).trim();
+      const validated = parseAndValidateStructuredOutput(
+        finalText,
+        options.responseSchema
+      );
+      return { text: finalText, data: validated };
+    };
+    try {
+      return await sendFinalStructuredTurn();
+    } catch (err) {
+      if (err instanceof StructuredOutputValidationError && input.onStructuredValidationRetry) {
+        await input.onStructuredValidationRetry();
+        return await sendFinalStructuredTurn();
+      }
+      throw err;
+    }
   }
   const fallbackContents = [
     ...contents,
@@ -4389,6 +4453,16 @@ function resolveProviderApiKey(params) {
   const fallback = env.LLM_API_KEY?.trim();
   return fallback && fallback.length > 0 ? fallback : void 0;
 }
+var DEFAULT_LLM_REQUEST_TIMEOUT_MS = 9e5;
+var DEFAULT_MAX_TRANSIENT_RETRIES = 4;
+var DEFAULT_RATE_LIMIT_FALLBACK_SECONDS = [
+  15,
+  30,
+  60,
+  120
+];
+var MAX_RATE_LIMIT_WAIT_SECONDS = 300;
+var DEFAULT_MAX_RATE_LIMIT_WAITS = 10;
 var LLMClient = class {
   providers = /* @__PURE__ */ new Map();
   constructor(initialProviders) {
@@ -4434,19 +4508,26 @@ var LLMClient = class {
       );
     }
     const fetchFn = options.fetchImpl ?? fetch;
-    const maxTransientRetries = options.maxTransientRetries ?? 2;
-    const defaultBackoff = options.fetchImpl ? [0, 0] : [1, 2];
+    const maxTransientRetries = options.maxTransientRetries ?? DEFAULT_MAX_TRANSIENT_RETRIES;
+    const defaultBackoff = options.fetchImpl ? [0, 0, 0, 0] : [5, 15, 45, 120];
     const backoffSeconds = options.transientRetryBackoffSeconds ?? defaultBackoff;
+    const requestTimeoutMs = options.requestTimeoutMs !== void 0 && options.requestTimeoutMs > 0 ? options.requestTimeoutMs : DEFAULT_LLM_REQUEST_TIMEOUT_MS;
+    const maxRateLimitWaits = options.maxRateLimitWaits ?? DEFAULT_MAX_RATE_LIMIT_WAITS;
+    const defaultRateLimitFallback = options.fetchImpl && !options.sleepMs ? [0, 0, 0, 0] : DEFAULT_RATE_LIMIT_FALLBACK_SECONDS;
+    const rateLimitFallback = options.rateLimitFallbackSeconds ?? defaultRateLimitFallback;
     const sleepMs = options.sleepMs ?? (async (ms) => {
       if (ms > 0) {
         await new Promise((resolve2) => setTimeout(resolve2, ms));
       }
     });
-    let transientRetriesUsed = 0;
+    let totalTransientRetriesUsed = 0;
+    let totalRateLimitWaitsUsed = 0;
     const executeRequest = async (reqUrl, reqInit) => {
+      let requestRetriesUsed = 0;
+      let requestRateLimitWaitsUsed = 0;
       while (true) {
         try {
-          const effectiveInit = options.fetchImpl || reqInit.signal ? reqInit : { ...reqInit, signal: AbortSignal.timeout(18e4) };
+          const effectiveInit = reqInit.signal || options.fetchImpl && options.requestTimeoutMs === void 0 ? reqInit : { ...reqInit, signal: AbortSignal.timeout(requestTimeoutMs) };
           const res = await fetchFn(reqUrl, effectiveInit);
           if (res.ok) {
             return res;
@@ -4459,9 +4540,23 @@ var LLMClient = class {
             model,
             retryAfterHeader: res.headers.get("retry-after")
           });
-          if (isTransientLLMError(classified) && transientRetriesUsed < maxTransientRetries) {
-            const backoffSec = backoffSeconds[transientRetriesUsed] ?? backoffSeconds[backoffSeconds.length - 1] ?? 0;
-            transientRetriesUsed += 1;
+          if (classified instanceof RateLimitError) {
+            if (requestRateLimitWaitsUsed < maxRateLimitWaits) {
+              const waitSec = classified.retryAfterSeconds !== void 0 ? Math.min(
+                Math.max(classified.retryAfterSeconds, 1),
+                MAX_RATE_LIMIT_WAIT_SECONDS
+              ) : rateLimitFallback[requestRateLimitWaitsUsed] ?? rateLimitFallback[rateLimitFallback.length - 1] ?? 120;
+              requestRateLimitWaitsUsed += 1;
+              totalRateLimitWaitsUsed += 1;
+              await sleepMs(waitSec * 1e3);
+              continue;
+            }
+            throw classified;
+          }
+          if (isTransientLLMError(classified) && requestRetriesUsed < maxTransientRetries) {
+            const backoffSec = backoffSeconds[requestRetriesUsed] ?? backoffSeconds[backoffSeconds.length - 1] ?? 0;
+            requestRetriesUsed += 1;
+            totalTransientRetriesUsed += 1;
             await sleepMs(backoffSec * 1e3);
             continue;
           }
@@ -4470,9 +4565,10 @@ var LLMClient = class {
           if (err instanceof LLMError) {
             throw err;
           }
-          if (transientRetriesUsed < maxTransientRetries) {
-            const backoffSec = backoffSeconds[transientRetriesUsed] ?? backoffSeconds[backoffSeconds.length - 1] ?? 0;
-            transientRetriesUsed += 1;
+          if (requestRetriesUsed < maxTransientRetries) {
+            const backoffSec = backoffSeconds[requestRetriesUsed] ?? backoffSeconds[backoffSeconds.length - 1] ?? 0;
+            requestRetriesUsed += 1;
+            totalTransientRetriesUsed += 1;
             await sleepMs(backoffSec * 1e3);
             continue;
           }
@@ -4483,53 +4579,62 @@ var LLMClient = class {
         }
       }
     };
-    if (provider === "google") {
-      const result2 = await executeGoogleProvider({
+    let structuredValidationRetried = false;
+    const onStructuredValidationRetry = maxTransientRetries > 0 ? async () => {
+      structuredValidationRetried = true;
+      const backoffSec = backoffSeconds[0] ?? 0;
+      totalTransientRetriesUsed += 1;
+      await sleepMs(backoffSec * 1e3);
+    } : void 0;
+    const invokeProvider = async () => {
+      if (provider === "google") {
+        return await executeGoogleProvider({
+          model,
+          apiKey,
+          providerConfig,
+          options,
+          executeRequest,
+          onStructuredValidationRetry
+        });
+      }
+      if (provider === "anthropic") {
+        return await executeAnthropicProvider({
+          model,
+          apiKey,
+          providerConfig,
+          options,
+          executeRequest
+        });
+      }
+      return await executeOpenAIProvider({
+        provider,
         model,
         apiKey,
         providerConfig,
         options,
         executeRequest
       });
-      return {
-        text: result2.text,
-        ...result2.data !== void 0 ? { data: result2.data } : {},
-        provider,
-        model,
-        attempts: 1 + transientRetriesUsed
-      };
-    }
-    if (provider === "anthropic") {
-      const result2 = await executeAnthropicProvider({
-        model,
-        apiKey,
-        providerConfig,
-        options,
-        executeRequest
-      });
-      return {
-        text: result2.text,
-        ...result2.data !== void 0 ? { data: result2.data } : {},
-        provider,
-        model,
-        attempts: 1 + transientRetriesUsed
-      };
-    }
-    const result = await executeOpenAIProvider({
-      provider,
-      model,
-      apiKey,
-      providerConfig,
-      options,
-      executeRequest
-    });
-    return {
-      text: result.text,
-      ...result.data !== void 0 ? { data: result.data } : {},
-      provider,
-      model,
-      attempts: 1 + transientRetriesUsed
     };
+    while (true) {
+      try {
+        const result = await invokeProvider();
+        return {
+          text: result.text,
+          ...result.data !== void 0 ? { data: result.data } : {},
+          provider,
+          model,
+          attempts: 1 + totalTransientRetriesUsed + totalRateLimitWaitsUsed,
+          transientRetriesUsed: totalTransientRetriesUsed,
+          rateLimitWaitsUsed: totalRateLimitWaitsUsed
+        };
+      } catch (err) {
+        if (err instanceof StructuredOutputValidationError && !structuredValidationRetried && onStructuredValidationRetry) {
+          await onStructuredValidationRetry();
+          continue;
+        }
+        throw err;
+      }
+    }
   }
   async completeText(options) {
     const res = await this.complete(options);
@@ -4558,17 +4663,23 @@ async function callGeminiText(options) {
     thinkingLevel: options.thinkingLevel,
     maxTransientRetries: options.maxTransientRetries,
     transientRetryBackoffSeconds: options.transientRetryBackoffSeconds,
+    requestTimeoutMs: options.requestTimeoutMs,
+    maxRateLimitWaits: options.maxRateLimitWaits,
     fetchImpl: options.fetchImpl,
     sleepMs: options.sleepMs,
     logLabel: options.logLabel,
     providers: options.providers
   });
+  const used = res.transientRetriesUsed ?? 0;
+  if (used > 0 && options.onTransientRetriesUsed) {
+    options.onTransientRetriesUsed(used);
+  }
   return res.text;
 }
 async function callGeminiJson(options) {
   const client = new LLMClient(options.providers);
   if (options.responseSchema) {
-    return client.completeStructured({
+    const res = await client.complete({
       apiKey: options.apiKey,
       model: options.model ?? "gemini-3.8-flash",
       systemInstruction: options.systemInstruction ?? "",
@@ -4582,11 +4693,18 @@ async function callGeminiJson(options) {
       thinkingLevel: options.thinkingLevel,
       maxTransientRetries: options.maxTransientRetries,
       transientRetryBackoffSeconds: options.transientRetryBackoffSeconds,
+      requestTimeoutMs: options.requestTimeoutMs,
+      maxRateLimitWaits: options.maxRateLimitWaits,
       fetchImpl: options.fetchImpl,
       sleepMs: options.sleepMs,
       logLabel: options.logLabel,
       providers: options.providers
     });
+    const used = res.transientRetriesUsed ?? 0;
+    if (used > 0 && options.onTransientRetriesUsed) {
+      options.onTransientRetriesUsed(used);
+    }
+    return res.data;
   }
   const rawText = await callGeminiText({
     ...options,
@@ -5810,6 +5928,10 @@ async function runUserAdvocateDesignGate(params) {
       apiKey: params.llmApiKey,
       model: params.model ?? "gemini-3.8-flash",
       providers: params.providers,
+      maxTransientRetries: params.maxTransientRetries,
+      transientRetryBackoffSeconds: params.transientRetryBackoffSeconds,
+      requestTimeoutMs: params.requestTimeoutMs,
+      onTransientRetriesUsed: params.onTransientRetriesUsed,
       systemInstruction,
       prompt,
       responseMimeType: "application/json",
@@ -6095,6 +6217,7 @@ var DEFAULT_AGENTS_CONFIG = {
   max_code_fix_attempts: 3,
   max_transient_api_retries: 4,
   transient_retry_backoff_seconds: [5, 15, 45, 120],
+  llm_request_timeout_seconds: 900,
   job_timeout_minutes: 60,
   review_timeout_minutes: 30,
   max_concurrent_tasks_per_feature: 3,
@@ -6257,6 +6380,7 @@ function resolveAgentsConfig(overrides = {}) {
     max_code_fix_attempts: overrides.max_code_fix_attempts ?? DEFAULT_AGENTS_CONFIG.max_code_fix_attempts,
     max_transient_api_retries: overrides.max_transient_api_retries ?? DEFAULT_AGENTS_CONFIG.max_transient_api_retries,
     transient_retry_backoff_seconds: overrides.transient_retry_backoff_seconds ?? DEFAULT_AGENTS_CONFIG.transient_retry_backoff_seconds,
+    llm_request_timeout_seconds: overrides.llm_request_timeout_seconds !== void 0 && overrides.llm_request_timeout_seconds > 0 ? overrides.llm_request_timeout_seconds : DEFAULT_AGENTS_CONFIG.llm_request_timeout_seconds,
     job_timeout_minutes: overrides.job_timeout_minutes ?? DEFAULT_AGENTS_CONFIG.job_timeout_minutes,
     review_timeout_minutes: overrides.review_timeout_minutes ?? DEFAULT_AGENTS_CONFIG.review_timeout_minutes,
     max_concurrent_tasks_per_feature: overrides.max_concurrent_tasks_per_feature ?? DEFAULT_AGENTS_CONFIG.max_concurrent_tasks_per_feature,
@@ -6344,6 +6468,7 @@ function parseAgentsYaml(yamlContent) {
   let max_code_fix_attempts;
   let max_transient_api_retries;
   let transient_retry_backoff_seconds;
+  let llm_request_timeout_seconds;
   let job_timeout_minutes;
   let review_timeout_minutes;
   let max_concurrent_tasks_per_feature;
@@ -6467,6 +6592,8 @@ function parseAgentsYaml(yamlContent) {
             nums[3]
           ];
         }
+      } else if (key === "llm_request_timeout_seconds") {
+        llm_request_timeout_seconds = parseNum(val);
       } else if (key === "job_timeout_minutes") {
         job_timeout_minutes = parseNum(val);
       } else if (key === "review_timeout_minutes") {
@@ -6676,6 +6803,7 @@ function parseAgentsYaml(yamlContent) {
     ...max_code_fix_attempts !== void 0 ? { max_code_fix_attempts } : {},
     ...max_transient_api_retries !== void 0 ? { max_transient_api_retries } : {},
     ...transient_retry_backoff_seconds ? { transient_retry_backoff_seconds } : {},
+    ...llm_request_timeout_seconds !== void 0 ? { llm_request_timeout_seconds } : {},
     ...job_timeout_minutes !== void 0 ? { job_timeout_minutes } : {},
     ...review_timeout_minutes !== void 0 ? { review_timeout_minutes } : {},
     ...max_concurrent_tasks_per_feature !== void 0 ? { max_concurrent_tasks_per_feature } : {},
@@ -6823,6 +6951,17 @@ function createGitHubRestHelper(params) {
           "POST",
           `/repos/${owner}/${repo}/issues/${issueNumber}/labels`,
           { labels: [...labels] }
+        );
+      } catch {
+      }
+    },
+    async removeIssueLabel(issueNumber, label) {
+      try {
+        await apiRequest(
+          "DELETE",
+          `/repos/${owner}/${repo}/issues/${issueNumber}/labels/${encodeURIComponent(label)}`,
+          void 0,
+          true
         );
       } catch {
       }
@@ -7970,6 +8109,10 @@ ${wrapUntrustedContent("untrusted_spec_content", input.designMarkdown)}` : "",
       apiKey: input.llmApiKey,
       model: input.model ?? "gemini-3.8-flash",
       providers: input.providers,
+      maxTransientRetries: input.maxTransientRetries,
+      transientRetryBackoffSeconds: input.transientRetryBackoffSeconds,
+      requestTimeoutMs: input.requestTimeoutMs,
+      onTransientRetriesUsed: input.onTransientRetriesUsed,
       thinkingLevel: "HIGH",
       logLabel: `review:${reviewer}#PR${input.prNumber}`,
       systemInstruction,
@@ -8267,6 +8410,10 @@ ${snippet}`;
       apiKey: input.llmApiKey,
       model: input.model ?? "gemini-3.8-flash",
       providers: input.providers,
+      maxTransientRetries: input.maxTransientRetries,
+      transientRetryBackoffSeconds: input.transientRetryBackoffSeconds,
+      requestTimeoutMs: input.requestTimeoutMs,
+      onTransientRetriesUsed: input.onTransientRetriesUsed,
       systemInstruction,
       prompt,
       responseMimeType: "application/json",
@@ -8335,6 +8482,7 @@ function resolvePhaseModels(inputModel, agentsConfig) {
   const providers = agentsConfig?.providers;
   const maxTransientRetries = agentsConfig?.max_transient_api_retries;
   const transientRetryBackoffSeconds = agentsConfig?.transient_retry_backoff_seconds;
+  const requestTimeoutMs = agentsConfig?.llm_request_timeout_seconds !== void 0 && agentsConfig.llm_request_timeout_seconds > 0 ? agentsConfig.llm_request_timeout_seconds * 1e3 : 9e5;
   const hasProvidersMap = Boolean(
     providers && Object.keys(providers).length > 0
   );
@@ -8343,6 +8491,7 @@ function resolvePhaseModels(inputModel, agentsConfig) {
       planningModel: fallbackModel,
       implementationModel: fallbackModel,
       reviewModel: fallbackModel,
+      requestTimeoutMs,
       ...providers ? { providers } : {},
       ...maxTransientRetries !== void 0 ? { maxTransientRetries } : {},
       ...transientRetryBackoffSeconds !== void 0 ? { transientRetryBackoffSeconds } : {}
@@ -8353,6 +8502,7 @@ function resolvePhaseModels(inputModel, agentsConfig) {
     planningModel: pickModel(agentsConfig.models?.planning),
     implementationModel: pickModel(agentsConfig.models?.implementation),
     reviewModel: pickModel(agentsConfig.models?.review),
+    requestTimeoutMs,
     ...providers ? { providers } : {},
     ...maxTransientRetries !== void 0 ? { maxTransientRetries } : {},
     ...transientRetryBackoffSeconds !== void 0 ? { transientRetryBackoffSeconds } : {}
@@ -8687,6 +8837,10 @@ async function runFeatureIntegrationPhase(params) {
     llmApiKey: params.llmApiKey,
     model: params.phaseModels.reviewModel,
     providers: params.phaseModels.providers,
+    maxTransientRetries: params.phaseModels.maxTransientRetries,
+    transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
+    requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+    onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
     fetchImpl: params.fetchImpl
   });
   const existingFeaturePr = params.existingFeaturePrAtStart ?? await params.gh.findOpenPullRequestByHead(params.featureBranch, "dev");
@@ -8769,6 +8923,10 @@ async function runFeatureIntegrationPhase(params) {
       llmApiKey: params.llmApiKey,
       model: params.phaseModels.reviewModel,
       providers: params.phaseModels.providers,
+      maxTransientRetries: params.phaseModels.maxTransientRetries,
+      transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
+      requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+      onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
       fetchImpl: params.fetchImpl
     });
     await params.gh.postPullRequestReview(featurePr.number, {
@@ -8942,6 +9100,10 @@ ${c}`).join("\n\n");
         apiKey: params.llmApiKey,
         model: params.phaseModels.implementationModel,
         providers: params.phaseModels.providers,
+        maxTransientRetries: params.phaseModels.maxTransientRetries,
+        transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
+        requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+        onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
         thinkingLevel: "HIGH",
         logLabel: `feature-review-fix:#PR${featurePr.number}/iter-${featureReviewFixAttempt}`,
         systemInstruction: featureFixSystemInstruction,
@@ -9024,6 +9186,10 @@ ${c}`).join("\n\n");
           apiKey: params.llmApiKey,
           model: params.phaseModels.implementationModel,
           providers: params.phaseModels.providers,
+          maxTransientRetries: params.phaseModels.maxTransientRetries,
+          transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
+          requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+          onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
           thinkingLevel: "HIGH",
           logLabel: `feature-review-test-retry:#PR${featurePr.number}/iter-${featureReviewFixAttempt}-retry-${featureTestRetry}`,
           systemInstruction: featureFixSystemInstruction,
@@ -9195,6 +9361,25 @@ Refs #${params.issueNumber}`
           diagnosticExcerpt: finalFeatureCiGate.formattedDiagnostics
         });
       }
+    } catch (err) {
+      if (err instanceof LLMError) {
+        const reason = err instanceof AuthenticationError || err instanceof QuotaExhaustedError ? "llm_quota_or_auth_failure" : "transient_llm_api_exhausted";
+        return await params.escalateToNeedsHuman({
+          reason,
+          ticketNumber: params.issueNumber,
+          branch: params.featureBranch,
+          phase: "implementation",
+          prNumber: featurePr.number,
+          prUrl: featurePr.html_url,
+          featurePrUrl: featurePr.html_url,
+          codeFixAttemptsUsed: featureReviewFixAttempt,
+          diagnosticExcerpt: redactSecrets(err.message, [
+            params.activeToken,
+            params.llmApiKey
+          ])
+        });
+      }
+      throw err;
     } finally {
       featureSandbox.cleanup();
     }
@@ -9432,6 +9617,7 @@ async function runGrillAndPlanPhase(params) {
   const {
     command,
     currentPhase,
+    currentStatus,
     repository,
     issueNumber,
     commentId,
@@ -9443,8 +9629,12 @@ async function runGrillAndPlanPhase(params) {
     store,
     llmApiKey,
     phaseModels,
+    onTransientRetriesUsed,
     fetchImpl
   } = params;
+  if (currentStatus === "suspended") {
+    await gh.removeIssueLabel?.(issueNumber, "needs-human");
+  }
   const grillExplorationCache = /* @__PURE__ */ new Map();
   const grillRepoTools = buildRepoExplorationToolsAndHandlers({
     gh,
@@ -9492,6 +9682,8 @@ ${issue.body}`
       providers: phaseModels.providers,
       maxTransientRetries: phaseModels.maxTransientRetries,
       transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+      requestTimeoutMs: phaseModels.requestTimeoutMs,
+      onTransientRetriesUsed,
       systemInstruction: grillSystemInstruction,
       prompt: grillPrompt,
       temperature: 0.2,
@@ -9577,6 +9769,8 @@ ${issue.body}`
       providers: phaseModels.providers,
       maxTransientRetries: phaseModels.maxTransientRetries,
       transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+      requestTimeoutMs: phaseModels.requestTimeoutMs,
+      onTransientRetriesUsed,
       systemInstruction: grillLoopEvalSystemInstruction,
       prompt: grillLoopEvalPrompt,
       temperature: 0.1,
@@ -9733,6 +9927,8 @@ ${issue.body}`
       providers: phaseModels.providers,
       maxTransientRetries: phaseModels.maxTransientRetries,
       transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+      requestTimeoutMs: phaseModels.requestTimeoutMs,
+      onTransientRetriesUsed,
       systemInstruction: specOnlySystemInstruction,
       prompt: specOnlyPrompt,
       temperature: 0.1,
@@ -9826,6 +10022,10 @@ ${issue.body}`
       llmApiKey,
       model: phaseModels.reviewModel,
       providers: phaseModels.providers,
+      maxTransientRetries: phaseModels.maxTransientRetries,
+      transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+      requestTimeoutMs: phaseModels.requestTimeoutMs,
+      onTransientRetriesUsed,
       fetchImpl
     }) : null;
     const plannedStack2 = detectRepositoryStack({
@@ -9990,6 +10190,8 @@ ${issue.body}`
       providers: phaseModels.providers,
       maxTransientRetries: phaseModels.maxTransientRetries,
       transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+      requestTimeoutMs: phaseModels.requestTimeoutMs,
+      onTransientRetriesUsed,
       systemInstruction: ticketsOnlySystemInstruction,
       prompt: ticketsOnlyPrompt,
       temperature: 0.1,
@@ -10067,6 +10269,8 @@ ${issue.body}`
       providers: phaseModels.providers,
       maxTransientRetries: phaseModels.maxTransientRetries,
       transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+      requestTimeoutMs: phaseModels.requestTimeoutMs,
+      onTransientRetriesUsed,
       systemInstruction: specSystemInstruction,
       prompt: specGenerationPrompt,
       temperature: 0.1,
@@ -10162,6 +10366,10 @@ ${issue.body}`
     llmApiKey,
     model: phaseModels.reviewModel,
     providers: phaseModels.providers,
+    maxTransientRetries: phaseModels.maxTransientRetries,
+    transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+    requestTimeoutMs: phaseModels.requestTimeoutMs,
+    onTransientRetriesUsed,
     fetchImpl
   }) : null;
   const plannedStack = detectRepositoryStack({
@@ -10715,6 +10923,9 @@ async function runTicketExecutionLoop(params) {
       continue;
     }
     const taskBranch = `task/${ticket.ticketIssueNumber}-${ticket.slug}`;
+    if (ticket.ticketIssueNumber !== params.issueNumber) {
+      await params.gh.removeIssueLabel?.(ticket.ticketIssueNumber, "needs-human");
+    }
     if (process.env.GITHUB_ACTIONS === "true") {
       process.stdout.write(
         `::group::[EPURE][Ticket #${ticket.ticketIssueNumber}] Initial TDD Implementation (${taskBranch})
@@ -10749,13 +10960,14 @@ async function runTicketExecutionLoop(params) {
       verificationGuideMarkdown = formatVerificationToolingGuideMarkdown(verificationProfile);
     }
     const bootstrappedTargets = /* @__PURE__ */ new Set();
+    let taskPr;
+    let fixAttempt = 0;
+    let reviewFixAttempt = 0;
     try {
       const ticketChangedFilesMap = /* @__PURE__ */ new Map();
       const ticketDeletedFilesSet = /* @__PURE__ */ new Set();
       let impl;
-      let taskPr;
       let currentPrHeadSha;
-      let fixAttempt = 0;
       const existingTaskPr = await params.gh.findOpenPullRequestByHead(
         taskBranch,
         params.featureBranch
@@ -10908,6 +11120,10 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
           apiKey: params.llmApiKey,
           model: params.phaseModels.implementationModel,
           providers: params.phaseModels.providers,
+          maxTransientRetries: params.phaseModels.maxTransientRetries,
+          transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
+          requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+          onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
           systemInstruction: tddSystemInstruction,
           prompt: tddPrompt,
           temperature: 0.1,
@@ -11030,6 +11246,10 @@ ${c}`).join("\n\n");
             apiKey: params.llmApiKey,
             model: params.phaseModels.implementationModel,
             providers: params.phaseModels.providers,
+            maxTransientRetries: params.phaseModels.maxTransientRetries,
+            transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
+            requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+            onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
             systemInstruction: fixSystemInstruction,
             prompt: fixPrompt,
             temperature: 0.1,
@@ -11181,6 +11401,10 @@ ${testCheck.output.slice(-2e3)}`
           llmApiKey: params.llmApiKey,
           model: params.phaseModels.reviewModel,
           providers: params.phaseModels.providers,
+          maxTransientRetries: params.phaseModels.maxTransientRetries,
+          transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
+          requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+          onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
           fetchImpl: params.fetchImpl
         });
         await params.gh.postPullRequestReview(taskPr.number, {
@@ -11281,7 +11505,6 @@ ${testCheck.output.slice(-2e3)}`
           verificationGuideMarkdown
         };
       }
-      let reviewFixAttempt = 0;
       while ((reviewResult.conclusion === "failure" || !ciGateResult.passed) && reviewFixAttempt < params.maxCodeFixAttempts) {
         reviewFixAttempt += 1;
         await updateIssueStateWithCas({
@@ -11352,6 +11575,10 @@ ${c}`).join("\n\n");
           apiKey: params.llmApiKey,
           model: params.phaseModels.implementationModel,
           providers: params.phaseModels.providers,
+          maxTransientRetries: params.phaseModels.maxTransientRetries,
+          transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
+          requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+          onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
           thinkingLevel: "HIGH",
           logLabel: `review-fix:#${ticket.ticketIssueNumber}/iter-${reviewFixAttempt}`,
           systemInstruction: reviewFixSystemInstruction,
@@ -11440,6 +11667,10 @@ ${c}`).join("\n\n");
             apiKey: params.llmApiKey,
             model: params.phaseModels.implementationModel,
             providers: params.phaseModels.providers,
+            maxTransientRetries: params.phaseModels.maxTransientRetries,
+            transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
+            requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+            onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
             thinkingLevel: "HIGH",
             systemInstruction: reviewFixSystemInstruction,
             prompt: [
@@ -11622,6 +11853,10 @@ ${testCheck.output.slice(-2e3)}`
         llmApiKey: params.llmApiKey,
         model: params.phaseModels.reviewModel,
         providers: params.phaseModels.providers,
+        maxTransientRetries: params.phaseModels.maxTransientRetries,
+        transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
+        requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+        onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
         fetchImpl: params.fetchImpl
       });
       await params.gh.updatePullRequest(taskPr.number, {
@@ -11646,6 +11881,30 @@ ${testCheck.output.slice(-2e3)}`
       params.completedTicketsSummary.push(
         `- **#${ticket.ticketIssueNumber}** (${ticket.title}) \u2014 PR #${taskPr.number} squash-merged into \`${params.featureBranch}\` as \`${squashCommit.commit_title}\` (Reviewers: ${reviewResult.selected_reviewers.map((r) => `\`${r}\``).join(", ")})`
       );
+    } catch (err) {
+      if (err instanceof LLMError) {
+        const reason = err instanceof AuthenticationError || err instanceof QuotaExhaustedError ? "llm_quota_or_auth_failure" : "transient_llm_api_exhausted";
+        const escalated = await params.escalateToNeedsHuman({
+          reason,
+          ticketNumber: ticket.ticketIssueNumber,
+          branch: taskBranch,
+          phase: "implementation",
+          prNumber: taskPr?.number,
+          prUrl: taskPr?.html_url,
+          codeFixAttemptsUsed: Math.max(fixAttempt, reviewFixAttempt),
+          diagnosticExcerpt: redactSecrets(err.message, [
+            params.activeToken,
+            params.llmApiKey
+          ])
+        });
+        return {
+          halted: true,
+          result: escalated,
+          verificationProfile,
+          verificationGuideMarkdown
+        };
+      }
+      throw err;
     } finally {
       sandboxWorkspace.cleanup();
     }
@@ -11761,25 +12020,92 @@ async function orchestrateIssueCommand(input) {
       input.model ?? input.geminiModel,
       parsedDevAgentsConfig
     );
-    if (input.command === "plan" || input.command === "to-spec" || input.command === "to-tickets" || input.command === "reply" && (currentState?.phase === "grilling" || currentState?.phase === "spec") && currentState?.status !== "cancelled" && currentState?.status !== "suspended") {
-      return await runGrillAndPlanPhase({
-        command: input.command,
-        currentPhase: currentState?.phase,
-        repository: input.repository,
-        issueNumber: input.issueNumber,
-        commentId: input.commentId,
-        issue,
-        allComments,
-        planSlug,
-        planBranch,
-        gh,
-        store,
-        llmApiKey: input.llmApiKey,
-        phaseModels,
-        fetchImpl: input.fetchImpl
-      });
+    const maxCodeFixAttempts = parsedDevAgentsConfig?.max_code_fix_attempts ?? 3;
+    let totalTransientRetriesUsed = 0;
+    if (input.command === "plan" || input.command === "to-spec" || input.command === "to-tickets" || input.command === "reply" && (currentState?.phase === "grilling" || currentState?.phase === "spec") && currentState?.status !== "cancelled") {
+      try {
+        return await runGrillAndPlanPhase({
+          command: input.command,
+          currentPhase: currentState?.phase,
+          currentStatus: currentState?.status,
+          repository: input.repository,
+          issueNumber: input.issueNumber,
+          commentId: input.commentId,
+          issue,
+          allComments,
+          planSlug,
+          planBranch,
+          gh,
+          store,
+          llmApiKey: input.llmApiKey,
+          phaseModels,
+          onTransientRetriesUsed: (used) => {
+            totalTransientRetriesUsed += used;
+          },
+          fetchImpl: input.fetchImpl
+        });
+      } catch (err) {
+        if (err instanceof LLMError) {
+          await gh.ensureLabel(
+            "needs-human",
+            "D93F0B",
+            "Requires human maintainer intervention"
+          );
+          await gh.addIssueLabels(input.issueNumber, ["needs-human"]);
+          const suspendedPhase = input.command === "to-tickets" ? "tickets" : input.command === "to-spec" || currentState?.phase === "spec" ? "spec" : "grilling";
+          const updatedSuspended = await updateIssueStateWithCas({
+            issueNumber: input.issueNumber,
+            store,
+            mutator: (prev) => ({
+              ...prev,
+              phase: suspendedPhase,
+              status: "suspended",
+              active_branch: planBranch,
+              transient_retries_used: totalTransientRetriesUsed || prev.transient_retries_used,
+              last_processed_comment_id: input.commentId ?? prev.last_processed_comment_id
+            })
+          });
+          const reason = err instanceof AuthenticationError || err instanceof QuotaExhaustedError ? "llm_quota_or_auth_failure" : "transient_llm_api_exhausted";
+          const escalationMarkdown = appendEpureCommandsSpoiler(
+            [
+              updatedSuspended.issue_mirror_markdown,
+              "",
+              formatNeedsHumanEscalationComment({
+                reason,
+                issueNumber: input.issueNumber,
+                ticketIssueNumber: input.issueNumber,
+                branch: planBranch,
+                maxCodeFixAttempts,
+                diagnosticExcerpt: redactSecrets(err.message, [
+                  activeToken,
+                  input.llmApiKey
+                ])
+              })
+            ].join("\n"),
+            {
+              phase: "suspended",
+              status: "suspended",
+              issueNumber: input.issueNumber
+            }
+          );
+          await gh.postIssueComment(input.issueNumber, escalationMarkdown);
+          return {
+            executed: true,
+            phase: updatedSuspended.state.phase,
+            status: updatedSuspended.state.status,
+            active_branch: planBranch,
+            summary_markdown: escalationMarkdown,
+            created_ticket_numbers: [],
+            feature_pr_url: ""
+          };
+        }
+        throw err;
+      }
     }
-    if (input.command === "approve") {
+    if (input.command === "approve" || input.command === "reply" && currentState?.phase === "implementation" && currentState?.status === "suspended") {
+      if (currentState?.status === "suspended") {
+        await gh.removeIssueLabel?.(input.issueNumber, "needs-human");
+      }
       let ticketsManifest = parseTrackedTicketsFromComments(allComments);
       const hasExplicitPlanManifest = ticketsManifest.length > 0;
       if (!hasExplicitPlanManifest) {
@@ -11857,7 +12183,6 @@ Refs #${input.issueNumber}`
       }
       const devWorkflowsMap = await gh.readDevWorkflowsMap("dev");
       const devBranchPaths = await gh.listBranchPaths("dev");
-      const maxCodeFixAttempts = parsedDevAgentsConfig?.max_code_fix_attempts ?? 3;
       const discoveredDevProfile = discoverVerificationProfile({
         targetFilesHint: [
           ...devBranchPaths,
@@ -11878,7 +12203,6 @@ Refs #${input.issueNumber}`
       const effectiveSleepFn = input.sleepFn ?? (input.fetchImpl ? async () => {
       } : void 0);
       const infraRerunsBySha = /* @__PURE__ */ new Map();
-      let totalTransientRetriesUsed = 0;
       const escalateToNeedsHuman = async (params) => {
         await gh.ensureLabel(
           "needs-human",
@@ -11894,7 +12218,7 @@ Refs #${input.issueNumber}`
           store,
           mutator: (prev) => ({
             ...prev,
-            phase: "implementation",
+            phase: params.phase ?? "implementation",
             status: "suspended",
             active_branch: params.branch,
             code_fix_attempts_used: params.codeFixAttemptsUsed ?? prev.code_fix_attempts_used,
@@ -12055,44 +12379,61 @@ ${t.filesToTouch.join(" ")}`
       if (loopOutcome.halted && loopOutcome.result) {
         return loopOutcome.result;
       }
-      return await runFeatureIntegrationPhase({
-        repository: input.repository,
-        issueNumber: input.issueNumber,
-        commentId: input.commentId,
-        activeToken,
-        issue,
-        planSlug,
-        featureBranch,
-        activeBranchForStartState: updatedStart.state.active_branch,
-        ticketsManifest,
-        existingFeaturePrAtStart,
-        accumulatedFiles,
-        featureChangedFilesMap,
-        featureDeletedFilesSet,
-        completedTicketsSummary,
-        devBranchPaths,
-        devWorkflowsMap,
-        trustedBaseFilesMap,
-        trustedBaseDesignMarkdown: trustedBaseRoster.designMarkdown,
-        parsedDevAgentsConfig,
-        initialVerificationProfile: loopOutcome.verificationProfile,
-        initialVerificationGuideMarkdown: loopOutcome.verificationGuideMarkdown,
-        maxCodeFixAttempts,
-        infraRerunsBySha,
-        getTotalTransientRetriesUsed: () => totalTransientRetriesUsed,
-        addTransientRetriesUsed: (delta) => {
-          totalTransientRetriesUsed += delta;
-        },
-        escalateToNeedsHuman,
-        gh,
-        store,
-        llmApiKey: input.llmApiKey,
-        phaseModels,
-        fetchImpl: input.fetchImpl,
-        effectiveSleepFn,
-        pollIntervalMs: input.pollIntervalMs,
-        sandboxRunner: input.sandboxRunner
-      });
+      try {
+        return await runFeatureIntegrationPhase({
+          repository: input.repository,
+          issueNumber: input.issueNumber,
+          commentId: input.commentId,
+          activeToken,
+          issue,
+          planSlug,
+          featureBranch,
+          activeBranchForStartState: updatedStart.state.active_branch,
+          ticketsManifest,
+          existingFeaturePrAtStart,
+          accumulatedFiles,
+          featureChangedFilesMap,
+          featureDeletedFilesSet,
+          completedTicketsSummary,
+          devBranchPaths,
+          devWorkflowsMap,
+          trustedBaseFilesMap,
+          trustedBaseDesignMarkdown: trustedBaseRoster.designMarkdown,
+          parsedDevAgentsConfig,
+          initialVerificationProfile: loopOutcome.verificationProfile,
+          initialVerificationGuideMarkdown: loopOutcome.verificationGuideMarkdown,
+          maxCodeFixAttempts,
+          infraRerunsBySha,
+          getTotalTransientRetriesUsed: () => totalTransientRetriesUsed,
+          addTransientRetriesUsed: (delta) => {
+            totalTransientRetriesUsed += delta;
+          },
+          escalateToNeedsHuman,
+          gh,
+          store,
+          llmApiKey: input.llmApiKey,
+          phaseModels,
+          fetchImpl: input.fetchImpl,
+          effectiveSleepFn,
+          pollIntervalMs: input.pollIntervalMs,
+          sandboxRunner: input.sandboxRunner
+        });
+      } catch (err) {
+        if (err instanceof LLMError) {
+          const reason = err instanceof AuthenticationError || err instanceof QuotaExhaustedError ? "llm_quota_or_auth_failure" : "transient_llm_api_exhausted";
+          return await escalateToNeedsHuman({
+            reason,
+            ticketNumber: input.issueNumber,
+            branch: featureBranch,
+            phase: "implementation",
+            diagnosticExcerpt: redactSecrets(err.message, [
+              activeToken,
+              input.llmApiKey
+            ])
+          });
+        }
+        throw err;
+      }
     }
     return {
       executed: false,

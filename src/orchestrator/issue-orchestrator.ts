@@ -8,6 +8,11 @@ import {
   type VerificationProfile
 } from "../bootstrap/ci-and-renovate.js";
 import { formatNeedsHumanEscalationComment } from "../execution/external-ci-gate.js";
+import {
+  AuthenticationError,
+  LLMError,
+  QuotaExhaustedError
+} from "../llm/errors.js";
 import { adaptReviewerRosterForDomain } from "../review/reviewer-roster.js";
 import { formatVerificationToolingGuideMarkdown } from "../sandbox/polyglot-workspace-runner.js";
 import {
@@ -228,6 +233,9 @@ export async function orchestrateIssueCommand(
       input.model ?? input.geminiModel,
       parsedDevAgentsConfig
     );
+    const maxCodeFixAttempts =
+      parsedDevAgentsConfig?.max_code_fix_attempts ?? 3;
+    let totalTransientRetriesUsed = 0;
 
     // 3 & 4. Handle /epure plan, human reply during grilling or spec review, /epure to-spec, /epure to-tickets
     if (
@@ -237,29 +245,114 @@ export async function orchestrateIssueCommand(
       (input.command === "reply" &&
         (currentState?.phase === "grilling" ||
           currentState?.phase === "spec") &&
-        currentState?.status !== "cancelled" &&
-        currentState?.status !== "suspended")
+        currentState?.status !== "cancelled")
     ) {
-      return await runGrillAndPlanPhase({
-        command: input.command,
-        currentPhase: currentState?.phase,
-        repository: input.repository,
-        issueNumber: input.issueNumber,
-        commentId: input.commentId,
-        issue,
-        allComments,
-        planSlug,
-        planBranch,
-        gh,
-        store,
-        llmApiKey: input.llmApiKey,
-        phaseModels,
-        fetchImpl: input.fetchImpl
-      });
+      try {
+        return await runGrillAndPlanPhase({
+          command: input.command,
+          currentPhase: currentState?.phase,
+          currentStatus: currentState?.status,
+          repository: input.repository,
+          issueNumber: input.issueNumber,
+          commentId: input.commentId,
+          issue,
+          allComments,
+          planSlug,
+          planBranch,
+          gh,
+          store,
+          llmApiKey: input.llmApiKey,
+          phaseModels,
+          onTransientRetriesUsed: (used) => {
+            totalTransientRetriesUsed += used;
+          },
+          fetchImpl: input.fetchImpl
+        });
+      } catch (err) {
+        if (err instanceof LLMError) {
+          await gh.ensureLabel(
+            "needs-human",
+            "D93F0B",
+            "Requires human maintainer intervention"
+          );
+          await gh.addIssueLabels(input.issueNumber, ["needs-human"]);
+
+          const suspendedPhase: EpureIssueState["phase"] =
+            input.command === "to-tickets"
+              ? "tickets"
+              : input.command === "to-spec" || currentState?.phase === "spec"
+                ? "spec"
+                : "grilling";
+
+          const updatedSuspended = await updateIssueStateWithCas({
+            issueNumber: input.issueNumber,
+            store,
+            mutator: (prev) => ({
+              ...prev,
+              phase: suspendedPhase,
+              status: "suspended",
+              active_branch: planBranch,
+              transient_retries_used:
+                totalTransientRetriesUsed || prev.transient_retries_used,
+              last_processed_comment_id:
+                input.commentId ?? prev.last_processed_comment_id
+            })
+          });
+
+          const reason =
+            err instanceof AuthenticationError ||
+            err instanceof QuotaExhaustedError
+              ? "llm_quota_or_auth_failure"
+              : "transient_llm_api_exhausted";
+
+          const escalationMarkdown = appendEpureCommandsSpoiler(
+            [
+              updatedSuspended.issue_mirror_markdown,
+              "",
+              formatNeedsHumanEscalationComment({
+                reason,
+                issueNumber: input.issueNumber,
+                ticketIssueNumber: input.issueNumber,
+                branch: planBranch,
+                maxCodeFixAttempts,
+                diagnosticExcerpt: redactSecrets(err.message, [
+                  activeToken,
+                  input.llmApiKey
+                ])
+              })
+            ].join("\n"),
+            {
+              phase: "suspended",
+              status: "suspended",
+              issueNumber: input.issueNumber
+            }
+          );
+
+          await gh.postIssueComment(input.issueNumber, escalationMarkdown);
+          return {
+            executed: true,
+            phase: updatedSuspended.state.phase,
+            status: updatedSuspended.state.status,
+            active_branch: planBranch,
+            summary_markdown: escalationMarkdown,
+            created_ticket_numbers: [],
+            feature_pr_url: ""
+          };
+        }
+        throw err;
+      }
     }
 
-    // 5. Handle /epure approve
-    if (input.command === "approve") {
+    // 5. Handle /epure approve (or reply when suspended in implementation phase)
+    if (
+      input.command === "approve" ||
+      (input.command === "reply" &&
+        currentState?.phase === "implementation" &&
+        currentState?.status === "suspended")
+    ) {
+      if (currentState?.status === "suspended") {
+        await gh.removeIssueLabel?.(input.issueNumber, "needs-human");
+      }
       let ticketsManifest = parseTrackedTicketsFromComments(allComments);
       const hasExplicitPlanManifest = ticketsManifest.length > 0;
       if (!hasExplicitPlanManifest) {
@@ -342,8 +435,6 @@ export async function orchestrateIssueCommand(
 
       const devWorkflowsMap = await gh.readDevWorkflowsMap("dev");
       const devBranchPaths = await gh.listBranchPaths("dev");
-      const maxCodeFixAttempts =
-        parsedDevAgentsConfig?.max_code_fix_attempts ?? 3;
 
       const discoveredDevProfile = discoverVerificationProfile({
         targetFilesHint: [
@@ -385,7 +476,6 @@ export async function orchestrateIssueCommand(
       const effectiveSleepFn =
         input.sleepFn ?? (input.fetchImpl ? async () => {} : undefined);
       const infraRerunsBySha = new Map<string, number>();
-      let totalTransientRetriesUsed = 0;
 
       const escalateToNeedsHuman: EscalateToNeedsHumanFn = async (params) => {
         await gh.ensureLabel(
@@ -403,7 +493,7 @@ export async function orchestrateIssueCommand(
           store,
           mutator: (prev) => ({
             ...prev,
-            phase: "implementation",
+            phase: params.phase ?? "implementation",
             status: "suspended",
             active_branch: params.branch,
             code_fix_attempts_used:
@@ -579,44 +669,65 @@ export async function orchestrateIssueCommand(
         return loopOutcome.result;
       }
 
-      return await runFeatureIntegrationPhase({
-        repository: input.repository,
-        issueNumber: input.issueNumber,
-        commentId: input.commentId,
-        activeToken,
-        issue,
-        planSlug,
-        featureBranch,
-        activeBranchForStartState: updatedStart.state.active_branch,
-        ticketsManifest,
-        existingFeaturePrAtStart,
-        accumulatedFiles,
-        featureChangedFilesMap,
-        featureDeletedFilesSet,
-        completedTicketsSummary,
-        devBranchPaths,
-        devWorkflowsMap,
-        trustedBaseFilesMap,
-        trustedBaseDesignMarkdown: trustedBaseRoster.designMarkdown,
-        parsedDevAgentsConfig,
-        initialVerificationProfile: loopOutcome.verificationProfile,
-        initialVerificationGuideMarkdown: loopOutcome.verificationGuideMarkdown,
-        maxCodeFixAttempts,
-        infraRerunsBySha,
-        getTotalTransientRetriesUsed: () => totalTransientRetriesUsed,
-        addTransientRetriesUsed: (delta) => {
-          totalTransientRetriesUsed += delta;
-        },
-        escalateToNeedsHuman,
-        gh,
-        store,
-        llmApiKey: input.llmApiKey,
-        phaseModels,
-        fetchImpl: input.fetchImpl,
-        effectiveSleepFn,
-        pollIntervalMs: input.pollIntervalMs,
-        sandboxRunner: input.sandboxRunner
-      });
+      try {
+        return await runFeatureIntegrationPhase({
+          repository: input.repository,
+          issueNumber: input.issueNumber,
+          commentId: input.commentId,
+          activeToken,
+          issue,
+          planSlug,
+          featureBranch,
+          activeBranchForStartState: updatedStart.state.active_branch,
+          ticketsManifest,
+          existingFeaturePrAtStart,
+          accumulatedFiles,
+          featureChangedFilesMap,
+          featureDeletedFilesSet,
+          completedTicketsSummary,
+          devBranchPaths,
+          devWorkflowsMap,
+          trustedBaseFilesMap,
+          trustedBaseDesignMarkdown: trustedBaseRoster.designMarkdown,
+          parsedDevAgentsConfig,
+          initialVerificationProfile: loopOutcome.verificationProfile,
+          initialVerificationGuideMarkdown: loopOutcome.verificationGuideMarkdown,
+          maxCodeFixAttempts,
+          infraRerunsBySha,
+          getTotalTransientRetriesUsed: () => totalTransientRetriesUsed,
+          addTransientRetriesUsed: (delta) => {
+            totalTransientRetriesUsed += delta;
+          },
+          escalateToNeedsHuman,
+          gh,
+          store,
+          llmApiKey: input.llmApiKey,
+          phaseModels,
+          fetchImpl: input.fetchImpl,
+          effectiveSleepFn,
+          pollIntervalMs: input.pollIntervalMs,
+          sandboxRunner: input.sandboxRunner
+        });
+      } catch (err) {
+        if (err instanceof LLMError) {
+          const reason =
+            err instanceof AuthenticationError ||
+            err instanceof QuotaExhaustedError
+              ? "llm_quota_or_auth_failure"
+              : "transient_llm_api_exhausted";
+          return await escalateToNeedsHuman({
+            reason,
+            ticketNumber: input.issueNumber,
+            branch: featureBranch,
+            phase: "implementation",
+            diagnosticExcerpt: redactSecrets(err.message, [
+              activeToken,
+              input.llmApiKey
+            ])
+          });
+        }
+        throw err;
+      }
     }
 
     return {

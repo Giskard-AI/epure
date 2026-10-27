@@ -166,11 +166,18 @@ describe("1. Dry-run simulation & guided application (planAndApplyRepoSetup)", (
       const agentsYmlContent = readFileSync(agentsYmlPath, "utf8");
       expect(agentsYmlContent).toContain("max_code_fix_attempts: 3");
       expect(agentsYmlContent).toContain("max_transient_api_retries: 4");
+      expect(agentsYmlContent).toContain("llm_request_timeout_seconds: 900");
       expect(agentsYmlContent).toContain("job_timeout_minutes: 60");
       expect(agentsYmlContent).toContain("review_timeout_minutes: 30");
       expect(agentsYmlContent).toContain("max_concurrent_tasks_per_feature: 3");
       expect(agentsYmlContent).toContain("trace_retention_days: 30");
       expect(agentsYmlContent).toContain("preview_retention_days: 14");
+
+      const issueWorkflowContent = readFileSync(
+        join(tempRepoDir, ".github", "workflows", "epure-issue-command.yml"),
+        "utf8"
+      );
+      expect(issueWorkflowContent).toContain("timeout-minutes: 60");
 
       expect(result.human_interventions.length).toBeGreaterThanOrEqual(3);
       expect(result.human_interventions.map((h) => h.id)).toEqual(
@@ -203,6 +210,7 @@ describe("2. .github/agents.yml defaults (Q78) and non-weakenable security invar
       max_code_fix_attempts: 3,
       max_transient_api_retries: 4,
       transient_retry_backoff_seconds: [5, 15, 45, 120],
+      llm_request_timeout_seconds: 900,
       job_timeout_minutes: 60,
       review_timeout_minutes: 30,
       max_concurrent_tasks_per_feature: 3,

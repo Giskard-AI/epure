@@ -1,7 +1,8 @@
 import {
   classifyHttpError,
   LLMError,
-  parseAndValidateStructuredOutput
+  parseAndValidateStructuredOutput,
+  StructuredOutputValidationError
 } from "../errors.js";
 import {
   buildProtectedSystemInstruction,
@@ -45,6 +46,7 @@ export interface GoogleProviderExecutionInput<T = unknown> {
     url: string,
     init: RequestInit
   ) => Promise<Response>;
+  readonly onStructuredValidationRetry?: (() => Promise<void> | void) | undefined;
 }
 
 export interface GoogleProviderExecutionOutput<T = unknown> {
@@ -215,11 +217,31 @@ export async function executeGoogleProvider<T = unknown>(
     }
 
     if (options.responseSchema) {
-      const validated = parseAndValidateStructuredOutput(
-        text,
-        options.responseSchema
-      );
-      return { text, data: validated };
+      try {
+        const validated = parseAndValidateStructuredOutput(
+          text,
+          options.responseSchema
+        );
+        return { text, data: validated };
+      } catch (err) {
+        if (err instanceof StructuredOutputValidationError) {
+          await input.onStructuredValidationRetry?.();
+          const retryParts = await sendGenerateContent({
+            systemInstruction: {
+              parts: [{ text: effectiveSystemInstruction }]
+            },
+            contents,
+            generationConfig
+          });
+          const retryText = extractTextFromParts(retryParts).trim();
+          const validatedRetry = parseAndValidateStructuredOutput(
+            retryText,
+            options.responseSchema
+          );
+          return { text: retryText, data: validatedRetry };
+        }
+        throw err;
+      }
     }
 
     return { text };
@@ -378,25 +400,43 @@ export async function executeGoogleProvider<T = unknown>(
       }
     ];
 
-    const finalParts = await sendGenerateContent({
-      systemInstruction: {
-        parts: [{ text: effectiveSystemInstruction }]
-      },
-      contents: finalContents,
-      toolConfig: {
-        functionCallingConfig: {
-          mode: "NONE"
-        }
-      },
-      generationConfig: finalGenerationConfig
-    });
+    const sendFinalStructuredTurn = async (): Promise<{
+      readonly text: string;
+      readonly data: T;
+    }> => {
+      const finalParts = await sendGenerateContent({
+        systemInstruction: {
+          parts: [{ text: effectiveSystemInstruction }]
+        },
+        contents: finalContents,
+        toolConfig: {
+          functionCallingConfig: {
+            mode: "NONE"
+          }
+        },
+        generationConfig: finalGenerationConfig
+      });
 
-    const finalText = extractTextFromParts(finalParts).trim();
-    const validated = parseAndValidateStructuredOutput(
-      finalText,
-      options.responseSchema
-    );
-    return { text: finalText, data: validated };
+      const finalText = extractTextFromParts(finalParts).trim();
+      const validated = parseAndValidateStructuredOutput(
+        finalText,
+        options.responseSchema
+      );
+      return { text: finalText, data: validated };
+    };
+
+    try {
+      return await sendFinalStructuredTurn();
+    } catch (err) {
+      if (
+        err instanceof StructuredOutputValidationError &&
+        input.onStructuredValidationRetry
+      ) {
+        await input.onStructuredValidationRetry();
+        return await sendFinalStructuredTurn();
+      }
+      throw err;
+    }
   }
 
   // Non-schema finalization when tool budget was reached while still calling tools

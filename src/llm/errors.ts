@@ -156,14 +156,50 @@ export class StructuredOutputValidationError extends LLMError {
   }
 }
 
-function parseRetryAfterHeader(
-  headerVal?: string | null | undefined
+export function parseRetryAfterSeconds(
+  headerVal?: string | null | undefined,
+  bodyText?: string | undefined,
+  nowMs: number = Date.now()
 ): number | undefined {
-  if (!headerVal) {
-    return undefined;
+  if (headerVal) {
+    const trimmed = headerVal.trim();
+    if (/^\d+(?:\.\d+)?$/.test(trimmed)) {
+      const num = Number.parseFloat(trimmed);
+      if (Number.isFinite(num) && num >= 0) {
+        return Math.ceil(num);
+      }
+    }
+    const parsedDateMs = Date.parse(trimmed);
+    if (!Number.isNaN(parsedDateMs)) {
+      return Math.max(0, Math.ceil((parsedDateMs - nowMs) / 1000));
+    }
   }
-  const num = Number.parseFloat(headerVal.trim());
-  return Number.isFinite(num) && num >= 0 ? num : undefined;
+
+  if (bodyText) {
+    const jsonDelayMatch =
+      /"(?:retryDelay|retry_delay|retryAfter|retry_after)"\s*:\s*"?(\d+(?:\.\d+)?)s?"?/i.exec(
+        bodyText
+      );
+    if (jsonDelayMatch?.[1]) {
+      const sec = Number.parseFloat(jsonDelayMatch[1]);
+      if (Number.isFinite(sec) && sec >= 0) {
+        return Math.ceil(sec);
+      }
+    }
+
+    const proseDelayMatch =
+      /(?:retry\s+after|try\s+again\s+in|retry\s+in)\s+(\d+(?:\.\d+)?)\s*(?:s|sec|seconds)\b/i.exec(
+        bodyText
+      );
+    if (proseDelayMatch?.[1]) {
+      const sec = Number.parseFloat(proseDelayMatch[1]);
+      if (Number.isFinite(sec) && sec >= 0) {
+        return Math.ceil(sec);
+      }
+    }
+  }
+
+  return undefined;
 }
 
 export function classifyHttpError(params: {
@@ -212,7 +248,7 @@ export function classifyHttpError(params: {
     return new RateLimitError(message, {
       status,
       provider,
-      retryAfterSeconds: parseRetryAfterHeader(retryAfterHeader)
+      retryAfterSeconds: parseRetryAfterSeconds(retryAfterHeader, bodyText)
     });
   }
 

@@ -116,6 +116,10 @@ export interface RunMultiAgentPrReviewInput {
   readonly llmApiKey?: string | undefined;
   readonly model?: string | undefined;
   readonly providers?: Readonly<Record<string, ProviderConfig>> | undefined;
+  readonly maxTransientRetries?: number | undefined;
+  readonly transientRetryBackoffSeconds?: readonly number[] | undefined;
+  readonly requestTimeoutMs?: number | undefined;
+  readonly onTransientRetriesUsed?: ((retriesUsed: number) => void) | undefined;
   readonly fetchImpl?: typeof fetch | undefined;
 }
 
@@ -624,6 +628,10 @@ async function executeSingleReviewerPass(params: {
       apiKey: input.llmApiKey,
       model: input.model ?? "gemini-3.8-flash",
       providers: input.providers,
+      maxTransientRetries: input.maxTransientRetries,
+      transientRetryBackoffSeconds: input.transientRetryBackoffSeconds,
+      requestTimeoutMs: input.requestTimeoutMs,
+      onTransientRetriesUsed: input.onTransientRetriesUsed,
       thinkingLevel: "HIGH",
       logLabel: `review:${reviewer}#PR${input.prNumber}`,
       systemInstruction,

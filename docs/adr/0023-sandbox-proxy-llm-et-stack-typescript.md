@@ -13,8 +13,9 @@ Lorsqu'un agent d'implémentation ou de migration Renovate travaille sur un dép
 2. **Q77 — Monorepo TypeScript strict sur Node.js 24 LTS** : les Custom Actions et contrôleurs d'`EPURE` sont écrits en TypeScript strict (Node.js 24 LTS) et pré-bundlés afin qu'aucun `npm install` ne soit requis au runtime chez les consommateurs. Le bootstrap `setup-repo` est fourni sous forme de CLI TypeScript invocables par le skill local, et les Composite Actions sont réservées à l'invocation de binaires externes épinglés (`pi`, `codex`, `zizmor`).
 3. **Q78 — Valeurs par défaut de `.github/agents.yml`** :
    - `max_code_fix_attempts`: **3**
-   - `max_transient_api_retries`: **4** (backoff exponentiel 5s → 15s → 45s → 120s)
-   - `job_timeout_minutes`: **60 minutes (1h)** pour les jobs d'implémentation (30 minutes pour les phases courtes de review/triage)
+   - `max_transient_api_retries`: **4** (backoff exponentiel 5s → 15s → 45s → 120s, évalué par requête HTTP unitaire et non partagé sur l'ensemble des tours d'une boucle d'outils ; les limitations de débit `HTTP 429` hors quota attendent le délai `Retry-After` ou un palier progressif `[15, 30, 60, 120]s` plafonné à 300s sans consommer ce compteur, jusqu'à 10 attentes par requête)
+   - `llm_request_timeout_seconds`: **900 secondes (15 minutes)** par requête HTTP unitaire vers un fournisseur LLM (distinct des timeouts des commandes locales de sandbox Stage 1 fixés à 180s/300s)
+   - `job_timeout_minutes`: **60 minutes (1h)** pour les jobs d'implémentation, synchronisé dans le `timeout-minutes` du workflow généré `.github/workflows/epure-orchestrator.yml` (30 minutes pour les phases courtes de review/triage)
    - `max_concurrent_tasks_per_feature`: **3**
    - `trace_retention_days`: **30 jours** (et **14 jours** pour les previews statiques hébergées)
 4. **Q79 — Périmètre des violations bloquantes Impeccable** : le check CI Impeccable bloque par défaut toute nouvelle violation portant sur : (a) le socle objectif par défaut (accessibilité vérifiable WCAG/ARIA/contraste/clavier, cassures de layout/overflow responsive, absence des états obligatoires loading/error/empty), ainsi que (b) toutes les règles et tokens ajoutés dans `DESIGN.md` et `.impeccable/surfaces/*.md`. Les suggestions purement esthétiques restent informatives.

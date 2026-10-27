@@ -85,6 +85,7 @@ function parseLatestSpecManifest(
 export async function runGrillAndPlanPhase(params: {
   readonly command: "plan" | "reply" | "to-spec" | "to-tickets";
   readonly currentPhase?: string | undefined;
+  readonly currentStatus?: string | undefined;
   readonly repository: string;
   readonly issueNumber: number;
   readonly commentId: number | undefined;
@@ -96,11 +97,13 @@ export async function runGrillAndPlanPhase(params: {
   readonly store: GitRefStateStore;
   readonly llmApiKey: string;
   readonly phaseModels: ResolvedPhaseModels;
+  readonly onTransientRetriesUsed?: ((retriesUsed: number) => void) | undefined;
   readonly fetchImpl?: typeof fetch | undefined;
 }): Promise<OrchestrateIssueResult> {
   const {
     command,
     currentPhase,
+    currentStatus,
     repository,
     issueNumber,
     commentId,
@@ -112,8 +115,13 @@ export async function runGrillAndPlanPhase(params: {
     store,
     llmApiKey,
     phaseModels,
+    onTransientRetriesUsed,
     fetchImpl
   } = params;
+
+  if (currentStatus === "suspended") {
+    await gh.removeIssueLabel?.(issueNumber, "needs-human");
+  }
 
   const grillExplorationCache = new Map<string, string>();
   const grillRepoTools = buildRepoExplorationToolsAndHandlers({
@@ -163,6 +171,8 @@ export async function runGrillAndPlanPhase(params: {
       providers: phaseModels.providers,
       maxTransientRetries: phaseModels.maxTransientRetries,
       transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+      requestTimeoutMs: phaseModels.requestTimeoutMs,
+      onTransientRetriesUsed,
       systemInstruction: grillSystemInstruction,
       prompt: grillPrompt,
       temperature: 0.2,
@@ -258,6 +268,8 @@ export async function runGrillAndPlanPhase(params: {
       providers: phaseModels.providers,
       maxTransientRetries: phaseModels.maxTransientRetries,
       transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+      requestTimeoutMs: phaseModels.requestTimeoutMs,
+      onTransientRetriesUsed,
       systemInstruction: grillLoopEvalSystemInstruction,
       prompt: grillLoopEvalPrompt,
       temperature: 0.1,
@@ -443,6 +455,8 @@ export async function runGrillAndPlanPhase(params: {
       providers: phaseModels.providers,
       maxTransientRetries: phaseModels.maxTransientRetries,
       transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+      requestTimeoutMs: phaseModels.requestTimeoutMs,
+      onTransientRetriesUsed,
       systemInstruction: specOnlySystemInstruction,
       prompt: specOnlyPrompt,
       temperature: 0.1,
@@ -548,6 +562,10 @@ export async function runGrillAndPlanPhase(params: {
           llmApiKey,
           model: phaseModels.reviewModel,
           providers: phaseModels.providers,
+          maxTransientRetries: phaseModels.maxTransientRetries,
+          transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+          requestTimeoutMs: phaseModels.requestTimeoutMs,
+          onTransientRetriesUsed,
           fetchImpl
         })
       : null;
@@ -750,6 +768,8 @@ export async function runGrillAndPlanPhase(params: {
       providers: phaseModels.providers,
       maxTransientRetries: phaseModels.maxTransientRetries,
       transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+      requestTimeoutMs: phaseModels.requestTimeoutMs,
+      onTransientRetriesUsed,
       systemInstruction: ticketsOnlySystemInstruction,
       prompt: ticketsOnlyPrompt,
       temperature: 0.1,
@@ -832,6 +852,8 @@ export async function runGrillAndPlanPhase(params: {
       providers: phaseModels.providers,
       maxTransientRetries: phaseModels.maxTransientRetries,
       transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+      requestTimeoutMs: phaseModels.requestTimeoutMs,
+      onTransientRetriesUsed,
       systemInstruction: specSystemInstruction,
       prompt: specGenerationPrompt,
       temperature: 0.1,
@@ -938,6 +960,10 @@ export async function runGrillAndPlanPhase(params: {
         llmApiKey,
         model: phaseModels.reviewModel,
         providers: phaseModels.providers,
+        maxTransientRetries: phaseModels.maxTransientRetries,
+        transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+        requestTimeoutMs: phaseModels.requestTimeoutMs,
+        onTransientRetriesUsed,
         fetchImpl
       })
     : null;

@@ -1,5 +1,10 @@
 export {
+  DEFAULT_LLM_REQUEST_TIMEOUT_MS,
+  DEFAULT_MAX_RATE_LIMIT_WAITS,
+  DEFAULT_MAX_TRANSIENT_RETRIES,
+  DEFAULT_RATE_LIMIT_FALLBACK_SECONDS,
   LLMClient,
+  MAX_RATE_LIMIT_WAIT_SECONDS,
   normalizeProviderConfig,
   parseModelIdentifier,
   resolveConfigValue,
@@ -16,6 +21,7 @@ export {
   type LLMErrorOptions,
   LLMTimeoutError,
   parseAndValidateStructuredOutput,
+  parseRetryAfterSeconds,
   QuotaExhaustedError,
   RateLimitError,
   sanitizeJsonStringLiterals,

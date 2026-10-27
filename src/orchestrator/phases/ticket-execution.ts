@@ -1,3 +1,4 @@
+import { redactSecrets } from "../../auth/issue-command-gate.js";
 import {
   discoverVerificationProfile,
   type VerificationProfile
@@ -10,6 +11,11 @@ import {
 } from "../../execution/external-ci-gate.js";
 import { reconcileProvenTicketDependencies } from "../../execution/proven-dependency-unblocker.js";
 import { evaluateReviewFeedbackTrigger } from "../../execution/review-loop-guard.js";
+import {
+  AuthenticationError,
+  LLMError,
+  QuotaExhaustedError
+} from "../../llm/errors.js";
 import { runMultiAgentPrReviewPass } from "../../review/multi-agent-pr-review.js";
 import type { ReviewerAgentName } from "../../review/reviewer-roster.js";
 import { generateSemanticSquashCommitFromDiff } from "../../review/squash-commit-generator.js";
@@ -367,6 +373,9 @@ export async function runTicketExecutionLoop(
     }
 
     const taskBranch = `task/${ticket.ticketIssueNumber}-${ticket.slug}`;
+    if (ticket.ticketIssueNumber !== params.issueNumber) {
+      await params.gh.removeIssueLabel?.(ticket.ticketIssueNumber, "needs-human");
+    }
     if (process.env.GITHUB_ACTIONS === "true") {
       process.stdout.write(
         `::group::[EPURE][Ticket #${ticket.ticketIssueNumber}] Initial TDD Implementation (${taskBranch})\n`
@@ -413,6 +422,10 @@ export async function runTicketExecutionLoop(
     }
     const bootstrappedTargets = new Set<string>();
 
+    let taskPr: { number: number; html_url: string; head_sha: string } | undefined;
+    let fixAttempt = 0;
+    let reviewFixAttempt = 0;
+
     try {
       const ticketChangedFilesMap = new Map<string, string>();
       const ticketDeletedFilesSet = new Set<string>();
@@ -421,9 +434,7 @@ export async function runTicketExecutionLoop(
         test_summary: string;
         files: Array<{ path: string; content: string }>;
       };
-      let taskPr: { number: number; html_url: string; head_sha: string };
       let currentPrHeadSha: string;
-      let fixAttempt = 0;
 
       const existingTaskPr = await params.gh.findOpenPullRequestByHead(
         taskBranch,
@@ -591,6 +602,12 @@ export async function runTicketExecutionLoop(
           apiKey: params.llmApiKey,
           model: params.phaseModels.implementationModel,
           providers: params.phaseModels.providers,
+          maxTransientRetries: params.phaseModels.maxTransientRetries,
+          transientRetryBackoffSeconds:
+            params.phaseModels.transientRetryBackoffSeconds,
+          requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+          onTransientRetriesUsed: (used) =>
+            params.addTransientRetriesUsed(used),
           systemInstruction: tddSystemInstruction,
           prompt: tddPrompt,
           temperature: 0.1,
@@ -719,6 +736,12 @@ export async function runTicketExecutionLoop(
             apiKey: params.llmApiKey,
             model: params.phaseModels.implementationModel,
             providers: params.phaseModels.providers,
+            maxTransientRetries: params.phaseModels.maxTransientRetries,
+            transientRetryBackoffSeconds:
+              params.phaseModels.transientRetryBackoffSeconds,
+            requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+            onTransientRetriesUsed: (used) =>
+              params.addTransientRetriesUsed(used),
             systemInstruction: fixSystemInstruction,
             prompt: fixPrompt,
             temperature: 0.1,
@@ -875,7 +898,7 @@ export async function runTicketExecutionLoop(
 
         const reviewRes = await runMultiAgentPrReviewPass({
           repository: params.repository,
-          prNumber: taskPr.number,
+          prNumber: taskPr!.number,
           headBranch: taskBranch,
           baseBranch: params.featureBranch,
           ticketNumber: ticket.ticketIssueNumber,
@@ -891,10 +914,16 @@ export async function runTicketExecutionLoop(
           llmApiKey: params.llmApiKey,
           model: params.phaseModels.reviewModel,
           providers: params.phaseModels.providers,
+          maxTransientRetries: params.phaseModels.maxTransientRetries,
+          transientRetryBackoffSeconds:
+            params.phaseModels.transientRetryBackoffSeconds,
+          requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+          onTransientRetriesUsed: (used) =>
+            params.addTransientRetriesUsed(used),
           fetchImpl: params.fetchImpl
         });
 
-        await params.gh.postPullRequestReview(taskPr.number, {
+        await params.gh.postPullRequestReview(taskPr!.number, {
           commitId: passParams.headSha,
           body: reviewRes.review_body_markdown
         });
@@ -1010,7 +1039,6 @@ export async function runTicketExecutionLoop(
         };
       }
 
-      let reviewFixAttempt = 0;
       while (
         (reviewResult.conclusion === "failure" || !ciGateResult.passed) &&
         reviewFixAttempt < params.maxCodeFixAttempts
@@ -1095,6 +1123,12 @@ export async function runTicketExecutionLoop(
             apiKey: params.llmApiKey,
             model: params.phaseModels.implementationModel,
             providers: params.phaseModels.providers,
+            maxTransientRetries: params.phaseModels.maxTransientRetries,
+            transientRetryBackoffSeconds:
+              params.phaseModels.transientRetryBackoffSeconds,
+            requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+            onTransientRetriesUsed: (used) =>
+              params.addTransientRetriesUsed(used),
             thinkingLevel: "HIGH",
             logLabel: `review-fix:#${ticket.ticketIssueNumber}/iter-${reviewFixAttempt}`,
             systemInstruction: reviewFixSystemInstruction,
@@ -1190,6 +1224,12 @@ export async function runTicketExecutionLoop(
               apiKey: params.llmApiKey,
               model: params.phaseModels.implementationModel,
               providers: params.phaseModels.providers,
+              maxTransientRetries: params.phaseModels.maxTransientRetries,
+              transientRetryBackoffSeconds:
+                params.phaseModels.transientRetryBackoffSeconds,
+              requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+              onTransientRetriesUsed: (used) =>
+                params.addTransientRetriesUsed(used),
               thinkingLevel: "HIGH",
               systemInstruction: reviewFixSystemInstruction,
               prompt: [
@@ -1386,6 +1426,12 @@ export async function runTicketExecutionLoop(
         llmApiKey: params.llmApiKey,
         model: params.phaseModels.reviewModel,
         providers: params.phaseModels.providers,
+        maxTransientRetries: params.phaseModels.maxTransientRetries,
+        transientRetryBackoffSeconds:
+          params.phaseModels.transientRetryBackoffSeconds,
+        requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+        onTransientRetriesUsed: (used) =>
+          params.addTransientRetriesUsed(used),
         fetchImpl: params.fetchImpl
       });
 
@@ -1415,6 +1461,34 @@ export async function runTicketExecutionLoop(
       params.completedTicketsSummary.push(
         `- **#${ticket.ticketIssueNumber}** (${ticket.title}) — PR #${taskPr.number} squash-merged into \`${params.featureBranch}\` as \`${squashCommit.commit_title}\` (Reviewers: ${reviewResult.selected_reviewers.map((r) => `\`${r}\``).join(", ")})`
       );
+    } catch (err) {
+      if (err instanceof LLMError) {
+        const reason =
+          err instanceof AuthenticationError ||
+          err instanceof QuotaExhaustedError
+            ? "llm_quota_or_auth_failure"
+            : "transient_llm_api_exhausted";
+        const escalated = await params.escalateToNeedsHuman({
+          reason,
+          ticketNumber: ticket.ticketIssueNumber,
+          branch: taskBranch,
+          phase: "implementation",
+          prNumber: taskPr?.number,
+          prUrl: taskPr?.html_url,
+          codeFixAttemptsUsed: Math.max(fixAttempt, reviewFixAttempt),
+          diagnosticExcerpt: redactSecrets(err.message, [
+            params.activeToken,
+            params.llmApiKey
+          ])
+        });
+        return {
+          halted: true,
+          result: escalated,
+          verificationProfile,
+          verificationGuideMarkdown
+        };
+      }
+      throw err;
     } finally {
       sandboxWorkspace.cleanup();
     }

@@ -504,6 +504,13 @@ orchestration:
   state_ref_prefix: "refs/epure/state/"
   # Maximum automated TDD / review remediation loops per ticket before escalating to needs-human
   max_code_fix_attempts: 3
+  # Per-HTTP-request transient LLM retry ceiling (5xx, 408, network/timeout; HTTP 429 rate-limits wait without consuming this quota)
+  max_transient_api_retries: 4
+  transient_retry_backoff_seconds: [5, 15, 45, 120]
+  # Unitary HTTP request timeout for LLM calls (15 minutes = 900 seconds)
+  llm_request_timeout_seconds: 900
+  # GitHub Actions orchestrator job wall-clock timeout in minutes
+  job_timeout_minutes: 60
   # Maximum parallel domain/transverse reviewers selected per PR diff (excluding spec-parity-reviewer)
   max_parallel_reviewers: 4
   # Enforce secretless sandbox execution (fails closed if secrets cannot be stripped)
@@ -583,6 +590,10 @@ For each phase call, `LLMClient` resolves the API key deterministically without 
 | --- | --- | --- | --- |
 | `state_ref_prefix` | `string` | `"refs/epure/state/"` | Git reference namespace used for atomic Compare-And-Swap state persistence (Q76). |
 | `max_code_fix_attempts` | `integer` | `3` | Maximum number of automated remediation rounds on a `task/*` or `feature/*` PR before adding `needs-human` and stopping (Q78). |
+| `max_transient_api_retries` | `integer` | `4` | Per-HTTP-request retry ceiling for transient LLM errors (`5xx`, `408`, timeout, or 1x malformed JSON retry). `HTTP 429` rate limits honor `Retry-After` (or `[15, 30, 60, 120]s`, max `300s`, up to 10 waits) without consuming this budget. |
+| `transient_retry_backoff_seconds` | `[int, int, int, int]` | `[5, 15, 45, 120]` | Exponential backoff schedule in seconds between transient HTTP retries. |
+| `llm_request_timeout_seconds` | `integer` | `900` | Unitary HTTP request timeout in seconds (`15 minutes`) for each LLM API call. |
+| `job_timeout_minutes` | `integer` | `60` | Wall-clock timeout in minutes for `orchestrate-command` in `.github/workflows/epure-issue-command.yml` (Q78). |
 | `max_parallel_reviewers` | `integer` | `4` | Ceiling on domain/transverse reviewers selected per PR diff so review latency and signal-to-noise remain optimal (Q92). |
 | `secretless_sandbox` | `boolean` | `true` | Strips `LLM_API_KEY` and GitHub App private keys from all child build/test processes; fails closed if isolation is unavailable (Q74). |
 
@@ -1502,6 +1513,13 @@ orchestration:
   state_ref_prefix: "refs/epure/state/"
   # Nombre maximal de tours d'auto-remédiation par ticket avant escalade needs-human
   max_code_fix_attempts: 3
+  # Plafond de reprises par requête HTTP unitaire sur erreur transitoire (5xx, 408, timeout ; les 429 attendent Retry-After sans consommer ce quota)
+  max_transient_api_retries: 4
+  transient_retry_backoff_seconds: [5, 15, 45, 120]
+  # Timeout HTTP par requête unitaire vers le fournisseur LLM (15 minutes = 900 secondes)
+  llm_request_timeout_seconds: 900
+  # Timeout global du job GitHub Actions d'orchestration en minutes
+  job_timeout_minutes: 60
   # Plafond de reviewers spécialisés/transverses sélectionnés par diff (hors spec-parity-reviewer)
   max_parallel_reviewers: 4
   # Exécution en sandbox sans secret (arrêt fail-closed si l'isolation échoue)
@@ -1581,6 +1599,10 @@ Pour chaque appel LLM, `LLMClient` résout la clé API de manière déterministe
 | --- | --- | --- | --- |
 | `state_ref_prefix` | `string` | `"refs/epure/state/"` | Espace de noms des références Git utilisé pour la persistance d'état Compare-And-Swap (Q76). |
 | `max_code_fix_attempts` | `integer` | `3` | Nombre maximal de tours de correction automatique sur une PR `task/*` ou `feature/*` avant l'ajout du label `needs-human` (Q78). |
+| `max_transient_api_retries` | `integer` | `4` | Plafond de reprises par requête HTTP unitaire en cas d'erreur transitoire (`5xx`, `408`, timeout ou 1 relance sur JSON tronqué). Les limitations de débit `HTTP 429` attendent `Retry-After` (ou `[15, 30, 60, 120]s`, max `300s`, jusqu'à 10 attentes) sans consommer ce compteur. |
+| `transient_retry_backoff_seconds` | `[int, int, int, int]` | `[5, 15, 45, 120]` | Paliers de backoff exponentiel en secondes entre deux reprises HTTP transitoires. |
+| `llm_request_timeout_seconds` | `integer` | `900` | Délai d'expiration HTTP unitaire en secondes (`15 minutes`) pour chaque appel au fournisseur LLM. |
+| `job_timeout_minutes` | `integer` | `60` | Délai d'expiration global en minutes du job `orchestrate-command` dans `.github/workflows/epure-issue-command.yml` (Q78). |
 | `max_parallel_reviewers` | `integer` | `4` | Plafond de reviewers métier/transverses sélectionnés par diff pour maîtriser la latence et la pertinence (Q92). |
 | `secretless_sandbox` | `boolean` | `true` | Purge `LLM_API_KEY` et les clés privées PEM des GitHub Apps de tous les sous-processus de test/build ; échoue en mode *fail-closed* si l'isolation est impossible (Q74). |
 

@@ -66,6 +66,7 @@ export interface AgentsConfig {
   readonly max_code_fix_attempts: number;
   readonly max_transient_api_retries: number;
   readonly transient_retry_backoff_seconds: readonly [number, number, number, number];
+  readonly llm_request_timeout_seconds: number;
   readonly job_timeout_minutes: number;
   readonly review_timeout_minutes: number;
   readonly max_concurrent_tasks_per_feature: number;
@@ -95,6 +96,7 @@ export interface AgentsConfigOverrides {
   readonly transient_retry_backoff_seconds?:
     | readonly [number, number, number, number]
     | undefined;
+  readonly llm_request_timeout_seconds?: number | undefined;
   readonly job_timeout_minutes?: number | undefined;
   readonly review_timeout_minutes?: number | undefined;
   readonly max_concurrent_tasks_per_feature?: number | undefined;
@@ -287,6 +289,7 @@ export const DEFAULT_AGENTS_CONFIG: AgentsConfig = {
   max_code_fix_attempts: 3,
   max_transient_api_retries: 4,
   transient_retry_backoff_seconds: [5, 15, 45, 120],
+  llm_request_timeout_seconds: 900,
   job_timeout_minutes: 60,
   review_timeout_minutes: 30,
   max_concurrent_tasks_per_feature: 3,
@@ -528,6 +531,11 @@ export function resolveAgentsConfig(
     transient_retry_backoff_seconds:
       overrides.transient_retry_backoff_seconds ??
       DEFAULT_AGENTS_CONFIG.transient_retry_backoff_seconds,
+    llm_request_timeout_seconds:
+      overrides.llm_request_timeout_seconds !== undefined &&
+      overrides.llm_request_timeout_seconds > 0
+        ? overrides.llm_request_timeout_seconds
+        : DEFAULT_AGENTS_CONFIG.llm_request_timeout_seconds,
     job_timeout_minutes:
       overrides.job_timeout_minutes ??
       DEFAULT_AGENTS_CONFIG.job_timeout_minutes,
@@ -699,6 +707,7 @@ export function serializeAgentsConfigYaml(
     `max_code_fix_attempts: ${config.max_code_fix_attempts}`,
     `max_transient_api_retries: ${config.max_transient_api_retries}`,
     `transient_retry_backoff_seconds: [${config.transient_retry_backoff_seconds.join(", ")}]`,
+    `llm_request_timeout_seconds: ${config.llm_request_timeout_seconds}`,
     `job_timeout_minutes: ${config.job_timeout_minutes}`,
     `review_timeout_minutes: ${config.review_timeout_minutes}`,
     `max_concurrent_tasks_per_feature: ${config.max_concurrent_tasks_per_feature}`,
@@ -832,6 +841,7 @@ export function parseAgentsYaml(
   let transient_retry_backoff_seconds:
     | readonly [number, number, number, number]
     | undefined;
+  let llm_request_timeout_seconds: number | undefined;
   let job_timeout_minutes: number | undefined;
   let review_timeout_minutes: number | undefined;
   let max_concurrent_tasks_per_feature: number | undefined;
@@ -1010,6 +1020,8 @@ export function parseAgentsYaml(
             nums[3]!
           ];
         }
+      } else if (key === "llm_request_timeout_seconds") {
+        llm_request_timeout_seconds = parseNum(val);
       } else if (key === "job_timeout_minutes") {
         job_timeout_minutes = parseNum(val);
       } else if (key === "review_timeout_minutes") {
@@ -1259,6 +1271,9 @@ export function parseAgentsYaml(
     ...(transient_retry_backoff_seconds
       ? { transient_retry_backoff_seconds }
       : {}),
+    ...(llm_request_timeout_seconds !== undefined
+      ? { llm_request_timeout_seconds }
+      : {}),
     ...(job_timeout_minutes !== undefined ? { job_timeout_minutes } : {}),
     ...(review_timeout_minutes !== undefined ? { review_timeout_minutes } : {}),
     ...(max_concurrent_tasks_per_feature !== undefined
@@ -1321,7 +1336,8 @@ export const parseAgentsYml = parseAgentsYaml;
 
 function buildCallerWorkflows(
   pinnedSha: string,
-  stack: DetectedStackProfile
+  stack: DetectedStackProfile,
+  jobTimeoutMinutes: number = DEFAULT_AGENTS_CONFIG.job_timeout_minutes
 ): ReadonlyArray<{
   readonly path: string;
   readonly content: string;
@@ -1370,7 +1386,7 @@ function buildCallerWorkflows(
         "    needs: authorize-command",
         "    if: ${{ needs.authorize-command.outputs.authorized == 'true' }}",
         "    runs-on: ubuntu-latest",
-        "    timeout-minutes: 60",
+        `    timeout-minutes: ${jobTimeoutMinutes}`,
         "    environment: gemini",
         "    concurrency:",
         "      group: epure-issue-${{ github.event.issue.number }}",
@@ -1728,6 +1744,7 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
   // Load existing .github/agents.yml if present to preserve user-customized verification.targets on re-run
   let existingVerification: VerificationProfile | undefined;
   let existingProviders: Readonly<Record<string, ProviderConfig>> | undefined;
+  let existingLlmRequestTimeoutSeconds: number | undefined;
   if (
     input.repoRootDir &&
     existsSync(join(input.repoRootDir, ".github", "agents.yml"))
@@ -1740,9 +1757,12 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
       const parsedExisting = parseAgentsYaml(existingRaw);
       existingVerification = parsedExisting.verification;
       existingProviders = parsedExisting.providers;
+      existingLlmRequestTimeoutSeconds =
+        parsedExisting.llm_request_timeout_seconds;
     } catch {
       existingVerification = undefined;
       existingProviders = undefined;
+      existingLlmRequestTimeoutSeconds = undefined;
     }
   }
 
@@ -1831,9 +1851,15 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
 
   const effectiveProviders =
     resolvedConfig.config.providers ?? existingProviders;
+  const effectiveLlmRequestTimeoutSeconds =
+    input.agentsOverrides?.llm_request_timeout_seconds !== undefined
+      ? resolvedConfig.config.llm_request_timeout_seconds
+      : (existingLlmRequestTimeoutSeconds ??
+        resolvedConfig.config.llm_request_timeout_seconds);
 
   const effectiveAgentsConfig: AgentsConfig = {
     ...resolvedConfig.config,
+    llm_request_timeout_seconds: effectiveLlmRequestTimeoutSeconds,
     ...(effectiveProviders ? { providers: effectiveProviders } : {}),
     verification: effectiveVerification
   };
@@ -1861,7 +1887,11 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
     renovateConfig.content
   );
 
-  const workflowTemplates = buildCallerWorkflows(pinnedSha, detectedStack);
+  const workflowTemplates = buildCallerWorkflows(
+    pinnedSha,
+    detectedStack,
+    effectiveAgentsConfig.job_timeout_minutes
+  );
   const plannedWorkflows: PlannedWorkflowFile[] = workflowTemplates.map((wf) => ({
     path: wf.path,
     action: computeFilePlanAction(input.repoRootDir, wf.path, wf.content),

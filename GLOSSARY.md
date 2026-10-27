@@ -174,11 +174,17 @@ _Éviter_ : intégration directe sur `dev`, validation sur une base obsolète.
 **Contrôle financier fournisseur** : limite financière qui peut être fournie par le prestataire LLM (compte, organisation, clé API). Elle n'est pas garantie par `dev-automation` et peut être indisponible selon le prestataire.
 _Éviter_ : garantie de plafond global par le workflow, compteur financier GitHub.
 
-**Échec transitoire du fournisseur LLM** : indisponibilité ou limitation temporaire d'une API permettant une reprise bornée avec backoff. Les répétitions réseau/API ne consomment pas le quota de trois corrections de code d'un ticket.
-_Éviter_ : recommencer sans borne, masquer une panne persistante.
+**Échec transitoire du fournisseur LLM** : indisponibilité ou coupure temporaire d'une API (`5xx`, `408`, timeout/coupure réseau) permettant une reprise bornée avec backoff (`max_transient_api_retries`, comptabilisé par requête HTTP unitaire et non cumulé sur l'ensemble d'une boucle d'outils). Les répétitions réseau/API ne consomment pas le quota de trois corrections de code d'un ticket.
+_Éviter_ : recommencer sans borne, masquer une panne persistante, mutualiser un unique compteur de reprises sur 20 tours d'outils.
+
+**Temporisation de limite de débit LLM (`429`)** : attente automatique lors d'une limitation temporaire de débit (`HTTP 429` hors épuisement de quota/facturation) respectant l'indication `Retry-After` du fournisseur (ou un délai progressif par défaut plafonné à 300 secondes, jusqu'à 10 attentes par requête HTTP), suivie d'une relance **sans consommer** le quota `max_transient_api_retries` ni le quota de corrections de code du ticket.
+_Éviter_ : décompter une pause de rate-limit `429` comme un échec serveur ou attendre indéfiniment sans plafond de sécurité.
 
 **Blocage fournisseur LLM** : problème de clé, de crédits ou de quota empêchant la poursuite des tâches dépendantes ; signalement GitHub et suspension sans changement automatique de clé ou de fournisseur.
 _Éviter_ : fallback automatique contournant les plafonds définis par l'utilisateur.
+
+**Reprise après suspension (`suspended -> active`)** : réactivation idempotente d'une issue de pilotage ou d'un ticket en état `suspended` (`needs-human`) lorsqu'un contributeur autorisé (`write` ou supérieur) publie une réponse ou relance la commande de phase correspondante, retirant le label `needs-human`, restaurant le statut `active` tout en conservant la phase courante (`grilling`, `spec`, `tickets`, `implementation`) et reprenant au dernier jalon validé.
+_Éviter_ : bloquer définitivement une issue suspendue après une panne API temporaire ou écraser la phase d'orchestration lors de la suspension.
 
 ## Orchestration des conversations et des reviews (ronde 9)
 

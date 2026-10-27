@@ -1,4 +1,5 @@
 import { redactSecrets } from "../auth/issue-command-gate.js";
+import { parseRetryAfterSeconds } from "../llm/errors.js";
 
 export type LlmResilienceStatus =
   | "completed"
@@ -17,6 +18,8 @@ export interface LlmProviderResponse {
   readonly status: number;
   readonly errorType?: string | undefined;
   readonly body: string;
+  readonly retryAfterHeader?: string | undefined;
+  readonly retryAfterSeconds?: number | undefined;
 }
 
 export interface LlmResiliencePolicy {
@@ -25,6 +28,8 @@ export interface LlmResiliencePolicy {
   readonly maxTransientApiRetries: number;
   readonly transientBackoffSeconds: readonly number[];
   readonly initialCodeFixAttemptsUsed: number;
+  readonly maxRateLimitWaits?: number | undefined;
+  readonly rateLimitFallbackSeconds?: readonly number[] | undefined;
 }
 
 export interface ExecuteLlmCallWithResilienceInput {
@@ -39,11 +44,18 @@ export interface LlmResilienceResult {
   readonly error_message: string;
   readonly response_body: string;
   readonly transient_retries_used: number;
+  readonly rate_limit_waits_used?: number | undefined;
   readonly code_fix_attempts_used: number;
   readonly provider_switched: boolean;
   readonly internal_cost_accounting_enabled: false;
   readonly diagnostic_markdown: string;
 }
+
+const DEFAULT_RATE_LIMIT_FALLBACK_SECONDS: readonly number[] = [
+  15, 30, 60, 120
+];
+const MAX_RATE_LIMIT_WAIT_SECONDS = 300;
+const DEFAULT_MAX_RATE_LIMIT_WAITS = 10;
 
 function isQuotaExhausted(resp: LlmProviderResponse): boolean {
   const errType = (resp.errorType ?? "").toLowerCase();
@@ -68,13 +80,19 @@ function isAuthInvalid(resp: LlmProviderResponse): boolean {
   );
 }
 
-function isTransientError(resp: LlmProviderResponse): boolean {
+function isRateLimitError(resp: LlmProviderResponse): boolean {
   if (isQuotaExhausted(resp) || isAuthInvalid(resp)) {
+    return false;
+  }
+  return resp.status === 429;
+}
+
+function isTransientError(resp: LlmProviderResponse): boolean {
+  if (isQuotaExhausted(resp) || isAuthInvalid(resp) || isRateLimitError(resp)) {
     return false;
   }
   return (
     resp.status === 408 ||
-    resp.status === 429 ||
     resp.status === 500 ||
     resp.status === 502 ||
     resp.status === 503 ||
@@ -102,6 +120,7 @@ export async function executeLlmCallWithResilience(
       error_message: msg,
       response_body: "",
       transient_retries_used: 0,
+      rate_limit_waits_used: 0,
       code_fix_attempts_used: codeFixAttemptsUsed,
       provider_switched: false,
       internal_cost_accounting_enabled: false,
@@ -115,7 +134,13 @@ export async function executeLlmCallWithResilience(
       await new Promise((resolve) => setTimeout(resolve, seconds * 10));
     });
 
+  const maxRateLimitWaits =
+    policy.maxRateLimitWaits ?? DEFAULT_MAX_RATE_LIMIT_WAITS;
+  const rateLimitFallback =
+    policy.rateLimitFallbackSeconds ?? DEFAULT_RATE_LIMIT_FALLBACK_SECONDS;
+
   let transientRetriesUsed = 0;
+  let rateLimitWaitsUsed = 0;
 
   while (true) {
     const resp = await input.invokePrimaryProvider();
@@ -127,10 +152,11 @@ export async function executeLlmCallWithResilience(
         error_message: "",
         response_body: redactSecrets(resp.body),
         transient_retries_used: transientRetriesUsed,
+        rate_limit_waits_used: rateLimitWaitsUsed,
         code_fix_attempts_used: codeFixAttemptsUsed,
         provider_switched: false,
         internal_cost_accounting_enabled: false,
-        diagnostic_markdown: `### EPURE LLM Call Succeeded\n- **Provider**: \`${policy.primaryProvider}\`\n- **Transient Retries Used**: \`${transientRetriesUsed}\``
+        diagnostic_markdown: `### EPURE LLM Call Succeeded\n- **Provider**: \`${policy.primaryProvider}\`\n- **Transient Retries Used**: \`${transientRetriesUsed}\`\n- **Rate-Limit Waits Used**: \`${rateLimitWaitsUsed}\``
       };
     }
 
@@ -144,6 +170,7 @@ export async function executeLlmCallWithResilience(
         error_message: msg,
         response_body: "",
         transient_retries_used: transientRetriesUsed,
+        rate_limit_waits_used: rateLimitWaitsUsed,
         code_fix_attempts_used: codeFixAttemptsUsed,
         provider_switched: false,
         internal_cost_accounting_enabled: false,
@@ -161,11 +188,27 @@ export async function executeLlmCallWithResilience(
         error_message: msg,
         response_body: "",
         transient_retries_used: transientRetriesUsed,
+        rate_limit_waits_used: rateLimitWaitsUsed,
         code_fix_attempts_used: codeFixAttemptsUsed,
         provider_switched: false,
         internal_cost_accounting_enabled: false,
         diagnostic_markdown: `### EPURE Ticket Suspended (\`LLM_AUTH_INVALID\`)\n- ${msg}`
       };
+    }
+
+    if (isRateLimitError(resp) && rateLimitWaitsUsed < maxRateLimitWaits) {
+      const extractedSec =
+        resp.retryAfterSeconds ??
+        parseRetryAfterSeconds(resp.retryAfterHeader, resp.body);
+      const waitSec =
+        extractedSec !== undefined
+          ? Math.min(Math.max(extractedSec, 1), MAX_RATE_LIMIT_WAIT_SECONDS)
+          : (rateLimitFallback[rateLimitWaitsUsed] ??
+            rateLimitFallback[rateLimitFallback.length - 1] ??
+            120);
+      rateLimitWaitsUsed += 1;
+      await sleep(waitSec);
+      continue;
     }
 
     if (
@@ -192,6 +235,7 @@ export async function executeLlmCallWithResilience(
       error_message: msg,
       response_body: "",
       transient_retries_used: transientRetriesUsed,
+      rate_limit_waits_used: rateLimitWaitsUsed,
       code_fix_attempts_used: codeFixAttemptsUsed,
       provider_switched: false,
       internal_cost_accounting_enabled: false,

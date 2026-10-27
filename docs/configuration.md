@@ -54,6 +54,13 @@ orchestration:
   state_ref_prefix: "refs/epure/state/"
   # Maximum automated TDD / review remediation loops per ticket before escalating to needs-human
   max_code_fix_attempts: 3
+  # Per-HTTP-request transient LLM retry ceiling (5xx, 408, network/timeout; HTTP 429 rate-limits wait without consuming this quota)
+  max_transient_api_retries: 4
+  transient_retry_backoff_seconds: [5, 15, 45, 120]
+  # Unitary HTTP request timeout for LLM calls (15 minutes = 900 seconds)
+  llm_request_timeout_seconds: 900
+  # GitHub Actions orchestrator job wall-clock timeout in minutes
+  job_timeout_minutes: 60
   # Maximum parallel domain/transverse reviewers selected per PR diff (excluding spec-parity-reviewer)
   max_parallel_reviewers: 4
   # Enforce secretless sandbox execution (fails closed if secrets cannot be stripped)
@@ -133,6 +140,10 @@ For each phase call, `LLMClient` resolves the API key deterministically without 
 | --- | --- | --- | --- |
 | `state_ref_prefix` | `string` | `"refs/epure/state/"` | Git reference namespace used for atomic Compare-And-Swap state persistence (Q76). |
 | `max_code_fix_attempts` | `integer` | `3` | Maximum number of automated remediation rounds on a `task/*` or `feature/*` PR before adding `needs-human` and stopping (Q78). |
+| `max_transient_api_retries` | `integer` | `4` | Per-HTTP-request retry ceiling for transient LLM errors (`5xx`, `408`, timeout, or 1x malformed JSON retry). `HTTP 429` rate limits honor `Retry-After` (or `[15, 30, 60, 120]s`, max `300s`, up to 10 waits) without consuming this budget. |
+| `transient_retry_backoff_seconds` | `[int, int, int, int]` | `[5, 15, 45, 120]` | Exponential backoff schedule in seconds between transient HTTP retries. |
+| `llm_request_timeout_seconds` | `integer` | `900` | Unitary HTTP request timeout in seconds (`15 minutes`) for each LLM API call. |
+| `job_timeout_minutes` | `integer` | `60` | Wall-clock timeout in minutes for `orchestrate-command` in `.github/workflows/epure-issue-command.yml` (Q78). |
 | `max_parallel_reviewers` | `integer` | `4` | Ceiling on domain/transverse reviewers selected per PR diff so review latency and signal-to-noise remain optimal (Q92). |
 | `secretless_sandbox` | `boolean` | `true` | Strips `LLM_API_KEY` and GitHub App private keys from all child build/test processes; fails closed if isolation is unavailable (Q74). |
 

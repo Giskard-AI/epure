@@ -95,6 +95,9 @@ export interface LLMCallOptions<T = unknown> {
   readonly thinkingLevel?: "MINIMAL" | "LOW" | "MEDIUM" | "HIGH" | undefined;
   readonly maxTransientRetries?: number | undefined;
   readonly transientRetryBackoffSeconds?: readonly number[] | undefined;
+  readonly requestTimeoutMs?: number | undefined;
+  readonly maxRateLimitWaits?: number | undefined;
+  readonly rateLimitFallbackSeconds?: readonly number[] | undefined;
   readonly fetchImpl?: typeof fetch | undefined;
   readonly sleepMs?: ((ms: number) => Promise<void>) | undefined;
   readonly logLabel?: string | undefined;
@@ -107,4 +110,6 @@ export interface LLMCompletionResult<T = unknown> {
   readonly provider: ProviderKind;
   readonly model: string;
   readonly attempts: number;
+  readonly transientRetriesUsed?: number | undefined;
+  readonly rateLimitWaitsUsed?: number | undefined;
 }

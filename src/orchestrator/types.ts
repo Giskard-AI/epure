@@ -4,6 +4,7 @@ import type {
   CheckRunAnnotationRecord,
   ExternalCheckRunRecord,
   ExternalWorkflowRunRecord,
+  NeedsHumanEscalationReason,
   WaitForExternalCiChecksResult
 } from "../execution/external-ci-gate.js";
 import type { ReviewerFinding } from "../review/multi-agent-pr-review.js";
@@ -139,6 +140,7 @@ export interface GitHubRestHelper {
   postIssueComment(issueNumber: number, body: string): Promise<string>;
   ensureLabel(name: string, color: string, description: string): Promise<void>;
   addIssueLabels(issueNumber: number, labels: readonly string[]): Promise<void>;
+  removeIssueLabel?(issueNumber: number, label: string): Promise<void>;
   createIssue(params: {
     title: string;
     body: string;
@@ -221,22 +223,19 @@ export interface GitHubRestHelper {
 }
 
 export interface EscalateToNeedsHumanParams {
-  reason:
-    | "remediation_exhausted"
-    | "grace_window_timeout"
-    | "wall_clock_budget_exhausted"
-    | "sensitive_path_violation";
+  reason: NeedsHumanEscalationReason;
   ticketNumber: number;
   branch: string;
-  prNumber?: number;
-  prUrl?: string;
-  featurePrUrl?: string;
-  codeFixAttemptsUsed?: number;
-  failedChecks?: WaitForExternalCiChecksResult["failedChecks"];
-  mustFixFindings?: ReadonlyArray<ReviewerFinding>;
-  sensitivePaths?: ReadonlyArray<string>;
-  traversalPaths?: ReadonlyArray<string>;
-  diagnosticExcerpt?: string;
+  phase?: EpureIssueState["phase"] | undefined;
+  prNumber?: number | undefined;
+  prUrl?: string | undefined;
+  featurePrUrl?: string | undefined;
+  codeFixAttemptsUsed?: number | undefined;
+  failedChecks?: WaitForExternalCiChecksResult["failedChecks"] | undefined;
+  mustFixFindings?: ReadonlyArray<ReviewerFinding> | undefined;
+  sensitivePaths?: ReadonlyArray<string> | undefined;
+  traversalPaths?: ReadonlyArray<string> | undefined;
+  diagnosticExcerpt?: string | undefined;
 }
 
 export type EscalateToNeedsHumanFn = (
@@ -250,6 +249,7 @@ export interface ResolvedPhaseModels {
   readonly providers?: AgentsConfig["providers"] | undefined;
   readonly maxTransientRetries?: number | undefined;
   readonly transientRetryBackoffSeconds?: readonly number[] | undefined;
+  readonly requestTimeoutMs?: number | undefined;
 }
 
 function canUsePhaseModelFromConfig(
@@ -291,6 +291,11 @@ export function resolvePhaseModels(
   const maxTransientRetries = agentsConfig?.max_transient_api_retries;
   const transientRetryBackoffSeconds =
     agentsConfig?.transient_retry_backoff_seconds;
+  const requestTimeoutMs =
+    agentsConfig?.llm_request_timeout_seconds !== undefined &&
+    agentsConfig.llm_request_timeout_seconds > 0
+      ? agentsConfig.llm_request_timeout_seconds * 1000
+      : 900_000;
   const hasProvidersMap = Boolean(
     providers && Object.keys(providers).length > 0
   );
@@ -300,6 +305,7 @@ export function resolvePhaseModels(
       planningModel: fallbackModel,
       implementationModel: fallbackModel,
       reviewModel: fallbackModel,
+      requestTimeoutMs,
       ...(providers ? { providers } : {}),
       ...(maxTransientRetries !== undefined ? { maxTransientRetries } : {}),
       ...(transientRetryBackoffSeconds !== undefined
@@ -317,6 +323,7 @@ export function resolvePhaseModels(
     planningModel: pickModel(agentsConfig.models?.planning),
     implementationModel: pickModel(agentsConfig.models?.implementation),
     reviewModel: pickModel(agentsConfig.models?.review),
+    requestTimeoutMs,
     ...(providers ? { providers } : {}),
     ...(maxTransientRetries !== undefined ? { maxTransientRetries } : {}),
     ...(transientRetryBackoffSeconds !== undefined

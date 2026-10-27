@@ -1,3 +1,4 @@
+import { redactSecrets } from "../../auth/issue-command-gate.js";
 import {
   discoverVerificationProfile,
   type VerificationProfile
@@ -8,6 +9,11 @@ import {
   waitForExternalCiChecks,
   type WaitForExternalCiChecksResult
 } from "../../execution/external-ci-gate.js";
+import {
+  AuthenticationError,
+  LLMError,
+  QuotaExhaustedError
+} from "../../llm/errors.js";
 import { prepareFeatureToDevPullRequest } from "../../planning/feature-to-dev-pr.js";
 import { runMultiAgentPrReviewPass } from "../../review/multi-agent-pr-review.js";
 import type { ReviewerAgentName } from "../../review/reviewer-roster.js";
@@ -149,6 +155,11 @@ export async function runFeatureIntegrationPhase(
     llmApiKey: params.llmApiKey,
     model: params.phaseModels.reviewModel,
     providers: params.phaseModels.providers,
+    maxTransientRetries: params.phaseModels.maxTransientRetries,
+    transientRetryBackoffSeconds:
+      params.phaseModels.transientRetryBackoffSeconds,
+    requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+    onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
     fetchImpl: params.fetchImpl
   });
 
@@ -251,6 +262,11 @@ export async function runFeatureIntegrationPhase(
       llmApiKey: params.llmApiKey,
       model: params.phaseModels.reviewModel,
       providers: params.phaseModels.providers,
+      maxTransientRetries: params.phaseModels.maxTransientRetries,
+      transientRetryBackoffSeconds:
+        params.phaseModels.transientRetryBackoffSeconds,
+      requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+      onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
       fetchImpl: params.fetchImpl
     });
 
@@ -468,6 +484,12 @@ export async function runFeatureIntegrationPhase(
           apiKey: params.llmApiKey,
           model: params.phaseModels.implementationModel,
           providers: params.phaseModels.providers,
+          maxTransientRetries: params.phaseModels.maxTransientRetries,
+          transientRetryBackoffSeconds:
+            params.phaseModels.transientRetryBackoffSeconds,
+          requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+          onTransientRetriesUsed: (used) =>
+            params.addTransientRetriesUsed(used),
           thinkingLevel: "HIGH",
           logLabel: `feature-review-fix:#PR${featurePr.number}/iter-${featureReviewFixAttempt}`,
           systemInstruction: featureFixSystemInstruction,
@@ -556,6 +578,12 @@ export async function runFeatureIntegrationPhase(
             apiKey: params.llmApiKey,
             model: params.phaseModels.implementationModel,
             providers: params.phaseModels.providers,
+            maxTransientRetries: params.phaseModels.maxTransientRetries,
+            transientRetryBackoffSeconds:
+              params.phaseModels.transientRetryBackoffSeconds,
+            requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+            onTransientRetriesUsed: (used) =>
+              params.addTransientRetriesUsed(used),
             thinkingLevel: "HIGH",
             logLabel: `feature-review-test-retry:#PR${featurePr.number}/iter-${featureReviewFixAttempt}-retry-${featureTestRetry}`,
             systemInstruction: featureFixSystemInstruction,
@@ -749,6 +777,29 @@ export async function runFeatureIntegrationPhase(
           diagnosticExcerpt: finalFeatureCiGate.formattedDiagnostics
         });
       }
+    } catch (err) {
+      if (err instanceof LLMError) {
+        const reason =
+          err instanceof AuthenticationError ||
+          err instanceof QuotaExhaustedError
+            ? "llm_quota_or_auth_failure"
+            : "transient_llm_api_exhausted";
+        return await params.escalateToNeedsHuman({
+          reason,
+          ticketNumber: params.issueNumber,
+          branch: params.featureBranch,
+          phase: "implementation",
+          prNumber: featurePr.number,
+          prUrl: featurePr.html_url,
+          featurePrUrl: featurePr.html_url,
+          codeFixAttemptsUsed: featureReviewFixAttempt,
+          diagnosticExcerpt: redactSecrets(err.message, [
+            params.activeToken,
+            params.llmApiKey
+          ])
+        });
+      }
+      throw err;
     } finally {
       featureSandbox.cleanup();
     }

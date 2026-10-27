@@ -193,6 +193,22 @@ export function createGitHubRestHelper(params: {
       }
     },
 
+    async removeIssueLabel(
+      issueNumber: number,
+      label: string
+    ): Promise<void> {
+      try {
+        await apiRequest(
+          "DELETE",
+          `/repos/${owner}/${repo}/issues/${issueNumber}/labels/${encodeURIComponent(label)}`,
+          undefined,
+          true
+        );
+      } catch {
+        // Non-fatal in mock tests
+      }
+    },
+
     async createIssue(input): Promise<{ number: number; html_url: string }> {
       const { data } = await apiRequest<{ number: number; html_url: string }>(
         "POST",

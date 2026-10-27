@@ -7,10 +7,13 @@ import {
 import { formatNeedsHumanEscalationComment } from "../src/execution/external-ci-gate.js";
 import {
   AuthenticationError,
+  DEFAULT_LLM_REQUEST_TIMEOUT_MS,
   GEMINI_SKIP_THOUGHT_SIGNATURE_SENTINEL,
   LLMClient,
   parseAndValidateStructuredOutput,
+  parseRetryAfterSeconds,
   QuotaExhaustedError,
+  RateLimitError,
   type ProviderConfig,
   type ResponseSchemaSpec
 } from "../src/llm/index.js";
@@ -1576,6 +1579,437 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
       expect(() =>
         GENERATED_PLANNING_BUNDLE_SCHEMA.validate(payload)
       ).toThrow(expectedErrorSubstring);
+    });
+  });
+
+  describe("8. Configurable LLM timeout (900s), non-penalizing 429 Retry-After waits, per-request retry scope & suspended state resumption", () => {
+    it.each([
+      {
+        id: "numeric-retry-after-header",
+        header: "42",
+        body: undefined,
+        nowMs: 1_700_000_000_000,
+        expectedSeconds: 42
+      },
+      {
+        id: "http-date-retry-after-header",
+        header: new Date(1_700_000_065_000).toUTCString(),
+        body: undefined,
+        nowMs: 1_700_000_000_000,
+        expectedSeconds: 65
+      },
+      {
+        id: "gemini-json-body-retryDelay",
+        header: null,
+        body: JSON.stringify({
+          error: {
+            code: 429,
+            details: [{ "@type": "RetryInfo", retryDelay: "37.4s" }]
+          }
+        }),
+        nowMs: 1_700_000_000_000,
+        expectedSeconds: 38
+      },
+      {
+        id: "text-body-retry-after-hint",
+        header: null,
+        body: "Rate limit reached. Please retry after 19s.",
+        nowMs: 1_700_000_000_000,
+        expectedSeconds: 19
+      },
+      {
+        id: "missing-header-and-body-returns-undefined",
+        header: null,
+        body: '{"error":"rate_limited"}',
+        nowMs: 1_700_000_000_000,
+        expectedSeconds: undefined
+      }
+    ])(
+      "parseRetryAfterSeconds [$id]",
+      ({ header, body, nowMs, expectedSeconds }) => {
+        expect(parseRetryAfterSeconds(header, body, nowMs)).toBe(
+          expectedSeconds
+        );
+      }
+    );
+
+    it.each([
+      {
+        id: "429-waits-retry-after-capped-at-300s-without-consuming-transient-retries",
+        responses: [
+          {
+            status: 429,
+            headers: { "retry-after": "25" },
+            body: JSON.stringify({ error: { message: "Too Many Requests" } })
+          },
+          {
+            status: 429,
+            headers: { "retry-after": "999" },
+            body: JSON.stringify({ error: { message: "Too Many Requests" } })
+          },
+          {
+            status: 503,
+            headers: {},
+            body: JSON.stringify({ error: { message: "Backend overloaded" } })
+          },
+          {
+            status: 200,
+            headers: {},
+            body: JSON.stringify({
+              choices: [{ message: { content: "Success after 429 and 503" } }]
+            })
+          }
+        ],
+        maxTransientRetries: 1,
+        maxRateLimitWaits: 5,
+        expectError: false,
+        expectedSleepsMs: [25_000, 300_000, 5_000],
+        expectedTransientRetriesUsed: 1,
+        expectedRateLimitWaitsUsed: 2
+      },
+      {
+        id: "throws-RateLimitError-when-consecutive-429-exceeds-maxRateLimitWaits",
+        responses: [
+          {
+            status: 429,
+            headers: { "retry-after": "10" },
+            body: JSON.stringify({ error: { message: "429 #1" } })
+          },
+          {
+            status: 429,
+            headers: { "retry-after": "10" },
+            body: JSON.stringify({ error: { message: "429 #2" } })
+          },
+          {
+            status: 429,
+            headers: { "retry-after": "10" },
+            body: JSON.stringify({ error: { message: "429 #3" } })
+          }
+        ],
+        maxTransientRetries: 4,
+        maxRateLimitWaits: 2,
+        expectError: true,
+        expectedSleepsMs: [10_000, 10_000],
+        expectedTransientRetriesUsed: 0,
+        expectedRateLimitWaitsUsed: 2
+      }
+    ])(
+      "LLMClient rate-limit handling [$id]",
+      async ({
+        responses,
+        maxTransientRetries,
+        maxRateLimitWaits,
+        expectError,
+        expectedSleepsMs,
+        expectedTransientRetriesUsed,
+        expectedRateLimitWaitsUsed
+      }) => {
+        const recordedSleepsMs: number[] = [];
+        let idx = 0;
+        const mockFetch: typeof fetch = async () => {
+          const item = responses[Math.min(idx, responses.length - 1)]!;
+          idx += 1;
+          return new Response(item.body, {
+            status: item.status,
+            headers: item.headers
+          });
+        };
+
+        const client = new LLMClient();
+        if (expectError) {
+          await expect(
+            client.complete({
+              model: "openai/gpt-5.4",
+              apiKey: "sk-test",
+              systemInstruction: "Sys",
+              userPrompt: "Prompt",
+              maxTransientRetries,
+              transientRetryBackoffSeconds: [5, 15, 45, 120],
+              maxRateLimitWaits,
+              sleepMs: async (ms) => {
+                recordedSleepsMs.push(ms);
+              },
+              fetchImpl: mockFetch
+            })
+          ).rejects.toBeInstanceOf(RateLimitError);
+          expect(recordedSleepsMs).toEqual(expectedSleepsMs);
+        } else {
+          const result = await client.complete({
+            model: "openai/gpt-5.4",
+            apiKey: "sk-test",
+            systemInstruction: "Sys",
+            userPrompt: "Prompt",
+            maxTransientRetries,
+            transientRetryBackoffSeconds: [5, 15, 45, 120],
+            maxRateLimitWaits,
+            sleepMs: async (ms) => {
+              recordedSleepsMs.push(ms);
+            },
+            fetchImpl: mockFetch
+          });
+          expect(result.text).toBe("Success after 429 and 503");
+          expect(result.transientRetriesUsed).toBe(expectedTransientRetriesUsed);
+          expect(result.rateLimitWaitsUsed).toBe(expectedRateLimitWaitsUsed);
+          expect(recordedSleepsMs).toEqual(expectedSleepsMs);
+        }
+      }
+    );
+
+    it("scopes maxTransientRetries per unitary HTTP request across multi-round tool calls and retries 1x on truncated JSON", async () => {
+      const stepResponses: Array<{ status: number; body: unknown }> = [
+        { status: 503, body: { error: { message: "503 r1-1" } } },
+        { status: 503, body: { error: { message: "503 r1-2" } } },
+        {
+          status: 200,
+          body: {
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      functionCall: {
+                        name: "read_repo_file",
+                        args: { path: "README.md" }
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        { status: 503, body: { error: { message: "503 r2-1" } } },
+        { status: 503, body: { error: { message: "503 r2-2" } } },
+        {
+          status: 200,
+          body: {
+            candidates: [
+              {
+                content: {
+                  parts: [{ text: '{"summary":"truncated",' }]
+                }
+              }
+            ]
+          }
+        },
+        {
+          status: 200,
+          body: {
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      text: JSON.stringify({
+                        summary: "Complete after per-request retries & 1x JSON retry",
+                        nested: { count: 42 }
+                      })
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ];
+
+      let callCount = 0;
+      const mockFetch: typeof fetch = async () => {
+        const current = stepResponses[Math.min(callCount, stepResponses.length - 1)]!;
+        callCount += 1;
+        return new Response(JSON.stringify(current.body), {
+          status: current.status
+        });
+      };
+
+      const client = new LLMClient();
+      const res = await client.complete({
+        model: "google/gemini-3.8-flash",
+        apiKey: "gm-test",
+        systemInstruction: "Sys",
+        userPrompt: "Inspect and answer",
+        maxTransientRetries: 2,
+        requestTimeoutMs: DEFAULT_LLM_REQUEST_TIMEOUT_MS,
+        sleepMs: async () => {},
+        tools: [
+          {
+            name: "read_repo_file",
+            description: "Read file",
+            parameters: { type: "OBJECT", properties: {} }
+          }
+        ],
+        toolHandlers: {
+          read_repo_file: async () => "# README"
+        },
+        responseSchema: sampleNestedSchema,
+        fetchImpl: mockFetch
+      });
+
+      expect(res.data?.nested.count).toBe(42);
+      expect(res.transientRetriesUsed).toBe(4);
+      expect(callCount).toBe(7);
+    });
+
+    it("escalates to needs-human without incrementing code_fix_attempts_used on LLM exhaustion and resumes cleanly on user reply", async () => {
+      const stateStore = createInMemoryGitRefStateStore();
+      await updateIssueStateWithCas({
+        issueNumber: 123,
+        store: stateStore,
+        mutator: (prev) => ({
+          ...prev,
+          phase: "grilling",
+          status: "active",
+          active_branch: "plan/123-dice-tray",
+          code_fix_attempts_used: 1
+        })
+      });
+
+      const postedComments: string[] = [];
+      const addedLabels: string[][] = [];
+      const removedLabels: string[] = [];
+      let shouldFailLlm = true;
+
+      const mockFetch: typeof fetch = async (inputUrl, init) => {
+        const url = String(inputUrl);
+        const method = init?.method ?? "GET";
+
+        if (url.includes("generativelanguage.googleapis.com")) {
+          if (shouldFailLlm) {
+            return new Response(
+              JSON.stringify({ error: { message: "Gateway timeout" } }),
+              { status: 504 }
+            );
+          }
+          return new Response(
+            JSON.stringify({
+              candidates: [
+                {
+                  content: {
+                    parts: [
+                      {
+                        text: JSON.stringify({
+                          frontier_resolved: false,
+                          round_number: 2,
+                          follow_up_questions_markdown: "1. Question de suivi ?",
+                          settled_decisions_summary_markdown:
+                            "Merci pour vos précisions.",
+                          rationale: "Encore une précision nécessaire."
+                        })
+                      }
+                    ]
+                  }
+                }
+              ]
+            }),
+            { status: 200 }
+          );
+        }
+
+        if (url.endsWith("/issues/123") && method === "GET") {
+          return new Response(
+            JSON.stringify({
+              number: 123,
+              title: "Add 3D dice tray",
+              body: "Feature description"
+            }),
+            { status: 200 }
+          );
+        }
+        if (url.includes("/issues/123/comments") && method === "GET") {
+          return new Response(
+            JSON.stringify([
+              {
+                id: 901,
+                body: "Ma réponse aux questions",
+                created_at: "2026-10-27T10:00:00Z",
+                user: { login: "maintainer", type: "User" }
+              }
+            ]),
+            { status: 200 }
+          );
+        }
+        if (url.includes("/issues/123/comments") && method === "POST") {
+          const parsed = JSON.parse(String(init?.body ?? "{}")) as {
+            body?: string;
+          };
+          postedComments.push(parsed.body ?? "");
+          return new Response(JSON.stringify({ id: 902 }), { status: 201 });
+        }
+        if (url.includes("/issues/123/labels") && method === "POST") {
+          const parsed = JSON.parse(String(init?.body ?? "{}")) as {
+            labels?: string[];
+          };
+          addedLabels.push(parsed.labels ?? []);
+          return new Response(JSON.stringify([]), { status: 200 });
+        }
+        if (url.includes("/issues/123/labels/") && method === "DELETE") {
+          removedLabels.push(decodeURIComponent(url.split("/labels/")[1] ?? ""));
+          return new Response(null, { status: 204 });
+        }
+        if (url.includes("/contents/.github/agents.yml")) {
+          const customConfig = serializeAgentsYml(
+            {
+              ...DEFAULT_AGENTS_CONFIG,
+              max_transient_api_retries: 1,
+              transient_retry_backoff_seconds: [0, 0, 0, 0],
+              llm_request_timeout_seconds: 600
+            },
+            false
+          );
+          return new Response(
+            JSON.stringify({
+              content: Buffer.from(customConfig, "utf8").toString("base64")
+            }),
+            { status: 200 }
+          );
+        }
+        return new Response(JSON.stringify({}), { status: 200 });
+      };
+
+      const suspendedRes = await orchestrateIssueCommand({
+        repository: "Hartorn-Inc/CozyVTT",
+        issueNumber: 123,
+        command: "reply",
+        commandArgs: "",
+        actor: "maintainer",
+        commentId: 901,
+        fallbackGithubToken: "ghs_testToken1234567890",
+        llmApiKey: "gm_testKey1234567890",
+        stateStore,
+        fetchImpl: mockFetch
+      });
+
+      expect(suspendedRes.executed).toBe(true);
+      expect(suspendedRes.status).toBe("suspended");
+      expect(suspendedRes.phase).toBe("grilling");
+      expect(addedLabels).toContainEqual(["needs-human"]);
+      expect(postedComments.at(-1)).toContain("needs-human");
+      expect(postedComments.at(-1)).toContain(
+        "Transient LLM API retries or unitary request timeout exhausted"
+      );
+
+      const snapAfterSuspend = await stateStore.readRef("refs/epure/state/123");
+      expect(snapAfterSuspend.state?.code_fix_attempts_used).toBe(1);
+      expect(snapAfterSuspend.state?.status).toBe("suspended");
+
+      shouldFailLlm = false;
+      const resumedRes = await orchestrateIssueCommand({
+        repository: "Hartorn-Inc/CozyVTT",
+        issueNumber: 123,
+        command: "reply",
+        commandArgs: "",
+        actor: "maintainer",
+        commentId: 903,
+        fallbackGithubToken: "ghs_testToken1234567890",
+        llmApiKey: "gm_testKey1234567890",
+        stateStore,
+        fetchImpl: mockFetch
+      });
+
+      expect(resumedRes.executed).toBe(true);
+      expect(resumedRes.status).toBe("active");
+      expect(resumedRes.phase).toBe("grilling");
+      expect(removedLabels).toContain("needs-human");
     });
   });
 });

@@ -149,7 +149,9 @@ export type NeedsHumanEscalationReason =
   | "remediation_exhausted"
   | "grace_window_timeout"
   | "sensitive_path_violation"
-  | "wall_clock_budget_exhausted";
+  | "wall_clock_budget_exhausted"
+  | "transient_llm_api_exhausted"
+  | "llm_quota_or_auth_failure";
 
 export interface FormatNeedsHumanEscalationInput {
   readonly issueNumber: number;
@@ -1022,6 +1024,12 @@ export function formatNeedsHumanEscalationComment(
   } else if (input.reason === "sensitive_path_violation") {
     reasonHeadline =
       "Forbidden modification of sensitive path or path traversal blocked pre-Stage-1";
+  } else if (input.reason === "transient_llm_api_exhausted") {
+    reasonHeadline =
+      "Transient LLM API retries or unitary request timeout exhausted (`max_transient_api_retries`) — code-fix budget preserved";
+  } else if (input.reason === "llm_quota_or_auth_failure") {
+    reasonHeadline =
+      "LLM provider quota/billing exhaustion or authentication failure (ADR-0012: no automatic fallback)";
   } else {
     reasonHeadline = "Runner wall-clock timeout budget exhausted";
   }

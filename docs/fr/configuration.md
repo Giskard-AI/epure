@@ -54,6 +54,13 @@ orchestration:
   state_ref_prefix: "refs/epure/state/"
   # Nombre maximal de tours d'auto-remédiation par ticket avant escalade needs-human
   max_code_fix_attempts: 3
+  # Plafond de reprises par requête HTTP unitaire sur erreur transitoire (5xx, 408, timeout ; les 429 attendent Retry-After sans consommer ce quota)
+  max_transient_api_retries: 4
+  transient_retry_backoff_seconds: [5, 15, 45, 120]
+  # Timeout HTTP par requête unitaire vers le fournisseur LLM (15 minutes = 900 secondes)
+  llm_request_timeout_seconds: 900
+  # Timeout global du job GitHub Actions d'orchestration en minutes
+  job_timeout_minutes: 60
   # Plafond de reviewers spécialisés/transverses sélectionnés par diff (hors spec-parity-reviewer)
   max_parallel_reviewers: 4
   # Exécution en sandbox sans secret (arrêt fail-closed si l'isolation échoue)
@@ -133,6 +140,10 @@ Pour chaque appel LLM, `LLMClient` résout la clé API de manière déterministe
 | --- | --- | --- | --- |
 | `state_ref_prefix` | `string` | `"refs/epure/state/"` | Espace de noms des références Git utilisé pour la persistance d'état Compare-And-Swap (Q76). |
 | `max_code_fix_attempts` | `integer` | `3` | Nombre maximal de tours de correction automatique sur une PR `task/*` ou `feature/*` avant l'ajout du label `needs-human` (Q78). |
+| `max_transient_api_retries` | `integer` | `4` | Plafond de reprises par requête HTTP unitaire en cas d'erreur transitoire (`5xx`, `408`, timeout ou 1 relance sur JSON tronqué). Les limitations de débit `HTTP 429` attendent `Retry-After` (ou `[15, 30, 60, 120]s`, max `300s`, jusqu'à 10 attentes) sans consommer ce compteur. |
+| `transient_retry_backoff_seconds` | `[int, int, int, int]` | `[5, 15, 45, 120]` | Paliers de backoff exponentiel en secondes entre deux reprises HTTP transitoires. |
+| `llm_request_timeout_seconds` | `integer` | `900` | Délai d'expiration HTTP unitaire en secondes (`15 minutes`) pour chaque appel au fournisseur LLM. |
+| `job_timeout_minutes` | `integer` | `60` | Délai d'expiration global en minutes du job `orchestrate-command` dans `.github/workflows/epure-issue-command.yml` (Q78). |
 | `max_parallel_reviewers` | `integer` | `4` | Plafond de reviewers métier/transverses sélectionnés par diff pour maîtriser la latence et la pertinence (Q92). |
 | `secretless_sandbox` | `boolean` | `true` | Purge `LLM_API_KEY` et les clés privées PEM des GitHub Apps de tous les sous-processus de test/build ; échoue en mode *fail-closed* si l'isolation est impossible (Q74). |
 

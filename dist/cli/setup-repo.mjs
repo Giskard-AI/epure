@@ -1525,6 +1525,7 @@ var DEFAULT_AGENTS_CONFIG = {
   max_code_fix_attempts: 3,
   max_transient_api_retries: 4,
   transient_retry_backoff_seconds: [5, 15, 45, 120],
+  llm_request_timeout_seconds: 900,
   job_timeout_minutes: 60,
   review_timeout_minutes: 30,
   max_concurrent_tasks_per_feature: 3,
@@ -1696,6 +1697,7 @@ function resolveAgentsConfig(overrides = {}) {
     max_code_fix_attempts: overrides.max_code_fix_attempts ?? DEFAULT_AGENTS_CONFIG.max_code_fix_attempts,
     max_transient_api_retries: overrides.max_transient_api_retries ?? DEFAULT_AGENTS_CONFIG.max_transient_api_retries,
     transient_retry_backoff_seconds: overrides.transient_retry_backoff_seconds ?? DEFAULT_AGENTS_CONFIG.transient_retry_backoff_seconds,
+    llm_request_timeout_seconds: overrides.llm_request_timeout_seconds !== void 0 && overrides.llm_request_timeout_seconds > 0 ? overrides.llm_request_timeout_seconds : DEFAULT_AGENTS_CONFIG.llm_request_timeout_seconds,
     job_timeout_minutes: overrides.job_timeout_minutes ?? DEFAULT_AGENTS_CONFIG.job_timeout_minutes,
     review_timeout_minutes: overrides.review_timeout_minutes ?? DEFAULT_AGENTS_CONFIG.review_timeout_minutes,
     max_concurrent_tasks_per_feature: overrides.max_concurrent_tasks_per_feature ?? DEFAULT_AGENTS_CONFIG.max_concurrent_tasks_per_feature,
@@ -1832,6 +1834,7 @@ function serializeAgentsConfigYaml(config, taskAutoMergeEnabled = false) {
     `max_code_fix_attempts: ${config.max_code_fix_attempts}`,
     `max_transient_api_retries: ${config.max_transient_api_retries}`,
     `transient_retry_backoff_seconds: [${config.transient_retry_backoff_seconds.join(", ")}]`,
+    `llm_request_timeout_seconds: ${config.llm_request_timeout_seconds}`,
     `job_timeout_minutes: ${config.job_timeout_minutes}`,
     `review_timeout_minutes: ${config.review_timeout_minutes}`,
     `max_concurrent_tasks_per_feature: ${config.max_concurrent_tasks_per_feature}`,
@@ -1920,6 +1923,7 @@ function parseAgentsYaml(yamlContent) {
   let max_code_fix_attempts;
   let max_transient_api_retries;
   let transient_retry_backoff_seconds;
+  let llm_request_timeout_seconds;
   let job_timeout_minutes;
   let review_timeout_minutes;
   let max_concurrent_tasks_per_feature;
@@ -2043,6 +2047,8 @@ function parseAgentsYaml(yamlContent) {
             nums[3]
           ];
         }
+      } else if (key === "llm_request_timeout_seconds") {
+        llm_request_timeout_seconds = parseNum(val);
       } else if (key === "job_timeout_minutes") {
         job_timeout_minutes = parseNum(val);
       } else if (key === "review_timeout_minutes") {
@@ -2252,6 +2258,7 @@ function parseAgentsYaml(yamlContent) {
     ...max_code_fix_attempts !== void 0 ? { max_code_fix_attempts } : {},
     ...max_transient_api_retries !== void 0 ? { max_transient_api_retries } : {},
     ...transient_retry_backoff_seconds ? { transient_retry_backoff_seconds } : {},
+    ...llm_request_timeout_seconds !== void 0 ? { llm_request_timeout_seconds } : {},
     ...job_timeout_minutes !== void 0 ? { job_timeout_minutes } : {},
     ...review_timeout_minutes !== void 0 ? { review_timeout_minutes } : {},
     ...max_concurrent_tasks_per_feature !== void 0 ? { max_concurrent_tasks_per_feature } : {},
@@ -2280,7 +2287,7 @@ function parseAgentsYaml(yamlContent) {
     ...Object.keys(securityOverrides).length > 0 ? { security_overrides: securityOverrides } : {}
   };
 }
-function buildCallerWorkflows(pinnedSha, stack) {
+function buildCallerWorkflows(pinnedSha, stack, jobTimeoutMinutes = DEFAULT_AGENTS_CONFIG.job_timeout_minutes) {
   const ciWorkflow = buildStackAwareCiWorkflowYaml({ pinnedSha, stack });
   return [
     {
@@ -2325,7 +2332,7 @@ function buildCallerWorkflows(pinnedSha, stack) {
         "    needs: authorize-command",
         "    if: ${{ needs.authorize-command.outputs.authorized == 'true' }}",
         "    runs-on: ubuntu-latest",
-        "    timeout-minutes: 60",
+        `    timeout-minutes: ${jobTimeoutMinutes}`,
         "    environment: gemini",
         "    concurrency:",
         "      group: epure-issue-${{ github.event.issue.number }}",
@@ -2651,6 +2658,7 @@ function planAndApplyRepoSetup(input) {
   });
   let existingVerification;
   let existingProviders;
+  let existingLlmRequestTimeoutSeconds;
   if (input.repoRootDir && existsSync2(join2(input.repoRootDir, ".github", "agents.yml"))) {
     try {
       const existingRaw = readFileSync2(
@@ -2660,9 +2668,11 @@ function planAndApplyRepoSetup(input) {
       const parsedExisting = parseAgentsYaml(existingRaw);
       existingVerification = parsedExisting.verification;
       existingProviders = parsedExisting.providers;
+      existingLlmRequestTimeoutSeconds = parsedExisting.llm_request_timeout_seconds;
     } catch {
       existingVerification = void 0;
       existingProviders = void 0;
+      existingLlmRequestTimeoutSeconds = void 0;
     }
   }
   const resetTargets = input.agentsOverrides?.reset_verification_targets === true;
@@ -2725,8 +2735,10 @@ function planAndApplyRepoSetup(input) {
     targets: mergedTargets
   };
   const effectiveProviders = resolvedConfig.config.providers ?? existingProviders;
+  const effectiveLlmRequestTimeoutSeconds = input.agentsOverrides?.llm_request_timeout_seconds !== void 0 ? resolvedConfig.config.llm_request_timeout_seconds : existingLlmRequestTimeoutSeconds ?? resolvedConfig.config.llm_request_timeout_seconds;
   const effectiveAgentsConfig = {
     ...resolvedConfig.config,
+    llm_request_timeout_seconds: effectiveLlmRequestTimeoutSeconds,
     ...effectiveProviders ? { providers: effectiveProviders } : {},
     verification: effectiveVerification
   };
@@ -2751,7 +2763,11 @@ function planAndApplyRepoSetup(input) {
     renovateConfig.path,
     renovateConfig.content
   );
-  const workflowTemplates = buildCallerWorkflows(pinnedSha, detectedStack);
+  const workflowTemplates = buildCallerWorkflows(
+    pinnedSha,
+    detectedStack,
+    effectiveAgentsConfig.job_timeout_minutes
+  );
   const plannedWorkflows = workflowTemplates.map((wf) => ({
     path: wf.path,
     action: computeFilePlanAction(input.repoRootDir, wf.path, wf.content),

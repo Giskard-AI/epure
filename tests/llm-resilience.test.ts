@@ -15,33 +15,40 @@ describe("Ticket 25 (#26) — LLM rate-limit backoff & quota/auth suspension wit
 
   it.each([
     {
-      id: "transient-429-rate-limit-recovers-without-consuming-code-fix-attempts",
+      id: "transient-429-rate-limit-waits-without-consuming-transient-retries-or-code-fix-attempts",
       responses: [
-        { status: 429, errorType: "rate_limit_exceeded", body: "Rate limit" },
+        {
+          status: 429,
+          errorType: "rate_limit_exceeded",
+          body: "Rate limit, please retry after 20s"
+        },
         { status: 503, errorType: "server_overloaded", body: "Overloaded" },
         { status: 200, body: '{"result":"ok"}' }
       ] satisfies readonly LlmProviderResponse[],
       fallbackProviderConfigured: undefined,
       expectedStatus: "completed",
       expectedErrorCode: "NONE",
-      expectedTransientRetriesUsed: 2,
-      expectedBackoffSleeps: [5, 15],
+      expectedTransientRetriesUsed: 1,
+      expectedRateLimitWaitsUsed: 1,
+      expectedBackoffSleeps: [20, 5],
       expectedCodeFixAttemptsUsed: 1
     },
     {
       id: "transient-retries-exhausted-suspends-without-consuming-code-fix-attempts",
       responses: [
         { status: 429, errorType: "rate_limit_exceeded", body: "Rate limit 1" },
-        { status: 429, errorType: "rate_limit_exceeded", body: "Rate limit 2" },
-        { status: 502, errorType: "bad_gateway", body: "Bad gateway 3" },
-        { status: 504, errorType: "gateway_timeout", body: "Timeout 4" },
+        { status: 502, errorType: "bad_gateway", body: "Bad gateway 1" },
+        { status: 504, errorType: "gateway_timeout", body: "Timeout 2" },
+        { status: 503, errorType: "service_unavailable", body: "Down 3" },
+        { status: 500, errorType: "internal_error", body: "Down 4" },
         { status: 503, errorType: "service_unavailable", body: "Still down 5" }
       ] satisfies readonly LlmProviderResponse[],
       fallbackProviderConfigured: undefined,
       expectedStatus: "suspended_transient_api_exhausted",
       expectedErrorCode: "TRANSIENT_API_RETRIES_EXHAUSTED",
       expectedTransientRetriesUsed: 4,
-      expectedBackoffSleeps: [5, 15, 45, 120],
+      expectedRateLimitWaitsUsed: 1,
+      expectedBackoffSleeps: [15, 5, 15, 45, 120],
       expectedCodeFixAttemptsUsed: 1
     },
     {
@@ -57,6 +64,7 @@ describe("Ticket 25 (#26) — LLM rate-limit backoff & quota/auth suspension wit
       expectedStatus: "suspended_llm_quota_or_auth",
       expectedErrorCode: "LLM_QUOTA_EXHAUSTED",
       expectedTransientRetriesUsed: 0,
+      expectedRateLimitWaitsUsed: 0,
       expectedBackoffSleeps: [],
       expectedCodeFixAttemptsUsed: 1
     },
@@ -73,6 +81,7 @@ describe("Ticket 25 (#26) — LLM rate-limit backoff & quota/auth suspension wit
       expectedStatus: "suspended_llm_quota_or_auth",
       expectedErrorCode: "LLM_AUTH_INVALID",
       expectedTransientRetriesUsed: 0,
+      expectedRateLimitWaitsUsed: 0,
       expectedBackoffSleeps: [],
       expectedCodeFixAttemptsUsed: 1
     },
@@ -89,6 +98,7 @@ describe("Ticket 25 (#26) — LLM rate-limit backoff & quota/auth suspension wit
       expectedStatus: "rejected_fallback_provider",
       expectedErrorCode: "FALLBACK_PROVIDER_SWITCH_FORBIDDEN",
       expectedTransientRetriesUsed: 0,
+      expectedRateLimitWaitsUsed: 0,
       expectedBackoffSleeps: [],
       expectedCodeFixAttemptsUsed: 1
     }
@@ -100,6 +110,7 @@ describe("Ticket 25 (#26) — LLM rate-limit backoff & quota/auth suspension wit
       expectedStatus,
       expectedErrorCode,
       expectedTransientRetriesUsed,
+      expectedRateLimitWaitsUsed,
       expectedBackoffSleeps,
       expectedCodeFixAttemptsUsed
     }) => {
@@ -128,6 +139,7 @@ describe("Ticket 25 (#26) — LLM rate-limit backoff & quota/auth suspension wit
       expect(result.status).toBe(expectedStatus);
       expect(result.error_code).toBe(expectedErrorCode);
       expect(result.transient_retries_used).toBe(expectedTransientRetriesUsed);
+      expect(result.rate_limit_waits_used).toBe(expectedRateLimitWaitsUsed);
       expect(recordedSleeps).toEqual(expectedBackoffSleeps);
       expect(result.code_fix_attempts_used).toBe(expectedCodeFixAttemptsUsed);
       expect(result.provider_switched).toBe(false);

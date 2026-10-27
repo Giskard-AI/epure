@@ -3,7 +3,9 @@ import {
   classifyHttpError,
   isTransientLLMError,
   LLMError,
-  LLMTimeoutError
+  LLMTimeoutError,
+  RateLimitError,
+  StructuredOutputValidationError
 } from "./errors.js";
 import { executeAnthropicProvider } from "./providers/anthropic.js";
 import { executeGoogleProvider } from "./providers/google.js";
@@ -221,6 +223,14 @@ export function resolveProviderApiKey(params: {
   return fallback && fallback.length > 0 ? fallback : undefined;
 }
 
+export const DEFAULT_LLM_REQUEST_TIMEOUT_MS = 900_000;
+export const DEFAULT_MAX_TRANSIENT_RETRIES = 4;
+export const DEFAULT_RATE_LIMIT_FALLBACK_SECONDS: readonly number[] = [
+  15, 30, 60, 120
+];
+export const MAX_RATE_LIMIT_WAIT_SECONDS = 300;
+export const DEFAULT_MAX_RATE_LIMIT_WAITS = 10;
+
 export class LLMClient {
   private readonly providers: Map<string, ProviderConfig> = new Map();
 
@@ -279,10 +289,23 @@ export class LLMClient {
     }
 
     const fetchFn = options.fetchImpl ?? fetch;
-    const maxTransientRetries = options.maxTransientRetries ?? 2;
-    const defaultBackoff = options.fetchImpl ? [0, 0] : [1, 2];
+    const maxTransientRetries =
+      options.maxTransientRetries ?? DEFAULT_MAX_TRANSIENT_RETRIES;
+    const defaultBackoff = options.fetchImpl ? [0, 0, 0, 0] : [5, 15, 45, 120];
     const backoffSeconds =
       options.transientRetryBackoffSeconds ?? defaultBackoff;
+    const requestTimeoutMs =
+      options.requestTimeoutMs !== undefined && options.requestTimeoutMs > 0
+        ? options.requestTimeoutMs
+        : DEFAULT_LLM_REQUEST_TIMEOUT_MS;
+    const maxRateLimitWaits =
+      options.maxRateLimitWaits ?? DEFAULT_MAX_RATE_LIMIT_WAITS;
+    const defaultRateLimitFallback =
+      options.fetchImpl && !options.sleepMs
+        ? [0, 0, 0, 0]
+        : DEFAULT_RATE_LIMIT_FALLBACK_SECONDS;
+    const rateLimitFallback =
+      options.rateLimitFallbackSeconds ?? defaultRateLimitFallback;
 
     const sleepMs =
       options.sleepMs ??
@@ -292,18 +315,23 @@ export class LLMClient {
         }
       });
 
-    let transientRetriesUsed = 0;
+    let totalTransientRetriesUsed = 0;
+    let totalRateLimitWaitsUsed = 0;
 
     const executeRequest = async (
       reqUrl: string,
       reqInit: RequestInit
     ): Promise<Response> => {
+      let requestRetriesUsed = 0;
+      let requestRateLimitWaitsUsed = 0;
+
       while (true) {
         try {
           const effectiveInit: RequestInit =
-            options.fetchImpl || reqInit.signal
+            reqInit.signal ||
+            (options.fetchImpl && options.requestTimeoutMs === undefined)
               ? reqInit
-              : { ...reqInit, signal: AbortSignal.timeout(180_000) };
+              : { ...reqInit, signal: AbortSignal.timeout(requestTimeoutMs) };
           const res = await fetchFn(reqUrl, effectiveInit);
           if (res.ok) {
             return res;
@@ -318,15 +346,35 @@ export class LLMClient {
             retryAfterHeader: res.headers.get("retry-after")
           });
 
+          if (classified instanceof RateLimitError) {
+            if (requestRateLimitWaitsUsed < maxRateLimitWaits) {
+              const waitSec =
+                classified.retryAfterSeconds !== undefined
+                  ? Math.min(
+                      Math.max(classified.retryAfterSeconds, 1),
+                      MAX_RATE_LIMIT_WAIT_SECONDS
+                    )
+                  : (rateLimitFallback[requestRateLimitWaitsUsed] ??
+                    rateLimitFallback[rateLimitFallback.length - 1] ??
+                    120);
+              requestRateLimitWaitsUsed += 1;
+              totalRateLimitWaitsUsed += 1;
+              await sleepMs(waitSec * 1000);
+              continue;
+            }
+            throw classified;
+          }
+
           if (
             isTransientLLMError(classified) &&
-            transientRetriesUsed < maxTransientRetries
+            requestRetriesUsed < maxTransientRetries
           ) {
             const backoffSec =
-              backoffSeconds[transientRetriesUsed] ??
+              backoffSeconds[requestRetriesUsed] ??
               backoffSeconds[backoffSeconds.length - 1] ??
               0;
-            transientRetriesUsed += 1;
+            requestRetriesUsed += 1;
+            totalTransientRetriesUsed += 1;
             await sleepMs(backoffSec * 1000);
             continue;
           }
@@ -337,12 +385,13 @@ export class LLMClient {
             throw err;
           }
 
-          if (transientRetriesUsed < maxTransientRetries) {
+          if (requestRetriesUsed < maxTransientRetries) {
             const backoffSec =
-              backoffSeconds[transientRetriesUsed] ??
+              backoffSeconds[requestRetriesUsed] ??
               backoffSeconds[backoffSeconds.length - 1] ??
               0;
-            transientRetriesUsed += 1;
+            requestRetriesUsed += 1;
+            totalTransientRetriesUsed += 1;
             await sleepMs(backoffSec * 1000);
             continue;
           }
@@ -355,55 +404,76 @@ export class LLMClient {
       }
     };
 
-    if (provider === "google") {
-      const result = await executeGoogleProvider({
+    let structuredValidationRetried = false;
+    const onStructuredValidationRetry =
+      maxTransientRetries > 0
+        ? async () => {
+            structuredValidationRetried = true;
+            const backoffSec = backoffSeconds[0] ?? 0;
+            totalTransientRetriesUsed += 1;
+            await sleepMs(backoffSec * 1000);
+          }
+        : undefined;
+
+    const invokeProvider = async (): Promise<{
+      readonly text: string;
+      readonly data?: T | undefined;
+    }> => {
+      if (provider === "google") {
+        return await executeGoogleProvider({
+          model,
+          apiKey,
+          providerConfig,
+          options,
+          executeRequest,
+          onStructuredValidationRetry
+        });
+      }
+
+      if (provider === "anthropic") {
+        return await executeAnthropicProvider({
+          model,
+          apiKey,
+          providerConfig,
+          options,
+          executeRequest
+        });
+      }
+
+      return await executeOpenAIProvider({
+        provider,
         model,
         apiKey,
         providerConfig,
         options,
         executeRequest
       });
-      return {
-        text: result.text,
-        ...(result.data !== undefined ? { data: result.data } : {}),
-        provider,
-        model,
-        attempts: 1 + transientRetriesUsed
-      };
-    }
-
-    if (provider === "anthropic") {
-      const result = await executeAnthropicProvider({
-        model,
-        apiKey,
-        providerConfig,
-        options,
-        executeRequest
-      });
-      return {
-        text: result.text,
-        ...(result.data !== undefined ? { data: result.data } : {}),
-        provider,
-        model,
-        attempts: 1 + transientRetriesUsed
-      };
-    }
-
-    const result = await executeOpenAIProvider({
-      provider,
-      model,
-      apiKey,
-      providerConfig,
-      options,
-      executeRequest
-    });
-    return {
-      text: result.text,
-      ...(result.data !== undefined ? { data: result.data } : {}),
-      provider,
-      model,
-      attempts: 1 + transientRetriesUsed
     };
+
+    while (true) {
+      try {
+        const result = await invokeProvider();
+        return {
+          text: result.text,
+          ...(result.data !== undefined ? { data: result.data } : {}),
+          provider,
+          model,
+          attempts: 1 + totalTransientRetriesUsed + totalRateLimitWaitsUsed,
+          transientRetriesUsed: totalTransientRetriesUsed,
+          rateLimitWaitsUsed: totalRateLimitWaitsUsed
+        };
+      } catch (err) {
+        if (
+          err instanceof StructuredOutputValidationError &&
+          !structuredValidationRetried &&
+          onStructuredValidationRetry
+        ) {
+          await onStructuredValidationRetry();
+          continue;
+        }
+        throw err;
+      }
+    }
   }
 
   async completeText(options: LLMCallOptions): Promise<string> {
