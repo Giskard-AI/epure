@@ -8404,12 +8404,17 @@ function buildRepoExplorationToolsAndHandlers(params) {
     ],
     toolHandlers: {
       list_repo_files: async (args) => {
-        const q = String(args.query ?? "").trim().toLowerCase();
+        const rawQuery = String(args.query ?? "").trim().toLowerCase();
+        const q = rawQuery === "*" || rawQuery === "**" || rawQuery === "." || rawQuery === "./" ? "" : rawQuery;
+        const queryTokens = q.split("*").filter(Boolean);
         let allPaths = await params.gh.listBranchPaths(params.branch);
         if (allPaths.length === 0 && params.branch !== params.featureBranch) {
           allPaths = await params.gh.listBranchPaths(params.featureBranch);
         }
-        const matches = allPaths.filter((p) => p.toLowerCase().includes(q)).slice(0, 60);
+        const matches = allPaths.filter((p) => {
+          const lower = p.toLowerCase();
+          return queryTokens.length === 0 ? true : queryTokens.every((token) => lower.includes(token));
+        }).slice(0, 60);
         return { matches };
       },
       search_in_repo_file: async (args) => {
