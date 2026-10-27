@@ -18,14 +18,15 @@ This guide provides a practical checklist for steering a feature or complex bugf
 
 ---
 
-## 2. Reviewing the `plan/*` Pull Request
+## 2. Generating & Reviewing the Specification (`/epure to-spec` & `/epure to-tickets`)
 
-Once the Grill settles, EPURE opens a `plan/<issue>-<slug> -> dev` Pull Request and creates the ticket DAG. Before commenting `/epure approve`, check:
+Once the Grill decision frontier is resolved (`frontier_resolved: true`), EPURE posts a **Settled Decisions Summary** and pauses in `grilling` (`awaiting_human_approval`).
 
-1. **`GLOSSARY.md`**: Are the new domain terms accurate and free of ambiguity?
-2. **`docs/adr/`**: Do the Architectural Decision Records reflect your choices?
-3. **`DESIGN.md` (if UI is involved)**: Are the color tokens, typography, and interaction states aligned with your product?
-4. **`docs/specs/<slug>.md` & Ticket DAG**: Are the acceptance criteria and `blocked_by` relationships between tickets logical?
+1. **Generate the Specification (`/epure to-spec`)**: Comment `/epure to-spec` to commit `GLOSSARY.md`, `docs/adr/NNNN-*.md`, `DESIGN.md` (if UI is involved), and `docs/specs/<slug>.md` onto `plan/<issue>-<slug>`. The issue transitions to `spec` (`awaiting_human_approval`).
+2. **Revise or Validate the Specification**:
+   - Inspect `GLOSSARY.md`, `docs/adr/`, and `docs/specs/<slug>.md` on `plan/<issue>-<slug>`.
+   - To request adjustments to the specification before creating tickets, **reply directly in a comment** (without a slash command).
+3. **Generate the Ticket DAG (`/epure to-tickets`)**: Once the specification is approved, comment `/epure to-tickets`. EPURE decomposes the spec into an acyclic dependency-ordered GitHub Issue DAG (`blocked_by`, `ready-for-agent`) and pauses in `tickets` (`awaiting_human_approval`) awaiting `/epure approve`.
 
 ---
 

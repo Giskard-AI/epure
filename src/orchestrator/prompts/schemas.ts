@@ -30,6 +30,19 @@ export interface GeneratedTicketSpec {
 
 export type PlannedTicketDefinition = GeneratedTicketSpec;
 
+export interface GeneratedSpecArtifacts {
+  readonly plan_slug: string;
+  readonly glossary_markdown: string;
+  readonly adrs: readonly GeneratedAdrDocument[];
+  readonly spec_path: string;
+  readonly spec_markdown: string;
+  readonly target_files_hint?: readonly string[] | undefined;
+}
+
+export interface GeneratedTicketDag {
+  readonly tickets: readonly GeneratedTicketSpec[];
+}
+
 export interface GeneratedPlanningBundle {
   readonly plan_slug: string;
   readonly glossary_markdown: string;
@@ -448,6 +461,138 @@ export const GENERATED_PLANNING_BUNDLE_SCHEMA: ResponseSchemaSpec<GeneratedPlann
         spec_path: specPath,
         spec_markdown: specMarkdown,
         tickets
+      };
+    }
+  };
+
+export const GENERATED_SPEC_ARTIFACTS_SCHEMA: ResponseSchemaSpec<GeneratedSpecArtifacts> =
+  {
+    name: "generated_spec_artifacts",
+    description:
+      "EPURE specification artifacts (GLOSSARY.md, ADRs, and specification Markdown) generated during /epure to-spec prior to human validation and ticket decomposition.",
+    schema: {
+      type: "object",
+      properties: {
+        plan_slug: { type: "string" },
+        glossary_markdown: { type: "string" },
+        adrs: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              path: { type: "string" },
+              content: { type: "string" },
+              filename: { type: "string" },
+              title: { type: "string" },
+              markdown: { type: "string" }
+            },
+            required: ["path", "content"]
+          }
+        },
+        spec_path: { type: "string" },
+        spec_markdown: { type: "string" },
+        target_files_hint: {
+          type: "array",
+          items: { type: "string" }
+        }
+      },
+      required: [
+        "plan_slug",
+        "glossary_markdown",
+        "adrs",
+        "spec_path",
+        "spec_markdown"
+      ]
+    },
+    validate(parsed: unknown): GeneratedSpecArtifacts {
+      const obj = asRecord(parsed, "GeneratedSpecArtifacts");
+      const validatedBundle = GENERATED_PLANNING_BUNDLE_SCHEMA.validate({
+        ...obj,
+        tickets: [
+          {
+            index: 1,
+            slug: "spec-validation-placeholder",
+            title: "[Ticket 1] Spec validation placeholder",
+            description: "Placeholder for spec-only validation",
+            acceptance_criteria: ["Spec validated"],
+            blocked_by_indices: [],
+            files_to_create_or_update: []
+          }
+        ]
+      });
+      return {
+        plan_slug: validatedBundle.plan_slug,
+        glossary_markdown: validatedBundle.glossary_markdown,
+        adrs: validatedBundle.adrs,
+        spec_path: validatedBundle.spec_path,
+        spec_markdown: validatedBundle.spec_markdown,
+        target_files_hint: asStringArray(obj.target_files_hint)
+      };
+    }
+  };
+
+export const GENERATED_TICKET_DAG_SCHEMA: ResponseSchemaSpec<GeneratedTicketDag> =
+  {
+    name: "generated_ticket_dag",
+    description:
+      "Dependency-ordered DAG of atomic TDD tickets decomposed from the approved specification during /epure to-tickets.",
+    schema: {
+      type: "object",
+      properties: {
+        tickets: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              index: { type: "integer" },
+              slug: { type: "string" },
+              title: { type: "string" },
+              description: { type: "string" },
+              summary: { type: "string" },
+              acceptance_criteria: {
+                type: "array",
+                items: { type: "string" }
+              },
+              blocked_by_indices: {
+                type: "array",
+                items: { type: "integer" }
+              },
+              files_to_create_or_update: {
+                type: "array",
+                items: { type: "string" }
+              },
+              files_likely_touched: {
+                type: "array",
+                items: { type: "string" }
+              }
+            },
+            required: [
+              "title",
+              "acceptance_criteria",
+              "blocked_by_indices"
+            ]
+          }
+        }
+      },
+      required: ["tickets"]
+    },
+    validate(parsed: unknown): GeneratedTicketDag {
+      const obj = asRecord(parsed, "GeneratedTicketDag");
+      const validatedBundle = GENERATED_PLANNING_BUNDLE_SCHEMA.validate({
+        plan_slug: "tickets-dag",
+        glossary_markdown: "# GLOSSARY\n\nExisting glossary.",
+        adrs: [
+          {
+            path: "docs/adr/0001-existing.md",
+            content: "# ADR\n\nExisting ADR."
+          }
+        ],
+        spec_path: "docs/specs/existing.md",
+        spec_markdown: "# Specification\n\nExisting specification.",
+        tickets: obj.tickets
+      });
+      return {
+        tickets: validatedBundle.tickets
       };
     }
   };

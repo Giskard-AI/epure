@@ -86,6 +86,7 @@ export interface LLMCallOptions<T = unknown> {
   readonly systemInstruction: string;
   readonly userPrompt: string;
   readonly temperature?: number | undefined;
+  readonly maxOutputTokens?: number | undefined;
   readonly responseMimeType?: "application/json" | "text/plain" | undefined;
   readonly responseSchema?: ResponseSchemaSpec<T> | undefined;
   readonly tools?: readonly ToolDeclaration[] | undefined;

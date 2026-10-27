@@ -18,14 +18,15 @@ Ce guide fournit la marche à suivre opérationnelle pour piloter une fonctionna
 
 ---
 
-## 2. Relire la Pull Request `plan/*`
+## 2. Générer & Valider la Spécification (`/epure to-spec` & `/epure to-tickets`)
 
-Une fois le Grill terminé, EPURE ouvre une PR `plan/<issue>-<slug> -> dev` et crée le DAG de tickets. Avant de poster `/epure approve`, vérifiez :
+Dès que la frontière de décisions du Grill est résolue (`frontier_resolved: true`), EPURE publie la **Synthèse des Décisions** et attend votre validation (`grilling` / `awaiting_human_approval`).
 
-1. **`GLOSSARY.md`** : les nouveaux termes du domaine sont-ils exacts et sans ambiguïté ?
-2. **`docs/adr/`** : les ADRs reflètent-ils fidèlement vos décisions ?
-3. **`DESIGN.md` (si une UI est concernée)** : les tokens de couleur, la typographie et les états d'interaction correspondent-ils à votre produit ?
-4. **`docs/specs/<slug>.md` & DAG de Tickets** : les critères d'acceptation et les liens `blocked_by` entre tickets sont-ils cohérents ?
+1. **Générer la Spécification (`/epure to-spec`)** : commentez `/epure to-spec` pour générer et commiter `GLOSSARY.md`, `docs/adr/NNNN-*.md`, `DESIGN.md` (si une UI est concernée) et `docs/specs/<slug>.md` sur `plan/<issue>-<slug>`. L'issue passe en phase `spec` (`awaiting_human_approval`).
+2. **Réviser ou Valider la Spécification** :
+   - Inspectez `GLOSSARY.md`, `docs/adr/` et `docs/specs/<slug>.md` sur `plan/<issue>-<slug>`.
+   - Pour demander un ajustement ou une précision sur la spécification avant la création des tickets, **répondez directement en commentaire** (sans commande slash).
+3. **Générer le Graphe de Tickets (`/epure to-tickets`)** : une fois la spécification validée, commentez `/epure to-tickets`. EPURE découpe la spécification en un graphe acyclique (DAG) de sous-issues GitHub (`blocked_by`, `ready-for-agent`) et passe en phase `tickets` (`awaiting_human_approval`) en attente de `/epure approve`.
 
 ---
 

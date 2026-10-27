@@ -1,0 +1,16 @@
+{
+  "targets": [
+    {
+      "id": "gemini-flash-target",
+      "planningModel": "google/gemini-3-flash-preview",
+      "executionModel": "google/gemini-3-flash-preview",
+      "reviewModel": "google/gemini-3-flash-preview",
+      "providers": {
+        "google": {
+          "provider": "google",
+          "api_key": "os.environ/GEMINI_API_KEY"
+        }
+      }
+    }
+  ]
+}

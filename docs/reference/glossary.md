@@ -26,7 +26,9 @@ This page provides the aligned **English <-> French** ubiquitous language refere
 | **Atomic Task Branch (`task/<ticket>-<slug>`)** | *Branche de tâche (`task/*`)* | Short-lived branch implementing a single ticket from the DAG in a secretless TDD sandbox. |
 | **Out-of-Branch CAS State Ref (`refs/epure/state/<issue>`)** | *Référence Git d'état d'orchestration (`refs/epure/state/<issue-number>`)* | Dedicated Git reference outside `refs/heads/*` storing the state machine (`last_processed_comment_id`, signed `spec_sha`, retry counters) updated via atomic Compare-And-Swap. |
 | **Batch Comment Cursor (`last_processed_comment_id`)** | *Traitement en lot des commentaires avec curseur* | Mechanism reading all unprocessed human comments in chronological order so queued runs never drop events. |
-| **Implicit Grill Continuity** | *Continuité implicite de l'entretien de grill* | Automatic processing of any ordinary human comment posted while the issue is in phase `grilling`, without repeating a slash command. |
+| **Implicit Grill & Spec Revision Continuity** | *Continuité implicite de l'entretien de grill et de la révision de spécification (Q84)* | Automatic processing of any ordinary human comment posted while the issue is in phase `grilling` (Grill answers) or `spec` (specification revision on `plan/*`), without repeating a slash command. |
+| **Human Grill Frontier Validation** | *Validation humaine de la frontière de Grill (Q85)* | Pause in `grilling` (`awaiting_human_approval`) with a Settled Decisions Summary once `frontier_resolved: true`, requiring explicit `/epure to-spec` before generating specification files. |
+| **Human Specification Validation** | *Validation humaine de la spécification (Q85)* | Separation between `/epure to-spec` (committing `GLOSSARY.md`, ADRs, `DESIGN.md`, and `docs/specs/<slug>.md` on `plan/*` in phase `spec` / `awaiting_human_approval`) and `/epure to-tickets` (generating the acyclic GitHub Issue DAG in phase `tickets` / `awaiting_human_approval`). |
 
 ---
 
@@ -40,3 +42,14 @@ This page provides the aligned **English <-> French** ubiquitous language refere
 | **Persona UX Gate (`user-advocate`)** | *Porte UX orientée personas (`user-advocate`)* | Specialist evaluating end-user journeys in `design-gate` mode (enriching ticket acceptance criteria before `/epure approve`) and `implementation-review` mode (blocking PR check on UI changes). |
 | **Blocking Design Violation (`impeccable-gate`)** | *Violation de design bloquante* | Objective new UI regression (WCAG 2.1 AA contrast, layout overflow, missing `DESIGN.md` tokens, or missing `loading`/`ready`/`error` interaction states) that blocks PR merge. |
 | **AI Semantic Squash Synthesis** | *Synthèse de message de squash sémantique par IA* | Zero-temperature generation of a Conventional Commit title and body right before squash-merge (`Refs #<ticket>` on `feature/*`, `Closes #<issue>` on `dev`). |
+
+---
+
+## 4. Multi-Provider LLM Router & Structured Output (ADR-0029)
+
+| English Term | French Canonical Term (`GLOSSARY.md`) | Definition & Invariant |
+| --- | --- | --- |
+| **Multi-Provider LLM Router (`LLMClient`)** | *Routeur LLM multi-fournisseurs* | Dependency-free TypeScript HTTP client routing `<provider>/<model>` identifiers (`openai/`, `azure/`, `azure_ai/`, `google/`, `gemini/`, `anthropic/`, or named aliases in `.github/agents.yml` with lazy `os.environ/VAR_NAME` resolution) without cross-provider fallback on auth/quota errors (ADR-0012). |
+| **Schema-Enforced Structured Output (`ResponseSchemaSpec<T>`)** | *Sortie structurée par schéma* | Contract pairing a strict JSON Schema (`responseSchema`, `response_format.json_schema`, or `output_config.format`) with a runtime TypeScript validator, executing a 2-phase tool loop + schema-locked final turn on Google Gemini. |
+| **Contextual `/epure` Command Cheat-Sheet (`formatEpureCommandsSpoiler`)** | *Aide-mémoire contextuel des commandes `/epure`* | Collapsible `<details>` block appended to every EPURE issue comment, sub-issue body, and PR description summarizing available commands and highlighting the recommended next action for the current phase. |
+

@@ -58,7 +58,7 @@ Because Issue #16 is in the `grilling` phase, **you do not need to type another 
 
 <span class="epure-badge epure-badge--auto">Mandatory Automated Step</span> + <span class="epure-badge epure-badge--optional">Conditional UI Gate</span>
 
-Once your reply settles all open questions on the design frontier, EPURE automatically transitions from **Grill** to **Blueprint & Tickets**:
+Once your reply settles all open questions on the design frontier, EPURE posts a **Settled Decisions Summary** and pauses in `grilling` (`awaiting_human_approval`). After you validate the frontier with **`/epure to-spec`** (to generate and review the spec on `plan/*`) and **`/epure to-tickets`** (to decompose the spec into tickets):
 
 1. **Creates branch `plan/16-markov-craft-calculator`** from `dev`.
 2. **Commits the domain and specification artifacts**:

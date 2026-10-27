@@ -404,6 +404,294 @@ describe("EPURE v1.1.0 — Real Orchestration Wiring (Q84–Q90, ADR-0026)", () 
       expect(parsed.files[0]?.content).toContain("\\s+");
       expect(parsed.files[0]?.content).toContain("L\\'Enclume\nAstrale");
     });
+
+    it("executes separate /epure to-spec (phase=spec, 0 tickets), human spec revision reply, and /epure to-tickets (phase=tickets, creates sub-issues)", async () => {
+      const store = createInMemoryGitRefStateStore();
+      await updateIssueStateWithCas({
+        issueNumber: 16,
+        store,
+        mutator: (prev) => ({
+          ...prev,
+          phase: "grilling",
+          status: "awaiting_human_approval",
+          active_branch: "plan/16-l-enclume-astrale"
+        })
+      });
+
+      const postedComments: Array<{ id: number; body: string }> = [
+        {
+          id: 101,
+          body: "### ✅ Frontière de Cadrage Résolue (`/grill-with-docs` — En attente de validation humaine)"
+        }
+      ];
+      const createdSubIssues: number[] = [];
+      let committedSpecContent = "";
+
+      const mockFetch = async (
+        url: string | URL | Request,
+        init?: RequestInit
+      ): Promise<Response> => {
+        const urlStr = String(url);
+        const method = init?.method ?? "GET";
+
+        if (urlStr.includes("generativelanguage.googleapis.com")) {
+          const parsedBody = JSON.parse(String(init?.body ?? "{}")) as {
+            systemInstruction?: { parts?: Array<{ text?: string }> };
+          };
+          const sysText =
+            parsedBody.systemInstruction?.parts?.[0]?.text ?? "";
+
+          if (sysText.includes("SANS créer les tickets")) {
+            committedSpecContent =
+              "# Specification Enclume Astrale\n\n## Architecture\nDeterministic engine.\n";
+            return new Response(
+              JSON.stringify({
+                candidates: [
+                  {
+                    content: {
+                      parts: [
+                        {
+                          text: JSON.stringify({
+                            plan_slug: "l-enclume-astrale",
+                            glossary_markdown:
+                              "# GLOSSARY\n\n- **Astral Anvil**: Deterministic forge.\n",
+                            adrs: [
+                              {
+                                path: "docs/adr/0001-astral-anvil.md",
+                                content:
+                                  "# ADR 0001\n\n## Context\nForge.\n\n## Decision\nPure TS.\n\n## Consequences\nTestable.\n"
+                              }
+                            ],
+                            spec_path: "docs/specs/l-enclume-astrale.md",
+                            spec_markdown: committedSpecContent,
+                            target_files_hint: ["src/forge.ts"]
+                          })
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }),
+              { status: 200 }
+            );
+          }
+
+          return new Response(
+            JSON.stringify({
+              candidates: [
+                {
+                  content: {
+                    parts: [
+                      {
+                        text: JSON.stringify({
+                          plan_slug: "l-enclume-astrale",
+                          tickets: [
+                            {
+                              index: 1,
+                              slug: "core-forge",
+                              title: "[Ticket 1] Implement core forge engine",
+                              description:
+                                "Implement deterministic forge calculation module.",
+                              acceptance_criteria: [
+                                "Returns exact integer output for all valid inputs"
+                              ],
+                              blocked_by_indices: [],
+                              files_to_create_or_update: ["src/forge.ts"]
+                            }
+                          ]
+                        })
+                      }
+                    ]
+                  }
+                }
+              ]
+            }),
+            { status: 200 }
+          );
+        }
+
+        if (urlStr.endsWith("/issues/16") && method === "GET") {
+          return new Response(
+            JSON.stringify({
+              number: 16,
+              title: "[Plan] L'Enclume Astrale",
+              body: "Cahier des charges initial"
+            }),
+            { status: 200 }
+          );
+        }
+        if (urlStr.includes("/issues/16/comments") && method === "GET") {
+          return new Response(
+            JSON.stringify(
+              postedComments.map((c) => ({
+                id: c.id,
+                body: c.body,
+                user: { login: "Hartorn", type: "User" },
+                created_at: "2026-10-24T10:00:00Z"
+              }))
+            ),
+            { status: 200 }
+          );
+        }
+        if (urlStr.includes("/issues/16/comments") && method === "POST") {
+          const parsed = JSON.parse(String(init?.body ?? "{}")) as {
+            body: string;
+          };
+          postedComments.push({
+            id: 200 + postedComments.length,
+            body: parsed.body
+          });
+          return new Response(
+            JSON.stringify({
+              html_url:
+                "https://github.com/Hartorn-Inc/enclume-astrale/issues/16#issuecomment-200"
+            }),
+            { status: 201 }
+          );
+        }
+        if (urlStr.includes("/git/trees/") && method === "GET") {
+          if (committedSpecContent) {
+            return new Response(
+              JSON.stringify({
+                tree: [
+                  {
+                    path: "docs/specs/l-enclume-astrale.md",
+                    type: "blob",
+                    sha: "sha_spec_1"
+                  },
+                  {
+                    path: "GLOSSARY.md",
+                    type: "blob",
+                    sha: "sha_glossary_1"
+                  },
+                  {
+                    path: "docs/adr/0001-astral-anvil.md",
+                    type: "blob",
+                    sha: "sha_adr_1"
+                  }
+                ]
+              }),
+              { status: 200 }
+            );
+          }
+          return new Response(JSON.stringify({ tree: [] }), { status: 200 });
+        }
+        if (urlStr.includes("/git/blobs/") && method === "GET") {
+          const text = urlStr.endsWith("sha_glossary_1")
+            ? "# GLOSSARY\n\n- **Astral Anvil**: Deterministic forge.\n"
+            : urlStr.endsWith("sha_adr_1")
+              ? "# ADR 0001\n\n## Context\nForge.\n\n## Decision\nPure TS.\n\n## Consequences\nTestable.\n"
+              : committedSpecContent;
+          return new Response(
+            JSON.stringify({
+              encoding: "base64",
+              content: Buffer.from(text, "utf8").toString("base64")
+            }),
+            { status: 200 }
+          );
+        }
+        if (urlStr.includes("/git/ref/heads/")) {
+          return new Response(
+            JSON.stringify({ object: { sha: "abc123456789" } }),
+            { status: 200 }
+          );
+        }
+        if (urlStr.includes("/git/commits/")) {
+          return new Response(
+            JSON.stringify({
+              sha: "newcommitsha",
+              tree: { sha: "treeshaxxx" }
+            }),
+            { status: 200 }
+          );
+        }
+        if (urlStr.includes("/git/blobs") || urlStr.includes("/git/trees")) {
+          return new Response(JSON.stringify({ sha: "blobortreesha" }), {
+            status: 201
+          });
+        }
+        if (urlStr.includes("/git/refs/heads/")) {
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        if (urlStr.includes("/labels")) {
+          return new Response(JSON.stringify({ name: "ready-for-agent" }), {
+            status: 201
+          });
+        }
+        if (urlStr.endsWith("/issues") && method === "POST") {
+          const nextNum = 17 + createdSubIssues.length;
+          createdSubIssues.push(nextNum);
+          return new Response(
+            JSON.stringify({
+              number: nextNum,
+              html_url: `https://github.com/Hartorn-Inc/enclume-astrale/issues/${nextNum}`
+            }),
+            { status: 201 }
+          );
+        }
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      };
+
+      // Step 1: /epure to-spec -> phase="spec", status="awaiting_human_approval", 0 tickets
+      const toSpecResult = await orchestrateIssueCommand({
+        repository: "Hartorn-Inc/enclume-astrale",
+        issueNumber: 16,
+        command: "to-spec",
+        commandArgs: "",
+        commentId: 105,
+        actor: "Hartorn",
+        fallbackGithubToken: "ghs_mock",
+        llmApiKey: "gemini_mock_key",
+        stateStore: store,
+        fetchImpl: mockFetch as typeof fetch
+      });
+
+      expect(toSpecResult.executed).toBe(true);
+      expect(toSpecResult.phase).toBe("spec");
+      expect(toSpecResult.status).toBe("awaiting_human_approval");
+      expect(toSpecResult.created_ticket_numbers).toEqual([]);
+      expect(toSpecResult.summary_markdown).toContain("/epure to-tickets");
+
+      // Step 2: Free-form reply during phase="spec" revises the spec and stays in phase="spec"
+      const specReplyResult = await orchestrateIssueCommand({
+        repository: "Hartorn-Inc/enclume-astrale",
+        issueNumber: 16,
+        command: "reply",
+        commandArgs: "Ajoute une précision sur l'arrondi dans la section 2.",
+        commentId: 106,
+        actor: "Hartorn",
+        fallbackGithubToken: "ghs_mock",
+        llmApiKey: "gemini_mock_key",
+        stateStore: store,
+        fetchImpl: mockFetch as typeof fetch
+      });
+
+      expect(specReplyResult.executed).toBe(true);
+      expect(specReplyResult.phase).toBe("spec");
+      expect(specReplyResult.status).toBe("awaiting_human_approval");
+      expect(specReplyResult.created_ticket_numbers).toEqual([]);
+      expect(specReplyResult.summary_markdown).toContain("Spécification révisée");
+
+      // Step 3: /epure to-tickets -> phase="tickets", status="awaiting_human_approval", creates sub-issues
+      const toTicketsResult = await orchestrateIssueCommand({
+        repository: "Hartorn-Inc/enclume-astrale",
+        issueNumber: 16,
+        command: "to-tickets",
+        commandArgs: "",
+        commentId: 107,
+        actor: "Hartorn",
+        fallbackGithubToken: "ghs_mock",
+        llmApiKey: "gemini_mock_key",
+        stateStore: store,
+        fetchImpl: mockFetch as typeof fetch
+      });
+
+      expect(toTicketsResult.executed).toBe(true);
+      expect(toTicketsResult.phase).toBe("tickets");
+      expect(toTicketsResult.status).toBe("awaiting_human_approval");
+      expect(toTicketsResult.created_ticket_numbers).toEqual([17]);
+      expect(toTicketsResult.summary_markdown).toContain("/epure approve");
+    });
   });
 
   describe("5. Polyglot Stage 1 Security Gate, Stage 3 External CI Recovery & Open-PR Reconciliation (ADR-0028)", () => {

@@ -138,7 +138,7 @@ export async function executeGoogleProvider<T = unknown>(
   const buildBaseGenerationConfig = (): Record<string, unknown> => {
     const gen: Record<string, unknown> = {
       temperature: options.temperature ?? 0.2,
-      maxOutputTokens: 65536
+      maxOutputTokens: options.maxOutputTokens ?? 65536
     };
     if (effectiveThinkingLevel && /^gemini-3/i.test(model)) {
       gen.thinkingConfig = {

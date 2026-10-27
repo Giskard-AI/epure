@@ -7,6 +7,7 @@ import type {
   SandboxExecutionResult
 } from "../../sandbox/llm-sandbox.js";
 import {
+  isSensitiveTaskBranchPath,
   runPolyglotStage1Verification
 } from "../../sandbox/polyglot-workspace-runner.js";
 import { wrapUntrustedContent } from "../../security/prompt-injection-guard.js";
@@ -304,6 +305,9 @@ export function buildRepoExplorationToolsAndHandlers(params: {
         const p = String(args.path ?? "")
           .trim()
           .replace(/^\/+/, "");
+        if (!p || p.includes("..") || isSensitiveTaskBranchPath(p)) {
+          return { error: `Access denied or invalid path: ${p}` };
+        }
         const q = String(args.query ?? "").trim();
         let content = params.accumulatedFiles.get(p) ?? null;
         if (content === null) {
@@ -351,6 +355,9 @@ export function buildRepoExplorationToolsAndHandlers(params: {
         const p = String(args.path ?? "")
           .trim()
           .replace(/^\/+/, "");
+        if (!p || p.includes("..") || isSensitiveTaskBranchPath(p)) {
+          return { error: `Access denied or invalid path: ${p}` };
+        }
         let content = params.accumulatedFiles.get(p) ?? null;
         if (content === null) {
           content =

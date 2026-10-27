@@ -603,6 +603,123 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
         );
       }
     );
+
+    it.each([
+      {
+        id: "openai-retains-tools-with-tool-choice-none-on-final-round-when-maxToolRounds-reached",
+        model: "openai/gpt-4.1",
+        expectedToolChoice: "none"
+      },
+      {
+        id: "anthropic-retains-tools-with-tool-choice-none-and-64000-max-tokens-on-final-round",
+        model: "anthropic/claude-sonnet-4-5",
+        expectedToolChoice: { type: "none" }
+      }
+    ])("$id", async ({ model, expectedToolChoice }) => {
+      const recordedBodies: Array<Record<string, unknown>> = [];
+      const mockFetch: typeof fetch = async (_url, init) => {
+        const body = JSON.parse(String(init?.body ?? "{}")) as Record<
+          string,
+          unknown
+        >;
+        recordedBodies.push(body);
+
+        if (recordedBodies.length === 1) {
+          if (model.startsWith("openai/")) {
+            return new Response(
+              JSON.stringify({
+                choices: [
+                  {
+                    message: {
+                      content: null,
+                      tool_calls: [
+                        {
+                          id: "call_1",
+                          type: "function",
+                          function: {
+                            name: "read_repo_file",
+                            arguments: JSON.stringify({ path: "README.md" })
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }),
+              { status: 200 }
+            );
+          }
+          return new Response(
+            JSON.stringify({
+              content: [
+                {
+                  type: "tool_use",
+                  id: "toolu_1",
+                  name: "read_repo_file",
+                  input: { path: "README.md" }
+                }
+              ]
+            }),
+            { status: 200 }
+          );
+        }
+
+        const payloadJson = JSON.stringify({
+          frontier_resolved: true,
+          round_number: 2,
+          follow_up_questions_markdown: "",
+          rationale: "Resolved on final tool round"
+        });
+        if (model.startsWith("openai/")) {
+          return new Response(
+            JSON.stringify({
+              choices: [{ message: { content: payloadJson } }]
+            }),
+            { status: 200 }
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            content: [{ type: "text", text: payloadJson }]
+          }),
+          { status: 200 }
+        );
+      };
+
+      const client = new LLMClient();
+      const out = await client.completeStructured({
+        model,
+        apiKey: "test-key",
+        systemInstruction: "Evaluate grill round",
+        userPrompt: "Read README.md first",
+        maxToolRounds: 1,
+        tools: [
+          {
+            name: "read_repo_file",
+            description: "Reads a file",
+            parameters: {
+              type: "OBJECT",
+              properties: { path: { type: "STRING" } },
+              required: ["path"]
+            }
+          }
+        ],
+        toolHandlers: {
+          read_repo_file: async () => ({ content: "# Repo" })
+        },
+        responseSchema: GRILL_ROUND_EVALUATION_SCHEMA,
+        fetchImpl: mockFetch
+      });
+
+      expect(out.frontier_resolved).toBe(true);
+      expect(recordedBodies).toHaveLength(2);
+      const finalRoundBody = recordedBodies[1]!;
+      expect(finalRoundBody.tools).toBeDefined();
+      expect(finalRoundBody.tool_choice).toEqual(expectedToolChoice);
+      if (model.startsWith("anthropic/")) {
+        expect(finalRoundBody.max_tokens).toBe(64000);
+      }
+    });
   });
 
   describe("3. ADR-0012 Resilience (fail-fast vs transient retry)", () => {

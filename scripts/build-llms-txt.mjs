@@ -38,7 +38,7 @@ const EN_PAGES = [
     url: `${SITE_URL}/commands`,
     file: "commands.md",
     summary:
-      "Complete reference for /setup-repo, /epure plan, /epure approve, /epure prototype, /epure resume, /epure retry, /epure pause, and /epure cancel."
+      "Complete reference for /setup-repo, /epure plan, /epure to-spec, /epure to-tickets, /epure approve, /epure status, and /epure cancel."
   },
   {
     title: "Configuration (.github/agents.yml & renovate.json)",

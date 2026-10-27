@@ -229,17 +229,20 @@ export async function orchestrateIssueCommand(
       parsedDevAgentsConfig
     );
 
-    // 3 & 4. Handle /epure plan, human reply during grilling, /epure to-spec, /epure to-tickets
+    // 3 & 4. Handle /epure plan, human reply during grilling or spec review, /epure to-spec, /epure to-tickets
     if (
       input.command === "plan" ||
       input.command === "to-spec" ||
       input.command === "to-tickets" ||
       (input.command === "reply" &&
-        currentState?.phase === "grilling" &&
-        currentState?.status === "active")
+        (currentState?.phase === "grilling" ||
+          currentState?.phase === "spec") &&
+        currentState?.status !== "cancelled" &&
+        currentState?.status !== "suspended")
     ) {
       return await runGrillAndPlanPhase({
         command: input.command,
+        currentPhase: currentState?.phase,
         repository: input.repository,
         issueNumber: input.issueNumber,
         commentId: input.commentId,

@@ -212,14 +212,23 @@ export async function executeOpenAIProvider<T = unknown>(
 
   for (let round = 0; round <= maxToolRounds; round += 1) {
     const allowToolsThisRound = hasTools && round < maxToolRounds;
+    const isReasoningModel = /^(?:o1|o3|o4)(?:$|-)/i.test(model.trim());
     const body: Record<string, unknown> = {
       model,
       messages,
-      temperature: options.temperature ?? 0.2
+      ...(isReasoningModel ? {} : { temperature: options.temperature ?? 0.2 }),
+      ...(options.maxOutputTokens !== undefined
+        ? { max_completion_tokens: options.maxOutputTokens }
+        : {})
     };
 
-    if (openAiTools && allowToolsThisRound) {
-      body.tools = openAiTools;
+    if (openAiTools) {
+      if (allowToolsThisRound) {
+        body.tools = openAiTools;
+      } else if (round > 0) {
+        body.tools = openAiTools;
+        body.tool_choice = "none";
+      }
     }
 
     if (options.responseSchema) {

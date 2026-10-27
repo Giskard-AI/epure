@@ -58,7 +58,7 @@ Tant que l'Issue #16 est en phase `grilling`, **vous n'avez pas besoin de répé
 
 <span class="epure-badge epure-badge--auto">Étape Automatisée Obligatoire</span> + <span class="epure-badge epure-badge--optional">Porte Conditionnelle UI</span>
 
-Dès que vos réponses lèvent toutes les ambiguïtés du Grill, EPURE passe automatiquement à la génération de l'**Épure et des Tickets** :
+Dès que vos réponses lèvent toutes les ambiguïtés du Grill, EPURE publie la **Synthèse des Décisions** et attend votre validation (`grilling` / `awaiting_human_approval`). Après validation de la frontière via **`/epure to-spec`** (génération et relecture de la spécification sur `plan/*`) puis **`/epure to-tickets`** (découpage en tickets) :
 
 1. **Crée la branche `plan/16-markov-craft-calculator`** depuis `dev`.
 2. **Versionne les artefacts du domaine et de spécification** :

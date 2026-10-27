@@ -18,6 +18,8 @@ import type {
 
 export {
   GENERATED_PLANNING_BUNDLE_SCHEMA,
+  GENERATED_SPEC_ARTIFACTS_SCHEMA,
+  GENERATED_TICKET_DAG_SCHEMA,
   GENERATED_TICKET_IMPLEMENTATION_SCHEMA,
   GRILL_ROUND_EVALUATION_SCHEMA,
   REVIEWER_FINDINGS_SCHEMA,
@@ -28,6 +30,8 @@ export {
   type GeneratedFilePatch,
   type GeneratedFilePatchEdit,
   type GeneratedPlanningBundle,
+  type GeneratedSpecArtifacts,
+  type GeneratedTicketDag,
   type GeneratedTicketFilePatch,
   type GeneratedTicketImplementation,
   type GeneratedTicketPatchEdit,

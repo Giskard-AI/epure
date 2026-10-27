@@ -50,13 +50,16 @@ function buildContextualActionHint(
       status === "awaiting-human" ||
       status === "awaiting_human_approval"
     ) {
-      return `La frontière de décisions du cadrage est complète. Postez \`/epure to-spec\`${issueRef} pour valider le cadrage et générer la spécification + les tickets (ou répondez en commentaire pour ajuster un point).`;
+      return `La frontière de décisions du cadrage est complète. Postez \`/epure to-spec\`${issueRef} pour valider le cadrage et générer la spécification sur \`plan/*\` (ou répondez en commentaire pour ajuster un point).`;
     }
-    return `Répondez directement en commentaire${issueRef} aux questions ci-dessus (sans préfixe \`/epure\`), ou postez \`/epure to-spec\` pour générer immédiatement la spécification et les tickets.`;
+    return `Répondez directement en commentaire${issueRef} aux questions ci-dessus (sans préfixe \`/epure\`), ou postez \`/epure to-spec\` pour générer immédiatement la spécification sur \`plan/*\`.`;
+  }
+
+  if (phase === "spec") {
+    return `Vérifiez la spécification, le \`GLOSSARY.md\` et les ADRs générés sur \`plan/*\`. Postez \`/epure to-tickets\`${issueRef} pour valider la spécification et générer le graphe de tickets (ou répondez en commentaire pour demander une modification de la spec).`;
   }
 
   if (
-    phase === "spec" ||
     phase === "tickets" ||
     status === "awaiting-human" ||
     status === "awaiting_human_approval"
@@ -94,8 +97,9 @@ export function formatEpureCommandsSpoiler(
     "| Commande | Action |",
     "| :--- | :--- |",
     "| `/epure plan` | Démarrer ou relancer le cadrage (`/grill-with-docs`) sur l'issue |",
-    "| *Réponse libre en commentaire* | Répondre aux questions de cadrage de l'agent (sans préfixe `/epure`) |",
-    "| `/epure to-spec` | Forcer la fin du cadrage et générer la spécification + les tickets (`plan/*`) |",
+    "| *Réponse libre en commentaire* | Répondre aux questions du Grill ou demander un ajustement de la spécification (sans préfixe `/epure`) |",
+    "| `/epure to-spec` | Valider la frontière du Grill et générer `GLOSSARY.md`, les ADRs et la spécification sur `plan/*` |",
+    "| `/epure to-tickets` | Valider la spécification sur `plan/*` et générer le graphe de tickets GitHub (`blocked_by`) |",
     "| `/epure approve` | Approuver le plan (ou reprendre après une suspension `needs-human`) et lancer l'implémentation |",
     "| `/epure status` | Afficher l'état d'avancement de l'issue et des tickets |",
     "| `/epure cancel` (ou `/epure stop`) | Suspendre immédiatement l'orchestration et empêcher tout auto-merge |",

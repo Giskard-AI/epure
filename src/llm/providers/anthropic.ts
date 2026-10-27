@@ -103,14 +103,19 @@ export async function executeAnthropicProvider<T = unknown>(
     const allowToolsThisRound = hasTools && round < maxToolRounds;
     const body: Record<string, unknown> = {
       model,
-      max_tokens: 8192,
+      max_tokens: options.maxOutputTokens ?? 64000,
       temperature: options.temperature ?? 0.2,
       system: effectiveSystemInstruction,
       messages
     };
 
-    if (anthropicTools && allowToolsThisRound) {
-      body.tools = anthropicTools;
+    if (anthropicTools) {
+      if (allowToolsThisRound) {
+        body.tools = anthropicTools;
+      } else if (round > 0) {
+        body.tools = anthropicTools;
+        body.tool_choice = { type: "none" };
+      }
     }
 
     if (options.responseSchema) {

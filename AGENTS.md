@@ -13,3 +13,11 @@ Default five canonical triage labels (`needs-triage`, `needs-info`, `ready-for-a
 ### Domain docs
 
 Single-context domain layout (`GLOSSARY.md` at repo root and ADRs in `docs/adr/`). See `docs/agents/domain.md`.
+
+### Live LLM & Orchestrator Verification (`npm run test:live`)
+
+When modifying `src/llm/**` or `src/orchestrator/**`, mocked unit tests (`npm test`) are necessary but not sufficient. Validate against real LLM endpoints using the agnostic live harness:
+
+1. Copy `epure.live-test.example.json` to `epure.live-test.json` (git-ignored) or set `EPURE_LIVE_TEST_CONFIG` / `EPURE_LIVE_TEST_TARGETS_JSON` with the list of LLM target configurations to verify.
+2. Run `npm run test:live` (never log or print API keys in stdout/stderr).
+

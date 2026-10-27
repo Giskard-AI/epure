@@ -278,7 +278,7 @@ Because Issue #16 is in the `grilling` phase, **you do not need to type another 
 
 <span class="epure-badge epure-badge--auto">Mandatory Automated Step</span> + <span class="epure-badge epure-badge--optional">Conditional UI Gate</span>
 
-Once your reply settles all open questions on the design frontier, EPURE automatically transitions from **Grill** to **Blueprint & Tickets**:
+Once your reply settles all open questions on the design frontier, EPURE posts a **Settled Decisions Summary** and pauses in `grilling` (`awaiting_human_approval`). After you validate the frontier with **`/epure to-spec`** (to generate and review the spec on `plan/*`) and **`/epure to-tickets`** (to decompose the spec into tickets):
 
 1. **Creates branch `plan/16-markov-craft-calculator`** from `dev`.
 2. **Commits the domain and specification artifacts**:
@@ -377,13 +377,13 @@ All `/epure` commands are posted as comments on a GitHub Issue. Every command is
 | --- | --- | --- | --- |
 | `/epure plan` | <span class="epure-badge epure-badge--human">Mandatory Human Gate 1</span> | `grilling` | Initializes `refs/epure/state/<issue>`, inspects the repository via read-only exploration tools (`list_repo_files`, `read_repo_file`, `search_in_repo_file`), and starts the structured architectural Grill interview. |
 | *(Any human comment during Grill)* | <span class="epure-badge epure-badge--human">Mandatory Human Gate 1</span> | `grilling` | Implicit Grill continuity (Q84): processes human answers via the batch cursor (`last_processed_comment_id`). If follow-up questions remain (`frontier_resolved: false`), posts the next Grill round. Once all ambiguities are settled (`frontier_resolved: true`), posts a **Settled Decisions Summary** and pauses in `grilling` (`awaiting_human_approval`) so the human validates the decision frontier before `/epure to-spec`. |
-| `/epure to-spec` | <span class="epure-badge epure-badge--human">Human Frontier Validation</span> | `tickets` | Validates the Grill decision frontier (or forces an early transition) and generates `GLOSSARY.md`, ADRs, `DESIGN.md`, `docs/specs/<slug>.md` on `plan/*`, and the dependency-ordered GitHub Issue DAG (`blocked_by`). |
+| `/epure to-spec` | <span class="epure-badge epure-badge--human">Human Frontier Validation</span> | `spec` | Validates the Grill decision frontier (or forces an early transition) and generates `GLOSSARY.md`, ADRs, `DESIGN.md`, and `docs/specs/<slug>.md` on `plan/*`, then pauses in `spec` (`awaiting_human_approval`) for human review. Free-form comments during `spec` revise the specification on `plan/*`. |
+| `/epure to-tickets` | <span class="epure-badge epure-badge--human">Human Spec Validation</span> | `tickets` | Validates the specification on `plan/*` and decomposes it into an acyclic dependency-ordered GitHub Issue DAG (`blocked_by`, `ready-for-agent`), pausing in `tickets` (`awaiting_human_approval`) before `/epure approve`. |
 | `/epure approve` | <span class="epure-badge epure-badge--human">Mandatory Human Gate 2</span> | `implementation` | Squash-merges the documentation-only `plan/* -> dev` PR, locks the signed `spec_sha` mandate in `refs/epure/state/<issue>`, opens `feature/<issue>-<slug>`, and executes the ticket DAG (`task/* -> feature/*`). Also supports **idempotent resumption** if re-run after an error. |
-| `/epure to-tickets` | <span class="epure-badge epure-badge--optional">Optional Override</span> | `tickets` | Alias / override to decompose the specification on `plan/*` into a dependency-ordered GitHub Issue DAG (`blocked_by`). |
 | `/epure status` | <span class="epure-badge epure-badge--optional">Optional Override</span> | *(Read-only)* | Reads `refs/epure/state/<issue>` and posts a fresh summary of the current phase, locked `spec_sha`, and per-ticket progress without mutating code. |
 | `/epure cancel` | <span class="epure-badge epure-badge--optional">Optional Override</span> | `cancelled` | Marks the mandate as `cancelled` in `refs/epure/state/<issue>`, stops any new ticket execution, and preserves existing branches and audit logs. |
 
-> **Contextual `/epure` Command Cheat-Sheet Spoiler (`<details>`)**: Every issue comment, sub-issue body, and pull request description posted by EPURE automatically includes a collapsible `<details>` block at the bottom (`⌨️ Commandes /epure disponibles`) summarizing the available slash commands and highlighting the recommended next action for the current lifecycle phase (`grilling`, `tickets`, `implementation`, `suspended`, `cancelled`, or `completed`).
+> **Contextual `/epure` Command Cheat-Sheet Spoiler (`<details>`)**: Every issue comment, sub-issue body, and pull request description posted by EPURE automatically includes a collapsible `<details>` block at the bottom (`⌨️ Commandes /epure disponibles`) summarizing the available slash commands and highlighting the recommended next action for the current lifecycle phase (`grilling`, `spec`, `tickets`, `implementation`, `suspended`, `cancelled`, or `completed`).
 
 ---
 
@@ -811,14 +811,15 @@ This guide provides a practical checklist for steering a feature or complex bugf
 
 ---
 
-## 2. Reviewing the `plan/*` Pull Request
+## 2. Generating & Reviewing the Specification (`/epure to-spec` & `/epure to-tickets`)
 
-Once the Grill settles, EPURE opens a `plan/<issue>-<slug> -> dev` Pull Request and creates the ticket DAG. Before commenting `/epure approve`, check:
+Once the Grill decision frontier is resolved (`frontier_resolved: true`), EPURE posts a **Settled Decisions Summary** and pauses in `grilling` (`awaiting_human_approval`).
 
-1. **`GLOSSARY.md`**: Are the new domain terms accurate and free of ambiguity?
-2. **`docs/adr/`**: Do the Architectural Decision Records reflect your choices?
-3. **`DESIGN.md` (if UI is involved)**: Are the color tokens, typography, and interaction states aligned with your product?
-4. **`docs/specs/<slug>.md` & Ticket DAG**: Are the acceptance criteria and `blocked_by` relationships between tickets logical?
+1. **Generate the Specification (`/epure to-spec`)**: Comment `/epure to-spec` to commit `GLOSSARY.md`, `docs/adr/NNNN-*.md`, `DESIGN.md` (if UI is involved), and `docs/specs/<slug>.md` onto `plan/<issue>-<slug>`. The issue transitions to `spec` (`awaiting_human_approval`).
+2. **Revise or Validate the Specification**:
+   - Inspect `GLOSSARY.md`, `docs/adr/`, and `docs/specs/<slug>.md` on `plan/<issue>-<slug>`.
+   - To request adjustments to the specification before creating tickets, **reply directly in a comment** (without a slash command).
+3. **Generate the Ticket DAG (`/epure to-tickets`)**: Once the specification is approved, comment `/epure to-tickets`. EPURE decomposes the spec into an acyclic dependency-ordered GitHub Issue DAG (`blocked_by`, `ready-for-agent`) and pauses in `tickets` (`awaiting_human_approval`) awaiting `/epure approve`.
 
 ---
 
@@ -973,7 +974,9 @@ This page provides the aligned **English <-> French** ubiquitous language refere
 | **Atomic Task Branch (`task/<ticket>-<slug>`)** | *Branche de tâche (`task/*`)* | Short-lived branch implementing a single ticket from the DAG in a secretless TDD sandbox. |
 | **Out-of-Branch CAS State Ref (`refs/epure/state/<issue>`)** | *Référence Git d'état d'orchestration (`refs/epure/state/<issue-number>`)* | Dedicated Git reference outside `refs/heads/*` storing the state machine (`last_processed_comment_id`, signed `spec_sha`, retry counters) updated via atomic Compare-And-Swap. |
 | **Batch Comment Cursor (`last_processed_comment_id`)** | *Traitement en lot des commentaires avec curseur* | Mechanism reading all unprocessed human comments in chronological order so queued runs never drop events. |
-| **Implicit Grill Continuity** | *Continuité implicite de l'entretien de grill* | Automatic processing of any ordinary human comment posted while the issue is in phase `grilling`, without repeating a slash command. |
+| **Implicit Grill & Spec Revision Continuity** | *Continuité implicite de l'entretien de grill et de la révision de spécification (Q84)* | Automatic processing of any ordinary human comment posted while the issue is in phase `grilling` (Grill answers) or `spec` (specification revision on `plan/*`), without repeating a slash command. |
+| **Human Grill Frontier Validation** | *Validation humaine de la frontière de Grill (Q85)* | Pause in `grilling` (`awaiting_human_approval`) with a Settled Decisions Summary once `frontier_resolved: true`, requiring explicit `/epure to-spec` before generating specification files. |
+| **Human Specification Validation** | *Validation humaine de la spécification (Q85)* | Separation between `/epure to-spec` (committing `GLOSSARY.md`, ADRs, `DESIGN.md`, and `docs/specs/<slug>.md` on `plan/*` in phase `spec` / `awaiting_human_approval`) and `/epure to-tickets` (generating the acyclic GitHub Issue DAG in phase `tickets` / `awaiting_human_approval`). |
 
 ---
 
@@ -987,6 +990,16 @@ This page provides the aligned **English <-> French** ubiquitous language refere
 | **Persona UX Gate (`user-advocate`)** | *Porte UX orientée personas (`user-advocate`)* | Specialist evaluating end-user journeys in `design-gate` mode (enriching ticket acceptance criteria before `/epure approve`) and `implementation-review` mode (blocking PR check on UI changes). |
 | **Blocking Design Violation (`impeccable-gate`)** | *Violation de design bloquante* | Objective new UI regression (WCAG 2.1 AA contrast, layout overflow, missing `DESIGN.md` tokens, or missing `loading`/`ready`/`error` interaction states) that blocks PR merge. |
 | **AI Semantic Squash Synthesis** | *Synthèse de message de squash sémantique par IA* | Zero-temperature generation of a Conventional Commit title and body right before squash-merge (`Refs #<ticket>` on `feature/*`, `Closes #<issue>` on `dev`). |
+
+---
+
+## 4. Multi-Provider LLM Router & Structured Output (ADR-0029)
+
+| English Term | French Canonical Term (`GLOSSARY.md`) | Definition & Invariant |
+| --- | --- | --- |
+| **Multi-Provider LLM Router (`LLMClient`)** | *Routeur LLM multi-fournisseurs* | Dependency-free TypeScript HTTP client routing `<provider>/<model>` identifiers (`openai/`, `azure/`, `azure_ai/`, `google/`, `gemini/`, `anthropic/`, or named aliases in `.github/agents.yml` with lazy `os.environ/VAR_NAME` resolution) without cross-provider fallback on auth/quota errors (ADR-0012). |
+| **Schema-Enforced Structured Output (`ResponseSchemaSpec<T>`)** | *Sortie structurée par schéma* | Contract pairing a strict JSON Schema (`responseSchema`, `response_format.json_schema`, or `output_config.format`) with a runtime TypeScript validator, executing a 2-phase tool loop + schema-locked final turn on Google Gemini. |
+| **Contextual `/epure` Command Cheat-Sheet (`formatEpureCommandsSpoiler`)** | *Aide-mémoire contextuel des commandes `/epure`* | Collapsible `<details>` block appended to every EPURE issue comment, sub-issue body, and PR description summarizing available commands and highlighting the recommended next action for the current phase. |
 
 ---
 ## [FR] Introduction & Nom (L'Épure)
@@ -1263,7 +1276,7 @@ Tant que l'Issue #16 est en phase `grilling`, **vous n'avez pas besoin de répé
 
 <span class="epure-badge epure-badge--auto">Étape Automatisée Obligatoire</span> + <span class="epure-badge epure-badge--optional">Porte Conditionnelle UI</span>
 
-Dès que vos réponses lèvent toutes les ambiguïtés du Grill, EPURE passe automatiquement à la génération de l'**Épure et des Tickets** :
+Dès que vos réponses lèvent toutes les ambiguïtés du Grill, EPURE publie la **Synthèse des Décisions** et attend votre validation (`grilling` / `awaiting_human_approval`). Après validation de la frontière via **`/epure to-spec`** (génération et relecture de la spécification sur `plan/*`) puis **`/epure to-tickets`** (découpage en tickets) :
 
 1. **Crée la branche `plan/16-markov-craft-calculator`** depuis `dev`.
 2. **Versionne les artefacts du domaine et de spécification** :
@@ -1362,13 +1375,13 @@ Toutes les commandes `/epure` se postent sous forme de commentaires sur une Issu
 | --- | --- | --- | --- |
 | `/epure plan` | <span class="epure-badge epure-badge--human">Jalon Humain Obligatoire 1</span> | `grilling` | Initialise `refs/epure/state/<issue>`, inspecte les fichiers du dépôt via les outils d'exploration (`list_repo_files`, `read_repo_file`, `search_in_repo_file`) et démarre l'entretien d'architecture structuré (Grill). |
 | *(Tout commentaire humain pendant le Grill)* | <span class="epure-badge epure-badge--human">Jalon Humain Obligatoire 1</span> | `grilling` | Continuité implicite du Grill (Q84) : traite les réponses humaines via `last_processed_comment_id`. S'il reste des points ouverts (`frontier_resolved: false`), publie le round suivant. Dès que la frontière est résolue (`frontier_resolved: true`), publie une **Synthèse des Décisions** et attend la validation humaine (`/epure to-spec`) avant de générer la spec et les tickets. |
-| `/epure to-spec` | <span class="epure-badge epure-badge--human">Validation Humaine de la Frontière</span> | `tickets` | Valide la frontière de cadrage du Grill (ou force la fin du cadrage) et génère `GLOSSARY.md`, les ADRs, `DESIGN.md`, `docs/specs/<slug>.md` sur `plan/*` ainsi que le graphe orienté acyclique (DAG) de sous-issues GitHub (`blocked_by`). |
+| `/epure to-spec` | <span class="epure-badge epure-badge--human">Validation Humaine de la Frontière</span> | `spec` | Valide la frontière de cadrage du Grill (ou force la fin du cadrage) et génère `GLOSSARY.md`, les ADRs, `DESIGN.md` et `docs/specs/<slug>.md` sur `plan/*`, puis passe en phase `spec` (`awaiting_human_approval`). Tout commentaire libre en phase `spec` révise la spécification sur `plan/*`. |
+| `/epure to-tickets` | <span class="epure-badge epure-badge--human">Validation Humaine de la Spécification</span> | `tickets` | Valide la spécification sur `plan/*` et la découpe en un graphe orienté acyclique (DAG) de sous-issues GitHub (`blocked_by`, `ready-for-agent`), puis passe en phase `tickets` (`awaiting_human_approval`) avant `/epure approve`. |
 | `/epure approve` | <span class="epure-badge epure-badge--human">Jalon Humain Obligatoire 2</span> | `implementation` | Fusionne en squash la PR documentaire `plan/* -> dev`, scelle le mandat signé `spec_sha` dans `refs/epure/state/<issue>`, ouvre `feature/<issue>-<slug>` et exécute le DAG de tickets (`task/* -> feature/*`). Permet aussi la **reprise idempotente** après un échec. |
-| `/epure to-tickets` | <span class="epure-badge epure-badge--optional">Commande Facultative</span> | `tickets` | Alias / commande permettant de générer le graphe orienté acyclique (DAG) d'issues GitHub (`blocked_by`) à partir du plan sur `plan/*`. |
 | `/epure status` | <span class="epure-badge epure-badge--optional">Commande Facultative</span> | *(Lecture seule)* | Lit `refs/epure/state/<issue>` et publie un rapport à jour de la phase courante, du `spec_sha` verrouillé et de l'état de chaque ticket sans modifier le code. |
 | `/epure cancel` | <span class="epure-badge epure-badge--optional">Commande Facultative</span> | `cancelled` | Marque le mandat comme `cancelled` dans `refs/epure/state/<issue>`, bloque toute nouvelle exécution de ticket et conserve les branches et traces d'audit existantes. |
 
-> **Aide-mémoire contextuel repliable (`<details>`)** : Chaque commentaire d'issue, corps de sous-issue de ticket et description de Pull Request publié par EPURE intègre automatiquement en pied de message un bloc repliable `<details>` (`⌨️ Commandes /epure disponibles`) récapitulant les commandes disponibles et mettant en évidence la prochaine action recommandée selon la phase courante (`grilling`, `tickets`, `implementation`, `suspended`, `cancelled` ou `completed`).
+> **Aide-mémoire contextuel repliable (`<details>`)** : Chaque commentaire d'issue, corps de sous-issue de ticket et description de Pull Request publié par EPURE intègre automatiquement en pied de message un bloc repliable `<details>` (`⌨️ Commandes /epure disponibles`) récapitulant les commandes disponibles et mettant en évidence la prochaine action recommandée selon la phase courante (`grilling`, `spec`, `tickets`, `implementation`, `suspended`, `cancelled` ou `completed`).
 
 ---
 
@@ -1796,14 +1809,15 @@ Ce guide fournit la marche à suivre opérationnelle pour piloter une fonctionna
 
 ---
 
-## 2. Relire la Pull Request `plan/*`
+## 2. Générer & Valider la Spécification (`/epure to-spec` & `/epure to-tickets`)
 
-Une fois le Grill terminé, EPURE ouvre une PR `plan/<issue>-<slug> -> dev` et crée le DAG de tickets. Avant de poster `/epure approve`, vérifiez :
+Dès que la frontière de décisions du Grill est résolue (`frontier_resolved: true`), EPURE publie la **Synthèse des Décisions** et attend votre validation (`grilling` / `awaiting_human_approval`).
 
-1. **`GLOSSARY.md`** : les nouveaux termes du domaine sont-ils exacts et sans ambiguïté ?
-2. **`docs/adr/`** : les ADRs reflètent-ils fidèlement vos décisions ?
-3. **`DESIGN.md` (si une UI est concernée)** : les tokens de couleur, la typographie et les états d'interaction correspondent-ils à votre produit ?
-4. **`docs/specs/<slug>.md` & DAG de Tickets** : les critères d'acceptation et les liens `blocked_by` entre tickets sont-ils cohérents ?
+1. **Générer la Spécification (`/epure to-spec`)** : commentez `/epure to-spec` pour générer et commiter `GLOSSARY.md`, `docs/adr/NNNN-*.md`, `DESIGN.md` (si une UI est concernée) et `docs/specs/<slug>.md` sur `plan/<issue>-<slug>`. L'issue passe en phase `spec` (`awaiting_human_approval`).
+2. **Réviser ou Valider la Spécification** :
+   - Inspectez `GLOSSARY.md`, `docs/adr/` et `docs/specs/<slug>.md` sur `plan/<issue>-<slug>`.
+   - Pour demander un ajustement ou une précision sur la spécification avant la création des tickets, **répondez directement en commentaire** (sans commande slash).
+3. **Générer le Graphe de Tickets (`/epure to-tickets`)** : une fois la spécification validée, commentez `/epure to-tickets`. EPURE découpe la spécification en un graphe acyclique (DAG) de sous-issues GitHub (`blocked_by`, `ready-for-agent`) et passe en phase `tickets` (`awaiting_human_approval`) en attente de `/epure approve`.
 
 ---
 

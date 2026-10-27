@@ -1290,11 +1290,14 @@ function buildContextualActionHint(context) {
   }
   if (phase === "grilling") {
     if (status === "awaiting-human" || status === "awaiting_human_approval") {
-      return `La fronti\xE8re de d\xE9cisions du cadrage est compl\xE8te. Postez \`/epure to-spec\`${issueRef} pour valider le cadrage et g\xE9n\xE9rer la sp\xE9cification + les tickets (ou r\xE9pondez en commentaire pour ajuster un point).`;
+      return `La fronti\xE8re de d\xE9cisions du cadrage est compl\xE8te. Postez \`/epure to-spec\`${issueRef} pour valider le cadrage et g\xE9n\xE9rer la sp\xE9cification sur \`plan/*\` (ou r\xE9pondez en commentaire pour ajuster un point).`;
     }
-    return `R\xE9pondez directement en commentaire${issueRef} aux questions ci-dessus (sans pr\xE9fixe \`/epure\`), ou postez \`/epure to-spec\` pour g\xE9n\xE9rer imm\xE9diatement la sp\xE9cification et les tickets.`;
+    return `R\xE9pondez directement en commentaire${issueRef} aux questions ci-dessus (sans pr\xE9fixe \`/epure\`), ou postez \`/epure to-spec\` pour g\xE9n\xE9rer imm\xE9diatement la sp\xE9cification sur \`plan/*\`.`;
   }
-  if (phase === "spec" || phase === "tickets" || status === "awaiting-human" || status === "awaiting_human_approval") {
+  if (phase === "spec") {
+    return `V\xE9rifiez la sp\xE9cification, le \`GLOSSARY.md\` et les ADRs g\xE9n\xE9r\xE9s sur \`plan/*\`. Postez \`/epure to-tickets\`${issueRef} pour valider la sp\xE9cification et g\xE9n\xE9rer le graphe de tickets (ou r\xE9pondez en commentaire pour demander une modification de la spec).`;
+  }
+  if (phase === "tickets" || status === "awaiting-human" || status === "awaiting_human_approval") {
     return `V\xE9rifiez la sp\xE9cification et le graphe de tickets g\xE9n\xE9r\xE9s, puis postez \`/epure approve\`${issueRef} pour lancer l'impl\xE9mentation TDD autonome.`;
   }
   if (phase === "implementation") {
@@ -1314,8 +1317,9 @@ function formatEpureCommandsSpoiler(context) {
     "| Commande | Action |",
     "| :--- | :--- |",
     "| `/epure plan` | D\xE9marrer ou relancer le cadrage (`/grill-with-docs`) sur l'issue |",
-    "| *R\xE9ponse libre en commentaire* | R\xE9pondre aux questions de cadrage de l'agent (sans pr\xE9fixe `/epure`) |",
-    "| `/epure to-spec` | Forcer la fin du cadrage et g\xE9n\xE9rer la sp\xE9cification + les tickets (`plan/*`) |",
+    "| *R\xE9ponse libre en commentaire* | R\xE9pondre aux questions du Grill ou demander un ajustement de la sp\xE9cification (sans pr\xE9fixe `/epure`) |",
+    "| `/epure to-spec` | Valider la fronti\xE8re du Grill et g\xE9n\xE9rer `GLOSSARY.md`, les ADRs et la sp\xE9cification sur `plan/*` |",
+    "| `/epure to-tickets` | Valider la sp\xE9cification sur `plan/*` et g\xE9n\xE9rer le graphe de tickets GitHub (`blocked_by`) |",
     "| `/epure approve` | Approuver le plan (ou reprendre apr\xE8s une suspension `needs-human`) et lancer l'impl\xE9mentation |",
     "| `/epure status` | Afficher l'\xE9tat d'avancement de l'issue et des tickets |",
     "| `/epure cancel` (ou `/epure stop`) | Suspendre imm\xE9diatement l'orchestration et emp\xEAcher tout auto-merge |",
@@ -3633,13 +3637,18 @@ async function executeAnthropicProvider(input) {
     const allowToolsThisRound = hasTools && round < maxToolRounds;
     const body = {
       model,
-      max_tokens: 8192,
+      max_tokens: options.maxOutputTokens ?? 64e3,
       temperature: options.temperature ?? 0.2,
       system: effectiveSystemInstruction,
       messages
     };
-    if (anthropicTools && allowToolsThisRound) {
-      body.tools = anthropicTools;
+    if (anthropicTools) {
+      if (allowToolsThisRound) {
+        body.tools = anthropicTools;
+      } else if (round > 0) {
+        body.tools = anthropicTools;
+        body.tool_choice = { type: "none" };
+      }
     }
     if (options.responseSchema) {
       body.output_config = {
@@ -3779,7 +3788,7 @@ async function executeGoogleProvider(input) {
   const buildBaseGenerationConfig = () => {
     const gen = {
       temperature: options.temperature ?? 0.2,
-      maxOutputTokens: 65536
+      maxOutputTokens: options.maxOutputTokens ?? 65536
     };
     if (effectiveThinkingLevel && /^gemini-3/i.test(model)) {
       gen.thinkingConfig = {
@@ -4135,13 +4144,20 @@ async function executeOpenAIProvider(input) {
   })) : void 0;
   for (let round = 0; round <= maxToolRounds; round += 1) {
     const allowToolsThisRound = hasTools && round < maxToolRounds;
+    const isReasoningModel = /^(?:o1|o3|o4)(?:$|-)/i.test(model.trim());
     const body = {
       model,
       messages,
-      temperature: options.temperature ?? 0.2
+      ...isReasoningModel ? {} : { temperature: options.temperature ?? 0.2 },
+      ...options.maxOutputTokens !== void 0 ? { max_completion_tokens: options.maxOutputTokens } : {}
     };
-    if (openAiTools && allowToolsThisRound) {
-      body.tools = openAiTools;
+    if (openAiTools) {
+      if (allowToolsThisRound) {
+        body.tools = openAiTools;
+      } else if (round > 0) {
+        body.tools = openAiTools;
+        body.tool_choice = "none";
+      }
     }
     if (options.responseSchema) {
       body.response_format = {
@@ -4811,6 +4827,132 @@ var GENERATED_PLANNING_BUNDLE_SCHEMA = {
       spec_path: specPath,
       spec_markdown: specMarkdown,
       tickets
+    };
+  }
+};
+var GENERATED_SPEC_ARTIFACTS_SCHEMA = {
+  name: "generated_spec_artifacts",
+  description: "EPURE specification artifacts (GLOSSARY.md, ADRs, and specification Markdown) generated during /epure to-spec prior to human validation and ticket decomposition.",
+  schema: {
+    type: "object",
+    properties: {
+      plan_slug: { type: "string" },
+      glossary_markdown: { type: "string" },
+      adrs: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            path: { type: "string" },
+            content: { type: "string" },
+            filename: { type: "string" },
+            title: { type: "string" },
+            markdown: { type: "string" }
+          },
+          required: ["path", "content"]
+        }
+      },
+      spec_path: { type: "string" },
+      spec_markdown: { type: "string" },
+      target_files_hint: {
+        type: "array",
+        items: { type: "string" }
+      }
+    },
+    required: [
+      "plan_slug",
+      "glossary_markdown",
+      "adrs",
+      "spec_path",
+      "spec_markdown"
+    ]
+  },
+  validate(parsed) {
+    const obj = asRecord(parsed, "GeneratedSpecArtifacts");
+    const validatedBundle = GENERATED_PLANNING_BUNDLE_SCHEMA.validate({
+      ...obj,
+      tickets: [
+        {
+          index: 1,
+          slug: "spec-validation-placeholder",
+          title: "[Ticket 1] Spec validation placeholder",
+          description: "Placeholder for spec-only validation",
+          acceptance_criteria: ["Spec validated"],
+          blocked_by_indices: [],
+          files_to_create_or_update: []
+        }
+      ]
+    });
+    return {
+      plan_slug: validatedBundle.plan_slug,
+      glossary_markdown: validatedBundle.glossary_markdown,
+      adrs: validatedBundle.adrs,
+      spec_path: validatedBundle.spec_path,
+      spec_markdown: validatedBundle.spec_markdown,
+      target_files_hint: asStringArray(obj.target_files_hint)
+    };
+  }
+};
+var GENERATED_TICKET_DAG_SCHEMA = {
+  name: "generated_ticket_dag",
+  description: "Dependency-ordered DAG of atomic TDD tickets decomposed from the approved specification during /epure to-tickets.",
+  schema: {
+    type: "object",
+    properties: {
+      tickets: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            index: { type: "integer" },
+            slug: { type: "string" },
+            title: { type: "string" },
+            description: { type: "string" },
+            summary: { type: "string" },
+            acceptance_criteria: {
+              type: "array",
+              items: { type: "string" }
+            },
+            blocked_by_indices: {
+              type: "array",
+              items: { type: "integer" }
+            },
+            files_to_create_or_update: {
+              type: "array",
+              items: { type: "string" }
+            },
+            files_likely_touched: {
+              type: "array",
+              items: { type: "string" }
+            }
+          },
+          required: [
+            "title",
+            "acceptance_criteria",
+            "blocked_by_indices"
+          ]
+        }
+      }
+    },
+    required: ["tickets"]
+  },
+  validate(parsed) {
+    const obj = asRecord(parsed, "GeneratedTicketDag");
+    const validatedBundle = GENERATED_PLANNING_BUNDLE_SCHEMA.validate({
+      plan_slug: "tickets-dag",
+      glossary_markdown: "# GLOSSARY\n\nExisting glossary.",
+      adrs: [
+        {
+          path: "docs/adr/0001-existing.md",
+          content: "# ADR\n\nExisting ADR."
+        }
+      ],
+      spec_path: "docs/specs/existing.md",
+      spec_markdown: "# Specification\n\nExisting specification.",
+      tickets: obj.tickets
+    });
+    return {
+      tickets: validatedBundle.tickets
     };
   }
 };
@@ -8419,6 +8561,9 @@ function buildRepoExplorationToolsAndHandlers(params) {
       },
       search_in_repo_file: async (args) => {
         const p = String(args.path ?? "").trim().replace(/^\/+/, "");
+        if (!p || p.includes("..") || isSensitiveTaskBranchPath(p)) {
+          return { error: `Access denied or invalid path: ${p}` };
+        }
         const q = String(args.query ?? "").trim();
         let content = params.accumulatedFiles.get(p) ?? null;
         if (content === null) {
@@ -8457,6 +8602,9 @@ function buildRepoExplorationToolsAndHandlers(params) {
       },
       read_repo_file: async (args) => {
         const p = String(args.path ?? "").trim().replace(/^\/+/, "");
+        if (!p || p.includes("..") || isSensitiveTaskBranchPath(p)) {
+          return { error: `Access denied or invalid path: ${p}` };
+        }
         let content = params.accumulatedFiles.get(p) ?? null;
         if (content === null) {
           content = await params.gh.readSingleBranchFile(params.branch, p) ?? (params.branch !== params.featureBranch ? await params.gh.readSingleBranchFile(params.featureBranch, p) : null);
@@ -9255,9 +9403,35 @@ function validatePlanningArtifactsAndGraph(bundle) {
 }
 
 // src/orchestrator/phases/grill-and-plan.ts
+function parseLatestSpecManifest(comments) {
+  for (let i = comments.length - 1; i >= 0; i -= 1) {
+    const body = comments[i]?.body ?? "";
+    const match = body.match(/<!-- epure-spec-manifest:(\{[\s\S]*?\}) -->/);
+    if (match?.[1]) {
+      try {
+        const parsed = JSON.parse(match[1]);
+        if (typeof parsed.planBranch === "string" && typeof parsed.specPath === "string" && Array.isArray(parsed.adrPaths)) {
+          return {
+            planBranch: parsed.planBranch,
+            specPath: parsed.specPath,
+            adrPaths: parsed.adrPaths.filter(
+              (p) => typeof p === "string"
+            ),
+            targetFilesHint: Array.isArray(parsed.targetFilesHint) ? parsed.targetFilesHint.filter(
+              (f) => typeof f === "string"
+            ) : []
+          };
+        }
+      } catch {
+      }
+    }
+  }
+  return null;
+}
 async function runGrillAndPlanPhase(params) {
   const {
     command,
+    currentPhase,
     repository,
     issueNumber,
     commentId,
@@ -9361,7 +9535,7 @@ ${c.body}`;
   const priorGrillRoundsCount = allComments.filter(
     (c) => c.body.includes("### Entretien de Cadrage EPURE")
   ).length;
-  if (command === "reply") {
+  if (command === "reply" && currentPhase !== "spec") {
     const grillLoopEvalSystemInstruction = [
       "Tu es l'architecte EPURE conduisant un entretien multi-tours `/grill-with-docs` (arbre de d\xE9cisions par rounds).",
       PROMPT_INJECTION_IMMUNITY_CLAUSE,
@@ -9435,7 +9609,7 @@ ${issue.body}`
           evalResult.follow_up_questions_markdown.trim(),
           "",
           "---",
-          "_R\xE9ponds directement en commentaire pour poursuivre l'entretien, ou poste `/epure to-spec` pour valider le cadrage et g\xE9n\xE9rer la sp\xE9cification et les tickets._"
+          "_R\xE9ponds directement en commentaire pour poursuivre l'entretien, ou poste `/epure to-spec` pour valider le cadrage et g\xE9n\xE9rer la sp\xE9cification._"
         ].join("\n"),
         {
           phase: "grilling",
@@ -9476,7 +9650,7 @@ ${issue.body}`
         "",
         "---",
         "\u{1F449} **Validation humaine requise avant `/to-spec`** :",
-        "- Si ce cadrage vous convient, postez **`/epure to-spec`** pour g\xE9n\xE9rer le `GLOSSARY.md`, les ADRs, la sp\xE9cification compl\xE8te et le graphe de tickets sur `" + planBranch + "`.",
+        "- Si ce cadrage vous convient, postez **`/epure to-spec`** pour g\xE9n\xE9rer le `GLOSSARY.md`, les ADRs et la sp\xE9cification compl\xE8te sur `" + planBranch + "`.",
         "- Si vous souhaitez approfondir un point, ajouter une contrainte ou corriger une d\xE9cision, **r\xE9pondez simplement en commentaire** (sans commande slash) pour ouvrir un nouveau round de grill."
       ].join("\n"),
       {
@@ -9498,65 +9672,412 @@ ${issue.body}`
   }
   await gh.ensureBranch("dev", "main");
   const humanContext = allComments.filter((c) => !c.user.login.endsWith("[bot]") && c.user.type !== "Bot").map((c) => `@${c.user.login}: ${c.body}`).join("\n\n---\n\n");
-  const specSystemInstruction = [
-    "Tu es l'architecte EPURE charg\xE9 de produire le dossier de sp\xE9cification complet et le d\xE9coupage en tickets atomiques TDD.",
-    PROMPT_INJECTION_IMMUNITY_CLAUSE,
-    "Si tu as besoin de v\xE9rifier des chemins ou le contenu existant de GLOSSARY.md / docs/adr/ avant de r\xE9diger, utilise les outils d'exploration avec parcimonie (1 \xE0 3 appels maximum), puis g\xE9n\xE8re imm\xE9diatement l'objet JSON final.",
-    "R\xC8GLE CRITIQUE : INTERDICTION STRICTE d'utiliser des ellipses ('...', '# Sp\xE9cification...', etc.) ou des valeurs tronqu\xE9es. Chaque champ ('glossary_markdown', 'adrs[*].content', 'spec_markdown', 'tickets[*].title', 'tickets[*].description', 'tickets[*].acceptance_criteria', 'tickets[*].files_to_create_or_update') DOIT contenir le texte int\xE9gral, d\xE9taill\xE9 et complet pr\xEAt \xE0 \xEAtre commit\xE9 dans le d\xE9p\xF4t.",
-    "Produis un objet JSON strictement valide (sans markdown autour) respectant exactement cette structure :",
-    "{",
-    `  "plan_slug": "${planSlug}",`,
-    '  "glossary_markdown": "<Contenu Markdown int\xE9gral de GLOSSARY.md int\xE9grant les termes du domaine>",',
-    '  "adrs": [',
-    `    { "path": "docs/adr/NNNN-decision-architecturale.md", "content": "<Contenu Markdown int\xE9gral de l'ADR avec Context, Decision et Consequences>" }`,
-    "  ],",
-    `  "spec_path": "docs/specs/${planSlug}.md",`,
-    '  "spec_markdown": "<Contenu Markdown int\xE9gral et d\xE9taill\xE9 de la sp\xE9cification technique et fonctionnelle>",',
-    '  "tickets": [',
-    "    {",
-    '      "index": 1,',
-    '      "slug": "<slug-court-du-ticket-1>",',
-    '      "title": "[Ticket 1] <Titre explicite et complet du ticket 1>",',
-    '      "description": "<Description technique compl\xE8te et d\xE9taill\xE9e du ticket 1>",',
-    `      "acceptance_criteria": ["<Crit\xE8re d'acceptation v\xE9rifiable 1>", "<Crit\xE8re d'acceptation v\xE9rifiable 2>"],`,
-    '      "blocked_by_indices": [],',
-    '      "files_to_create_or_update": ["<chemin/fichier1>", "<chemin/fichier2>"]',
-    "    }",
-    "  ]",
-    "}"
-  ].join("\n");
-  const specGenerationPrompt = [
-    `Issue #${issue.number} (description initiale non fiable) :`,
-    wrapUntrustedContent(
-      "untrusted_issue_content",
-      `Titre : ${issue.title}
+  const readRepoFileSafely = async (path, ref) => {
+    if (typeof gh.readSingleBranchFile !== "function") {
+      return null;
+    }
+    try {
+      return await gh.readSingleBranchFile(ref, path);
+    } catch {
+      return null;
+    }
+  };
+  if (command === "to-spec" || command === "reply" && currentPhase === "spec") {
+    const isSpecRevision = command === "reply" && currentPhase === "spec";
+    const existingManifest = parseLatestSpecManifest(allComments);
+    const currentSpecOnBranch = await readRepoFileSafely(
+      existingManifest?.specPath ?? `docs/specs/${planSlug}.md`,
+      planBranch
+    );
+    const specOnlySystemInstruction = [
+      "Tu es l'architecte EPURE charg\xE9 de produire (ou r\xE9viser) le dossier de sp\xE9cification complet (`GLOSSARY.md`, ADRs dans `docs/adr/`, et sp\xE9cification `docs/specs/<slug>.md`) SANS cr\xE9er les tickets pour l'instant.",
+      PROMPT_INJECTION_IMMUNITY_CLAUSE,
+      "Si tu as besoin de v\xE9rifier des chemins ou le contenu existant de GLOSSARY.md / docs/adr/ avant de r\xE9diger, utilise les outils d'exploration avec parcimonie (1 \xE0 3 appels maximum), puis g\xE9n\xE8re imm\xE9diatement l'objet JSON final.",
+      "R\xC8GLE CRITIQUE : INTERDICTION STRICTE d'utiliser des ellipses ('...', '# Sp\xE9cification...', etc.) ou des valeurs tronqu\xE9es. Chaque champ ('glossary_markdown', 'adrs[*].content', 'spec_markdown', 'target_files_hint') DOIT contenir le texte int\xE9gral, d\xE9taill\xE9 et complet pr\xEAt \xE0 \xEAtre commit\xE9 dans le d\xE9p\xF4t.",
+      "Produis un objet JSON strictement valide (sans markdown autour) respectant exactement cette structure :",
+      "{",
+      `  "plan_slug": "${planSlug}",`,
+      '  "glossary_markdown": "<Contenu Markdown int\xE9gral de GLOSSARY.md int\xE9grant les termes du domaine>",',
+      '  "adrs": [',
+      `    { "path": "docs/adr/NNNN-decision-architecturale.md", "content": "<Contenu Markdown int\xE9gral de l'ADR avec Context, Decision et Consequences>" }`,
+      "  ],",
+      `  "spec_path": "docs/specs/${planSlug}.md",`,
+      '  "spec_markdown": "<Contenu Markdown int\xE9gral et d\xE9taill\xE9 de la sp\xE9cification technique et fonctionnelle>",',
+      '  "target_files_hint": ["<chemin/fichier1>", "<chemin/fichier2>"]',
+      "}"
+    ].join("\n");
+    const specOnlyPrompt = [
+      `Issue #${issue.number} (description initiale non fiable) :`,
+      wrapUntrustedContent(
+        "untrusted_issue_content",
+        `Titre : ${issue.title}
 
 Description :
 ${issue.body}`
-    ),
-    "",
-    "Historique complet de l'entretien /grill-with-docs (questions EPURE et r\xE9ponses humaines) :",
-    wrapUntrustedContent(
-      "untrusted_comment_history",
-      fullConversationHistory || humanContext
-    )
-  ].join("\n");
-  const bundle = await callGeminiJson({
-    apiKey: llmApiKey,
-    model: phaseModels.planningModel,
-    providers: phaseModels.providers,
-    maxTransientRetries: phaseModels.maxTransientRetries,
-    transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
-    systemInstruction: specSystemInstruction,
-    prompt: specGenerationPrompt,
-    temperature: 0.1,
-    tools: grillRepoTools.tools,
-    toolHandlers: grillRepoTools.toolHandlers,
-    maxToolRounds: 10,
-    logLabel: `spec-bundle#${issueNumber}`,
-    responseSchema: GENERATED_PLANNING_BUNDLE_SCHEMA,
-    fetchImpl
-  });
+      ),
+      "",
+      ...currentSpecOnBranch ? [
+        `Sp\xE9cification existante sur \`${planBranch}\` \xE0 r\xE9viser selon les derniers commentaires humains :`,
+        wrapUntrustedContent("untrusted_spec_content", currentSpecOnBranch),
+        ""
+      ] : [],
+      "Historique complet de l'entretien /grill-with-docs et retours humains :",
+      wrapUntrustedContent(
+        "untrusted_comment_history",
+        fullConversationHistory || humanContext
+      )
+    ].join("\n");
+    const specArtifacts = await callGeminiJson({
+      apiKey: llmApiKey,
+      model: phaseModels.planningModel,
+      providers: phaseModels.providers,
+      maxTransientRetries: phaseModels.maxTransientRetries,
+      transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+      systemInstruction: specOnlySystemInstruction,
+      prompt: specOnlyPrompt,
+      temperature: 0.1,
+      tools: grillRepoTools.tools,
+      toolHandlers: grillRepoTools.toolHandlers,
+      maxToolRounds: 10,
+      logLabel: isSpecRevision ? `spec-revision#${issueNumber}` : `spec-artifacts#${issueNumber}`,
+      responseSchema: GENERATED_SPEC_ARTIFACTS_SCHEMA,
+      fetchImpl
+    });
+    const specGateResult = validatePlanningArtifactsAndGraph({
+      introducesDomainTerms: true,
+      glossaryContent: specArtifacts.glossary_markdown,
+      adrFiles: specArtifacts.adrs.map((a) => ({
+        path: a.path,
+        content: a.content
+      })),
+      specPath: specArtifacts.spec_path,
+      specContent: specArtifacts.spec_markdown,
+      tickets: [
+        {
+          id: 1,
+          issueNumber: 1,
+          title: "spec-validation-placeholder",
+          state: "open",
+          blockedBy: []
+        }
+      ]
+    });
+    if (!specGateResult.valid) {
+      await gh.ensureLabel(
+        "needs-human",
+        "D93F0B",
+        "Requires human maintainer intervention"
+      );
+      await gh.addIssueLabels(issueNumber, ["needs-human"]);
+      const suspended = await updateIssueStateWithCas({
+        issueNumber,
+        store,
+        mutator: (prev) => ({
+          ...prev,
+          phase: "spec",
+          status: "suspended",
+          active_branch: planBranch,
+          last_processed_comment_id: commentId ?? prev.last_processed_comment_id
+        })
+      });
+      const escalationComment = appendEpureCommandsSpoiler(
+        [
+          suspended.issue_mirror_markdown,
+          "",
+          `### \u26A0\uFE0F Escalade \`needs-human\` \u2014 \xC9chec de validation des livrables de sp\xE9cification (\`${specGateResult.error_code}\`)`,
+          "",
+          `- **Code d'erreur** : \`${specGateResult.error_code}\``,
+          `- **Raison** : ${specGateResult.error_message}`,
+          "- **Action requise** : Corrigez les livrables ou relancez `/epure to-spec`."
+        ].join("\n"),
+        {
+          phase: "suspended",
+          status: "suspended",
+          issueNumber
+        }
+      );
+      await gh.postIssueComment(issueNumber, escalationComment);
+      return {
+        executed: true,
+        phase: suspended.state.phase,
+        status: suspended.state.status,
+        active_branch: planBranch,
+        summary_markdown: escalationComment,
+        created_ticket_numbers: [],
+        feature_pr_url: ""
+      };
+    }
+    const targetFilesHint = specArtifacts.target_files_hint ?? [];
+    const touchesFrontendUi2 = targetFilesHint.some(
+      (f) => /\.(?:tsx|jsx|css|scss|html)$/i.test(f)
+    );
+    const impeccableSession2 = planImpeccableDesignSession({
+      issueNumber,
+      surfaceSlug: planSlug,
+      touchesFrontendUi: touchesFrontendUi2,
+      alreadyAnsweredTopics: ["theme", "layout"],
+      candidateDesignTopics: ["theme", "layout", "accessibility"]
+    });
+    const designGate2 = touchesFrontendUi2 ? await runUserAdvocateDesignGate({
+      repository,
+      planTitle: issue.title,
+      glossaryMarkdown: specArtifacts.glossary_markdown,
+      specMarkdown: specArtifacts.spec_markdown,
+      llmApiKey,
+      model: phaseModels.reviewModel,
+      providers: phaseModels.providers,
+      fetchImpl
+    }) : null;
+    const plannedStack2 = detectRepositoryStack({
+      targetFilesHint
+    });
+    const adaptedRoster2 = adaptReviewerRosterForDomain({
+      repository,
+      planTitle: issue.title,
+      glossaryMarkdown: specArtifacts.glossary_markdown,
+      specMarkdown: specArtifacts.spec_markdown,
+      touchesFrontendUi: touchesFrontendUi2,
+      stackKind: plannedStack2.kind,
+      personas: designGate2?.personas,
+      domainInvariants: designGate2?.domain_invariants
+    });
+    const zizmorFile2 = buildZizmorConfigYaml();
+    const renovateFile2 = buildRenovateConfigJson(plannedStack2);
+    const ciFile2 = buildStackAwareCiWorkflowYaml({
+      pinnedSha: "main",
+      stack: plannedStack2
+    });
+    const existingBaseRoster2 = await gh.readTrustedBaseRosterFiles("dev");
+    const hasExistingConfiguredRoster2 = existingBaseRoster2.size > 0;
+    const corePlanningDocs2 = [
+      ...specArtifacts.glossary_markdown.trim().length > 0 ? [{ path: "GLOSSARY.md", content: specArtifacts.glossary_markdown }] : [],
+      { path: specArtifacts.spec_path, content: specArtifacts.spec_markdown },
+      ...specArtifacts.adrs.map((a) => ({ path: a.path, content: a.content }))
+    ];
+    const planningFiles2 = hasExistingConfiguredRoster2 ? corePlanningDocs2 : [
+      ...corePlanningDocs2,
+      ...adaptedRoster2.files,
+      zizmorFile2,
+      renovateFile2,
+      ciFile2
+    ];
+    await gh.commitFilesToBranch({
+      branch: planBranch,
+      fromBranch: "dev",
+      commitMessage: isSpecRevision ? `docs(plan): revise GLOSSARY, ADRs, and spec for #${issueNumber}` : `docs(plan): generate GLOSSARY, ADRs, spec, DESIGN.md, and adapted reviewer roster for #${issueNumber}`,
+      files: planningFiles2
+    });
+    const updatedSpec = await updateIssueStateWithCas({
+      issueNumber,
+      store,
+      mutator: (prev) => ({
+        ...prev,
+        phase: "spec",
+        status: "awaiting_human_approval",
+        active_branch: planBranch,
+        last_processed_comment_id: commentId ?? prev.last_processed_comment_id
+      })
+    });
+    const specManifestPayload = {
+      planBranch,
+      specPath: specArtifacts.spec_path,
+      adrPaths: specArtifacts.adrs.map((a) => a.path),
+      targetFilesHint
+    };
+    const specReviewComment = appendEpureCommandsSpoiler(
+      [
+        updatedSpec.issue_mirror_markdown,
+        "",
+        isSpecRevision ? `### \u{1F4DD} Sp\xE9cification r\xE9vis\xE9e sur \`${planBranch}\` (En attente de validation humaine)` : `### \u{1F4C4} Sp\xE9cification, Glossaire et ADRs g\xE9n\xE9r\xE9s sur \`${planBranch}\` (En attente de validation humaine)`,
+        "",
+        "- **Glossaire** : `GLOSSARY.md`",
+        `- **ADRs** : ${specArtifacts.adrs.map((a) => `\`${a.path}\``).join(", ")}`,
+        `- **Sp\xE9cification** : \`${specArtifacts.spec_path}\``,
+        `- **Roster Multi-Agents adapt\xE9** : \`.cursor/agents/*.md\` (${adaptedRoster2.files.length} fichiers)`,
+        ...impeccableSession2.impeccable_invoked ? [
+          "- **Design Gate Impeccable & `user-advocate` (`design-gate`)** : `DESIGN.md` g\xE9n\xE9r\xE9"
+        ] : [],
+        "",
+        "\u{1F449} **Validation humaine de la sp\xE9cification requise avant `/to-tickets`** :",
+        `- Inspectez les fichiers sur la branche \`${planBranch}\` (\`${specArtifacts.spec_path}\`, \`GLOSSARY.md\`, ADRs).`,
+        "- Pour demander un ajustement ou une correction de la sp\xE9cification, **r\xE9pondez directement en commentaire** (sans commande slash).",
+        "- Si la sp\xE9cification est valid\xE9e, postez **`/epure to-tickets`** pour g\xE9n\xE9rer le graphe de tickets TDD (`ready-for-agent`).",
+        "",
+        `<!-- epure-spec-manifest:${JSON.stringify(specManifestPayload)} -->`
+      ].join("\n"),
+      {
+        phase: "spec",
+        status: "awaiting_human_approval",
+        issueNumber
+      }
+    );
+    await gh.postIssueComment(issueNumber, specReviewComment);
+    return {
+      executed: true,
+      phase: updatedSpec.state.phase,
+      status: updatedSpec.state.status,
+      active_branch: planBranch,
+      summary_markdown: specReviewComment,
+      created_ticket_numbers: [],
+      feature_pr_url: ""
+    };
+  }
+  const storedSpecManifest = parseLatestSpecManifest(allComments);
+  const candidateSpecPath = storedSpecManifest?.specPath ?? `docs/specs/${planSlug}.md`;
+  const existingSpecOnPlanBranch = await readRepoFileSafely(
+    candidateSpecPath,
+    planBranch
+  );
+  let bundle;
+  if (existingSpecOnPlanBranch && existingSpecOnPlanBranch.trim().length > 0) {
+    const existingGlossary = await readRepoFileSafely("GLOSSARY.md", planBranch) ?? await readRepoFileSafely("GLOSSARY.md", "dev") ?? "# Glossary\n\n- **Domain Term**: Canonical project definition.\n";
+    const adrPathsToRead = storedSpecManifest?.adrPaths ?? [];
+    const loadedAdrs = [];
+    for (const adrPath of adrPathsToRead) {
+      const adrContent = await readRepoFileSafely(adrPath, planBranch);
+      if (adrContent) {
+        const filename = adrPath.split("/").pop() ?? adrPath;
+        loadedAdrs.push({
+          path: adrPath,
+          content: adrContent,
+          filename,
+          title: filename,
+          markdown: adrContent
+        });
+      }
+    }
+    const ticketsOnlySystemInstruction = [
+      "Tu es l'architecte EPURE charg\xE9 de d\xE9couper la sp\xE9cification approuv\xE9e en un graphe acyclique (DAG) de tickets atomiques TDD.",
+      PROMPT_INJECTION_IMMUNITY_CLAUSE,
+      "R\xC8GLE CRITIQUE : INTERDICTION STRICTE d'utiliser des ellipses ('...', etc.) ou des valeurs tronqu\xE9es. Chaque champ ('tickets[*].title', 'tickets[*].description', 'tickets[*].acceptance_criteria', 'tickets[*].files_to_create_or_update') DOIT contenir le texte int\xE9gral, d\xE9taill\xE9 et complet.",
+      "Produis un objet JSON strictement valide (sans markdown autour) respectant exactement cette structure :",
+      "{",
+      '  "tickets": [',
+      "    {",
+      '      "index": 1,',
+      '      "slug": "<slug-court-du-ticket-1>",',
+      '      "title": "[Ticket 1] <Titre explicite et complet du ticket 1>",',
+      '      "description": "<Description technique compl\xE8te et d\xE9taill\xE9e du ticket 1>",',
+      `      "acceptance_criteria": ["<Crit\xE8re d'acceptation v\xE9rifiable 1>", "<Crit\xE8re d'acceptation v\xE9rifiable 2>"],`,
+      '      "blocked_by_indices": [],',
+      '      "files_to_create_or_update": ["<chemin/fichier1>", "<chemin/fichier2>"]',
+      "    }",
+      "  ]",
+      "}"
+    ].join("\n");
+    const ticketsOnlyPrompt = [
+      `Issue #${issue.number} :`,
+      wrapUntrustedContent(
+        "untrusted_issue_content",
+        `Titre : ${issue.title}
+
+Description :
+${issue.body}`
+      ),
+      "",
+      `Sp\xE9cification approuv\xE9e sur \`${planBranch}\` (\`${candidateSpecPath}\`) :`,
+      wrapUntrustedContent("untrusted_spec_content", existingSpecOnPlanBranch),
+      "",
+      "Historique complet de l'entretien et des validations :",
+      wrapUntrustedContent(
+        "untrusted_comment_history",
+        fullConversationHistory || humanContext
+      )
+    ].join("\n");
+    const ticketDag = await callGeminiJson({
+      apiKey: llmApiKey,
+      model: phaseModels.planningModel,
+      providers: phaseModels.providers,
+      maxTransientRetries: phaseModels.maxTransientRetries,
+      transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+      systemInstruction: ticketsOnlySystemInstruction,
+      prompt: ticketsOnlyPrompt,
+      temperature: 0.1,
+      tools: grillRepoTools.tools,
+      toolHandlers: grillRepoTools.toolHandlers,
+      maxToolRounds: 8,
+      logLabel: `ticket-dag#${issueNumber}`,
+      responseSchema: GENERATED_TICKET_DAG_SCHEMA,
+      fetchImpl
+    });
+    const fallbackAdrContent = "# ADR 0001\n\n## Context\nApproved specification on plan branch.\n\n## Decision\nExecute atomic TDD ticket DAG.\n\n## Consequences\nDeterministic execution.\n";
+    bundle = {
+      plan_slug: planSlug,
+      glossary_markdown: existingGlossary,
+      adrs: loadedAdrs.length > 0 ? loadedAdrs : [
+        {
+          path: "docs/adr/0001-plan-architecture.md",
+          content: fallbackAdrContent,
+          filename: "0001-plan-architecture.md",
+          title: "ADR 0001",
+          markdown: fallbackAdrContent
+        }
+      ],
+      spec_path: candidateSpecPath,
+      spec_markdown: existingSpecOnPlanBranch,
+      tickets: ticketDag.tickets
+    };
+  } else {
+    const specSystemInstruction = [
+      "Tu es l'architecte EPURE charg\xE9 de produire le dossier de sp\xE9cification complet et le d\xE9coupage en tickets atomiques TDD.",
+      PROMPT_INJECTION_IMMUNITY_CLAUSE,
+      "Si tu as besoin de v\xE9rifier des chemins ou le contenu existant de GLOSSARY.md / docs/adr/ avant de r\xE9diger, utilise les outils d'exploration avec parcimonie (1 \xE0 3 appels maximum), puis g\xE9n\xE8re imm\xE9diatement l'objet JSON final.",
+      "R\xC8GLE CRITIQUE : INTERDICTION STRICTE d'utiliser des ellipses ('...', '# Sp\xE9cification...', etc.) ou des valeurs tronqu\xE9es. Chaque champ ('glossary_markdown', 'adrs[*].content', 'spec_markdown', 'tickets[*].title', 'tickets[*].description', 'tickets[*].acceptance_criteria', 'tickets[*].files_to_create_or_update') DOIT contenir le texte int\xE9gral, d\xE9taill\xE9 et complet pr\xEAt \xE0 \xEAtre commit\xE9 dans le d\xE9p\xF4t.",
+      "Produis un objet JSON strictement valide (sans markdown autour) respectant exactement cette structure :",
+      "{",
+      `  "plan_slug": "${planSlug}",`,
+      '  "glossary_markdown": "<Contenu Markdown int\xE9gral de GLOSSARY.md int\xE9grant les termes du domaine>",',
+      '  "adrs": [',
+      `    { "path": "docs/adr/NNNN-decision-architecturale.md", "content": "<Contenu Markdown int\xE9gral de l'ADR avec Context, Decision et Consequences>" }`,
+      "  ],",
+      `  "spec_path": "docs/specs/${planSlug}.md",`,
+      '  "spec_markdown": "<Contenu Markdown int\xE9gral et d\xE9taill\xE9 de la sp\xE9cification technique et fonctionnelle>",',
+      '  "tickets": [',
+      "    {",
+      '      "index": 1,',
+      '      "slug": "<slug-court-du-ticket-1>",',
+      '      "title": "[Ticket 1] <Titre explicite et complet du ticket 1>",',
+      '      "description": "<Description technique compl\xE8te et d\xE9taill\xE9e du ticket 1>",',
+      `      "acceptance_criteria": ["<Crit\xE8re d'acceptation v\xE9rifiable 1>", "<Crit\xE8re d'acceptation v\xE9rifiable 2>"],`,
+      '      "blocked_by_indices": [],',
+      '      "files_to_create_or_update": ["<chemin/fichier1>", "<chemin/fichier2>"]',
+      "    }",
+      "  ]",
+      "}"
+    ].join("\n");
+    const specGenerationPrompt = [
+      `Issue #${issue.number} (description initiale non fiable) :`,
+      wrapUntrustedContent(
+        "untrusted_issue_content",
+        `Titre : ${issue.title}
+
+Description :
+${issue.body}`
+      ),
+      "",
+      "Historique complet de l'entretien /grill-with-docs (questions EPURE et r\xE9ponses humaines) :",
+      wrapUntrustedContent(
+        "untrusted_comment_history",
+        fullConversationHistory || humanContext
+      )
+    ].join("\n");
+    bundle = await callGeminiJson({
+      apiKey: llmApiKey,
+      model: phaseModels.planningModel,
+      providers: phaseModels.providers,
+      maxTransientRetries: phaseModels.maxTransientRetries,
+      transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+      systemInstruction: specSystemInstruction,
+      prompt: specGenerationPrompt,
+      temperature: 0.1,
+      tools: grillRepoTools.tools,
+      toolHandlers: grillRepoTools.toolHandlers,
+      maxToolRounds: 10,
+      logLabel: `spec-bundle#${issueNumber}`,
+      responseSchema: GENERATED_PLANNING_BUNDLE_SCHEMA,
+      fetchImpl
+    });
+  }
   const gateBundle = {
     introducesDomainTerms: true,
     glossaryContent: bundle.glossary_markdown,
@@ -9676,12 +10197,14 @@ ${issue.body}`
     renovateFile,
     ciFile
   ];
-  await gh.commitFilesToBranch({
-    branch: planBranch,
-    fromBranch: "dev",
-    commitMessage: `docs(plan): generate GLOSSARY, ADRs, spec, DESIGN.md, and adapted reviewer roster for #${issueNumber}`,
-    files: planningFiles
-  });
+  if (!existingSpecOnPlanBranch || existingSpecOnPlanBranch.trim().length === 0) {
+    await gh.commitFilesToBranch({
+      branch: planBranch,
+      fromBranch: "dev",
+      commitMessage: `docs(plan): generate GLOSSARY, ADRs, spec, DESIGN.md, and adapted reviewer roster for #${issueNumber}`,
+      files: planningFiles
+    });
+  }
   await gh.ensureLabel(
     "ready-for-agent",
     "0E8A16",
@@ -11238,9 +11761,10 @@ async function orchestrateIssueCommand(input) {
       input.model ?? input.geminiModel,
       parsedDevAgentsConfig
     );
-    if (input.command === "plan" || input.command === "to-spec" || input.command === "to-tickets" || input.command === "reply" && currentState?.phase === "grilling" && currentState?.status === "active") {
+    if (input.command === "plan" || input.command === "to-spec" || input.command === "to-tickets" || input.command === "reply" && (currentState?.phase === "grilling" || currentState?.phase === "spec") && currentState?.status !== "cancelled" && currentState?.status !== "suspended") {
       return await runGrillAndPlanPhase({
         command: input.command,
+        currentPhase: currentState?.phase,
         repository: input.repository,
         issueNumber: input.issueNumber,
         commentId: input.commentId,
