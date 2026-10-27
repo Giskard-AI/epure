@@ -57,3 +57,18 @@ EPURE a été conçu dès l'origine autour de trois principes d'ingénierie : **
    - **[Archify (`tt-a1i/archify`)](https://github.com/tt-a1i/archify)** — Schémas d'architecture interactifs validés en qualité showcase (`scripts/archify/`).
    - **[zizmor (`woodruffw/zizmor`)](https://github.com/woodruffw/zizmor)** — Analyse statique de sécurité des workflows GitHub Actions (`actions/zizmor-audit`).
    - **[Renovate (`renovatebot/renovate`)](https://github.com/renovatebot/renovate)** — Mise à jour automatisée des workflows épinglés par SHA et des dépendances (`auto_migrate`).
+
+---
+
+## 3. Routeur `LLMClient` Multi-Fournisseurs, Sorties Structurées & Orchestrateur Modulaire (ADR-0029)
+
+1. **Routeur HTTP Multi-Fournisseurs (`src/llm/`)** :
+   - Client TypeScript `LLMClient` sans dépendance externe routant les identifiants `<fournisseur>/<modèle>` vers **Google Gemini** (`google/`, `gemini/`), **OpenAI** (`openai/`), **Azure OpenAI** (`azure/`), **Azure AI Foundry** (`azure_ai/`) et **Anthropic** (`anthropic/`), avec résolution différée `os.environ/VAR_NAME` depuis `.github/agents.yml`.
+   - Respect strict de l'ADR-0012 : les erreurs HTTP `401`/`403` (`AuthenticationError`) et `402` (`QuotaExhaustedError`) interrompent immédiatement l'exécution sans bascule silencieuse, tandis que les erreurs transitoires (`408`, `429`, `5xx`) appliquent un backoff exponentiel borné.
+2. **Sorties Structurées par Schéma (`ResponseSchemaSpec<T>`) & Boucle d'Outils Gemini en 2 Phases** :
+   - Les 11 appels LLM structurés du système (`GrillRoundEvaluation`, `GeneratedPlanningBundle`, `GeneratedTicketImplementation`, constats des reviewers, `user-advocate` et synthèse de squash) transmettent un JSON Schema natif (`responseSchema`, `response_format.json_schema` avec fermeture récursive `additionalProperties: false`, ou `output_config.format`) couplé aux validateurs TypeScript de `src/orchestrator/prompts/schemas.ts`.
+   - Sur Google Gemini, lorsqu'un appel combine les outils d'exploration (`list_repo_files`, `search_in_repo_file`, `read_repo_file`) et un schéma JSON, la **Phase 1** exécute les tours d'outils avec `functionDeclarations` (en préservant les `thoughtSignature` Gemini 3), puis la **Phase 2** verrouille `functionCallingConfig.mode = "NONE"` avec `responseMimeType: "application/json"` et `responseSchema`.
+3. **Architecture Modulaire `src/orchestrator/` & Garde-fous Branchés** :
+   - `src/orchestrator/issue-orchestrator.ts` orchestre les sous-modules spécialisés `github/rest-client.ts`, `workspace/repo-tools.ts`, `prompts/schemas.ts`, `formatting/comments.ts` ainsi que les 3 phases `phases/grill-and-plan.ts`, `phases/ticket-execution.ts` et `phases/feature-integration.ts`.
+   - Branche directement la détection de cycles du DAG (`validatePlanningArtifactsAndGraph`), le déblocage sur dépendance prouvée (`reconcileProvenTicketDependencies`, escaladant en `needs-human` si un ticket bloquant est fermé en `not_planned`), la détection d'annulation `/epure cancel` inter-tickets (`processPendingIssueCommentsBatch`) et la garde anti-boucle de revue par SHA (`evaluateReviewFeedbackTrigger`).
+

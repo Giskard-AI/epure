@@ -1,7 +1,13 @@
 import {
-  callGeminiGenerateContent,
-  extractJsonObject
-} from "../orchestrator/gemini-client.js";
+  AuthenticationError,
+  QuotaExhaustedError
+} from "../llm/errors.js";
+import type { ProviderConfig } from "../llm/types.js";
+import { callGeminiJson } from "../orchestrator/gemini-client.js";
+import {
+  USER_ADVOCATE_SCHEMA,
+  type UserAdvocatePayload
+} from "../orchestrator/prompts/schemas.js";
 import {
   PROMPT_INJECTION_IMMUNITY_CLAUSE,
   wrapUntrustedContent
@@ -589,15 +595,20 @@ export function adaptReviewerRosterForDomain(
   };
 }
 
-export async function runUserAdvocateDesignGate(params: {
+export interface RunUserAdvocateDesignGateInput {
   readonly repository: string;
   readonly planTitle: string;
   readonly glossaryMarkdown: string;
   readonly specMarkdown: string;
   readonly llmApiKey?: string | undefined;
   readonly model?: string | undefined;
+  readonly providers?: Readonly<Record<string, ProviderConfig>> | undefined;
   readonly fetchImpl?: typeof fetch | undefined;
-}): Promise<UserAdvocateDesignGateResult> {
+}
+
+export async function runUserAdvocateDesignGate(
+  params: RunUserAdvocateDesignGateInput
+): Promise<UserAdvocateDesignGateResult> {
   const defaultAdapted = adaptReviewerRosterForDomain({
     repository: params.repository,
     planTitle: params.planTitle,
@@ -681,22 +692,17 @@ export async function runUserAdvocateDesignGate(params: {
       )
     ].join("\n");
 
-    const raw = await callGeminiGenerateContent({
+    const parsed = await callGeminiJson<UserAdvocatePayload>({
       apiKey: params.llmApiKey,
       model: params.model ?? "gemini-3.8-flash",
+      providers: params.providers,
       systemInstruction,
       prompt,
       responseMimeType: "application/json",
+      responseSchema: USER_ADVOCATE_SCHEMA,
       temperature: 0.1,
       fetchImpl: params.fetchImpl
     });
-
-    const parsed = extractJsonObject<{
-      personas?: DomainPersonaSpec[];
-      domain_invariants?: string[];
-      ux_acceptance_criteria?: string[];
-      findings?: UserAdvocateDesignGateFinding[];
-    }>(raw);
 
     const personas =
       Array.isArray(parsed.personas) && parsed.personas.length > 0
@@ -743,7 +749,13 @@ export async function runUserAdvocateDesignGate(params: {
       design_markdown: adapted.designMarkdown ?? "# DESIGN.md\n",
       findings: Array.isArray(parsed.findings) ? parsed.findings : []
     };
-  } catch {
+  } catch (error) {
+    if (
+      error instanceof AuthenticationError ||
+      error instanceof QuotaExhaustedError
+    ) {
+      throw error;
+    }
     return {
       mode: "design-gate",
       personas: [],

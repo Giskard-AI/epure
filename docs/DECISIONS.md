@@ -236,6 +236,20 @@ Voir [ADR-0027](adr/0027-rulesets-roster-review-multi-agents-et-squash-ia.md).
 - **Q102 (validée)** : conserver `/GLOSSARY.md` à la racine comme unique source de vérité, l'inclure sans duplication dans `docs/fr/reference/glossary.md` via `<!--@include: ../../../GLOSSARY.md-->`, et fournir la table de correspondance et traduction alignée EN/FR dans `docs/reference/glossary.md`.
 - **Q103 (validée)** : appliquer la gouvernance UI **Impeccable** (*dogfooding*) au site de documentation VitePress lui-même via un fichier `DESIGN.md` à la racine du dépôt (tokens visuels Blueprint en modes clair et sombre, contraste WCAG 2.1 AA >= 4.5:1, responsive sans overflow horizontal, états `loading`/`ready`/`error` et accessibilité clavier/ARIA du composant `<ArchifyDiagram>`), validé automatiquement par `evaluateImpeccableFrontendPr` et audité par `design-reviewer`, `accessibility-reviewer` et `user-advocate`.
 
+## Ronde 25 — Q104 à Q111 (validées — Vérification Polyglotte en Sandbox et Boucle CI Externe)
+
+- Voir [ADR-0028](adr/0028-verification-polyglotte-et-boucle-ci-externe.md).
+
+## Ronde 26 — Routeur LLM Multi-Fournisseurs, Sorties Structurées par Schéma, Aide-Mémoire `/epure` & Découpage Modulaire de l'Orchestrateur
+
+- **Routeur `src/llm/` (`LLMClient`) et bloc `providers:` dans `.github/agents.yml`** : support natif des identifiants `<provider>/<model>` (`openai/`, `azure/`, `azure_ai/`, `google/`, `gemini/`, `anthropic/`), résolution différée `os.environ/VAR_NAME`, normalisation des URL Azure OpenAI et Azure AI Foundry (retrait automatique du suffixe `/models`), et conformité stricte à l'ADR-0012 (arrêt immédiat sur `401`/`402`/`403` sans bascule silencieuse, backoff borné sur erreurs transitoires).
+- **Sorties structurées natives (`ResponseSchemaSpec<T>`) et boucle Gemini en 2 phases** : les 11 appels LLM structurés utilisent des JSON Schemas formels (`responseSchema`, `response_format.json_schema` avec `additionalProperties: false` récursif, `output_config.format`) et un protocole en 2 phases sur Gemini lorsque des outils d'exploration du dépôt (`list_repo_files`, `search_in_repo_file`, `read_repo_file`) sont combinés à un schéma de sortie.
+- **Découpage modulaire de `src/orchestrator/` et branchement des garde-fous** : séparation en `types.ts`, `github/rest-client.ts`, `workspace/repo-tools.ts`, `prompts/schemas.ts`, `formatting/comments.ts` et `phases/{grill-and-plan,ticket-execution,feature-integration}.ts` ; branchement effectif de `validatePlanningArtifactsAndGraph`, `reconcileProvenTicketDependencies`, `processPendingIssueCommentsBatch`, `evaluateReviewFeedbackTrigger` et `prepareFeatureToDevPullRequest` ; suppression des 9 anciens modules de simulation non branchés.
+- **Aide-mémoire contextuel `<details>` des commandes `/epure`** : ajout automatique par `appendEpureCommandsSpoiler` en pied de chaque commentaire d'issue, sous-issue de ticket et description de PR.
+
+Voir [ADR-0029](adr/0029-routeur-llm-multi-fournisseurs-sorties-structurees-et-decoupage-orchestrateur.md).
+
+
 
 
 

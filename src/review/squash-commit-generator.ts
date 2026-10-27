@@ -1,14 +1,20 @@
 import { CONVENTIONAL_COMMIT_PATTERN_REGEX } from "../bootstrap/setup-repo.js";
 import {
-  callGeminiGenerateContent,
-  extractJsonObject
-} from "../orchestrator/gemini-client.js";
+  AuthenticationError,
+  QuotaExhaustedError
+} from "../llm/errors.js";
+import type { ProviderConfig } from "../llm/types.js";
+import { callGeminiJson } from "../orchestrator/gemini-client.js";
+import {
+  SQUASH_COMMIT_SCHEMA,
+  type SquashCommitPayload
+} from "../orchestrator/prompts/schemas.js";
 import {
   PROMPT_INJECTION_IMMUNITY_CLAUSE,
   wrapUntrustedContent
 } from "../security/prompt-injection-guard.js";
 
-export interface GenerateSquashCommitInput {
+export interface GenerateSemanticSquashCommitInput {
   readonly prNumber: number;
   readonly targetBranch: string;
   readonly defaultBranch?: string | undefined;
@@ -22,8 +28,11 @@ export interface GenerateSquashCommitInput {
   }>;
   readonly llmApiKey?: string | undefined;
   readonly model?: string | undefined;
+  readonly providers?: Readonly<Record<string, ProviderConfig>> | undefined;
   readonly fetchImpl?: typeof fetch | undefined;
 }
+
+export type GenerateSquashCommitInput = GenerateSemanticSquashCommitInput;
 
 export interface GeneratedSquashCommit {
   readonly pr_title: string;
@@ -168,23 +177,20 @@ export async function generateSemanticSquashCommitFromDiff(
       wrapUntrustedContent("untrusted_pr_diff", diffSnippet)
     ].join("\n");
 
-    const raw = await callGeminiGenerateContent({
+    const parsed = await callGeminiJson<SquashCommitPayload>({
       apiKey: input.llmApiKey,
       model: input.model ?? "gemini-3.8-flash",
+      providers: input.providers,
       systemInstruction,
       prompt,
       responseMimeType: "application/json",
+      responseSchema: SQUASH_COMMIT_SCHEMA,
       temperature: 0.0,
       fetchImpl: input.fetchImpl
     });
 
-    const parsed = extractJsonObject<{
-      pr_title?: string;
-      bullets?: string[];
-    }>(raw);
-
     const validPrTitle = normalizeConventionalCommitTitle(
-      parsed.pr_title ?? defaultPrTitle,
+      parsed.pr_title ?? parsed.title ?? defaultPrTitle,
       scopeHint
     );
     const bullets =
@@ -192,7 +198,13 @@ export async function generateSemanticSquashCommitFromDiff(
         ? parsed.bullets.map((b) =>
             b.trim().startsWith("-") ? b.trim() : `- ${b.trim()}`
           )
-        : defaultBullets;
+        : parsed.body
+          ? parsed.body
+              .split(/\r?\n/)
+              .map((b) => b.trim())
+              .filter((b) => b.length > 0)
+              .map((b) => (b.startsWith("-") ? b : `- ${b}`))
+          : defaultBullets;
 
     const commitTitle = `${validPrTitle} (#${input.prNumber})`;
     const commitMessage = [...bullets, "", ...trailers.trailerLines].join("\n");
@@ -203,7 +215,13 @@ export async function generateSemanticSquashCommitFromDiff(
       commit_message: commitMessage,
       uses_closes_keyword: trailers.usesClosesKeyword
     };
-  } catch {
+  } catch (error) {
+    if (
+      error instanceof AuthenticationError ||
+      error instanceof QuotaExhaustedError
+    ) {
+      throw error;
+    }
     const commitTitle = `${defaultPrTitle} (#${input.prNumber})`;
     const commitMessage = [
       ...(defaultBullets.length > 0

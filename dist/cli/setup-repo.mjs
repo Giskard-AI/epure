@@ -1556,6 +1556,75 @@ function normalizeVerificationTarget(target) {
     ...target.build_command ? { build_command: target.build_command } : {}
   };
 }
+function attachDualProviderConfigGetters(entry) {
+  const definePair = (snakeKey, camelKey) => {
+    const hasSnake = Object.prototype.hasOwnProperty.call(entry, snakeKey);
+    const hasCamel = Object.prototype.hasOwnProperty.call(entry, camelKey);
+    if (hasSnake && !hasCamel) {
+      Object.defineProperty(entry, camelKey, {
+        get() {
+          return entry[snakeKey];
+        },
+        enumerable: false,
+        configurable: true
+      });
+    } else if (hasCamel && !hasSnake) {
+      Object.defineProperty(entry, snakeKey, {
+        get() {
+          return entry[camelKey];
+        },
+        enumerable: false,
+        configurable: true
+      });
+    }
+  };
+  definePair("api_key", "apiKey");
+  definePair("base_url", "baseUrl");
+  definePair("api_version", "apiVersion");
+  definePair("default_headers", "defaultHeaders");
+  return entry;
+}
+function normalizeAgentsProvidersMap(providers, preferSnakeCase = false) {
+  if (!providers) {
+    return void 0;
+  }
+  const keys = Object.keys(providers);
+  if (keys.length === 0) {
+    return void 0;
+  }
+  const out = {};
+  for (const [alias, raw] of Object.entries(providers)) {
+    const cleanAlias = alias.trim();
+    if (!cleanAlias || !raw) {
+      continue;
+    }
+    const entry = {};
+    if (raw.provider) {
+      entry.provider = raw.provider;
+    }
+    const apiKeyVal = raw.api_key ?? raw.apiKey;
+    const baseUrlVal = raw.base_url ?? raw.baseUrl;
+    const apiVersionVal = raw.api_version ?? raw.apiVersion;
+    const defaultHeadersVal = raw.default_headers ?? raw.defaultHeaders;
+    const useSnake = preferSnakeCase || raw.api_key !== void 0 || raw.base_url !== void 0 || raw.api_version !== void 0 || raw.default_headers !== void 0;
+    if (apiKeyVal !== void 0) {
+      entry[useSnake ? "api_key" : "apiKey"] = apiKeyVal;
+    }
+    if (baseUrlVal !== void 0) {
+      entry[useSnake ? "base_url" : "baseUrl"] = baseUrlVal;
+    }
+    if (apiVersionVal !== void 0) {
+      entry[useSnake ? "api_version" : "apiVersion"] = apiVersionVal;
+    }
+    if (defaultHeadersVal !== void 0) {
+      entry[useSnake ? "default_headers" : "defaultHeaders"] = {
+        ...defaultHeadersVal
+      };
+    }
+    out[cleanAlias] = attachDualProviderConfigGetters(entry);
+  }
+  return Object.keys(out).length > 0 ? out : void 0;
+}
 function resolveAgentsConfig(overrides = {}) {
   const sec = overrides.security_overrides;
   if (sec) {
@@ -1614,6 +1683,7 @@ function resolveAgentsConfig(overrides = {}) {
     } : {},
     targets: overrides.verification.targets ? overrides.verification.targets.map(normalizeVerificationTarget) : DEFAULT_VERIFICATION_PROFILE.targets
   } : DEFAULT_VERIFICATION_PROFILE;
+  const normalizedProviders = normalizeAgentsProvidersMap(overrides.providers);
   const config = {
     harness: overrides.harness ?? DEFAULT_AGENTS_CONFIG.harness,
     models: {
@@ -1621,6 +1691,7 @@ function resolveAgentsConfig(overrides = {}) {
       implementation: overrides.models?.implementation ?? DEFAULT_AGENTS_CONFIG.models.implementation,
       review: overrides.models?.review ?? DEFAULT_AGENTS_CONFIG.models.review
     },
+    ...normalizedProviders ? { providers: normalizedProviders } : {},
     merge_policy: overrides.merge_policy ?? DEFAULT_AGENTS_CONFIG.merge_policy,
     max_code_fix_attempts: overrides.max_code_fix_attempts ?? DEFAULT_AGENTS_CONFIG.max_code_fix_attempts,
     max_transient_api_retries: overrides.max_transient_api_retries ?? DEFAULT_AGENTS_CONFIG.max_transient_api_retries,
@@ -1643,7 +1714,53 @@ function resolveAgentsConfig(overrides = {}) {
 function escapeYamlDoubleQuoted(val) {
   return JSON.stringify(val);
 }
+function formatYamlProviderScalar(val) {
+  if (val.length === 0 || /[\r\n#]/.test(val) || /^\s|\s$/.test(val) || val.startsWith('"') || val.startsWith("'")) {
+    return escapeYamlDoubleQuoted(val);
+  }
+  return val;
+}
 function serializeAgentsConfigYaml(config, taskAutoMergeEnabled = false) {
+  const providerLines = [];
+  if (config.providers && Object.keys(config.providers).length > 0) {
+    providerLines.push("providers:");
+    for (const [alias, rawEntry] of Object.entries(config.providers)) {
+      if (!rawEntry) {
+        continue;
+      }
+      providerLines.push(`  ${alias}:`);
+      if (rawEntry.provider) {
+        providerLines.push(
+          `    provider: ${formatYamlProviderScalar(rawEntry.provider)}`
+        );
+      }
+      const apiKey = rawEntry.api_key ?? rawEntry.apiKey;
+      if (apiKey !== void 0) {
+        providerLines.push(`    api_key: ${formatYamlProviderScalar(apiKey)}`);
+      }
+      const baseUrl = rawEntry.base_url ?? rawEntry.baseUrl;
+      if (baseUrl !== void 0) {
+        providerLines.push(
+          `    base_url: ${formatYamlProviderScalar(baseUrl)}`
+        );
+      }
+      const apiVersion = rawEntry.api_version ?? rawEntry.apiVersion;
+      if (apiVersion !== void 0) {
+        providerLines.push(
+          `    api_version: ${formatYamlProviderScalar(apiVersion)}`
+        );
+      }
+      const defaultHeaders = rawEntry.default_headers ?? rawEntry.defaultHeaders;
+      if (defaultHeaders && Object.keys(defaultHeaders).length > 0) {
+        providerLines.push("    default_headers:");
+        for (const [hKey, hVal] of Object.entries(defaultHeaders)) {
+          providerLines.push(
+            `      ${hKey}: ${formatYamlProviderScalar(hVal)}`
+          );
+        }
+      }
+    }
+  }
   const verification = config.verification ?? DEFAULT_VERIFICATION_PROFILE;
   const verificationLines = [
     "verification:",
@@ -1709,6 +1826,7 @@ function serializeAgentsConfigYaml(config, taskAutoMergeEnabled = false) {
     `  planning: ${config.models.planning}`,
     `  implementation: ${config.models.implementation}`,
     `  review: ${config.models.review}`,
+    ...providerLines,
     `merge_policy: ${config.merge_policy}`,
     `task_auto_merge_enabled: ${taskAutoMergeEnabled}`,
     `max_code_fix_attempts: ${config.max_code_fix_attempts}`,
@@ -1794,6 +1912,9 @@ function parseYamlStringArrayInline(raw) {
 function parseAgentsYaml(yamlContent) {
   let harness;
   const models = {};
+  const providers = {};
+  let currentProviderAlias = null;
+  let inProviderDefaultHeaders = false;
   let merge_policy;
   let task_auto_merge_enabled;
   let max_code_fix_attempts;
@@ -1871,6 +1992,8 @@ function parseAgentsYaml(yamlContent) {
       inDeferredWorkflows = false;
       inCurrentTargetPathPatterns = false;
       currentTarget = null;
+      currentProviderAlias = null;
+      inProviderDefaultHeaders = false;
       const kv = /^([a-zA-Z0-9_]+):\s*(.*)$/.exec(trimmed);
       if (!kv || !kv[1]) {
         continue;
@@ -1879,6 +2002,10 @@ function parseAgentsYaml(yamlContent) {
       const val = (kv[2] ?? "").replace(/\s+#.*$/, "").trim();
       if (key === "models" && !val) {
         section = "models";
+        continue;
+      }
+      if (key === "providers" && !val) {
+        section = "providers";
         continue;
       }
       if (key === "verification" && !val) {
@@ -1943,6 +2070,64 @@ function parseAgentsYaml(yamlContent) {
         if (k === "planning" || k === "implementation" || k === "review") {
           models[k] = v;
         }
+      }
+      continue;
+    }
+    if (section === "providers") {
+      if (indent === 2) {
+        inProviderDefaultHeaders = false;
+        const kv = /^([a-zA-Z0-9_.-]+):\s*(.*)$/.exec(trimmed);
+        if (kv && kv[1]) {
+          currentProviderAlias = kv[1];
+          providers[currentProviderAlias] = attachDualProviderConfigGetters({});
+        }
+        continue;
+      }
+      if (indent === 4 && currentProviderAlias) {
+        const kv = /^([a-zA-Z0-9_.-]+):\s*(.*)$/.exec(trimmed);
+        if (kv && kv[1]) {
+          const k = kv[1];
+          const rawV = (kv[2] ?? "").replace(/\s+#.*$/, "").trim();
+          const currentObj = providers[currentProviderAlias] ?? {};
+          if (k === "default_headers" || k === "defaultHeaders") {
+            if (rawV === "{}") {
+              currentObj.default_headers = {};
+              inProviderDefaultHeaders = false;
+            } else {
+              currentObj.default_headers = {};
+              inProviderDefaultHeaders = true;
+            }
+          } else {
+            inProviderDefaultHeaders = false;
+            const v = unquoteYamlScalar(rawV);
+            if (k === "provider") {
+              currentObj.provider = v;
+            } else if (k === "api_key" || k === "apiKey") {
+              currentObj.api_key = v;
+            } else if (k === "base_url" || k === "baseUrl") {
+              currentObj.base_url = v;
+            } else if (k === "api_version" || k === "apiVersion") {
+              currentObj.api_version = v;
+            }
+          }
+          providers[currentProviderAlias] = attachDualProviderConfigGetters(currentObj);
+        }
+        continue;
+      }
+      if (indent >= 6 && currentProviderAlias && inProviderDefaultHeaders) {
+        const kv = /^([a-zA-Z0-9_.-]+|"[^"]+"|'[^']+'):\s*(.+)$/.exec(trimmed);
+        if (kv && kv[1] && kv[2]) {
+          const hKey = unquoteYamlScalar(kv[1]);
+          const hVal = unquoteYamlScalar(kv[2].replace(/\s+#.*$/, ""));
+          const currentObj = providers[currentProviderAlias] ?? {};
+          const headersMap = {
+            ...currentObj.default_headers ?? {},
+            [hKey]: hVal
+          };
+          currentObj.default_headers = headersMap;
+          providers[currentProviderAlias] = attachDualProviderConfigGetters(currentObj);
+        }
+        continue;
       }
       continue;
     }
@@ -2062,6 +2247,7 @@ function parseAgentsYaml(yamlContent) {
   const overrides = {
     ...harness ? { harness } : {},
     ...Object.keys(models).length > 0 ? { models } : {},
+    ...Object.keys(providers).length > 0 ? { providers } : {},
     ...merge_policy ? { merge_policy } : {},
     ...max_code_fix_attempts !== void 0 ? { max_code_fix_attempts } : {},
     ...max_transient_api_retries !== void 0 ? { max_transient_api_retries } : {},
@@ -2464,6 +2650,7 @@ function planAndApplyRepoSetup(input) {
     repoRootDir: input.repoRootDir
   });
   let existingVerification;
+  let existingProviders;
   if (input.repoRootDir && existsSync2(join2(input.repoRootDir, ".github", "agents.yml"))) {
     try {
       const existingRaw = readFileSync2(
@@ -2472,8 +2659,10 @@ function planAndApplyRepoSetup(input) {
       );
       const parsedExisting = parseAgentsYaml(existingRaw);
       existingVerification = parsedExisting.verification;
+      existingProviders = parsedExisting.providers;
     } catch {
       existingVerification = void 0;
+      existingProviders = void 0;
     }
   }
   const resetTargets = input.agentsOverrides?.reset_verification_targets === true;
@@ -2535,8 +2724,10 @@ function planAndApplyRepoSetup(input) {
     ...deferredSet.size > 0 ? { deferred_external_workflows: Array.from(deferredSet) } : {},
     targets: mergedTargets
   };
+  const effectiveProviders = resolvedConfig.config.providers ?? existingProviders;
   const effectiveAgentsConfig = {
     ...resolvedConfig.config,
+    ...effectiveProviders ? { providers: effectiveProviders } : {},
     verification: effectiveVerification
   };
   const agentsYamlContent = serializeAgentsConfigYaml(

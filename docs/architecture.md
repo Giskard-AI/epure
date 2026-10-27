@@ -57,3 +57,18 @@ EPURE is built from the ground up around **Defense-in-Depth**, **Least Privilege
    - **[Archify (`tt-a1i/archify`)](https://github.com/tt-a1i/archify)** — Showcase-validated interactive architecture diagrams (`scripts/archify/`).
    - **[zizmor (`woodruffw/zizmor`)](https://github.com/woodruffw/zizmor)** — GitHub Actions workflow static security analysis (`actions/zizmor-audit`).
    - **[Renovate (`renovatebot/renovate`)](https://github.com/renovatebot/renovate)** — Automated updates of SHA-pinned workflows and dependencies (`auto_migrate`).
+
+---
+
+## 3. Multi-Provider `LLMClient`, Native Structured Outputs & Modular Orchestrator (ADR-0029)
+
+1. **Multi-Provider HTTP Router (`src/llm/`)**:
+   - Zero-dependency TypeScript `LLMClient` routing `<provider>/<model>` identifiers across **Google Gemini** (`google/`, `gemini/`), **OpenAI** (`openai/`), **Azure OpenAI** (`azure/`), **Azure AI Foundry** (`azure_ai/`), and **Anthropic** (`anthropic/`), with `os.environ/VAR_NAME` lazy resolution from `.github/agents.yml`.
+   - Enforces ADR-0012 fail-fast resilience: HTTP `401`/`403` (`AuthenticationError`) and `402` (`QuotaExhaustedError`) immediately halt without silent fallback, while transient `408`/`429`/`5xx` errors apply bounded exponential backoff.
+2. **Native Schema-Enforced Structured Outputs (`ResponseSchemaSpec<T>`) & 2-Phase Gemini Tool Loop**:
+   - All 11 structured LLM calls (`GrillRoundEvaluation`, `GeneratedPlanningBundle`, `GeneratedTicketImplementation`, multi-agent reviewer findings, `user-advocate`, and squash commit synthesis) send formal JSON Schemas (`responseSchema`, `response_format.json_schema` with recursive `additionalProperties: false`, or `output_config.format`) paired with runtime TypeScript validators in `src/orchestrator/prompts/schemas.ts`.
+   - When Google Gemini calls combine repository exploration tools (`list_repo_files`, `search_in_repo_file`, `read_repo_file`) with a `ResponseSchemaSpec`, **Phase 1** executes tool rounds with `functionDeclarations` (preserving Gemini 3 `thoughtSignature` tokens), and **Phase 2** finalizes with `functionCallingConfig.mode = "NONE"` + `responseMimeType: "application/json"` + `responseSchema`.
+3. **Modular `src/orchestrator/` Architecture & Wired Safety Guards**:
+   - `src/orchestrator/issue-orchestrator.ts` acts as a clean coordinator delegating to `github/rest-client.ts`, `workspace/repo-tools.ts`, `prompts/schemas.ts`, `formatting/comments.ts`, and the phase modules `phases/grill-and-plan.ts`, `phases/ticket-execution.ts`, and `phases/feature-integration.ts`.
+   - Enforces DAG cycle detection (`validatePlanningArtifactsAndGraph`), proven blocker resolution (`reconcileProvenTicketDependencies`, escalating to `needs-human` on `not_planned` closures), mid-run `/epure cancel` batch cursor checks (`processPendingIssueCommentsBatch`), and commit-SHA review loop guards (`evaluateReviewFeedbackTrigger`).
+

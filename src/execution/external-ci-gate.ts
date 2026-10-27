@@ -1,5 +1,6 @@
 import { basename } from "node:path";
 import { redactSecrets } from "../auth/issue-command-gate.js";
+import { appendEpureCommandsSpoiler } from "../orchestrator/formatting/comments.js";
 import { matchesPathPattern } from "../sandbox/polyglot-workspace-runner.js";
 import { wrapUntrustedContent } from "../security/prompt-injection-guard.js";
 
@@ -1110,5 +1111,9 @@ export function formatNeedsHumanEscalationComment(
     `3. Postez \`/epure approve\` sur cette issue (#${input.issueNumber}) : l'orchestrateur réconciliera automatiquement la PR existante et reprendra la validation sans dupliquer le travail (ADR-0028, Q110).`
   );
 
-  return lines.join("\n");
+  return appendEpureCommandsSpoiler(lines.join("\n"), {
+    phase: "suspended",
+    status: "suspended",
+    issueNumber: input.issueNumber
+  });
 }

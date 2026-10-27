@@ -31,6 +31,24 @@ llm:
   squash_summary_model: "gemini-3.8-flash"
   squash_summary_temperature: 0.0
 
+# Routage de modèle par phase (<fournisseur>/<modèle> ou identifiant court, ADR-0029)
+models:
+  planning: "anthropic/claude-sonnet-4-20250514"
+  implementation: "openai/gpt-5.4"
+  review: "google/gemini-3.8-flash"
+
+# Endpoints de fournisseurs personnalisés & références os.environ/VAR_NAME sans secret en clair (ADR-0029)
+providers:
+  azure-prod:
+    provider: "azure"
+    api_key: "os.environ/AZURE_OPENAI_API_KEY"
+    base_url: "os.environ/AZURE_OPENAI_ENDPOINT"
+    api_version: "2024-10-21"
+  foundry-deepseek:
+    provider: "azure_ai"
+    api_key: "os.environ/AZURE_AI_API_KEY"
+    base_url: "https://my-foundry.services.ai.azure.com"
+
 orchestration:
   # Préfixe des références Git atomiques hors-branches (CAS)
   state_ref_prefix: "refs/epure/state/"
@@ -87,14 +105,27 @@ sensitive_paths:
 | `default_integration` | `string` | `"dev"` | Branche par défaut du dépôt où atterrissent les PRs documentaires `plan/*` approuvées et les PRs applicatives `feature/*` mergées par un humain. |
 | `release` | `string` | `"main"` | Branche de production immuable mise à jour exclusivement par `release-promote.yml` en fast-forward depuis `dev`. |
 
-### `llm`
+### `llm`, `models` & `providers` (Routage Multi-Fournisseurs — ADR-0029)
+
+EPURE intègre un client `LLMClient` multi-fournisseurs sans dépendance externe inspiré de `giskard-llm`, compatible avec **Google Gemini** (`google/` ou `gemini/`), **OpenAI** (`openai/`), **Azure OpenAI** (`azure/`), **Azure AI Foundry** (`azure_ai/`) et **Anthropic** (`anthropic/`).
 
 | Clé | Type | Défaut | Description |
 | --- | --- | --- | --- |
-| `provider` | `string` | `"google-gemini"` | Fournisseur LLM géré par le sidecar proxy local au runner. |
-| `model` | `string` | `"gemini-3.8-flash"` | Modèle utilisé pour le Grill, la rédaction des specs, la boucle TDD et la revue multi-agents. |
-| `thinking_level` | `"LOW" \| "MEDIUM" \| "HIGH"` | `"HIGH"` | Niveau de réflexion transmis à `thinkingConfig` de Gemini. |
-| `squash_summary_temperature` | `number` | `0.0` | Température déterministe utilisée pour synthétiser le titre et le corps Conventional Commit avant chaque squash-merge (Q94). |
+| `models.planning` | `string` | `"claude-sonnet-4-20250514"` (ou repli `"gemini-3.8-flash"`) | Modèle utilisé pour l'entretien `/grill-with-docs` et la génération de la spécification et du DAG de tickets (`<fournisseur>/<modèle>` ou nom court). |
+| `models.implementation` | `string` | `"claude-sonnet-4-20250514"` (ou repli `"gemini-3.8-flash"`) | Modèle utilisé pour l'implémentation TDD et les boucles d'auto-remédiation Stage 1/2/3. |
+| `models.review` | `string` | `"gpt-4.1"` (ou repli `"gemini-3.8-flash"`) | Modèle utilisé pour le roster de revue multi-agents, le `design-gate` `user-advocate` et la synthèse du message de squash à température `0.0`. |
+| `providers.<alias>.provider` | `"google" \| "openai" \| "azure" \| "azure_ai" \| "anthropic"` | *(Optionnel)* | Famille de protocole associée à un alias personnalisé référencé dans `models.*` (`<alias>/<modèle>`). |
+| `providers.<alias>.api_key` | `string` | `os.environ/<VAR>` | Référence de variable d'environnement (`os.environ/VAR_NAME`) résolue à l'exécution depuis `process.env`. Ne commitez jamais de clé API en clair dans `.github/agents.yml`. |
+| `providers.<alias>.base_url` | `string` | Défaut du fournisseur | URL de base personnalisée ou `os.environ/VAR_NAME` (pour `azure_ai`, tout suffixe `/models` sur `*.services.ai.azure.com` est normalisé automatiquement). |
+| `providers.<alias>.api_version` | `string` | `"2024-10-21"` | Version d'API du déploiement Azure OpenAI (`?api-version=...`). |
+| `providers.<alias>.default_headers` | `Record<string, string>` | `{}` | En-têtes HTTP additionnels transmis à chaque requête vers cet alias. |
+
+#### Ordre de Résolution des Clés API
+
+Pour chaque appel LLM, `LLMClient` résout la clé API de manière déterministe et sans bascule silencieuse vers un autre fournisseur en cas d'erreur `401`/`402`/`403` (ADR-0012, ADR-0029) :
+1. `providers[alias].api_key` (avec résolution de `os.environ/VAR_NAME` dans `process.env`).
+2. Variable d'environnement standard du fournisseur (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `AZURE_API_KEY` / `AZURE_OPENAI_API_KEY`, `AZURE_AI_API_KEY`).
+3. Clé `LLM_API_KEY` passée à l'action d'orchestration.
 
 ### `orchestration`
 

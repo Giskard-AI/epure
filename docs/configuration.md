@@ -31,6 +31,24 @@ llm:
   squash_summary_model: "gemini-3.8-flash"
   squash_summary_temperature: 0.0
 
+# Per-phase model routing (<provider>/<model> or bare model identifier, ADR-0029)
+models:
+  planning: "anthropic/claude-sonnet-4-20250514"
+  implementation: "openai/gpt-5.4"
+  review: "google/gemini-3.8-flash"
+
+# Optional custom provider endpoints & secret-free environment variable references (ADR-0029)
+providers:
+  azure-prod:
+    provider: "azure"
+    api_key: "os.environ/AZURE_OPENAI_API_KEY"
+    base_url: "os.environ/AZURE_OPENAI_ENDPOINT"
+    api_version: "2024-10-21"
+  foundry-deepseek:
+    provider: "azure_ai"
+    api_key: "os.environ/AZURE_AI_API_KEY"
+    base_url: "https://my-foundry.services.ai.azure.com"
+
 orchestration:
   # Out-of-branch atomic CAS state prefix
   state_ref_prefix: "refs/epure/state/"
@@ -87,14 +105,27 @@ sensitive_paths:
 | `default_integration` | `string` | `"dev"` | Default branch of the repository where approved `plan/*` and human-reviewed `feature/*` PRs land. |
 | `release` | `string` | `"main"` | Immutable release branch updated exclusively by `release-promote.yml` via fast-forward from `dev`. |
 
-### `llm`
+### `llm`, `models` & `providers` (Multi-Provider Routing — ADR-0029)
+
+EPURE includes a zero-dependency multi-provider `LLMClient` inspired by `giskard-llm` that supports **Google Gemini** (`google/` or `gemini/`), **OpenAI** (`openai/`), **Azure OpenAI** (`azure/`), **Azure AI Foundry** (`azure_ai/`), and **Anthropic** (`anthropic/`).
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `provider` | `string` | `"google-gemini"` | LLM provider managed by the runner-local proxy sidecar. |
-| `model` | `string` | `"gemini-3.8-flash"` | Model used for Grill interviews, specification writing, TDD coding, and multi-agent reviews. |
-| `thinking_level` | `"LOW" \| "MEDIUM" \| "HIGH"` | `"HIGH"` | Reasoning depth passed to Gemini `thinkingConfig`. |
-| `squash_summary_temperature` | `number` | `0.0` | Deterministic temperature used to synthesize Conventional Commit titles and bodies before squash-merge (Q94). |
+| `models.planning` | `string` | `"claude-sonnet-4-20250514"` (or `"gemini-3.8-flash"` fallback) | Model used for `/grill-with-docs` interviews and specification/DAG generation (`<provider>/<model>` or bare model). |
+| `models.implementation` | `string` | `"claude-sonnet-4-20250514"` (or `"gemini-3.8-flash"` fallback) | Model used for TDD code generation and Stage 1/2/3 auto-remediation loops. |
+| `models.review` | `string` | `"gpt-4.1"` (or `"gemini-3.8-flash"` fallback) | Model used for the multi-agent PR review roster, `user-advocate` design-gate, and zero-temperature squash commit synthesis. |
+| `providers.<alias>.provider` | `"google" \| "openai" \| "azure" \| "azure_ai" \| "anthropic"` | *(Optional)* | Underlying protocol family for a custom provider alias referenced in `models.*` (`<alias>/<model>`). |
+| `providers.<alias>.api_key` | `string` | `os.environ/<VAR>` | Secret-free environment variable reference (`os.environ/VAR_NAME`) resolved at runtime from `process.env`. Never commit literal API keys in `.github/agents.yml`. |
+| `providers.<alias>.base_url` | `string` | Provider default | Custom base URL or `os.environ/VAR_NAME` (for `azure_ai`, trailing `/models` suffixes on `*.services.ai.azure.com` are stripped automatically). |
+| `providers.<alias>.api_version` | `string` | `"2024-10-21"` | Azure OpenAI deployment API version (`?api-version=...`). |
+| `providers.<alias>.default_headers` | `Record<string, string>` | `{}` | Optional custom HTTP headers attached to every request for this provider alias. |
+
+#### API Key Resolution Order
+
+For each phase call, `LLMClient` resolves the API key deterministically without silent cross-provider fallback (ADR-0012, ADR-0029):
+1. `providers[alias].api_key` (resolving `os.environ/VAR_NAME` from `process.env`).
+2. Standard provider environment variable (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `AZURE_API_KEY` / `AZURE_OPENAI_API_KEY`, `AZURE_AI_API_KEY`).
+3. Explicit `LLM_API_KEY` passed to the orchestrator action.
 
 ### `orchestration`
 

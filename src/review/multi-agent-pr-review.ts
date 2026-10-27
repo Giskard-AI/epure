@@ -3,11 +3,27 @@ import {
   type ImpeccablePrFinding
 } from "../frontend/impeccable-pr-gate.js";
 import {
-  callGeminiGenerateContent,
-  extractJsonObject,
+  AuthenticationError,
+  QuotaExhaustedError
+} from "../llm/errors.js";
+import type { ProviderConfig } from "../llm/types.js";
+import {
+  callGeminiJson,
   type GeminiFunctionDeclaration,
   type GeminiToolHandler
 } from "../orchestrator/gemini-client.js";
+import {
+  REVIEWER_FINDINGS_SCHEMA,
+  SQUASH_COMMIT_SCHEMA,
+  USER_ADVOCATE_SCHEMA,
+  type ReviewerFindingPayloadItem,
+  type ReviewerFindingsPayload,
+  type ReviewerLlmFindingItem,
+  type SquashCommitLlmPayload,
+  type SquashCommitPayload,
+  type UserAdvocateLlmPayload,
+  type UserAdvocatePayload
+} from "../orchestrator/prompts/schemas.js";
 import {
   detectPromptInjectionInPrFiles,
   PROMPT_INJECTION_IMMUNITY_CLAUSE,
@@ -19,6 +35,19 @@ import {
   resolveTrustedReviewerPrompt,
   type ReviewerAgentName
 } from "./reviewer-roster.js";
+
+export {
+  REVIEWER_FINDINGS_SCHEMA,
+  SQUASH_COMMIT_SCHEMA,
+  USER_ADVOCATE_SCHEMA,
+  type ReviewerFindingPayloadItem,
+  type ReviewerFindingsPayload,
+  type ReviewerLlmFindingItem,
+  type SquashCommitLlmPayload,
+  type SquashCommitPayload,
+  type UserAdvocateLlmPayload,
+  type UserAdvocatePayload
+};
 
 export type FindingCategory = "must_fix" | "informational" | "no_action";
 export type FindingSeverity = "critical" | "high" | "medium" | "low" | "info";
@@ -86,6 +115,7 @@ export interface RunMultiAgentPrReviewInput {
   readonly previousFailedReviewers?: readonly ReviewerAgentName[] | undefined;
   readonly llmApiKey?: string | undefined;
   readonly model?: string | undefined;
+  readonly providers?: Readonly<Record<string, ProviderConfig>> | undefined;
   readonly fetchImpl?: typeof fetch | undefined;
 }
 
@@ -590,42 +620,31 @@ async function executeSingleReviewerPass(params: {
   ].join("\n");
 
   try {
-    const raw = await callGeminiGenerateContent({
+    const parsed = await callGeminiJson<ReviewerFindingsPayload>({
       apiKey: input.llmApiKey,
       model: input.model ?? "gemini-3.8-flash",
+      providers: input.providers,
       thinkingLevel: "HIGH",
       logLabel: `review:${reviewer}#PR${input.prNumber}`,
       systemInstruction,
       prompt,
       responseMimeType: "application/json",
+      responseSchema: REVIEWER_FINDINGS_SCHEMA,
       temperature: 0.0,
       tools: reviewerTools.declarations,
       toolHandlers: reviewerTools.handlers,
       fetchImpl: input.fetchImpl
     });
 
-    const parsed = extractJsonObject<{
-      summary?: string;
-      findings?: Array<{
-        category?: string;
-        severity?: string;
-        path?: string;
-        line?: number;
-        title?: string;
-        rationale?: string;
-        suggested_action?: string;
-      }>;
-    }>(raw);
-
     const findings: ReviewerFinding[] = (parsed.findings ?? []).map((f) => ({
       reviewer,
       category: normalizeFindingCategory(f.category, f.severity),
       severity: normalizeFindingSeverity(f.severity),
-      path: (f.path ?? input.changedFiles[0]?.path ?? "").trim(),
+      path: (f.path ?? f.file ?? input.changedFiles[0]?.path ?? "").trim(),
       line: typeof f.line === "number" && f.line > 0 ? f.line : 1,
       title: (f.title ?? "Review finding").trim(),
-      rationale: (f.rationale ?? "").trim(),
-      suggested_action: (f.suggested_action ?? "").trim()
+      rationale: (f.rationale ?? f.message ?? "").trim(),
+      suggested_action: (f.suggested_action ?? f.remediation ?? "").trim()
     }));
 
     return {
@@ -636,7 +655,13 @@ async function executeSingleReviewerPass(params: {
         `${reviewer} completed review pass (${findings.length} finding(s)).`,
       findings
     };
-  } catch {
+  } catch (error) {
+    if (
+      error instanceof AuthenticationError ||
+      error instanceof QuotaExhaustedError
+    ) {
+      throw error;
+    }
     return {
       reviewer,
       prompt_source: trustedPrompt.source,

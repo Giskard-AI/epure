@@ -333,7 +333,7 @@ _Éviter_ : se fier uniquement au payload `github.event.comment` du webhook déc
 **Référence Git d'état d'orchestration (`refs/epure/state/<issue-number>`, Q76)** : référence Git dédiée hors branches standard (`refs/heads/*`) stockant l'état machine d'orchestration (curseur `last_processed_comment_id`, mandat de plan approuvé avec `spec_sha`, `approved_by`, statut `active|cancelled`, compteurs de tentatives par ticket) avec *compare-and-swap* atomique Git, doublée d'un tableau de bord Markdown lisible synchronisé dans le corps de l'issue GitHub.
 _Éviter_ : polluer l'historique des branches applicatives `dev` et `main` avec des commits JSON d'état machine ou utiliser uniquement un commentaire d'issue sujet aux écrasements concurrents.
 
-## Orchestration réelle Gemini et Publisher GitHub App (Q84–Q90)
+## Orchestration réelle multi-fournisseurs (`LLMClient`) et Publisher GitHub App (Q84–Q90)
 
 **Continuité implicite de l'entretien de grill (Q84)** : traitement automatique de tout commentaire humain posté sur une issue de pilotage dont la référence `refs/epure/state/<issue-number>` est en phase `grilling` comme une réponse à l'entretien en cours, sans imposer de répéter une commande slash à chaque tour.
 _Éviter_ : rejeter les réponses humaines ordinaires sous prétexte qu'elles ne commencent pas par `/epure`.
@@ -380,7 +380,21 @@ _Éviter_ : retourner un succès par défaut en l'absence de `package.json` raci
 **Porte de CI externe multi-workflows et boucle d'auto-réparation (Stage 3, Q106–Q110)** : attente déterministe (avec fenêtre d'amorçage et corrélation des filtres `on.pull_request`/`push` sur tous les workflows `.github/workflows/*.{yml,yaml}` hors EPURE) de la complétude des *check-runs* et *workflow_runs* externes sur le `head_sha` d'une PR, suivie en cas d'échec applicatif de l'extraction assainie des annotations et logs d'erreur (~12 Ko) pour alimenter jusqu'à 3 rondes unifiées de remédiation (*Review IA + CI externe*), avec relance sans pénalité sur panne transitoire d'infrastructure et réconciliation idempotente des PRs déjà ouvertes.
 _Éviter_ : fusionner `task/* -> feature/*` avant la fin des workflows CI externes, considérer zéro check-run à $T+0$ comme un succès, ou gaspiller une tentative de code sur un échec réseau du runner.
 
+## Routeur LLM multi-fournisseurs, sorties structurées et ergonomie `/epure` (ADR-0029)
 
+### Vocabulaire canonique
 
+| Terme canonique | Identifiant technique | Définition et invariant |
+| --- | --- | --- |
+| **Routeur LLM multi-fournisseurs** | `LLMClient` | Client HTTP TypeScript sans dépendance externe (inspiré de `giskard-llm`) routant chaque appel selon le préfixe `<provider>/<model>` (`openai/`, `azure/`, `azure_ai/`, `google/`, `gemini/`, `anthropic/` ou un alias nommé déclaré dans la section `providers:` de `.github/agents.yml` avec résolution différée `os.environ/VAR_NAME`), garantissant l'absence de bascule automatique inter-fournisseurs sur erreur d'authentification ou de quota (ADR-0012). |
+| **Sortie structurée par schéma** | `ResponseSchemaSpec<T>` | Contrat associant un JSON Schema strict (transmis nativement au fournisseur via `responseSchema`, `response_format.json_schema` ou `output_config.format`) et un validateur TypeScript d'exécution, remplaçant toute extraction heuristique de JSON par expression régulière. Sur Google Gemini avec outils d'exploration (`tools`), le client exécute la boucle d'outils puis déclenche un tour final dédié (`functionCallingConfig.mode = "NONE"`) avec `responseSchema` activé. |
+| **Aide-mémoire contextuel des commandes `/epure`** | `formatEpureCommandsSpoiler` | Bloc Markdown repliable (`<details>`) inséré systématiquement au pied des commentaires d'issues, des sous-issues de tickets et des descriptions de Pull Requests générés par `EPURE`, récapitulant les commandes disponibles (`/epure plan`, `/epure to-spec`, `/epure approve`, `/epure status`, `/epure cancel`) et mettant en évidence la prochaine action attendue selon la phase courante. |
 
+**Routeur LLM multi-fournisseurs** (`LLMClient`) : Client HTTP TypeScript sans dépendance externe (inspiré de `giskard-llm`) routant chaque appel selon le préfixe `<provider>/<model>` (`openai/`, `azure/`, `azure_ai/`, `google/`, `gemini/`, `anthropic/` ou un alias nommé déclaré dans la section `providers:` de `.github/agents.yml` avec résolution différée `os.environ/VAR_NAME`), garantissant l'absence de bascule automatique inter-fournisseurs sur erreur d'authentification ou de quota (ADR-0012).
+_Éviter_ : coupler l'orchestrateur à un unique fournisseur au runtime, stocker des clés API en clair dans `.github/agents.yml`, ou basculer automatiquement vers un fournisseur de secours en cas d'erreur `401`/`402`/`403`.
 
+**Sortie structurée par schéma** (`ResponseSchemaSpec<T>`) : Contrat associant un JSON Schema strict (transmis nativement au fournisseur via `responseSchema`, `response_format.json_schema` ou `output_config.format`) et un validateur TypeScript d'exécution, remplaçant toute extraction heuristique de JSON par expression régulière. Sur Google Gemini avec outils d'exploration (`tools`), le client exécute la boucle d'outils puis déclenche un tour final dédié (`functionCallingConfig.mode = "NONE"`) avec `responseSchema` activé.
+_Éviter_ : extraire du JSON par expression régulière depuis du texte libre ou désactiver la validation de schéma lorsqu'une boucle d'outils est active.
+
+**Aide-mémoire contextuel des commandes `/epure`** : Bloc Markdown repliable (`<details>`) inséré systématiquement au pied des commentaires d'issues, des sous-issues de tickets et des descriptions de Pull Requests générés par `EPURE`, récapitulant les commandes disponibles (`/epure plan`, `/epure to-spec`, `/epure approve`, `/epure status`, `/epure cancel`) et mettant en évidence la prochaine action attendue selon la phase courante.
+_Éviter_ : publier des commentaires d'orchestration ou des escalades `needs-human` sans rappeler à l'opérateur humain les commandes de reprise ou d'annulation disponibles.

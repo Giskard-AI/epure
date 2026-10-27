@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { buildConsumerAppManifests } from "../auth/github-apps.js";
 import { EPURE_PUBLIC_VERSION } from "../contract/epure-contract.js";
+import type { ProviderConfig, ProviderKind } from "../llm/types.js";
 import {
   buildDefaultReviewerRosterFiles,
   type CustomDomainReviewerSpec,
@@ -21,6 +22,8 @@ import {
 
 export {
   discoverVerificationProfile,
+  type ProviderConfig,
+  type ProviderKind,
   type VerificationProfile,
   type VerificationTargetKind,
   type VerificationTargetSpec
@@ -58,6 +61,7 @@ export interface AgentsModelsConfig {
 export interface AgentsConfig {
   readonly harness: AgentHarness;
   readonly models: AgentsModelsConfig;
+  readonly providers?: Readonly<Record<string, ProviderConfig>> | undefined;
   readonly merge_policy: StaleBaseMergePolicy;
   readonly max_code_fix_attempts: number;
   readonly max_transient_api_retries: number;
@@ -71,6 +75,8 @@ export interface AgentsConfig {
   readonly verification?: VerificationProfile | undefined;
 }
 
+export type AgentsYmlConfig = AgentsConfig;
+
 export interface SecurityOverridesAttempt {
   readonly require_write_permission?: boolean | undefined;
   readonly sandbox_isolation?: boolean | undefined;
@@ -82,6 +88,7 @@ export interface SecurityOverridesAttempt {
 export interface AgentsConfigOverrides {
   readonly harness?: AgentHarness | undefined;
   readonly models?: Partial<AgentsModelsConfig> | undefined;
+  readonly providers?: Readonly<Record<string, ProviderConfig>> | undefined;
   readonly merge_policy?: StaleBaseMergePolicy | undefined;
   readonly max_code_fix_attempts?: number | undefined;
   readonly max_transient_api_retries?: number | undefined;
@@ -323,6 +330,96 @@ function normalizeVerificationTarget(
   };
 }
 
+function attachDualProviderConfigGetters(
+  entry: Record<string, unknown>
+): ProviderConfig {
+  const definePair = (snakeKey: string, camelKey: string): void => {
+    const hasSnake = Object.prototype.hasOwnProperty.call(entry, snakeKey);
+    const hasCamel = Object.prototype.hasOwnProperty.call(entry, camelKey);
+    if (hasSnake && !hasCamel) {
+      Object.defineProperty(entry, camelKey, {
+        get() {
+          return entry[snakeKey];
+        },
+        enumerable: false,
+        configurable: true
+      });
+    } else if (hasCamel && !hasSnake) {
+      Object.defineProperty(entry, snakeKey, {
+        get() {
+          return entry[camelKey];
+        },
+        enumerable: false,
+        configurable: true
+      });
+    }
+  };
+
+  definePair("api_key", "apiKey");
+  definePair("base_url", "baseUrl");
+  definePair("api_version", "apiVersion");
+  definePair("default_headers", "defaultHeaders");
+
+  return entry as ProviderConfig;
+}
+
+function normalizeAgentsProvidersMap(
+  providers?: Readonly<Record<string, ProviderConfig>> | undefined,
+  preferSnakeCase: boolean = false
+): Readonly<Record<string, ProviderConfig>> | undefined {
+  if (!providers) {
+    return undefined;
+  }
+  const keys = Object.keys(providers);
+  if (keys.length === 0) {
+    return undefined;
+  }
+
+  const out: Record<string, ProviderConfig> = {};
+  for (const [alias, raw] of Object.entries(providers)) {
+    const cleanAlias = alias.trim();
+    if (!cleanAlias || !raw) {
+      continue;
+    }
+
+    const entry: Record<string, unknown> = {};
+    if (raw.provider) {
+      entry.provider = raw.provider;
+    }
+
+    const apiKeyVal = raw.api_key ?? raw.apiKey;
+    const baseUrlVal = raw.base_url ?? raw.baseUrl;
+    const apiVersionVal = raw.api_version ?? raw.apiVersion;
+    const defaultHeadersVal = raw.default_headers ?? raw.defaultHeaders;
+
+    const useSnake =
+      preferSnakeCase ||
+      raw.api_key !== undefined ||
+      raw.base_url !== undefined ||
+      raw.api_version !== undefined ||
+      raw.default_headers !== undefined;
+
+    if (apiKeyVal !== undefined) {
+      entry[useSnake ? "api_key" : "apiKey"] = apiKeyVal;
+    }
+    if (baseUrlVal !== undefined) {
+      entry[useSnake ? "base_url" : "baseUrl"] = baseUrlVal;
+    }
+    if (apiVersionVal !== undefined) {
+      entry[useSnake ? "api_version" : "apiVersion"] = apiVersionVal;
+    }
+    if (defaultHeadersVal !== undefined) {
+      entry[useSnake ? "default_headers" : "defaultHeaders"] = {
+        ...defaultHeadersVal
+      };
+    }
+
+    out[cleanAlias] = attachDualProviderConfigGetters(entry);
+  }
+
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 export function resolveAgentsConfig(
   overrides: AgentsConfigOverrides = {}
 ): ResolvedAgentsConfigResult {
@@ -408,6 +505,8 @@ export function resolveAgentsConfig(
       }
     : DEFAULT_VERIFICATION_PROFILE;
 
+  const normalizedProviders = normalizeAgentsProvidersMap(overrides.providers);
+
   const config: AgentsConfig = {
     harness: overrides.harness ?? DEFAULT_AGENTS_CONFIG.harness,
     models: {
@@ -418,6 +517,7 @@ export function resolveAgentsConfig(
         DEFAULT_AGENTS_CONFIG.models.implementation,
       review: overrides.models?.review ?? DEFAULT_AGENTS_CONFIG.models.review
     },
+    ...(normalizedProviders ? { providers: normalizedProviders } : {}),
     merge_policy: overrides.merge_policy ?? DEFAULT_AGENTS_CONFIG.merge_policy,
     max_code_fix_attempts:
       overrides.max_code_fix_attempts ??
@@ -459,10 +559,65 @@ function escapeYamlDoubleQuoted(val: string): string {
   return JSON.stringify(val);
 }
 
+function formatYamlProviderScalar(val: string): string {
+  if (
+    val.length === 0 ||
+    /[\r\n#]/.test(val) ||
+    /^\s|\s$/.test(val) ||
+    val.startsWith('"') ||
+    val.startsWith("'")
+  ) {
+    return escapeYamlDoubleQuoted(val);
+  }
+  return val;
+}
+
 export function serializeAgentsConfigYaml(
   config: AgentsConfig,
   taskAutoMergeEnabled: boolean = false
 ): string {
+  const providerLines: string[] = [];
+  if (config.providers && Object.keys(config.providers).length > 0) {
+    providerLines.push("providers:");
+    for (const [alias, rawEntry] of Object.entries(config.providers)) {
+      if (!rawEntry) {
+        continue;
+      }
+      providerLines.push(`  ${alias}:`);
+      if (rawEntry.provider) {
+        providerLines.push(
+          `    provider: ${formatYamlProviderScalar(rawEntry.provider)}`
+        );
+      }
+      const apiKey = rawEntry.api_key ?? rawEntry.apiKey;
+      if (apiKey !== undefined) {
+        providerLines.push(`    api_key: ${formatYamlProviderScalar(apiKey)}`);
+      }
+      const baseUrl = rawEntry.base_url ?? rawEntry.baseUrl;
+      if (baseUrl !== undefined) {
+        providerLines.push(
+          `    base_url: ${formatYamlProviderScalar(baseUrl)}`
+        );
+      }
+      const apiVersion = rawEntry.api_version ?? rawEntry.apiVersion;
+      if (apiVersion !== undefined) {
+        providerLines.push(
+          `    api_version: ${formatYamlProviderScalar(apiVersion)}`
+        );
+      }
+      const defaultHeaders =
+        rawEntry.default_headers ?? rawEntry.defaultHeaders;
+      if (defaultHeaders && Object.keys(defaultHeaders).length > 0) {
+        providerLines.push("    default_headers:");
+        for (const [hKey, hVal] of Object.entries(defaultHeaders)) {
+          providerLines.push(
+            `      ${hKey}: ${formatYamlProviderScalar(hVal)}`
+          );
+        }
+      }
+    }
+  }
+
   const verification = config.verification ?? DEFAULT_VERIFICATION_PROFILE;
   const verificationLines: string[] = [
     "verification:",
@@ -538,6 +693,7 @@ export function serializeAgentsConfigYaml(
     `  planning: ${config.models.planning}`,
     `  implementation: ${config.models.implementation}`,
     `  review: ${config.models.review}`,
+    ...providerLines,
     `merge_policy: ${config.merge_policy}`,
     `task_auto_merge_enabled: ${taskAutoMergeEnabled}`,
     `max_code_fix_attempts: ${config.max_code_fix_attempts}`,
@@ -559,6 +715,8 @@ export function serializeAgentsConfigYaml(
     ""
   ].join("\n");
 }
+
+export const serializeAgentsYml = serializeAgentsConfigYaml;
 
 export function buildDefaultAgentsYaml(
   configOrOptions?:
@@ -664,6 +822,9 @@ export function parseAgentsYaml(
 } {
   let harness: AgentHarness | undefined;
   const models: Partial< Record<keyof AgentsModelsConfig, string> > = {};
+  const providers: Record<string, ProviderConfig> = {};
+  let currentProviderAlias: string | null = null;
+  let inProviderDefaultHeaders = false;
   let merge_policy: StaleBaseMergePolicy | undefined;
   let task_auto_merge_enabled: boolean | undefined;
   let max_code_fix_attempts: number | undefined;
@@ -710,6 +871,7 @@ export function parseAgentsYaml(
   let section:
     | "root"
     | "models"
+    | "providers"
     | "verification"
     | "security"
     | "other" = "root";
@@ -789,6 +951,8 @@ export function parseAgentsYaml(
       inDeferredWorkflows = false;
       inCurrentTargetPathPatterns = false;
       currentTarget = null;
+      currentProviderAlias = null;
+      inProviderDefaultHeaders = false;
 
       const kv = /^([a-zA-Z0-9_]+):\s*(.*)$/.exec(trimmed);
       if (!kv || !kv[1]) {
@@ -799,6 +963,10 @@ export function parseAgentsYaml(
 
       if (key === "models" && !val) {
         section = "models";
+        continue;
+      }
+      if (key === "providers" && !val) {
+        section = "providers";
         continue;
       }
       if (key === "verification" && !val) {
@@ -870,6 +1038,76 @@ export function parseAgentsYaml(
         if (k === "planning" || k === "implementation" || k === "review") {
           models[k] = v;
         }
+      }
+      continue;
+    }
+
+    if (section === "providers") {
+      if (indent === 2) {
+        inProviderDefaultHeaders = false;
+        const kv = /^([a-zA-Z0-9_.-]+):\s*(.*)$/.exec(trimmed);
+        if (kv && kv[1]) {
+          currentProviderAlias = kv[1];
+          providers[currentProviderAlias] = attachDualProviderConfigGetters({});
+        }
+        continue;
+      }
+
+      if (indent === 4 && currentProviderAlias) {
+        const kv = /^([a-zA-Z0-9_.-]+):\s*(.*)$/.exec(trimmed);
+        if (kv && kv[1]) {
+          const k = kv[1];
+          const rawV = (kv[2] ?? "").replace(/\s+#.*$/, "").trim();
+          const currentObj = (providers[currentProviderAlias] ?? {}) as Record<
+            string,
+            unknown
+          >;
+
+          if (k === "default_headers" || k === "defaultHeaders") {
+            if (rawV === "{}") {
+              currentObj.default_headers = {};
+              inProviderDefaultHeaders = false;
+            } else {
+              currentObj.default_headers = {};
+              inProviderDefaultHeaders = true;
+            }
+          } else {
+            inProviderDefaultHeaders = false;
+            const v = unquoteYamlScalar(rawV);
+            if (k === "provider") {
+              currentObj.provider = v as ProviderKind;
+            } else if (k === "api_key" || k === "apiKey") {
+              currentObj.api_key = v;
+            } else if (k === "base_url" || k === "baseUrl") {
+              currentObj.base_url = v;
+            } else if (k === "api_version" || k === "apiVersion") {
+              currentObj.api_version = v;
+            }
+          }
+          providers[currentProviderAlias] =
+            attachDualProviderConfigGetters(currentObj);
+        }
+        continue;
+      }
+
+      if (indent >= 6 && currentProviderAlias && inProviderDefaultHeaders) {
+        const kv = /^([a-zA-Z0-9_.-]+|"[^"]+"|'[^']+'):\s*(.+)$/.exec(trimmed);
+        if (kv && kv[1] && kv[2]) {
+          const hKey = unquoteYamlScalar(kv[1]);
+          const hVal = unquoteYamlScalar(kv[2].replace(/\s+#.*$/, ""));
+          const currentObj = (providers[currentProviderAlias] ?? {}) as Record<
+            string,
+            unknown
+          >;
+          const headersMap = {
+            ...((currentObj.default_headers as Record<string, string>) ?? {}),
+            [hKey]: hVal
+          };
+          currentObj.default_headers = headersMap;
+          providers[currentProviderAlias] =
+            attachDualProviderConfigGetters(currentObj);
+        }
+        continue;
       }
       continue;
     }
@@ -1012,6 +1250,7 @@ export function parseAgentsYaml(
   const overrides: AgentsConfigOverrides = {
     ...(harness ? { harness } : {}),
     ...(Object.keys(models).length > 0 ? { models } : {}),
+    ...(Object.keys(providers).length > 0 ? { providers } : {}),
     ...(merge_policy ? { merge_policy } : {}),
     ...(max_code_fix_attempts !== undefined ? { max_code_fix_attempts } : {}),
     ...(max_transient_api_retries !== undefined
@@ -1077,6 +1316,8 @@ export function parseAgentsYaml(
       : {})
   };
 }
+
+export const parseAgentsYml = parseAgentsYaml;
 
 function buildCallerWorkflows(
   pinnedSha: string,
@@ -1486,6 +1727,7 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
 
   // Load existing .github/agents.yml if present to preserve user-customized verification.targets on re-run
   let existingVerification: VerificationProfile | undefined;
+  let existingProviders: Readonly<Record<string, ProviderConfig>> | undefined;
   if (
     input.repoRootDir &&
     existsSync(join(input.repoRootDir, ".github", "agents.yml"))
@@ -1497,8 +1739,10 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
       );
       const parsedExisting = parseAgentsYaml(existingRaw);
       existingVerification = parsedExisting.verification;
+      existingProviders = parsedExisting.providers;
     } catch {
       existingVerification = undefined;
+      existingProviders = undefined;
     }
   }
 
@@ -1585,8 +1829,12 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
     targets: mergedTargets
   };
 
+  const effectiveProviders =
+    resolvedConfig.config.providers ?? existingProviders;
+
   const effectiveAgentsConfig: AgentsConfig = {
     ...resolvedConfig.config,
+    ...(effectiveProviders ? { providers: effectiveProviders } : {}),
     verification: effectiveVerification
   };
 
