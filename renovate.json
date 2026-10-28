@@ -47,6 +47,20 @@
   },
   "prHourlyLimit": 2,
   "prConcurrentLimit": 5,
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Track pinned CLI and security binary versions via # renovate: comments",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/[^/]+\\.ya?ml$/",
+        "/^src/.*\\.ts$/",
+        "/^scripts/.*\\.sh$/"
+      ],
+      "matchStrings": [
+        "#\\s*renovate:\\s*datasource=(?<datasource>[a-z-]+)\\s+depName=(?<depName>[^\\s]+)(?:\\s+extractVersion=(?<extractVersion>[^\\s]+))?\\s*\\n\\s*(?:export\\s+const\\s+)?[A-Z0-9_]+\\s*=\\s*[\"'](?<currentValue>[^\"']+)[\"']"
+      ]
+    }
+  ],
   "packageRules": [
     {
       "description": "Supply-chain protection: never merge or propose day-1 releases (default 3-day quarantine cooldown)",
@@ -75,6 +89,16 @@
         "docker-compose"
       ],
       "minimumReleaseAge": "7 days"
+    },
+    {
+      "description": "CLI and sandbox security binaries cooldown (7 days) on GitHub releases/tags (rtk-ai/rtk, zizmorcore/zizmor)",
+      "groupName": "cli-security-and-sandbox-tools",
+      "matchDatasources": [
+        "github-releases",
+        "github-tags"
+      ],
+      "minimumReleaseAge": "7 days",
+      "automerge": false
     },
     {
       "description": "Group GitHub Actions digest & version updates",

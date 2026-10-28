@@ -17,7 +17,7 @@ concurrency:
 jobs:
   build-docs:
     name: "Validate Archify Showcase Diagrams & Build VitePress Docs"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
       contents: read
@@ -50,7 +50,7 @@ jobs:
     name: "Deploy Documentation to GitHub Pages"
     needs: build-docs
     if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     permissions:
       pages: write

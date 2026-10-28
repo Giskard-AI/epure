@@ -33,6 +33,7 @@ import {
 import { runFeatureIntegrationPhase } from "./phases/feature-integration.js";
 import { runGrillAndPlanPhase } from "./phases/grill-and-plan.js";
 import { runTicketExecutionLoop } from "./phases/ticket-execution.js";
+import { EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT } from "./prompts/code-discipline.js";
 import {
   resolvePhaseModels,
   type CreatedTicketRecord,
@@ -68,6 +69,7 @@ import {
 } from "./workspace/repo-tools.js";
 
 export {
+  EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT,
   applyTicketImplementationPayload,
   buildRepoExplorationToolsAndHandlers,
   createGitHubRestHelper,

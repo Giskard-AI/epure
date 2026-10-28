@@ -1,0 +1,24 @@
+# Stateless RTK configuration for EPURE Stage 1 verification (ADR-0030).
+# Zero learning, zero SQLite history/recall databases, zero telemetry.
+
+[telemetry]
+enabled = false
+
+[tracking]
+enabled = false
+
+[retriever]
+mode = "disabled"
+
+[display]
+colors = false
+emoji = false
+max_width = 120
+
+[filters]
+ignore_dirs = [".git", "node_modules", "dist", "target", "__pycache__", ".venv", "vendor", ".next", "coverage"]
+ignore_files = ["*.lock", "package-lock.json", "pnpm-lock.yaml", "*.min.js", "*.min.css"]
+
+[hooks]
+exclude_commands = ["curl", "gh"]
+suppress_hook_warning = true

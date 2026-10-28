@@ -202,6 +202,70 @@ export function parseRetryAfterSeconds(
   return undefined;
 }
 
+interface ParsedProviderErrorEnvelope {
+  readonly code?: string | undefined;
+  readonly type?: string | undefined;
+  readonly status?: string | undefined;
+  readonly errorInfoReason?: string | undefined;
+  readonly hasRetryInfo: boolean;
+  readonly quotaIds: readonly string[];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseProviderErrorEnvelope(bodyText: string): ParsedProviderErrorEnvelope {
+  try {
+    const parsed: unknown = JSON.parse(bodyText);
+    if (!isRecord(parsed)) {
+      return { hasRetryInfo: false, quotaIds: [] };
+    }
+    const errObj = isRecord(parsed.error) ? parsed.error : parsed;
+
+    const code = typeof errObj.code === "string" ? errObj.code : undefined;
+    const type = typeof errObj.type === "string" ? errObj.type : undefined;
+    const status = typeof errObj.status === "string" ? errObj.status : undefined;
+
+    let errorInfoReason: string | undefined;
+    let hasRetryInfo = false;
+    const quotaIds: string[] = [];
+
+    if (Array.isArray(errObj.details)) {
+      for (const detail of errObj.details) {
+        if (!isRecord(detail)) continue;
+        const detailType = typeof detail["@type"] === "string" ? detail["@type"] : "";
+        if (
+          detailType.endsWith("google.rpc.RetryInfo") &&
+          typeof detail.retryDelay === "string"
+        ) {
+          hasRetryInfo = true;
+        }
+        if (
+          detailType.endsWith("google.rpc.ErrorInfo") &&
+          typeof detail.reason === "string"
+        ) {
+          errorInfoReason = detail.reason;
+        }
+        if (
+          detailType.endsWith("google.rpc.QuotaFailure") &&
+          Array.isArray(detail.violations)
+        ) {
+          for (const v of detail.violations) {
+            if (isRecord(v) && typeof v.quotaId === "string") {
+              quotaIds.push(v.quotaId);
+            }
+          }
+        }
+      }
+    }
+
+    return { code, type, status, errorInfoReason, hasRetryInfo, quotaIds };
+  } catch {
+    return { hasRetryInfo: false, quotaIds: [] };
+  }
+}
+
 export function classifyHttpError(params: {
   readonly status: number;
   readonly bodyText: string;
@@ -217,8 +281,57 @@ export function classifyHttpError(params: {
       : `LLM API call failed (${provider}/${model}, HTTP ${status})`;
   const message = `${prefix}: ${bodyText}`;
 
+  const retryAfterSeconds = parseRetryAfterSeconds(retryAfterHeader, bodyText);
+  const envelope = parseProviderErrorEnvelope(bodyText);
+  const errCodeLower = envelope.code?.toLowerCase();
+  const errTypeLower = envelope.type?.toLowerCase();
+  const errReasonLower = envelope.errorInfoReason?.toLowerCase();
+
+  const isAuth =
+    status === 401 ||
+    status === 403 ||
+    errCodeLower === "invalid_api_key" ||
+    errTypeLower === "authentication_error" ||
+    errTypeLower === "permission_error" ||
+    errReasonLower === "api_key_invalid" ||
+    lowerBody.includes("invalid_api_key") ||
+    lowerBody.includes("authentication_error") ||
+    lowerBody.includes("api_key_invalid");
+
+  if (isAuth) {
+    return new AuthenticationError(message, { status, provider });
+  }
+
+  // Official provider structured rate-limit signals take precedence on HTTP 429:
+  // - Google gRPC RetryInfo detail or PerMinute quotaId
+  // - OpenAI code="rate_limit_exceeded" or type="tokens"/"requests"
+  // - Anthropic type="rate_limit_error"
+  // - Explicit Retry-After header or parsed retry delay
+  const hasExplicitRateLimitSignal =
+    status === 429 &&
+    (envelope.hasRetryInfo ||
+      retryAfterSeconds !== undefined ||
+      errCodeLower === "rate_limit_exceeded" ||
+      errTypeLower === "rate_limit_error" ||
+      errTypeLower === "tokens" ||
+      errTypeLower === "requests" ||
+      (envelope.quotaIds.length > 0 &&
+        envelope.quotaIds.every((id) => /perminute/i.test(id))));
+
+  if (hasExplicitRateLimitSignal) {
+    return new RateLimitError(message, {
+      status,
+      provider,
+      retryAfterSeconds
+    });
+  }
+
   const isQuota =
     status === 402 ||
+    errCodeLower === "insufficient_quota" ||
+    errTypeLower === "insufficient_quota" ||
+    errCodeLower === "billing_hard_limit_reached" ||
+    errReasonLower === "billing_disabled" ||
     lowerBody.includes("insufficient_quota") ||
     lowerBody.includes("exceeded your current quota") ||
     lowerBody.includes("quota_exceeded") ||
@@ -229,17 +342,6 @@ export function classifyHttpError(params: {
     return new QuotaExhaustedError(message, { status, provider });
   }
 
-  const isAuth =
-    status === 401 ||
-    status === 403 ||
-    lowerBody.includes("invalid_api_key") ||
-    lowerBody.includes("authentication_error") ||
-    lowerBody.includes("api_key_invalid");
-
-  if (isAuth) {
-    return new AuthenticationError(message, { status, provider });
-  }
-
   if (status === 408) {
     return new LLMTimeoutError(message, { status, provider });
   }
@@ -248,7 +350,7 @@ export function classifyHttpError(params: {
     return new RateLimitError(message, {
       status,
       provider,
-      retryAfterSeconds: parseRetryAfterSeconds(retryAfterHeader, bodyText)
+      retryAfterSeconds
     });
   }
 

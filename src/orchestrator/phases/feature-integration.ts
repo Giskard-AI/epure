@@ -34,6 +34,7 @@ import {
 } from "../../state/git-ref-state.js";
 import { appendEpureCommandsSpoiler } from "../formatting/comments.js";
 import { callGeminiJson } from "../gemini-client.js";
+import { EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT } from "../prompts/code-discipline.js";
 import {
   GENERATED_TICKET_IMPLEMENTATION_SCHEMA,
   type EscalateToNeedsHumanFn,
@@ -449,7 +450,9 @@ export async function runFeatureIntegrationPhase(
         '    { "path": "...", "content": "..." }',
         "  ],",
         '  "deleted_files": ["..."]',
-        "}"
+        "}",
+        "",
+        EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
       ].join("\n");
 
       const featureFixPromptParts: string[] = [];

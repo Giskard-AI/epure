@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildKernelSandboxedCommand,
   buildSanitizedSandboxEnv,
   createLlmSandboxProxy,
   runInUntrustedCodeSandbox,
-  type SandboxExecutionInput
+  type KernelSandboxCapabilities,
+  type SandboxExecutionInput,
+  type SandboxNetworkPolicy
 } from "../src/sandbox/llm-sandbox.js";
 
 describe("Ticket 06 (#7) — Sandbox LLM proxy & untrusted code credential isolation", () => {
@@ -65,6 +68,11 @@ describe("Ticket 06 (#7) — Sandbox LLM proxy & untrusted code credential isola
       expect(sanitized.EPURE_LLM_PROXY_URL).toBe("http://127.0.0.1:43199/v1");
       expect(sanitized.EPURE_LLM_PROXY_NONCE).toBe("nonce-ephemeral-123");
       expect(sanitized.EPURE_SANDBOX_ACTIVE).toBe("true");
+      expect(sanitized.RTK_TELEMETRY_DISABLED).toBe("1");
+      expect(sanitized.RTK_RECALL).toBe("0");
+      expect(sanitized.RTK_TEE).toBe("0");
+      expect(sanitized.RTK_SUPPRESS_HOOK_WARNING).toBe("1");
+      expect(sanitized.NO_COLOR).toBe("1");
     }
   );
 
@@ -224,6 +232,153 @@ describe("Ticket 06 (#7) — Sandbox LLM proxy & untrusted code credential isola
       } finally {
         await proxy.close();
       }
+    }
+  );
+
+  it.each([
+    {
+      id: "https-only-install-uses-landrun-with-port-443-only-and-excludes-proxy-port",
+      networkPolicy: "https_only" as SandboxNetworkPolicy,
+      proxyPort: 43120,
+      capabilities: {
+        landrunAvailable: true,
+        bubblewrapAvailable: true
+      } satisfies KernelSandboxCapabilities,
+      expectedBackend: "landrun" as const,
+      expectedCommand: "landrun",
+      requiredArgs: ["--connect-tcp", "443", "--rwx", "--rox"],
+      forbiddenArgs: ["43120", "--unshare-net"]
+    },
+    {
+      id: "proxy-only-harness-uses-landrun-with-ephemeral-proxy-port-only",
+      networkPolicy: "proxy_only" as SandboxNetworkPolicy,
+      proxyPort: 43120,
+      capabilities: {
+        landrunAvailable: true,
+        bubblewrapAvailable: true
+      } satisfies KernelSandboxCapabilities,
+      expectedBackend: "landrun" as const,
+      expectedCommand: "landrun",
+      requiredArgs: ["--connect-tcp", "43120", "--rwx", "--rox"],
+      forbiddenArgs: ["443", "--unshare-net"]
+    },
+    {
+      id: "offline-verification-uses-bubblewrap-unshare-net-and-tmpfs-when-available",
+      networkPolicy: "offline" as SandboxNetworkPolicy,
+      proxyPort: 43120,
+      capabilities: {
+        landrunAvailable: true,
+        bubblewrapAvailable: true
+      } satisfies KernelSandboxCapabilities,
+      expectedBackend: "bubblewrap" as const,
+      expectedCommand: "bwrap",
+      requiredArgs: [
+        "--unshare-net",
+        "--unshare-pid",
+        "--unshare-ipc",
+        "--die-with-parent",
+        "--tmpfs",
+        "/tmp"
+      ],
+      forbiddenArgs: ["--connect-tcp"]
+    },
+    {
+      id: "offline-verification-falls-back-to-landrun-with-zero-tcp-ports-when-bwrap-unavailable",
+      networkPolicy: "offline" as SandboxNetworkPolicy,
+      proxyPort: 43120,
+      capabilities: {
+        landrunAvailable: true,
+        bubblewrapAvailable: false
+      } satisfies KernelSandboxCapabilities,
+      expectedBackend: "landrun" as const,
+      expectedCommand: "landrun",
+      requiredArgs: ["--rox", "--rwx"],
+      forbiddenArgs: ["--connect-tcp", "443", "43120"]
+    }
+  ])(
+    "buildKernelSandboxedCommand [$id]: builds two-phase Ubuntu 26.04 kernel confinement invocation",
+    ({
+      networkPolicy,
+      proxyPort,
+      capabilities,
+      expectedBackend,
+      expectedCommand,
+      requiredArgs,
+      forbiddenArgs
+    }) => {
+      const wrapped = buildKernelSandboxedCommand({
+        command: "npm",
+        args: ["test"],
+        cwd: "/tmp/epure-work",
+        sanitizedEnv: {
+          PATH: "/usr/bin:/bin",
+          HOME: "/home/runner",
+          RTK_TELEMETRY_DISABLED: "1"
+        },
+        networkPolicy,
+        proxyPort,
+        capabilities
+      });
+
+      expect(wrapped.backend).toBe(expectedBackend);
+      expect(wrapped.command).toBe(expectedCommand);
+      for (const reqArg of requiredArgs) {
+        expect(wrapped.args).toContain(reqArg);
+      }
+      for (const forbidden of forbiddenArgs) {
+        expect(wrapped.args).not.toContain(forbidden);
+      }
+    }
+  );
+
+  it.each([
+    {
+      id: "fails-closed-when-enforce-kernel-sandbox-is-true-and-backends-are-unavailable",
+      enforceEnv: "true",
+      capabilities: {
+        landrunAvailable: false,
+        bubblewrapAvailable: false
+      } satisfies KernelSandboxCapabilities,
+      expectedIsolated: false,
+      expectedErrorCode: "SANDBOX_ISOLATION_UNAVAILABLE",
+      expectedExitCode: 1
+    },
+    {
+      id: "falls-back-gracefully-to-unconfined-spawn-when-enforce-kernel-sandbox-is-false-and-backends-are-unavailable",
+      enforceEnv: "false",
+      capabilities: {
+        landrunAvailable: false,
+        bubblewrapAvailable: false
+      } satisfies KernelSandboxCapabilities,
+      expectedIsolated: true,
+      expectedErrorCode: "NONE",
+      expectedExitCode: 0
+    }
+  ])(
+    "runInUntrustedCodeSandbox [$id]: kernel sandbox enforcement vs local fallback",
+    async ({
+      enforceEnv,
+      capabilities,
+      expectedIsolated,
+      expectedErrorCode,
+      expectedExitCode
+    }) => {
+      const result = await runInUntrustedCodeSandbox({
+        isolationAvailable: true,
+        runnerEnv: {
+          ...RUNNER_SECRETS_ENV,
+          EPURE_ENFORCE_KERNEL_SANDBOX: enforceEnv
+        },
+        command: process.execPath,
+        args: ["-e", "console.log('sandbox-check')"],
+        networkPolicy: "offline",
+        kernelCapabilities: capabilities
+      });
+
+      expect(result.isolated).toBe(expectedIsolated);
+      expect(result.error_code).toBe(expectedErrorCode);
+      expect(result.exit_code).toBe(expectedExitCode);
+      expect(result.kernel_backend).toBe("none");
     }
   );
 });

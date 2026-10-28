@@ -68,6 +68,39 @@ const PINNED_ACTIONS_SETUP_GO_SHA =
 const PINNED_ZIZMOR_ACTION_SHA =
   "zizmorcore/zizmor-action@85b2b9fb8e3325e7a23d7d0a9d7ba5ae0f999e3e # v0.7.1";
 
+// # renovate: datasource=github-releases depName=rtk-ai/rtk
+export const PINNED_RTK_VERSION = "v1.0.1";
+
+const SAFE_RTK_VERSION_PATTERN = /^v?[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/;
+
+export function buildSandboxToolingSetupSteps(
+  rtkVersion: string = PINNED_RTK_VERSION
+): readonly string[] {
+  const safeRtkVersion = SAFE_RTK_VERSION_PATTERN.test(rtkVersion.trim())
+    ? rtkVersion.trim()
+    : PINNED_RTK_VERSION;
+  return [
+    "      - name: Provision Ubuntu 26.04 kernel sandbox (landrun + bubblewrap) & stateless RTK",
+    "        run: |",
+    "          sudo apt-get update -qq",
+    "          sudo apt-get install -y --no-install-recommends landrun bubblewrap ca-certificates curl",
+    "          # renovate: datasource=github-releases depName=rtk-ai/rtk",
+    `          RTK_VERSION="${safeRtkVersion}"`,
+    '          RTK_ARCHIVE="rtk-x86_64-unknown-linux-musl.tar.gz"',
+    '          curl -fsSL "https://github.com/rtk-ai/rtk/releases/download/${RTK_VERSION}/${RTK_ARCHIVE}" -o "/tmp/${RTK_ARCHIVE}"',
+    '          curl -fsSL "https://github.com/rtk-ai/rtk/releases/download/${RTK_VERSION}/checksums.txt" -o "/tmp/rtk-checksums.txt"',
+    "          (cd /tmp && sha256sum --check --ignore-missing rtk-checksums.txt)",
+    '          mkdir -p "$RUNNER_TEMP/bin"',
+    '          tar -xzf "/tmp/${RTK_ARCHIVE}" -C "$RUNNER_TEMP/bin" rtk',
+    '          chmod 0755 "$RUNNER_TEMP/bin/rtk"',
+    '          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"',
+    '          echo "RTK_TELEMETRY_DISABLED=1" >> "$GITHUB_ENV"',
+    '          echo "RTK_RECALL=0" >> "$GITHUB_ENV"',
+    '          echo "RTK_TEE=0" >> "$GITHUB_ENV"',
+    '          echo "NO_COLOR=1" >> "$GITHUB_ENV"'
+  ];
+}
+
 function parseMakefileTargets(makefileContent: string): readonly string[] {
   const targets = new Set<string>();
   for (const line of makefileContent.split("\n")) {
@@ -1252,6 +1285,14 @@ export function buildRenovateConfigJson(
       minimumReleaseAge: "7 days"
     },
     {
+      description:
+        "CLI and sandbox security binaries cooldown (7 days) on GitHub releases/tags (rtk-ai/rtk, zizmorcore/zizmor)",
+      groupName: "cli-security-and-sandbox-tools",
+      matchDatasources: ["github-releases", "github-tags"],
+      minimumReleaseAge: "7 days",
+      automerge: false
+    },
+    {
       description: "Group GitHub Actions digest & version updates",
       groupName: "github-actions",
       matchManagers: ["github-actions"],
@@ -1390,6 +1431,21 @@ export function buildRenovateConfigJson(
     },
     prHourlyLimit: 2,
     prConcurrentLimit: 5,
+    customManagers: [
+      {
+        customType: "regex",
+        description:
+          "Track pinned CLI and security binary versions via # renovate: comments",
+        managerFilePatterns: [
+          "/^\\.github/workflows/[^/]+\\.ya?ml$/",
+          "/^src/.*\\.ts$/",
+          "/^scripts/.*\\.sh$/"
+        ],
+        matchStrings: [
+          "#\\s*renovate:\\s*datasource=(?<datasource>[a-z-]+)\\s+depName=(?<depName>[^\\s]+)(?:\\s+extractVersion=(?<extractVersion>[^\\s]+))?\\s*\\n\\s*(?:export\\s+const\\s+)?[A-Z0-9_]+\\s*=\\s*[\"'](?<currentValue>[^\"']+)[\"']"
+        ]
+      }
+    ],
     packageRules
   };
 
@@ -1525,14 +1581,14 @@ export function buildStackAwareCiWorkflowYaml(params: {
       "jobs:",
       "  quality:",
       '    name: "Quality (Format, Lint, Typecheck, Test & Build)"',
-      "    runs-on: ubuntu-latest",
+      "    runs-on: ubuntu-26.04",
       "    timeout-minutes: 20",
       "    steps:",
       ...qualitySteps,
       "",
       "  zizmor:",
       '    name: "Zizmor"',
-      "    runs-on: ubuntu-latest",
+      "    runs-on: ubuntu-26.04",
       "    timeout-minutes: 10",
       "    permissions:",
       "      contents: read # checkout the workflows zizmor audits",

@@ -5,7 +5,9 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  PINNED_RTK_VERSION,
   buildRenovateConfigJson,
+  buildSandboxToolingSetupSteps,
   buildStackAwareCiWorkflowYaml,
   buildZizmorConfigYaml,
   detectRepositoryStack
@@ -532,6 +534,9 @@ describe("5. Pre-bundled CLI (dist/cli/setup-repo.mjs) & skill (.agents/skills/s
       expect(renovate.content).toContain('"prCreation": "not-pending"');
       expect(renovate.content).toContain('"automerge": false');
       expect(renovate.content).toContain('ignore-scripts=true');
+      expect(renovate.content).toContain('"customManagers"');
+      expect(renovate.content).toContain("cli-security-and-sandbox-tools");
+      expect(renovate.content).toContain('"github-releases"');
       expect(renovate.content).toContain(expectedRenovateSubstring);
 
       const ci = buildStackAwareCiWorkflowYaml({
@@ -539,9 +544,19 @@ describe("5. Pre-bundled CLI (dist/cli/setup-repo.mjs) & skill (.agents/skills/s
         stack
       });
       expect(ci.path).toBe(".github/workflows/ci.yml");
+      expect(ci.content).toContain("runs-on: ubuntu-26.04");
+      expect(ci.content).not.toContain("runs-on: ubuntu-latest");
       expect(ci.content).toContain("zizmorcore/zizmor-action@");
       expect(ci.content).toContain("persona: pedantic");
       expect(ci.content).toContain(expectedCiSubstring);
+
+      const sandboxSteps = buildSandboxToolingSetupSteps().join("\n");
+      expect(sandboxSteps).toContain("landrun bubblewrap");
+      expect(sandboxSteps).toContain("# renovate: datasource=github-releases depName=rtk-ai/rtk");
+      expect(sandboxSteps).toContain(PINNED_RTK_VERSION);
+      expect(sandboxSteps).toContain("sha256sum --check --ignore-missing");
+      expect(sandboxSteps).toContain("RTK_TELEMETRY_DISABLED=1");
+      expect(sandboxSteps).toContain("RTK_RECALL=0");
     }
   );
 

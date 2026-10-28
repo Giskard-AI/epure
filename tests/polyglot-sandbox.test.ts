@@ -19,6 +19,7 @@ import {
   type ExternalWorkflowRunRecord
 } from "../src/execution/external-ci-gate.js";
 import {
+  formatAndCondenseStage1CommandOutput,
   formatVerificationToolingGuideMarkdown,
   runPolyglotStage1Verification,
   validateWorkspaceFileOperations
@@ -82,7 +83,7 @@ describe("EPURE v1.4.0 — Polyglot Verification Discovery, Workspace Sandbox & 
             "on: [push, pull_request]",
             "jobs:",
             "  backend-test:",
-            "    runs-on: ubuntu-latest",
+            "    runs-on: ubuntu-26.04",
             "    defaults:",
             "      run:",
             "        working-directory: backend",
@@ -200,7 +201,7 @@ describe("EPURE v1.4.0 — Polyglot Verification Discovery, Workspace Sandbox & 
             "on: [pull_request]",
             "jobs:",
             "  lint:",
-            "    runs-on: ubuntu-latest",
+            "    runs-on: ubuntu-26.04",
             "    steps:",
             "      - run: npm ci",
             "      - run: npm run lint",
@@ -211,7 +212,7 @@ describe("EPURE v1.4.0 — Polyglot Verification Discovery, Workspace Sandbox & 
             "on: [pull_request]",
             "jobs:",
             "  e2e:",
-            "    runs-on: ubuntu-latest",
+            "    runs-on: ubuntu-26.04",
             "    services:",
             "      postgres:",
             "        image: postgres:16",
@@ -223,7 +224,7 @@ describe("EPURE v1.4.0 — Polyglot Verification Discovery, Workspace Sandbox & 
             "on: [pull_request]",
             "jobs:",
             "  docs:",
-            "    runs-on: ubuntu-latest",
+            "    runs-on: ubuntu-26.04",
             "    steps:",
             "      - run: python3 scripts/spec-coverage.py"
           ].join("\n"),
@@ -234,7 +235,7 @@ describe("EPURE v1.4.0 — Polyglot Verification Discovery, Workspace Sandbox & 
             "    types: [created]",
             "jobs:",
             "  orchestrate:",
-            "    runs-on: ubuntu-latest",
+            "    runs-on: ubuntu-26.04",
             "    steps:",
             "      - uses: Giskard-AI/epure/actions/orchestrate-issue@a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
             "      - run: cargo test --all-targets"
@@ -539,6 +540,143 @@ describe("EPURE v1.4.0 — Polyglot Verification Discovery, Workspace Sandbox & 
         expect(executedCommands).toEqual(expectedExecutedCommands);
       }
     );
+
+    it.each([
+      {
+        id: "enforces-https-only-for-node-install-and-offline-for-codegen-typecheck-lint-test",
+        target: {
+          name: "api",
+          working_directory: ".",
+          kind: "node" as const,
+          path_patterns: ["**"],
+          install_command: "npm ci",
+          codegen_command: "npx prisma generate",
+          typecheck_command: "npm run typecheck",
+          lint_command: "npm run lint",
+          test_command: "npm test"
+        },
+        expectedStepPolicies: [
+          { command: "npm ci", policy: "https_only" },
+          { command: "npx prisma generate", policy: "offline" },
+          { command: "npm run typecheck", policy: "offline" },
+          { command: "npm run lint", policy: "offline" },
+          { command: "npm test", policy: "offline" }
+        ]
+      },
+      {
+        id: "enforces-https-only-for-python-uv-sync-and-offline-for-ruff-and-pytest",
+        target: {
+          name: "ml-worker",
+          working_directory: ".",
+          kind: "python" as const,
+          path_patterns: ["**"],
+          install_command: "uv sync",
+          lint_command: "ruff check .",
+          test_command: "pytest -q"
+        },
+        expectedStepPolicies: [
+          { command: "uv sync", policy: "https_only" },
+          { command: "ruff check .", policy: "offline" },
+          { command: "pytest -q", policy: "offline" }
+        ]
+      }
+    ])("$id", async ({ target, expectedStepPolicies }) => {
+      const observedPolicies: Array<{ command: string; policy: string | undefined }> = [];
+      const res = await runPolyglotStage1Verification({
+        profile: {
+          wait_for_external_ci: true,
+          external_ci_timeout_minutes: 15,
+          grace_window_seconds: 45,
+          targets: [target]
+        },
+        files: [{ path: "src/index.ts", content: "export const x = 1;\n" }],
+        changedPaths: ["src/index.ts"],
+        isTaskBranch: true,
+        llmApiKey: "test-llm-key",
+        sandboxRunner: async (input) => {
+          observedPolicies.push({
+            command: [input.command, ...(input.args ?? [])].join(" ").trim(),
+            policy: input.networkPolicy
+          });
+          return {
+            isolated: true,
+            error_code: "NONE",
+            error_message: "",
+            proxy_url: "http://127.0.0.1:0/v1/llm",
+            exit_code: 0,
+            stdout: "PASS",
+            stderr: "",
+            duration_ms: 5
+          };
+        }
+      });
+
+      expect(res.passed).toBe(true);
+      expect(observedPolicies).toEqual(expectedStepPolicies);
+    });
+
+    it.each([
+      {
+        id: "strips-ansi-and-filters-lockfile-and-npm-noise-on-passing-command",
+        exitCode: 0,
+        stdout: [
+          "\x1b[32mnpm warn deprecated inflight@1.0.6\x1b[0m",
+          "npm notice created a lockfile as package-lock.json",
+          "added 412 packages, and audited 413 packages in 3s",
+          "found 0 vulnerabilities",
+          "\x1b[32m✓ tests/math.test.ts (4 tests)\x1b[0m"
+        ].join("\n"),
+        stderr: "",
+        expectedContains: ["✓ tests/math.test.ts (4 tests)"],
+        expectedNotContains: [
+          "\x1b[32m",
+          "npm warn deprecated",
+          "added 412 packages"
+        ]
+      },
+      {
+        id: "appends-stateless-in-memory-raw-failure-tail-when-command-fails-with-filtered-noise",
+        exitCode: 1,
+        stdout: [
+          "npm warn deprecated glob@7.2.3",
+          "Scanning node_modules/vitest/dist/vendor.min.js",
+          "\x1b[31mFAIL tests/auth.test.ts > rejects expired JWT\x1b[0m"
+        ].join("\n"),
+        stderr:
+          "AssertionError: expected 200 to deeply equal 401\n    at src/auth.ts:88:15",
+        expectedContains: [
+          "FAIL tests/auth.test.ts > rejects expired JWT",
+          "AssertionError: expected 200 to deeply equal 401",
+          "at src/auth.ts:88:15",
+          "raw failure tail"
+        ],
+        expectedNotContains: ["\x1b[31m"]
+      }
+    ])(
+      "formatAndCondenseStage1CommandOutput [$id]: formats logs statelessly without SQLite recall",
+      ({
+        exitCode,
+        stdout,
+        stderr,
+        expectedContains,
+        expectedNotContains
+      }) => {
+        const formatted = formatAndCondenseStage1CommandOutput({
+          step: "test",
+          rawCommand: "npm test",
+          exitCode,
+          stdout,
+          stderr
+        });
+
+        for (const fragment of expectedContains) {
+          expect(formatted).toContain(fragment);
+        }
+        for (const forbidden of expectedNotContains) {
+          expect(formatted).not.toContain(forbidden);
+        }
+      }
+    );
   });
 
   describe("Seam 3: Post-PR External CI Gate (`src/execution/external-ci-gate.ts`)", () => {
@@ -565,7 +703,7 @@ describe("EPURE v1.4.0 — Polyglot Verification Discovery, Workspace Sandbox & 
           "on: [pull_request]",
           "jobs:",
           "  gate:",
-          "    runs-on: ubuntu-latest"
+          "    runs-on: ubuntu-26.04"
         ].join("\n"),
         ".github/workflows/backend-ci.yml": [
           "name: Backend CI",
@@ -575,7 +713,7 @@ describe("EPURE v1.4.0 — Polyglot Verification Discovery, Workspace Sandbox & 
           "      - 'backend/**'",
           "jobs:",
           "  test:",
-          "    runs-on: ubuntu-latest"
+          "    runs-on: ubuntu-26.04"
         ].join("\n"),
         ".github/workflows/frontend-ci.yml": [
           "name: Frontend CI",
@@ -584,7 +722,7 @@ describe("EPURE v1.4.0 — Polyglot Verification Discovery, Workspace Sandbox & 
           "    paths: ['frontend/**']",
           "jobs:",
           "  test:",
-          "    runs-on: ubuntu-latest"
+          "    runs-on: ubuntu-26.04"
         ].join("\n"),
         ".github/workflows/full-suite.yml": [
           "name: Full Suite",
@@ -595,7 +733,7 @@ describe("EPURE v1.4.0 — Polyglot Verification Discovery, Workspace Sandbox & 
           "      - '*.md'",
           "jobs:",
           "  e2e:",
-          "    runs-on: ubuntu-latest",
+          "    runs-on: ubuntu-26.04",
           "    services:",
           "      postgres:",
           "        image: postgres:16"

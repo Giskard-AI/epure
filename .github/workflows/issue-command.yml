@@ -89,7 +89,7 @@ permissions:
 jobs:
   authorize-command:
     name: "Authorize /epure Issue Command"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -130,7 +130,7 @@ jobs:
     name: "Orchestrate Authorized /epure Lifecycle"
     needs: authorize-command
     if: ${{ needs.authorize-command.outputs.authorized == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     environment: ${{ inputs.llm_environment || 'gemini' }}
     concurrency:
@@ -148,6 +148,26 @@ jobs:
           repository: Giskard-AI/epure
           ref: ${{ job.workflow_sha || 'main' }}
           persist-credentials: false
+
+      - name: Provision Ubuntu 26.04 kernel sandbox (landrun + bubblewrap) & stateless RTK
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends landrun bubblewrap ca-certificates curl
+          # renovate: datasource=github-releases depName=rtk-ai/rtk
+          RTK_VERSION="v1.0.1"
+          RTK_ARCHIVE="rtk-x86_64-unknown-linux-musl.tar.gz"
+          curl -fsSL "https://github.com/rtk-ai/rtk/releases/download/${RTK_VERSION}/${RTK_ARCHIVE}" -o "/tmp/${RTK_ARCHIVE}"
+          curl -fsSL "https://github.com/rtk-ai/rtk/releases/download/${RTK_VERSION}/checksums.txt" -o "/tmp/rtk-checksums.txt"
+          (cd /tmp && sha256sum --check --ignore-missing rtk-checksums.txt)
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "/tmp/${RTK_ARCHIVE}" -C "$RUNNER_TEMP/bin" rtk
+          chmod 0755 "$RUNNER_TEMP/bin/rtk"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          echo "RTK_TELEMETRY_DISABLED=1" >> "$GITHUB_ENV"
+          echo "RTK_RECALL=0" >> "$GITHUB_ENV"
+          echo "RTK_TEE=0" >> "$GITHUB_ENV"
+          echo "NO_COLOR=1" >> "$GITHUB_ENV"
+          echo "EPURE_ENFORCE_KERNEL_SANDBOX=true" >> "$GITHUB_ENV"
 
       - name: Run pre-bundled EPURE issue orchestrator
         id: orchestrate
