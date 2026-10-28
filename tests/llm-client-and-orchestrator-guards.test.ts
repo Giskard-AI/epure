@@ -4,16 +4,25 @@ import {
   parseAgentsYml,
   serializeAgentsYml
 } from "../src/bootstrap/setup-repo.js";
-import { formatNeedsHumanEscalationComment } from "../src/execution/external-ci-gate.js";
+import {
+  formatNeedsHumanEscalationComment,
+  resolveLlmEscalationReason,
+  type NeedsHumanEscalationReason
+} from "../src/execution/external-ci-gate.js";
 import {
   AuthenticationError,
+  BadRequestError,
   DEFAULT_LLM_REQUEST_TIMEOUT_MS,
   GEMINI_SKIP_THOUGHT_SIGNATURE_SENTINEL,
   LLMClient,
+  LLMError,
+  LLMTimeoutError,
   parseAndValidateStructuredOutput,
   parseRetryAfterSeconds,
   QuotaExhaustedError,
   RateLimitError,
+  ServerError,
+  StructuredOutputValidationError,
   type ProviderConfig,
   type ResponseSchemaSpec
 } from "../src/llm/index.js";
@@ -27,11 +36,13 @@ import {
 } from "../src/orchestrator/issue-orchestrator.js";
 import {
   GENERATED_PLANNING_BUNDLE_SCHEMA,
+  GENERATED_TICKET_IMPLEMENTATION_SCHEMA,
   GRILL_ROUND_EVALUATION_SCHEMA
 } from "../src/orchestrator/prompts/schemas.js";
 import { runMultiAgentPrReviewPass } from "../src/review/multi-agent-pr-review.js";
 import { runUserAdvocateDesignGate } from "../src/review/reviewer-roster.js";
 import { generateSemanticSquashCommitFromDiff } from "../src/review/squash-commit-generator.js";
+import { detectPromptInjectionInPrFiles } from "../src/security/prompt-injection-guard.js";
 import {
   createInMemoryGitRefStateStore,
   updateIssueStateWithCas
@@ -2010,6 +2021,430 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
       expect(resumedRes.status).toBe("active");
       expect(resumedRes.phase).toBe("grilling");
       expect(removedLabels).toContain("needs-human");
+    });
+  });
+
+  describe("9. v1.5.7 — Literal \\b/\\f regex preservation, corrective structured-output retry, resolveLlmEscalationReason & internal_error escalation", () => {
+    it.each([
+      {
+        id: "single-backslash-b-in-json-regex-preserved-as-literal-backslash-b",
+        rawJson:
+          '{"summary":"Motifs: `(?i)\\b(?:TODO|FIXME|XXX)\\b` et `\\bTODO\\\\(#[A-Za-z0-9_-]+\\\\):`","nested":{"count":1}}',
+        expectedSubstrings: [
+          "(?i)\\b(?:TODO|FIXME|XXX)\\b",
+          "\\bTODO\\(#[A-Za-z0-9_-]+\\):"
+        ]
+      },
+      {
+        id: "already-doubled-backslash-b-and-single-backslash-f-preserved-without-control-chars",
+        rawJson:
+          '{"summary":"Already escaped \\\\bword\\\\b and unescaped \\fform","nested":{"count":2}}',
+        expectedSubstrings: ["\\bword\\b", "\\fform"]
+      }
+    ])("$id", ({ rawJson, expectedSubstrings }) => {
+      const parsed = parseAndValidateStructuredOutput(
+        rawJson,
+        sampleNestedSchema
+      );
+      for (const expected of expectedSubstrings) {
+        expect(parsed.summary).toContain(expected);
+      }
+      expect(parsed.summary.includes("\x08")).toBe(false);
+      expect(parsed.summary.includes("\x0c")).toBe(false);
+
+      const findings = detectPromptInjectionInPrFiles([
+        {
+          path: "docs/specs/nettoyage-de-futures-features-docs-e.md",
+          content: parsed.summary
+        }
+      ]);
+      expect(findings).toHaveLength(0);
+    });
+
+    it.each([
+      {
+        id: "google-corrective-retry-injects-validation-error-without-rerunning-tools",
+        model: "google/gemini-3.8-flash",
+        buildInvalidResponse: () => ({
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: JSON.stringify({
+                      commit_message: "fix: attempt",
+                      test_summary: " tested ",
+                      files: [],
+                      patches: [],
+                      deleted_files: []
+                    })
+                  }
+                ]
+              }
+            }
+          ]
+        }),
+        buildValidResponse: () => ({
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: JSON.stringify({
+                      commit_message: "fix: add link checker",
+                      test_summary: "12 tests passed",
+                      files: [
+                        {
+                          path: "scripts/check-markdown-links.py",
+                          content: "print('ok')\n"
+                        }
+                      ],
+                      patches: [],
+                      deleted_files: []
+                    })
+                  }
+                ]
+              }
+            }
+          ]
+        })
+      },
+      {
+        id: "openai-corrective-retry-injects-validation-error-and-recovers",
+        model: "openai/gpt-5.4",
+        buildInvalidResponse: () => ({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  commit_message: "fix: attempt",
+                  test_summary: "tested",
+                  files: [],
+                  patches: [],
+                  deleted_files: []
+                })
+              }
+            }
+          ]
+        }),
+        buildValidResponse: () => ({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  commit_message: "fix: add link checker",
+                  test_summary: "12 tests passed",
+                  files: [
+                    {
+                      path: "scripts/check-markdown-links.py",
+                      content: "print('ok')\n"
+                    }
+                  ],
+                  patches: [],
+                  deleted_files: []
+                })
+              }
+            }
+          ]
+        })
+      },
+      {
+        id: "anthropic-corrective-retry-injects-validation-error-and-recovers",
+        model: "anthropic/claude-sonnet-4-20250514",
+        buildInvalidResponse: () => ({
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                commit_message: "fix: attempt",
+                test_summary: "tested",
+                files: [],
+                patches: [],
+                deleted_files: []
+              })
+            }
+          ]
+        }),
+        buildValidResponse: () => ({
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                commit_message: "fix: add link checker",
+                test_summary: "12 tests passed",
+                files: [
+                  {
+                    path: "scripts/check-markdown-links.py",
+                    content: "print('ok')\n"
+                  }
+                ],
+                patches: [],
+                deleted_files: []
+              })
+            }
+          ]
+        })
+      }
+    ])(
+      "$id",
+      async ({ model, buildInvalidResponse, buildValidResponse }) => {
+        const requestBodies: string[] = [];
+        const mockFetch: typeof fetch = async (_url, init) => {
+          const bodyStr = String(init?.body ?? "");
+          requestBodies.push(bodyStr);
+          if (requestBodies.length === 1) {
+            return new Response(JSON.stringify(buildInvalidResponse()), {
+              status: 200
+            });
+          }
+          return new Response(JSON.stringify(buildValidResponse()), {
+            status: 200
+          });
+        };
+
+        const client = new LLMClient();
+        const res = await client.complete({
+          model,
+          apiKey: "test-key",
+          systemInstruction: "Sys",
+          userPrompt: "Implement ticket",
+          maxTransientRetries: 2,
+          transientRetryBackoffSeconds: [0, 0],
+          sleepMs: async () => {},
+          responseSchema: GENERATED_TICKET_IMPLEMENTATION_SCHEMA,
+          fetchImpl: mockFetch
+        });
+
+        expect(requestBodies).toHaveLength(2);
+        expect(requestBodies[1]).toContain(
+          "Your previous JSON response failed schema validation"
+        );
+        expect(requestBodies[1]).toContain(
+          "GeneratedTicketImplementation must include at least one non-empty file"
+        );
+        expect(res.data?.files?.[0]?.path).toBe(
+          "scripts/check-markdown-links.py"
+        );
+        expect(res.transientRetriesUsed).toBe(1);
+      }
+    );
+
+    it.each([
+      {
+        id: "auth-error-maps-to-llm-quota-or-auth-failure",
+        err: new AuthenticationError("401 Unauthorized", {
+          provider: "google",
+          status: 401
+        }),
+        expectedReason: "llm_quota_or_auth_failure" as NeedsHumanEscalationReason,
+        expectedHeadlineSubstring:
+          "LLM provider quota/billing exhaustion or authentication failure"
+      },
+      {
+        id: "quota-exhausted-maps-to-llm-quota-or-auth-failure",
+        err: new QuotaExhaustedError("Insufficient quota", {
+          provider: "openai",
+          status: 429
+        }),
+        expectedReason: "llm_quota_or_auth_failure" as NeedsHumanEscalationReason,
+        expectedHeadlineSubstring:
+          "LLM provider quota/billing exhaustion or authentication failure"
+      },
+      {
+        id: "server-503-maps-to-transient-llm-api-exhausted",
+        err: new ServerError("503 Service Unavailable", {
+          provider: "google",
+          status: 503
+        }),
+        expectedReason: "transient_llm_api_exhausted" as NeedsHumanEscalationReason,
+        expectedHeadlineSubstring:
+          "Transient LLM API retries or unitary request timeout exhausted"
+      },
+      {
+        id: "timeout-408-maps-to-transient-llm-api-exhausted",
+        err: new LLMTimeoutError("Request timed out after 900000ms", {
+          provider: "google",
+          status: 408
+        }),
+        expectedReason: "transient_llm_api_exhausted" as NeedsHumanEscalationReason,
+        expectedHeadlineSubstring:
+          "Transient LLM API retries or unitary request timeout exhausted"
+      },
+      {
+        id: "rate-limit-429-maps-to-transient-llm-api-exhausted",
+        err: new RateLimitError("Too Many Requests", {
+          provider: "google",
+          status: 429
+        }),
+        expectedReason: "transient_llm_api_exhausted" as NeedsHumanEscalationReason,
+        expectedHeadlineSubstring:
+          "Transient LLM API retries or unitary request timeout exhausted"
+      },
+      {
+        id: "structured-output-validation-error-maps-to-llm-request-invalid",
+        err: new StructuredOutputValidationError(
+          "Structured output failed validation for schema 'generated_ticket_implementation'",
+          { provider: "google" }
+        ),
+        expectedReason: "llm_request_invalid" as NeedsHumanEscalationReason,
+        expectedHeadlineSubstring:
+          "LLM request rejected or response invalid after structured-output retry (non-transient)"
+      },
+      {
+        id: "bad-request-400-maps-to-llm-request-invalid",
+        err: new BadRequestError("400 Invalid schema", {
+          provider: "openai",
+          status: 400
+        }),
+        expectedReason: "llm_request_invalid" as NeedsHumanEscalationReason,
+        expectedHeadlineSubstring:
+          "LLM request rejected or response invalid after structured-output retry (non-transient)"
+      }
+    ])("$id", ({ err, expectedReason, expectedHeadlineSubstring }) => {
+      const reason = resolveLlmEscalationReason(err);
+      expect(reason).toBe(expectedReason);
+      const comment = formatNeedsHumanEscalationComment({
+        reason,
+        issueNumber: 123,
+        ticketIssueNumber: 136,
+        branch: "task/136-links"
+      });
+      expect(comment).toContain(expectedHeadlineSubstring);
+    });
+
+    it.each([
+      {
+        id: "escalates-unhandled-non-llm-internal-error-to-suspended-with-internal-error-reason",
+        failureMode: "non_llm_internal_error" as const,
+        expectedHeadline:
+          "Internal orchestrator error — code-fix budget preserved"
+      },
+      {
+        id: "escalates-persistent-structured-output-validation-error-with-llm-request-invalid-reason",
+        failureMode: "persistent_structured_validation_error" as const,
+        expectedHeadline:
+          "LLM request rejected or response invalid after structured-output retry (non-transient) — code-fix budget preserved"
+      }
+    ])("$id", async ({ failureMode, expectedHeadline }) => {
+      const stateStore = createInMemoryGitRefStateStore();
+      await updateIssueStateWithCas({
+        issueNumber: 123,
+        store: stateStore,
+        mutator: (prev) => ({
+          ...prev,
+          phase: "grilling",
+          status: "active",
+          active_branch: "plan/123-links",
+          code_fix_attempts_used: 2
+        })
+      });
+
+      const postedComments: string[] = [];
+      const addedLabels: string[][] = [];
+
+      const mockFetch: typeof fetch = async (inputUrl, init) => {
+        const url = String(inputUrl);
+        const method = init?.method ?? "GET";
+
+        if (url.includes("generativelanguage.googleapis.com")) {
+          return new Response(
+            JSON.stringify({
+              candidates: [
+                {
+                  content: {
+                    parts: [
+                      {
+                        text: '{"not_matching_grill_schema": true}'
+                      }
+                    ]
+                  }
+                }
+              ]
+            }),
+            { status: 200 }
+          );
+        }
+
+        if (url.endsWith("/issues/123") && method === "GET") {
+          if (failureMode === "non_llm_internal_error") {
+            throw new TypeError("Simulated unexpected internal orchestrator bug");
+          }
+          return new Response(
+            JSON.stringify({
+              number: 123,
+              title: "Check markdown links",
+              body: "Plan body"
+            }),
+            { status: 200 }
+          );
+        }
+        if (url.includes("/issues/123/comments") && method === "GET") {
+          return new Response(
+            JSON.stringify([
+              {
+                id: 950,
+                body: "Go",
+                created_at: "2026-10-28T10:00:00Z",
+                user: { login: "maintainer", type: "User" }
+              }
+            ]),
+            { status: 200 }
+          );
+        }
+        if (url.includes("/issues/123/comments") && method === "POST") {
+          const parsed = JSON.parse(String(init?.body ?? "{}")) as {
+            body?: string;
+          };
+          postedComments.push(parsed.body ?? "");
+          return new Response(JSON.stringify({ id: 951 }), { status: 201 });
+        }
+        if (url.includes("/issues/123/labels") && method === "POST") {
+          const parsed = JSON.parse(String(init?.body ?? "{}")) as {
+            labels?: string[];
+          };
+          addedLabels.push(parsed.labels ?? []);
+          return new Response(JSON.stringify([]), { status: 200 });
+        }
+        if (url.includes("/contents/.github/agents.yml")) {
+          const customConfig = serializeAgentsYml(
+            {
+              ...DEFAULT_AGENTS_CONFIG,
+              max_transient_api_retries: 1,
+              transient_retry_backoff_seconds: [0, 0, 0, 0]
+            },
+            false
+          );
+          return new Response(
+            JSON.stringify({
+              content: Buffer.from(customConfig, "utf8").toString("base64")
+            }),
+            { status: 200 }
+          );
+        }
+        return new Response(JSON.stringify({}), { status: 200 });
+      };
+
+      const res = await orchestrateIssueCommand({
+        repository: "Hartorn-Inc/CozyVTT",
+        issueNumber: 123,
+        command: "reply",
+        commandArgs: "",
+        actor: "maintainer",
+        commentId: 950,
+        fallbackGithubToken: "ghs_testToken1234567890",
+        llmApiKey: "gm_testKey1234567890",
+        stateStore,
+        fetchImpl: mockFetch
+      });
+
+      expect(res.executed).toBe(true);
+      expect(res.status).toBe("suspended");
+      expect(addedLabels).toContainEqual(["needs-human"]);
+      expect(postedComments.at(-1)).toContain(expectedHeadline);
+
+      const snap = await stateStore.readRef("refs/epure/state/123");
+      expect(snap.state?.status).toBe("suspended");
+      expect(snap.state?.code_fix_attempts_used).toBe(2);
     });
   });
 });

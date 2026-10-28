@@ -1,6 +1,12 @@
 import { basename } from "node:path";
 import { redactSecrets } from "../auth/issue-command-gate.js";
 import { appendEpureCommandsSpoiler } from "../orchestrator/formatting/comments.js";
+import {
+  AuthenticationError,
+  isTransientLLMError,
+  LLMError,
+  QuotaExhaustedError
+} from "../llm/errors.js";
 import { matchesPathPattern } from "../sandbox/polyglot-workspace-runner.js";
 import { wrapUntrustedContent } from "../security/prompt-injection-guard.js";
 
@@ -151,7 +157,26 @@ export type NeedsHumanEscalationReason =
   | "sensitive_path_violation"
   | "wall_clock_budget_exhausted"
   | "transient_llm_api_exhausted"
-  | "llm_quota_or_auth_failure";
+  | "llm_quota_or_auth_failure"
+  | "llm_request_invalid"
+  | "internal_error";
+
+/**
+ * Maps an LLM error to its needs-human reason. Only transient failures (5xx, 408,
+ * 429 after waits, timeouts) are reported as transient exhaustion; malformed
+ * responses after corrective retries and rejected requests get `llm_request_invalid`.
+ */
+export function resolveLlmEscalationReason(
+  err: LLMError
+): NeedsHumanEscalationReason {
+  if (err instanceof AuthenticationError || err instanceof QuotaExhaustedError) {
+    return "llm_quota_or_auth_failure";
+  }
+  if (isTransientLLMError(err)) {
+    return "transient_llm_api_exhausted";
+  }
+  return "llm_request_invalid";
+}
 
 export interface FormatNeedsHumanEscalationInput {
   readonly issueNumber: number;
@@ -1030,6 +1055,12 @@ export function formatNeedsHumanEscalationComment(
   } else if (input.reason === "llm_quota_or_auth_failure") {
     reasonHeadline =
       "LLM provider quota/billing exhaustion or authentication failure (ADR-0012: no automatic fallback)";
+  } else if (input.reason === "llm_request_invalid") {
+    reasonHeadline =
+      "LLM request rejected or response invalid after structured-output retry (non-transient) — code-fix budget preserved";
+  } else if (input.reason === "internal_error") {
+    reasonHeadline =
+      "Internal orchestrator error — code-fix budget preserved";
   } else {
     reasonHeadline = "Runner wall-clock timeout budget exhausted";
   }

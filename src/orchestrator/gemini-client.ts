@@ -53,52 +53,14 @@ export async function callGeminiText(
   options: GeminiCallOptions
 ): Promise<string> {
   const client = new LLMClient(options.providers);
-  const res = await client.complete({
-    apiKey: options.apiKey,
-    model: options.model ?? "gemini-3.8-flash",
-    systemInstruction: options.systemInstruction ?? "",
-    userPrompt: options.userPrompt ?? options.prompt ?? "",
-    temperature: options.temperature,
-    responseMimeType: options.responseMimeType,
-    responseSchema: options.responseSchema,
-    tools: options.tools,
-    toolHandlers: options.toolHandlers,
-    maxToolRounds: options.maxToolRounds,
-    thinkingLevel: options.thinkingLevel,
-    maxTransientRetries: options.maxTransientRetries,
-    transientRetryBackoffSeconds: options.transientRetryBackoffSeconds,
-    requestTimeoutMs: options.requestTimeoutMs,
-    maxRateLimitWaits: options.maxRateLimitWaits,
-    fetchImpl: options.fetchImpl,
-    sleepMs: options.sleepMs,
-    logLabel: options.logLabel,
-    providers: options.providers
-  });
-  const used = res.transientRetriesUsed ?? 0;
-  if (used > 0 && options.onTransientRetriesUsed) {
-    options.onTransientRetriesUsed(used);
-  }
-  return res.text;
-}
-
-export async function callGeminiGenerateContent(
-  options: GeminiGenerateOptions
-): Promise<string> {
-  return callGeminiText(options);
-}
-
-export async function callGeminiJson<T = unknown>(
-  options: GeminiCallOptions<T>
-): Promise<T> {
-  const client = new LLMClient(options.providers);
-  if (options.responseSchema) {
-    const res = await client.complete<T>({
+  try {
+    const res = await client.complete({
       apiKey: options.apiKey,
       model: options.model ?? "gemini-3.8-flash",
       systemInstruction: options.systemInstruction ?? "",
       userPrompt: options.userPrompt ?? options.prompt ?? "",
       temperature: options.temperature,
-      responseMimeType: "application/json",
+      responseMimeType: options.responseMimeType,
       responseSchema: options.responseSchema,
       tools: options.tools,
       toolHandlers: options.toolHandlers,
@@ -117,7 +79,68 @@ export async function callGeminiJson<T = unknown>(
     if (used > 0 && options.onTransientRetriesUsed) {
       options.onTransientRetriesUsed(used);
     }
-    return res.data as T;
+    return res.text;
+  } catch (err) {
+    const used =
+      err && typeof err === "object"
+        ? ((err as { transientRetriesUsed?: number }).transientRetriesUsed ?? 0)
+        : 0;
+    if (used > 0 && options.onTransientRetriesUsed) {
+      options.onTransientRetriesUsed(used);
+    }
+    throw err;
+  }
+}
+
+export async function callGeminiGenerateContent(
+  options: GeminiGenerateOptions
+): Promise<string> {
+  return callGeminiText(options);
+}
+
+export async function callGeminiJson<T = unknown>(
+  options: GeminiCallOptions<T>
+): Promise<T> {
+  const client = new LLMClient(options.providers);
+  if (options.responseSchema) {
+    try {
+      const res = await client.complete<T>({
+        apiKey: options.apiKey,
+        model: options.model ?? "gemini-3.8-flash",
+        systemInstruction: options.systemInstruction ?? "",
+        userPrompt: options.userPrompt ?? options.prompt ?? "",
+        temperature: options.temperature,
+        responseMimeType: "application/json",
+        responseSchema: options.responseSchema,
+        tools: options.tools,
+        toolHandlers: options.toolHandlers,
+        maxToolRounds: options.maxToolRounds,
+        thinkingLevel: options.thinkingLevel,
+        maxTransientRetries: options.maxTransientRetries,
+        transientRetryBackoffSeconds: options.transientRetryBackoffSeconds,
+        requestTimeoutMs: options.requestTimeoutMs,
+        maxRateLimitWaits: options.maxRateLimitWaits,
+        fetchImpl: options.fetchImpl,
+        sleepMs: options.sleepMs,
+        logLabel: options.logLabel,
+        providers: options.providers
+      });
+      const used = res.transientRetriesUsed ?? 0;
+      if (used > 0 && options.onTransientRetriesUsed) {
+        options.onTransientRetriesUsed(used);
+      }
+      return res.data as T;
+    } catch (err) {
+      const used =
+        err && typeof err === "object"
+          ? ((err as { transientRetriesUsed?: number }).transientRetriesUsed ??
+            0)
+          : 0;
+      if (used > 0 && options.onTransientRetriesUsed) {
+        options.onTransientRetriesUsed(used);
+      }
+      throw err;
+    }
   }
 
   const rawText = await callGeminiText({

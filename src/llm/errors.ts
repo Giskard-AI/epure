@@ -323,8 +323,6 @@ export function sanitizeJsonStringLiterals(candidate: string): string {
         next === '"' ||
         next === "\\" ||
         next === "/" ||
-        next === "b" ||
-        next === "f" ||
         next === "n" ||
         next === "r" ||
         next === "t"
@@ -401,9 +399,9 @@ export function parseAndValidateStructuredOutput<T = unknown>(
   let parsed: unknown;
   try {
     try {
-      parsed = JSON.parse(extracted);
-    } catch {
       parsed = JSON.parse(sanitizeJsonStringLiterals(extracted));
+    } catch {
+      parsed = JSON.parse(extracted);
     }
   } catch (err) {
     throw new StructuredOutputValidationError(
