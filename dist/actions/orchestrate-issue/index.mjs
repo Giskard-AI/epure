@@ -5139,9 +5139,14 @@ var GENERATED_TICKET_IMPLEMENTATION_SCHEMA = {
           `GeneratedFileChange[${idx}].path must be a non-empty string.`
         );
       }
+      if (typeof rec.content !== "string") {
+        throw new Error(
+          `GeneratedFileChange[${idx}].content for '${rec.path.trim()}' must be a string.`
+        );
+      }
       return {
         path: rec.path.trim(),
-        content: typeof rec.content === "string" ? rec.content : ""
+        content: rec.content
       };
     }) : void 0;
     const patches = Array.isArray(
@@ -5178,6 +5183,14 @@ var GENERATED_TICKET_IMPLEMENTATION_SCHEMA = {
     const deletedFiles = Array.isArray(
       obj.deleted_files
     ) ? asStringArray(obj.deleted_files) : void 0;
+    const hasFiles = (files?.length ?? 0) > 0;
+    const hasPatches = (patches?.some((p) => p.edits.length > 0) ?? false) && (patches?.length ?? 0) > 0;
+    const hasDeleted = (deletedFiles?.length ?? 0) > 0;
+    if (!hasFiles && !hasPatches && !hasDeleted) {
+      throw new Error(
+        "GeneratedTicketImplementation must include at least one non-empty file in 'files', 'patches', or 'deleted_files'."
+      );
+    }
     return {
       commit_message: commitMessage,
       test_summary: testSummary,
@@ -8540,12 +8553,35 @@ async function applyTicketImplementationPayload(params) {
       continue;
     }
     let updatedContent = baseContent;
+    let appliedAny = false;
     for (const edit of patch.edits ?? []) {
       const oldStr = edit.old_string || edit.search || "";
       const newStr = edit.new_string ?? edit.replace ?? "";
-      if (oldStr && updatedContent.includes(oldStr)) {
-        updatedContent = updatedContent.replace(oldStr, newStr);
+      if (!oldStr) {
+        continue;
       }
+      if (updatedContent.includes(oldStr)) {
+        updatedContent = updatedContent.replace(oldStr, newStr);
+        appliedAny = true;
+        continue;
+      }
+      const normalizedOld = oldStr.replace(/\r\n/g, "\n").trim();
+      const normalizedDoc = updatedContent.replace(/\r\n/g, "\n");
+      if (normalizedOld && normalizedDoc.includes(normalizedOld)) {
+        updatedContent = normalizedDoc.replace(
+          normalizedOld,
+          newStr.replace(/\r\n/g, "\n").trim()
+        );
+        appliedAny = true;
+      } else if (process.env.GITHUB_ACTIONS === "true") {
+        process.stdout.write(
+          `[EPURE][Patch] Warning: edit old_string (${oldStr.length} chars) did not match in ${cleanPath}
+`
+        );
+      }
+    }
+    if (!appliedAny && (patch.edits?.length ?? 0) > 0) {
+      continue;
     }
     params.accumulatedFiles.set(cleanPath, updatedContent);
     params.featureChangedFilesMap.set(cleanPath, updatedContent);
@@ -9279,10 +9315,20 @@ ${c}`).join("\n\n");
         });
       }
       if (!featureTestCheck.passed) {
-        throw new Error(
-          `Sandbox test verification failed while addressing final feature review findings on PR #${featurePr.number}:
-${featureTestCheck.output.slice(-2e3)}`
-        );
+        if (featureReviewFixAttempt < maxFeatureReviewFixAttempts) {
+          continue;
+        }
+        return await params.escalateToNeedsHuman({
+          reason: "code_fix_attempts_exhausted",
+          ticketNumber: params.issueNumber,
+          branch: params.featureBranch,
+          prNumber: featurePr.number,
+          prUrl: featurePr.html_url,
+          featurePrUrl: featurePr.html_url,
+          codeFixAttemptsUsed: featureReviewFixAttempt,
+          mustFixFindings: featureReview.must_fix_findings,
+          diagnosticExcerpt: featureTestCheck.output.slice(-2e3)
+        });
       }
       const changedFixFiles = Array.from(changedFixFilesMap.entries()).map(
         ([path, content]) => ({ path, content })
@@ -11323,10 +11369,19 @@ ${c}`).join("\n\n");
           });
         }
         if (!testCheck.passed) {
-          throw new Error(
-            `TDD sandbox verification failed for ticket #${ticket.ticketIssueNumber} after ${fixAttempt} auto-fix attempts:
-${testCheck.output.slice(-2e3)}`
-          );
+          const escalated = await params.escalateToNeedsHuman({
+            reason: "code_fix_attempts_exhausted",
+            ticketNumber: ticket.ticketIssueNumber,
+            branch: taskBranch,
+            codeFixAttemptsUsed: fixAttempt,
+            diagnosticExcerpt: testCheck.output.slice(-2e3)
+          });
+          return {
+            halted: true,
+            result: escalated,
+            verificationProfile,
+            verificationGuideMarkdown
+          };
         }
         await params.gh.commitFilesToBranch({
           branch: taskBranch,
@@ -11767,10 +11822,32 @@ ${c}`).join("\n\n");
           });
         }
         if (!testCheck.passed) {
-          throw new Error(
-            `Sandbox test verification failed while addressing review/CI findings on #${ticket.ticketIssueNumber}:
-${testCheck.output.slice(-2e3)}`
-          );
+          currentPrHeadSha = await params.gh.commitFilesToBranch({
+            branch: taskBranch,
+            fromBranch: params.featureBranch,
+            commitMessage: `chore(wip): checkpoint review-fix attempt ${reviewFixAttempt} on #${ticket.ticketIssueNumber}`,
+            files: impl.files,
+            deletedFiles: Array.from(ticketDeletedFilesSet)
+          });
+          if (reviewFixAttempt < params.maxCodeFixAttempts) {
+            continue;
+          }
+          const escalated = await params.escalateToNeedsHuman({
+            reason: "code_fix_attempts_exhausted",
+            ticketNumber: ticket.ticketIssueNumber,
+            branch: taskBranch,
+            prNumber: taskPr.number,
+            prUrl: taskPr.html_url,
+            codeFixAttemptsUsed: reviewFixAttempt,
+            mustFixFindings: reviewResult.must_fix_findings,
+            diagnosticExcerpt: testCheck.output.slice(-2e3)
+          });
+          return {
+            halted: true,
+            result: escalated,
+            verificationProfile,
+            verificationGuideMarkdown
+          };
         }
         currentPrHeadSha = await params.gh.commitFilesToBranch({
           branch: taskBranch,

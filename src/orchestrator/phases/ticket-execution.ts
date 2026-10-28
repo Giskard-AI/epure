@@ -819,9 +819,19 @@ export async function runTicketExecutionLoop(
         }
 
         if (!testCheck.passed) {
-          throw new Error(
-            `TDD sandbox verification failed for ticket #${ticket.ticketIssueNumber} after ${fixAttempt} auto-fix attempts:\n${testCheck.output.slice(-2000)}`
-          );
+          const escalated = await params.escalateToNeedsHuman({
+            reason: "code_fix_attempts_exhausted",
+            ticketNumber: ticket.ticketIssueNumber,
+            branch: taskBranch,
+            codeFixAttemptsUsed: fixAttempt,
+            diagnosticExcerpt: testCheck.output.slice(-2000)
+          });
+          return {
+            halted: true,
+            result: escalated,
+            verificationProfile,
+            verificationGuideMarkdown
+          };
         }
 
         await params.gh.commitFilesToBranch({
@@ -1330,9 +1340,32 @@ export async function runTicketExecutionLoop(
           });
         }
         if (!testCheck.passed) {
-          throw new Error(
-            `Sandbox test verification failed while addressing review/CI findings on #${ticket.ticketIssueNumber}:\n${testCheck.output.slice(-2000)}`
-          );
+          currentPrHeadSha = await params.gh.commitFilesToBranch({
+            branch: taskBranch,
+            fromBranch: params.featureBranch,
+            commitMessage: `chore(wip): checkpoint review-fix attempt ${reviewFixAttempt} on #${ticket.ticketIssueNumber}`,
+            files: impl.files,
+            deletedFiles: Array.from(ticketDeletedFilesSet)
+          });
+          if (reviewFixAttempt < params.maxCodeFixAttempts) {
+            continue;
+          }
+          const escalated = await params.escalateToNeedsHuman({
+            reason: "code_fix_attempts_exhausted",
+            ticketNumber: ticket.ticketIssueNumber,
+            branch: taskBranch,
+            prNumber: taskPr.number,
+            prUrl: taskPr.html_url,
+            codeFixAttemptsUsed: reviewFixAttempt,
+            mustFixFindings: reviewResult.must_fix_findings,
+            diagnosticExcerpt: testCheck.output.slice(-2000)
+          });
+          return {
+            halted: true,
+            result: escalated,
+            verificationProfile,
+            verificationGuideMarkdown
+          };
         }
 
         currentPrHeadSha = await params.gh.commitFilesToBranch({

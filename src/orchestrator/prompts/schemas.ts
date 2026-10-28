@@ -670,9 +670,14 @@ export const GENERATED_TICKET_IMPLEMENTATION_SCHEMA: ResponseSchemaSpec<Generate
                 `GeneratedFileChange[${idx}].path must be a non-empty string.`
               );
             }
+            if (typeof rec.content !== "string") {
+              throw new Error(
+                `GeneratedFileChange[${idx}].content for '${rec.path.trim()}' must be a string.`
+              );
+            }
             return {
               path: rec.path.trim(),
-              content: typeof rec.content === "string" ? rec.content : ""
+              content: rec.content
             };
           })
         : undefined;
@@ -726,6 +731,17 @@ export const GENERATED_TICKET_IMPLEMENTATION_SCHEMA: ResponseSchemaSpec<Generate
       )
         ? asStringArray(obj.deleted_files)
         : undefined;
+
+      const hasFiles = (files?.length ?? 0) > 0;
+      const hasPatches =
+        (patches?.some((p) => p.edits.length > 0) ?? false) &&
+        (patches?.length ?? 0) > 0;
+      const hasDeleted = (deletedFiles?.length ?? 0) > 0;
+      if (!hasFiles && !hasPatches && !hasDeleted) {
+        throw new Error(
+          "GeneratedTicketImplementation must include at least one non-empty file in 'files', 'patches', or 'deleted_files'."
+        );
+      }
 
       return {
         commit_message: commitMessage,

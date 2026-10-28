@@ -63,12 +63,34 @@ export async function applyTicketImplementationPayload(params: {
       continue;
     }
     let updatedContent = baseContent;
+    let appliedAny = false;
     for (const edit of patch.edits ?? []) {
       const oldStr = edit.old_string || edit.search || "";
       const newStr = edit.new_string ?? edit.replace ?? "";
-      if (oldStr && updatedContent.includes(oldStr)) {
-        updatedContent = updatedContent.replace(oldStr, newStr);
+      if (!oldStr) {
+        continue;
       }
+      if (updatedContent.includes(oldStr)) {
+        updatedContent = updatedContent.replace(oldStr, newStr);
+        appliedAny = true;
+        continue;
+      }
+      const normalizedOld = oldStr.replace(/\r\n/g, "\n").trim();
+      const normalizedDoc = updatedContent.replace(/\r\n/g, "\n");
+      if (normalizedOld && normalizedDoc.includes(normalizedOld)) {
+        updatedContent = normalizedDoc.replace(
+          normalizedOld,
+          newStr.replace(/\r\n/g, "\n").trim()
+        );
+        appliedAny = true;
+      } else if (process.env.GITHUB_ACTIONS === "true") {
+        process.stdout.write(
+          `[EPURE][Patch] Warning: edit old_string (${oldStr.length} chars) did not match in ${cleanPath}\n`
+        );
+      }
+    }
+    if (!appliedAny && (patch.edits?.length ?? 0) > 0) {
+      continue;
     }
     params.accumulatedFiles.set(cleanPath, updatedContent);
     params.featureChangedFilesMap.set(cleanPath, updatedContent);

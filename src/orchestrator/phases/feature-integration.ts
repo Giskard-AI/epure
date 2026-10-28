@@ -678,9 +678,20 @@ export async function runFeatureIntegrationPhase(
       }
 
       if (!featureTestCheck.passed) {
-        throw new Error(
-          `Sandbox test verification failed while addressing final feature review findings on PR #${featurePr.number}:\n${featureTestCheck.output.slice(-2000)}`
-        );
+        if (featureReviewFixAttempt < maxFeatureReviewFixAttempts) {
+          continue;
+        }
+        return await params.escalateToNeedsHuman({
+          reason: "code_fix_attempts_exhausted",
+          ticketNumber: params.issueNumber,
+          branch: params.featureBranch,
+          prNumber: featurePr.number,
+          prUrl: featurePr.html_url,
+          featurePrUrl: featurePr.html_url,
+          codeFixAttemptsUsed: featureReviewFixAttempt,
+          mustFixFindings: featureReview.must_fix_findings,
+          diagnosticExcerpt: featureTestCheck.output.slice(-2000)
+        });
       }
 
       const changedFixFiles = Array.from(changedFixFilesMap.entries()).map(
