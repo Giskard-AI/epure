@@ -32,14 +32,18 @@ import {
 } from "../src/orchestrator/formatting/comments.js";
 import {
   orchestrateIssueCommand,
-  resolvePhaseModels
+  resolvePhaseModels,
+  createGitHubRestHelper
 } from "../src/orchestrator/issue-orchestrator.js";
 import {
   GENERATED_PLANNING_BUNDLE_SCHEMA,
   GENERATED_TICKET_IMPLEMENTATION_SCHEMA,
   GRILL_ROUND_EVALUATION_SCHEMA
 } from "../src/orchestrator/prompts/schemas.js";
-import { runMultiAgentPrReviewPass } from "../src/review/multi-agent-pr-review.js";
+import {
+  buildReviewerInspectionTools,
+  runMultiAgentPrReviewPass
+} from "../src/review/multi-agent-pr-review.js";
 import { runUserAdvocateDesignGate } from "../src/review/reviewer-roster.js";
 import { generateSemanticSquashCommitFromDiff } from "../src/review/squash-commit-generator.js";
 import { detectPromptInjectionInPrFiles } from "../src/security/prompt-injection-guard.js";
@@ -2445,6 +2449,137 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
       const snap = await stateStore.readRef("refs/epure/state/123");
       expect(snap.state?.status).toBe("suspended");
       expect(snap.state?.code_fix_attempts_used).toBe(2);
+    });
+
+    it.each([
+      {
+        id: "skips-already-deleted-file-in-base-tree-to-avoid-gitrpc-bad-object-state",
+        baseTreeBlobs: ["README.md"],
+        deletedFiles: ["docs/FUTURE_FEATURES.md"],
+        expectedTreePathsPosted: ["README.md"]
+      },
+      {
+        id: "includes-sha-null-when-deleted-file-still-exists-in-base-tree",
+        baseTreeBlobs: ["README.md", "docs/FUTURE_FEATURES.md"],
+        deletedFiles: ["docs/FUTURE_FEATURES.md"],
+        expectedTreePathsPosted: ["README.md", "docs/FUTURE_FEATURES.md"]
+      }
+    ])(
+      "$id",
+      async ({ baseTreeBlobs, deletedFiles, expectedTreePathsPosted }) => {
+        const postedTreeEntries: Array<{ path: string; sha: string | null }> =
+          [];
+
+        const mockFetch: typeof fetch = async (inputUrl, init) => {
+          const url = String(inputUrl);
+          const method = init?.method ?? "GET";
+
+          if (url.includes("/git/ref/heads/") && method === "GET") {
+            return new Response(
+              JSON.stringify({ object: { sha: "parent_sha_1" } }),
+              { status: 200 }
+            );
+          }
+          if (url.includes("/git/commits/parent_sha_1") && method === "GET") {
+            return new Response(
+              JSON.stringify({ tree: { sha: "base_tree_sha_1" } }),
+              { status: 200 }
+            );
+          }
+          if (
+            url.includes("/git/trees/base_tree_sha_1?recursive=1") &&
+            method === "GET"
+          ) {
+            return new Response(
+              JSON.stringify({
+                tree: baseTreeBlobs.map((p) => ({
+                  path: p,
+                  type: "blob",
+                  sha: "blob_existing"
+                }))
+              }),
+              { status: 200 }
+            );
+          }
+          if (url.endsWith("/git/blobs") && method === "POST") {
+            return new Response(JSON.stringify({ sha: "new_blob_sha" }), {
+              status: 201
+            });
+          }
+          if (url.endsWith("/git/trees") && method === "POST") {
+            const parsed = JSON.parse(String(init?.body ?? "{}")) as {
+              tree?: Array<{ path: string; sha: string | null }>;
+            };
+            postedTreeEntries.push(...(parsed.tree ?? []));
+            return new Response(JSON.stringify({ sha: "new_tree_sha" }), {
+              status: 201
+            });
+          }
+          if (url.endsWith("/git/commits") && method === "POST") {
+            return new Response(JSON.stringify({ sha: "new_commit_sha" }), {
+              status: 201
+            });
+          }
+          return new Response(JSON.stringify({}), { status: 200 });
+        };
+
+        const gh = createGitHubRestHelper({
+          repository: "Hartorn-Inc/CozyVTT",
+          token: "ghs_test",
+          fetchImpl: mockFetch
+        });
+
+        await gh.commitFilesToBranch({
+          branch: "task/137-triage",
+          fromBranch: "feature/123-clean",
+          commitMessage: "fix(review): update docs",
+          files: [{ path: "README.md", content: "# Updated\n" }],
+          deletedFiles
+        });
+
+        expect(postedTreeEntries.map((e) => e.path)).toEqual(
+          expectedTreePathsPosted
+        );
+      }
+    );
+
+    it("excludes deletedFiles from reviewer inspection tools and reports DELETED status on read_file / read_line_range", async () => {
+      const tools = buildReviewerInspectionTools({
+        repository: "Hartorn-Inc/CozyVTT",
+        prNumber: 146,
+        headBranch: "task/137-triage",
+        baseBranch: "feature/123-clean",
+        ticketNumber: 137,
+        ticketTitle: "Delete FUTURE_FEATURES.md",
+        acceptanceCriteria: ["docs/FUTURE_FEATURES.md is deleted"],
+        changedFiles: [{ path: "README.md", content: "# Clean\n" }],
+        deletedFiles: ["docs/FUTURE_FEATURES.md"],
+        trustedBaseBranchFiles: new Map([
+          ["docs/FUTURE_FEATURES.md", "# Old Future Features\n"],
+          ["README.md", "# Old Readme\n"]
+        ])
+      });
+
+      const listOut = (await tools.handlers.list_files!({})) as {
+        files: Array<{ path: string }>;
+      };
+      expect(listOut.files.map((f) => f.path)).not.toContain(
+        "docs/FUTURE_FEATURES.md"
+      );
+
+      const readOut = (await tools.handlers.read_file!({
+        path: "docs/FUTURE_FEATURES.md"
+      })) as { deleted_in_pr?: boolean; status?: string };
+      expect(readOut.deleted_in_pr).toBe(true);
+      expect(readOut.status).toContain("DELETED");
+
+      const rangeOut = (await tools.handlers.read_line_range!({
+        path: "docs/FUTURE_FEATURES.md",
+        start_line: 1,
+        end_line: 20
+      })) as { deleted_in_pr?: boolean; status?: string };
+      expect(rangeOut.deleted_in_pr).toBe(true);
+      expect(rangeOut.status).toContain("DELETED");
     });
   });
 });

@@ -7522,18 +7522,46 @@ function createGitHubRestHelper(params) {
           sha: blobRes.data.sha
         });
       }
+      const pendingDeletedPaths = [];
       for (const delPath of input.deletedFiles ?? []) {
         const cleanPath = delPath.trim().replace(/^\/+/, "");
         if (!cleanPath || seenTreePaths.has(cleanPath)) {
           continue;
         }
         seenTreePaths.add(cleanPath);
-        treeEntries.push({
-          path: cleanPath,
-          mode: "100644",
-          type: "blob",
-          sha: null
-        });
+        pendingDeletedPaths.push(cleanPath);
+      }
+      if (pendingDeletedPaths.length > 0) {
+        let existingTreePaths = null;
+        try {
+          const baseTreeListing = await apiRequest(
+            "GET",
+            `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(baseTreeSha)}?recursive=1`,
+            void 0,
+            true
+          );
+          if (Array.isArray(baseTreeListing.data?.tree)) {
+            existingTreePaths = new Set(
+              baseTreeListing.data.tree.filter((e) => e.type === "blob" && typeof e.path === "string").map((e) => e.path.trim().replace(/^\/+/, ""))
+            );
+          }
+        } catch {
+          existingTreePaths = null;
+        }
+        for (const cleanPath of pendingDeletedPaths) {
+          if (existingTreePaths && !existingTreePaths.has(cleanPath)) {
+            continue;
+          }
+          treeEntries.push({
+            path: cleanPath,
+            mode: "100644",
+            type: "blob",
+            sha: null
+          });
+        }
+      }
+      if (treeEntries.length === 0) {
+        return parentCommitSha;
       }
       const newTree = await apiRequest(
         "POST",
@@ -8076,6 +8104,12 @@ function buildReviewerInspectionTools(input) {
   for (const f of input.changedFiles) {
     allFiles.set(f.path.replace(/^\/+/, ""), f.content);
   }
+  const deletedSet = new Set(
+    (input.deletedFiles ?? []).map((p) => p.trim().replace(/^\/+/, "")).filter(Boolean)
+  );
+  for (const delPath of deletedSet) {
+    allFiles.delete(delPath);
+  }
   const changedSet = new Set(
     input.changedFiles.map((f) => f.path.replace(/^\/+/, ""))
   );
@@ -8151,6 +8185,13 @@ function buildReviewerInspectionTools(input) {
     },
     read_file: (args) => {
       const rawPath = String(args.path ?? "").trim().replace(/^\/+/, "");
+      if (deletedSet.has(rawPath)) {
+        return {
+          path: rawPath,
+          deleted_in_pr: true,
+          status: "DELETED \u2014 This file was permanently removed in this Pull Request and no longer exists in the workspace."
+        };
+      }
       const content = allFiles.get(rawPath);
       if (content === void 0) {
         return {
@@ -8168,6 +8209,13 @@ function buildReviewerInspectionTools(input) {
     },
     read_line_range: (args) => {
       const rawPath = String(args.path ?? "").trim().replace(/^\/+/, "");
+      if (deletedSet.has(rawPath)) {
+        return {
+          path: rawPath,
+          deleted_in_pr: true,
+          status: "DELETED \u2014 This file was permanently removed in this Pull Request and no longer exists in the workspace."
+        };
+      }
       const content = allFiles.get(rawPath);
       if (content === void 0) {
         return {
@@ -8236,10 +8284,20 @@ async function executeSingleReviewerPass(params) {
       findings: []
     };
   }
-  const fullFilesDump = input.changedFiles.map(
-    (f) => `--- FILE: ${f.path} (${f.content.split("\n").length} lines) ---
+  const deletedFilesSection = input.deletedFiles && input.deletedFiles.length > 0 ? [
+    "### Deleted Files in PR:",
+    ...input.deletedFiles.map(
+      (p) => `- \`${p.trim().replace(/^\/+/, "")}\` (DELETED from repository)`
+    ),
+    ""
+  ].join("\n") : "";
+  const fullFilesDump = [
+    ...deletedFilesSection ? [deletedFilesSection] : [],
+    ...input.changedFiles.map(
+      (f) => `--- FILE: ${f.path} (${f.content.split("\n").length} lines) ---
 ${formatFileWithLineNumbers(f.content)}`
-  ).join("\n\n");
+    )
+  ].join("\n\n");
   const reviewerTools = buildReviewerInspectionTools(input);
   const systemInstruction = [
     trustedPrompt.promptContent,
@@ -8892,7 +8950,11 @@ function buildRepoExplorationToolsAndHandlers(params) {
           allPaths = await params.gh.listBranchPaths(params.featureBranch);
         }
         const matches = allPaths.filter((p) => {
-          const lower = p.toLowerCase();
+          const cleanP = p.trim().replace(/^\/+/, "");
+          if (params.deletedFilesSet?.has(cleanP)) {
+            return false;
+          }
+          const lower = cleanP.toLowerCase();
           return queryTokens.length === 0 ? true : queryTokens.every((token) => lower.includes(token));
         }).slice(0, 60);
         return { matches };
@@ -8901,6 +8963,9 @@ function buildRepoExplorationToolsAndHandlers(params) {
         const p = String(args.path ?? "").trim().replace(/^\/+/, "");
         if (!p || p.includes("..") || isSensitiveTaskBranchPath(p)) {
           return { error: `Access denied or invalid path: ${p}` };
+        }
+        if (params.deletedFilesSet?.has(p)) {
+          return { error: `File '${p}' was deleted in the current branch.` };
         }
         const q = String(args.query ?? "").trim();
         let content = params.accumulatedFiles.get(p) ?? null;
@@ -8942,6 +9007,9 @@ function buildRepoExplorationToolsAndHandlers(params) {
         const p = String(args.path ?? "").trim().replace(/^\/+/, "");
         if (!p || p.includes("..") || isSensitiveTaskBranchPath(p)) {
           return { error: `Access denied or invalid path: ${p}` };
+        }
+        if (params.deletedFilesSet?.has(p)) {
+          return { error: `File '${p}' was deleted in the current branch.` };
         }
         let content = params.accumulatedFiles.get(p) ?? null;
         if (content === null) {
@@ -9104,6 +9172,7 @@ async function runFeatureIntegrationPhase(params) {
       glossaryMarkdown: params.issue.body,
       designMarkdown: params.trustedBaseDesignMarkdown,
       changedFiles: currentChangedFeatureFiles,
+      deletedFiles: Array.from(params.featureDeletedFilesSet),
       workspaceFiles: params.accumulatedFiles,
       trustedBaseBranchFiles: params.trustedBaseFilesMap,
       isReReviewPass: passParams.isReReviewPass,
@@ -9301,6 +9370,7 @@ ${c}`).join("\n\n");
           branch: params.featureBranch,
           featureBranch: params.featureBranch,
           accumulatedFiles: params.accumulatedFiles,
+          deletedFilesSet: params.featureDeletedFilesSet,
           devBranchPaths: params.devBranchPaths,
           gh: params.gh
         }),
@@ -9407,6 +9477,7 @@ ${c}`).join("\n\n");
             branch: params.featureBranch,
             featureBranch: params.featureBranch,
             accumulatedFiles: params.accumulatedFiles,
+            deletedFilesSet: params.featureDeletedFilesSet,
             devBranchPaths: params.devBranchPaths,
             gh: params.gh
           }),
@@ -11454,6 +11525,7 @@ ${c}`).join("\n\n");
               branch: params.featureBranch,
               featureBranch: params.featureBranch,
               accumulatedFiles: params.accumulatedFiles,
+              deletedFilesSet: ticketDeletedFilesSet,
               devBranchPaths: params.devBranchPaths,
               gh: params.gh
             }),
@@ -11600,6 +11672,7 @@ ${c}`).join("\n\n");
           glossaryMarkdown: params.issue.body,
           designMarkdown: params.trustedBaseDesignMarkdown,
           changedFiles: impl.files,
+          deletedFiles: Array.from(ticketDeletedFilesSet),
           workspaceFiles: params.accumulatedFiles,
           trustedBaseBranchFiles: params.trustedBaseFilesMap,
           isReReviewPass: passParams.isReReviewPass,
@@ -11794,6 +11867,7 @@ ${c}`).join("\n\n");
             branch: taskBranch,
             featureBranch: params.featureBranch,
             accumulatedFiles: params.accumulatedFiles,
+            deletedFilesSet: ticketDeletedFilesSet,
             devBranchPaths: params.devBranchPaths,
             gh: params.gh
           }),
@@ -11905,6 +11979,7 @@ ${c}`).join("\n\n");
               branch: taskBranch,
               featureBranch: params.featureBranch,
               accumulatedFiles: params.accumulatedFiles,
+              deletedFilesSet: ticketDeletedFilesSet,
               devBranchPaths: params.devBranchPaths,
               gh: params.gh
             }),

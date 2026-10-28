@@ -977,6 +977,11 @@ describe("EPURE v1.1.0 — Real Orchestration Wiring (Q84–Q90, ADR-0026)", () 
                     path: "src/forge.ts",
                     type: "blob",
                     sha: "blob_existing_forge"
+                  },
+                  {
+                    path: "src/legacy-dup.ts",
+                    type: "blob",
+                    sha: "blob_existing_legacy_dup"
                   }
                 ]
               }),

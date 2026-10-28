@@ -252,6 +252,7 @@ export async function runFeatureIntegrationPhase(
       glossaryMarkdown: params.issue.body,
       designMarkdown: params.trustedBaseDesignMarkdown,
       changedFiles: currentChangedFeatureFiles,
+      deletedFiles: Array.from(params.featureDeletedFilesSet),
       workspaceFiles: params.accumulatedFiles,
       trustedBaseBranchFiles: params.trustedBaseFilesMap,
       isReReviewPass: passParams.isReReviewPass,
@@ -496,6 +497,7 @@ export async function runFeatureIntegrationPhase(
             branch: params.featureBranch,
             featureBranch: params.featureBranch,
             accumulatedFiles: params.accumulatedFiles,
+            deletedFilesSet: params.featureDeletedFilesSet,
             devBranchPaths: params.devBranchPaths,
             gh: params.gh
           }),
@@ -612,6 +614,7 @@ export async function runFeatureIntegrationPhase(
               branch: params.featureBranch,
               featureBranch: params.featureBranch,
               accumulatedFiles: params.accumulatedFiles,
+              deletedFilesSet: params.featureDeletedFilesSet,
               devBranchPaths: params.devBranchPaths,
               gh: params.gh
             }),
