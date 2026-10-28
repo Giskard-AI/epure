@@ -220,6 +220,7 @@ export function buildRepoExplorationToolsAndHandlers(params: {
   readonly branch: string;
   readonly featureBranch: string;
   readonly accumulatedFiles: Map<string, string>;
+  readonly deletedFilesSet?: ReadonlySet<string> | undefined;
   readonly devBranchPaths: readonly string[];
   readonly gh: GitHubRestHelper;
 }): {
@@ -315,7 +316,11 @@ export function buildRepoExplorationToolsAndHandlers(params: {
         }
         const matches = allPaths
           .filter((p) => {
-            const lower = p.toLowerCase();
+            const cleanP = p.trim().replace(/^\/+/, "");
+            if (params.deletedFilesSet?.has(cleanP)) {
+              return false;
+            }
+            const lower = cleanP.toLowerCase();
             return queryTokens.length === 0
               ? true
               : queryTokens.every((token) => lower.includes(token));
@@ -329,6 +334,9 @@ export function buildRepoExplorationToolsAndHandlers(params: {
           .replace(/^\/+/, "");
         if (!p || p.includes("..") || isSensitiveTaskBranchPath(p)) {
           return { error: `Access denied or invalid path: ${p}` };
+        }
+        if (params.deletedFilesSet?.has(p)) {
+          return { error: `File '${p}' was deleted in the current branch.` };
         }
         const q = String(args.query ?? "").trim();
         let content = params.accumulatedFiles.get(p) ?? null;
@@ -379,6 +387,9 @@ export function buildRepoExplorationToolsAndHandlers(params: {
           .replace(/^\/+/, "");
         if (!p || p.includes("..") || isSensitiveTaskBranchPath(p)) {
           return { error: `Access denied or invalid path: ${p}` };
+        }
+        if (params.deletedFilesSet?.has(p)) {
+          return { error: `File '${p}' was deleted in the current branch.` };
         }
         let content = params.accumulatedFiles.get(p) ?? null;
         if (content === null) {

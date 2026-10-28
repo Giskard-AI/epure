@@ -103,6 +103,7 @@ export interface RunMultiAgentPrReviewInput {
     readonly path: string;
     readonly content: string;
   }>;
+  readonly deletedFiles?: readonly string[] | undefined;
   readonly workspaceFiles?:
     | ReadonlyMap<string, string>
     | Readonly<Record<string, string>>
@@ -399,6 +400,12 @@ export function buildReviewerInspectionTools(input: RunMultiAgentPrReviewInput):
   for (const f of input.changedFiles) {
     allFiles.set(f.path.replace(/^\/+/, ""), f.content);
   }
+  const deletedSet = new Set(
+    (input.deletedFiles ?? []).map((p) => p.trim().replace(/^\/+/, "")).filter(Boolean)
+  );
+  for (const delPath of deletedSet) {
+    allFiles.delete(delPath);
+  }
 
   const changedSet = new Set(
     input.changedFiles.map((f) => f.path.replace(/^\/+/, ""))
@@ -481,6 +488,13 @@ export function buildReviewerInspectionTools(input: RunMultiAgentPrReviewInput):
     },
     read_file: (args) => {
       const rawPath = String(args.path ?? "").trim().replace(/^\/+/, "");
+      if (deletedSet.has(rawPath)) {
+        return {
+          path: rawPath,
+          deleted_in_pr: true,
+          status: "DELETED — This file was permanently removed in this Pull Request and no longer exists in the workspace."
+        };
+      }
       const content = allFiles.get(rawPath);
       if (content === undefined) {
         return {
@@ -498,6 +512,13 @@ export function buildReviewerInspectionTools(input: RunMultiAgentPrReviewInput):
     },
     read_line_range: (args) => {
       const rawPath = String(args.path ?? "").trim().replace(/^\/+/, "");
+      if (deletedSet.has(rawPath)) {
+        return {
+          path: rawPath,
+          deleted_in_pr: true,
+          status: "DELETED — This file was permanently removed in this Pull Request and no longer exists in the workspace."
+        };
+      }
       const content = allFiles.get(rawPath);
       if (content === undefined) {
         return {
@@ -582,12 +603,24 @@ async function executeSingleReviewerPass(params: {
     };
   }
 
-  const fullFilesDump = input.changedFiles
-    .map(
+  const deletedFilesSection =
+    input.deletedFiles && input.deletedFiles.length > 0
+      ? [
+          "### Deleted Files in PR:",
+          ...input.deletedFiles.map(
+            (p) => `- \`${p.trim().replace(/^\/+/, "")}\` (DELETED from repository)`
+          ),
+          ""
+        ].join("\n")
+      : "";
+
+  const fullFilesDump = [
+    ...(deletedFilesSection ? [deletedFilesSection] : []),
+    ...input.changedFiles.map(
       (f) =>
         `--- FILE: ${f.path} (${f.content.split("\n").length} lines) ---\n${formatFileWithLineNumbers(f.content)}`
     )
-    .join("\n\n");
+  ].join("\n\n");
 
   const reviewerTools = buildReviewerInspectionTools(input);
 

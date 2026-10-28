@@ -617,18 +617,53 @@ export function createGitHubRestHelper(params: {
         });
       }
 
+      const pendingDeletedPaths: string[] = [];
       for (const delPath of input.deletedFiles ?? []) {
         const cleanPath = delPath.trim().replace(/^\/+/, "");
         if (!cleanPath || seenTreePaths.has(cleanPath)) {
           continue;
         }
         seenTreePaths.add(cleanPath);
-        treeEntries.push({
-          path: cleanPath,
-          mode: "100644",
-          type: "blob",
-          sha: null
-        });
+        pendingDeletedPaths.push(cleanPath);
+      }
+
+      if (pendingDeletedPaths.length > 0) {
+        let existingTreePaths: Set<string> | null = null;
+        try {
+          const baseTreeListing = await apiRequest<{
+            tree?: Array<{ path?: string; type?: string }>;
+          }>(
+            "GET",
+            `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(baseTreeSha)}?recursive=1`,
+            undefined,
+            true
+          );
+          if (Array.isArray(baseTreeListing.data?.tree)) {
+            existingTreePaths = new Set(
+              baseTreeListing.data.tree
+                .filter((e) => e.type === "blob" && typeof e.path === "string")
+                .map((e) => e.path!.trim().replace(/^\/+/, ""))
+            );
+          }
+        } catch {
+          existingTreePaths = null;
+        }
+
+        for (const cleanPath of pendingDeletedPaths) {
+          if (existingTreePaths && !existingTreePaths.has(cleanPath)) {
+            continue;
+          }
+          treeEntries.push({
+            path: cleanPath,
+            mode: "100644",
+            type: "blob",
+            sha: null
+          });
+        }
+      }
+
+      if (treeEntries.length === 0) {
+        return parentCommitSha;
       }
 
       const newTree = await apiRequest<{ sha: string }>(

@@ -746,6 +746,7 @@ export async function runTicketExecutionLoop(
               branch: params.featureBranch,
               featureBranch: params.featureBranch,
               accumulatedFiles: params.accumulatedFiles,
+              deletedFilesSet: ticketDeletedFilesSet,
               devBranchPaths: params.devBranchPaths,
               gh: params.gh
             }),
@@ -914,6 +915,7 @@ export async function runTicketExecutionLoop(
           glossaryMarkdown: params.issue.body,
           designMarkdown: params.trustedBaseDesignMarkdown,
           changedFiles: impl.files,
+          deletedFiles: Array.from(ticketDeletedFilesSet),
           workspaceFiles: params.accumulatedFiles,
           trustedBaseBranchFiles: params.trustedBaseFilesMap,
           isReReviewPass: passParams.isReReviewPass,
@@ -1145,6 +1147,7 @@ export async function runTicketExecutionLoop(
               branch: taskBranch,
               featureBranch: params.featureBranch,
               accumulatedFiles: params.accumulatedFiles,
+              deletedFilesSet: ticketDeletedFilesSet,
               devBranchPaths: params.devBranchPaths,
               gh: params.gh
             }),
@@ -1267,6 +1270,7 @@ export async function runTicketExecutionLoop(
                 branch: taskBranch,
                 featureBranch: params.featureBranch,
                 accumulatedFiles: params.accumulatedFiles,
+                deletedFilesSet: ticketDeletedFilesSet,
                 devBranchPaths: params.devBranchPaths,
                 gh: params.gh
               }),
