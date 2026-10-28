@@ -554,7 +554,7 @@ describe("5. Pre-bundled CLI (dist/cli/setup-repo.mjs) & skill (.agents/skills/s
       expect(sandboxSteps).toContain("landrun bubblewrap");
       expect(sandboxSteps).toContain("# renovate: datasource=github-releases depName=rtk-ai/rtk");
       expect(sandboxSteps).toContain(PINNED_RTK_VERSION);
-      expect(sandboxSteps).toContain("sha256sum -c -");
+      expect(sandboxSteps).toContain("sha256sum --check --ignore-missing");
       expect(sandboxSteps).toContain("RTK_TELEMETRY_DISABLED=1");
       expect(sandboxSteps).toContain("RTK_RECALL=0");
     }

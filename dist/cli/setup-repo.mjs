@@ -408,6 +408,31 @@ var PINNED_ACTIONS_SETUP_NODE_SHA = "actions/setup-node@949feb2413d6458794dcd249
 var PINNED_ACTIONS_SETUP_PYTHON_SHA = "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0";
 var PINNED_ACTIONS_SETUP_GO_SHA = "actions/setup-go@41dfa10bad2bb2ae585af6ee5bb4d7d973ad74ed # v5.5.0";
 var PINNED_ZIZMOR_ACTION_SHA = "zizmorcore/zizmor-action@85b2b9fb8e3325e7a23d7d0a9d7ba5ae0f999e3e # v0.7.1";
+var PINNED_RTK_VERSION = "v1.0.1";
+var SAFE_RTK_VERSION_PATTERN = /^v?[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/;
+function buildSandboxToolingSetupSteps(rtkVersion = PINNED_RTK_VERSION) {
+  const safeRtkVersion = SAFE_RTK_VERSION_PATTERN.test(rtkVersion.trim()) ? rtkVersion.trim() : PINNED_RTK_VERSION;
+  return [
+    "      - name: Provision Ubuntu 26.04 kernel sandbox (landrun + bubblewrap) & stateless RTK",
+    "        run: |",
+    "          sudo apt-get update -qq",
+    "          sudo apt-get install -y --no-install-recommends landrun bubblewrap ca-certificates curl",
+    "          # renovate: datasource=github-releases depName=rtk-ai/rtk",
+    `          RTK_VERSION="${safeRtkVersion}"`,
+    '          RTK_ARCHIVE="rtk-x86_64-unknown-linux-musl.tar.gz"',
+    '          curl -fsSL "https://github.com/rtk-ai/rtk/releases/download/${RTK_VERSION}/${RTK_ARCHIVE}" -o "/tmp/${RTK_ARCHIVE}"',
+    '          curl -fsSL "https://github.com/rtk-ai/rtk/releases/download/${RTK_VERSION}/checksums.txt" -o "/tmp/rtk-checksums.txt"',
+    "          (cd /tmp && sha256sum --check --ignore-missing rtk-checksums.txt)",
+    '          mkdir -p "$RUNNER_TEMP/bin"',
+    '          tar -xzf "/tmp/${RTK_ARCHIVE}" -C "$RUNNER_TEMP/bin" rtk',
+    '          chmod 0755 "$RUNNER_TEMP/bin/rtk"',
+    '          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"',
+    '          echo "RTK_TELEMETRY_DISABLED=1" >> "$GITHUB_ENV"',
+    '          echo "RTK_RECALL=0" >> "$GITHUB_ENV"',
+    '          echo "RTK_TEE=0" >> "$GITHUB_ENV"',
+    '          echo "NO_COLOR=1" >> "$GITHUB_ENV"'
+  ];
+}
 function parseMakefileTargets(makefileContent) {
   const targets = /* @__PURE__ */ new Set();
   for (const line of makefileContent.split("\n")) {
@@ -2364,6 +2389,7 @@ function buildCallerWorkflows(pinnedSha, stack, jobTimeoutMinutes = DEFAULT_AGEN
         "      pull-requests: write # open, review, and squash-merge task PRs",
         "      checks: write # publish ai-review, impeccable-gate, and PR title check runs",
         "    steps:",
+        ...buildSandboxToolingSetupSteps(),
         "      - name: Run pre-bundled EPURE issue orchestrator",
         "        id: orchestrate",
         `        uses: Giskard-AI/epure/actions/orchestrate-issue@${pinnedSha} # v1.1.0`,

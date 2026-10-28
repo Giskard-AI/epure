@@ -1489,10 +1489,16 @@ function parseRetryAfterSeconds(headerVal, bodyText, nowMs = Date.now()) {
   }
   return void 0;
 }
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 function parseProviderErrorEnvelope(bodyText) {
   try {
     const parsed = JSON.parse(bodyText);
-    const errObj = parsed && typeof parsed.error === "object" && parsed.error !== null ? parsed.error : parsed;
+    if (!isRecord(parsed)) {
+      return { hasRetryInfo: false, quotaIds: [] };
+    }
+    const errObj = isRecord(parsed.error) ? parsed.error : parsed;
     const code = typeof errObj.code === "string" ? errObj.code : void 0;
     const type = typeof errObj.type === "string" ? errObj.type : void 0;
     const status = typeof errObj.status === "string" ? errObj.status : void 0;
@@ -1501,22 +1507,18 @@ function parseProviderErrorEnvelope(bodyText) {
     const quotaIds = [];
     if (Array.isArray(errObj.details)) {
       for (const detail of errObj.details) {
-        if (!detail || typeof detail !== "object") continue;
-        const d = detail;
-        const detailType = typeof d["@type"] === "string" ? d["@type"] : "";
-        if (detailType.endsWith("google.rpc.RetryInfo") && typeof d.retryDelay === "string") {
+        if (!isRecord(detail)) continue;
+        const detailType = typeof detail["@type"] === "string" ? detail["@type"] : "";
+        if (detailType.endsWith("google.rpc.RetryInfo") && typeof detail.retryDelay === "string") {
           hasRetryInfo = true;
         }
-        if (detailType.endsWith("google.rpc.ErrorInfo") && typeof d.reason === "string") {
-          errorInfoReason = d.reason;
+        if (detailType.endsWith("google.rpc.ErrorInfo") && typeof detail.reason === "string") {
+          errorInfoReason = detail.reason;
         }
-        if (detailType.endsWith("google.rpc.QuotaFailure") && Array.isArray(d.violations)) {
-          for (const v of d.violations) {
-            if (v && typeof v === "object") {
-              const qId = v.quotaId;
-              if (typeof qId === "string") {
-                quotaIds.push(qId);
-              }
+        if (detailType.endsWith("google.rpc.QuotaFailure") && Array.isArray(detail.violations)) {
+          for (const v of detail.violations) {
+            if (isRecord(v) && typeof v.quotaId === "string") {
+              quotaIds.push(v.quotaId);
             }
           }
         }
@@ -1760,7 +1762,8 @@ function buildSanitizedSandboxEnv(runnerEnv, proxy) {
   return sanitized;
 }
 function buildLandrunInvocation(params) {
-  const resolvedCwd = resolve(params.cwd);
+  const sanitizeLandrunPath = (p) => p.replace(/,/g, "");
+  const resolvedCwd = sanitizeLandrunPath(resolve(params.cwd));
   const roxPaths = /* @__PURE__ */ new Set([
     "/usr",
     "/bin",
@@ -1770,11 +1773,11 @@ function buildLandrunInvocation(params) {
     "/opt"
   ]);
   if (params.command.startsWith("/")) {
-    roxPaths.add(dirname(resolve(params.command)));
+    roxPaths.add(sanitizeLandrunPath(dirname(resolve(params.command))));
   }
   const rwxPaths = /* @__PURE__ */ new Set([resolvedCwd, "/tmp"]);
   if (params.networkPolicy === "https_only") {
-    const home = params.sanitizedEnv.HOME?.trim();
+    const home = sanitizeLandrunPath(params.sanitizedEnv.HOME?.trim() ?? "");
     if (home) {
       rwxPaths.add(`${home}/.npm`);
       rwxPaths.add(`${home}/.cache`);
@@ -1795,9 +1798,6 @@ function buildLandrunInvocation(params) {
     }
   } else if (params.networkPolicy === "https_only") {
     landrunArgs.push("--connect-tcp", "443");
-    if (typeof params.proxyPort === "number" && params.proxyPort > 0) {
-      landrunArgs.push("--connect-tcp", String(params.proxyPort));
-    }
   }
   for (const key of Object.keys(params.sanitizedEnv).sort()) {
     landrunArgs.push("--env", key);
@@ -1884,12 +1884,18 @@ function buildKernelSandboxedCommand(input) {
     args: input.args
   };
 }
+var cachedDefaultCapabilities = null;
+var cachedDefaultCapabilitiesPath = "";
 function probeKernelSandboxCapabilities(runnerEnv = process.env) {
   if (process.platform !== "linux") {
     return { landrunAvailable: false, bubblewrapAvailable: false };
   }
+  const pathVal = runnerEnv.PATH ?? process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
+  if (cachedDefaultCapabilities !== null && cachedDefaultCapabilitiesPath === pathVal) {
+    return cachedDefaultCapabilities;
+  }
   const probeEnv = {
-    PATH: runnerEnv.PATH ?? process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin"
+    PATH: pathVal
   };
   let landrunAvailable = false;
   try {
@@ -1934,7 +1940,10 @@ function probeKernelSandboxCapabilities(runnerEnv = process.env) {
   } catch {
     bubblewrapAvailable = false;
   }
-  return { landrunAvailable, bubblewrapAvailable };
+  const result = { landrunAvailable, bubblewrapAvailable };
+  cachedDefaultCapabilities = result;
+  cachedDefaultCapabilitiesPath = pathVal;
+  return result;
 }
 function readRequestBody(req) {
   return new Promise((resolve3, reject) => {
@@ -2078,38 +2087,33 @@ async function runInUntrustedCodeSandbox(input) {
     const cwd = input.cwd ?? process.cwd();
     const timeoutMs = input.timeoutMs ?? 60 * 60 * 1e3;
     const proxyPort = parsePortFromProxyUrl(proxy.proxyUrl);
-    let spawnCommand = input.command;
-    let spawnArgs = args;
-    let kernelBackend = "none";
-    if (enforceKernelSandbox || input.kernelCapabilities !== void 0) {
-      const capabilities = input.kernelCapabilities ?? probeKernelSandboxCapabilities(input.runnerEnv);
-      const wrapped = buildKernelSandboxedCommand({
-        command: input.command,
-        args,
-        cwd,
-        sanitizedEnv,
-        networkPolicy,
-        proxyPort,
-        capabilities
-      });
-      kernelBackend = wrapped.backend;
-      if (wrapped.backend === "none" && enforceKernelSandbox) {
-        return {
-          isolated: false,
-          error_code: "SANDBOX_ISOLATION_UNAVAILABLE",
-          error_message: "Fail-closed: kernel sandbox backend (landrun/bubblewrap) is unavailable while EPURE_ENFORCE_KERNEL_SANDBOX=true (ADR-0030).",
-          exit_code: 1,
-          stdout: "",
-          stderr: "",
-          duration_ms: Date.now() - startMs,
-          proxy_url: "",
-          kernel_backend: "none",
-          network_policy: networkPolicy
-        };
-      }
-      spawnCommand = wrapped.command;
-      spawnArgs = wrapped.args;
+    const capabilities = input.kernelCapabilities ?? probeKernelSandboxCapabilities(input.runnerEnv);
+    const wrapped = buildKernelSandboxedCommand({
+      command: input.command,
+      args,
+      cwd,
+      sanitizedEnv,
+      networkPolicy,
+      proxyPort,
+      capabilities
+    });
+    const kernelBackend = wrapped.backend;
+    if (wrapped.backend === "none" && enforceKernelSandbox) {
+      return {
+        isolated: false,
+        error_code: "SANDBOX_ISOLATION_UNAVAILABLE",
+        error_message: "Fail-closed: kernel sandbox backend (landrun/bubblewrap) is unavailable while EPURE_ENFORCE_KERNEL_SANDBOX=true (ADR-0030).",
+        exit_code: 1,
+        stdout: "",
+        stderr: "",
+        duration_ms: Date.now() - startMs,
+        proxy_url: "",
+        kernel_backend: "none",
+        network_policy: networkPolicy
+      };
     }
+    const spawnCommand = wrapped.command;
+    const spawnArgs = wrapped.args;
     const childResult = await new Promise((resolvePromise) => {
       const child = spawn(spawnCommand, [...spawnArgs], {
         cwd,
@@ -2170,7 +2174,7 @@ var SENSITIVE_TASK_BRANCH_PATH_PATTERNS = [
 var SHELL_INJECTION_PATTERN = /[;|`><\r\n]|\$\(|\$\{\{/;
 var ANSI_ESCAPE_PATTERN = /\x1b\[[0-9;]*[A-Za-z]/g;
 var RTK_NOISE_LINE_PATTERN = /^(?:npm warn deprecated\b|npm notice\b|added \d+ packages\b|audited \d+ packages\b|found 0 vulnerabilities\b|Downloading https?:\/\/|Collecting [a-zA-Z0-9_.-]+\s*$|\s*\[[=>.\s-]{10,}\]\s*\d+%)/i;
-var RTK_IGNORED_PATH_NOISE_PATTERN = /(?:^|\s)(?:\.git\/|node_modules\/|__pycache__\/|\.venv\/|package-lock\.json|pnpm-lock\.yaml|[^\s]+\.min\.(?:js|css))(?:\s|$)/;
+var RTK_IGNORED_PATH_NOISE_PATTERN = /(?:^|\s)(?:\.git\/|node_modules\/|dist\/|target\/|__pycache__\/|\.venv\/|[^\s]+\.lock|package-lock\.json|pnpm-lock\.yaml|[^\s]+\.min\.(?:js|css))(?:\s|$)/;
 var DIAGNOSTIC_PRESERVE_PATTERN = /\b(?:error|fail|failed|failure|err!|assertionerror|typeerror|referenceerror|syntaxerror|traceback|exception|panic)\b|^\s*at\s+/i;
 function formatAndCondenseStage1CommandOutput(input) {
   const rawCombined = `${input.stdout}
@@ -2970,13 +2974,6 @@ ${execRes.stderr}`
             }
           }
           const stepPassed = execRes.isolated && execRes.exit_code === 0;
-          const formattedOutput = formatAndCondenseStage1CommandOutput({
-            step: candidate.step,
-            rawCommand: tokenized.raw,
-            exitCode: execRes.exit_code,
-            stdout: execRes.stdout,
-            stderr: execRes.stderr
-          });
           executedSteps.push({
             step: candidate.step,
             raw_command: tokenized.raw,
@@ -2988,6 +2985,13 @@ ${execRes.stderr}`
             network_policy: stepNetworkPolicy
           });
           if (!stepPassed) {
+            const formattedOutput = formatAndCondenseStage1CommandOutput({
+              step: candidate.step,
+              rawCommand: tokenized.raw,
+              exitCode: execRes.exit_code,
+              stdout: execRes.stdout,
+              stderr: execRes.stderr
+            });
             targetPassed = false;
             targetFailureOutput = `[Target: ${target.name} (${target.working_directory})][${candidate.step}: ${tokenized.raw}] failed (exit ${execRes.exit_code}):
 ${formattedOutput}`;

@@ -71,20 +71,25 @@ const PINNED_ZIZMOR_ACTION_SHA =
 // # renovate: datasource=github-releases depName=rtk-ai/rtk
 export const PINNED_RTK_VERSION = "v1.0.1";
 
+const SAFE_RTK_VERSION_PATTERN = /^v?[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/;
+
 export function buildSandboxToolingSetupSteps(
   rtkVersion: string = PINNED_RTK_VERSION
 ): readonly string[] {
+  const safeRtkVersion = SAFE_RTK_VERSION_PATTERN.test(rtkVersion.trim())
+    ? rtkVersion.trim()
+    : PINNED_RTK_VERSION;
   return [
     "      - name: Provision Ubuntu 26.04 kernel sandbox (landrun + bubblewrap) & stateless RTK",
     "        run: |",
     "          sudo apt-get update -qq",
     "          sudo apt-get install -y --no-install-recommends landrun bubblewrap ca-certificates curl",
     "          # renovate: datasource=github-releases depName=rtk-ai/rtk",
-    `          RTK_VERSION="${rtkVersion}"`,
+    `          RTK_VERSION="${safeRtkVersion}"`,
     '          RTK_ARCHIVE="rtk-x86_64-unknown-linux-musl.tar.gz"',
     '          curl -fsSL "https://github.com/rtk-ai/rtk/releases/download/${RTK_VERSION}/${RTK_ARCHIVE}" -o "/tmp/${RTK_ARCHIVE}"',
     '          curl -fsSL "https://github.com/rtk-ai/rtk/releases/download/${RTK_VERSION}/checksums.txt" -o "/tmp/rtk-checksums.txt"',
-    '          (cd /tmp && grep "  ${RTK_ARCHIVE}$" rtk-checksums.txt | sha256sum -c -)',
+    "          (cd /tmp && sha256sum --check --ignore-missing rtk-checksums.txt)",
     '          mkdir -p "$RUNNER_TEMP/bin"',
     '          tar -xzf "/tmp/${RTK_ARCHIVE}" -C "$RUNNER_TEMP/bin" rtk',
     '          chmod 0755 "$RUNNER_TEMP/bin/rtk"',

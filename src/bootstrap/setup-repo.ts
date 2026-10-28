@@ -10,6 +10,7 @@ import {
 } from "../review/reviewer-roster.js";
 import {
   buildRenovateConfigJson,
+  buildSandboxToolingSetupSteps,
   buildStackAwareCiWorkflowYaml,
   buildZizmorConfigYaml,
   detectRepositoryStack,
@@ -1397,6 +1398,7 @@ function buildCallerWorkflows(
         "      pull-requests: write # open, review, and squash-merge task PRs",
         "      checks: write # publish ai-review, impeccable-gate, and PR title check runs",
         "    steps:",
+        ...buildSandboxToolingSetupSteps(),
         "      - name: Run pre-bundled EPURE issue orchestrator",
         "        id: orchestrate",
         `        uses: Giskard-AI/epure/actions/orchestrate-issue@${pinnedSha} # v1.1.0`,

@@ -16,6 +16,8 @@ export type SandboxErrorCode =
 
 export type SandboxNetworkPolicy = "proxy_only" | "https_only" | "offline";
 
+export type KernelSandboxBackend = "landrun" | "bubblewrap" | "none";
+
 export interface KernelSandboxCapabilities {
   readonly landrunAvailable: boolean;
   readonly bubblewrapAvailable: boolean;
@@ -32,7 +34,7 @@ export interface BuildKernelSandboxedCommandInput {
 }
 
 export interface BuiltKernelSandboxedCommand {
-  readonly backend: "landrun" | "bubblewrap" | "none";
+  readonly backend: KernelSandboxBackend;
   readonly command: string;
   readonly args: readonly string[];
 }
@@ -94,7 +96,7 @@ export interface SandboxExecutionResult {
   readonly stderr: string;
   readonly duration_ms: number;
   readonly proxy_url: string;
-  readonly kernel_backend?: "landrun" | "bubblewrap" | "none" | undefined;
+  readonly kernel_backend?: KernelSandboxBackend | undefined;
   readonly network_policy?: SandboxNetworkPolicy | undefined;
 }
 
@@ -150,7 +152,8 @@ export function buildLandrunInvocation(params: {
   readonly networkPolicy: SandboxNetworkPolicy;
   readonly proxyPort?: number | undefined;
 }): readonly string[] {
-  const resolvedCwd = resolve(params.cwd);
+  const sanitizeLandrunPath = (p: string): string => p.replace(/,/g, "");
+  const resolvedCwd = sanitizeLandrunPath(resolve(params.cwd));
   const roxPaths = new Set<string>([
     "/usr",
     "/bin",
@@ -160,12 +163,12 @@ export function buildLandrunInvocation(params: {
     "/opt"
   ]);
   if (params.command.startsWith("/")) {
-    roxPaths.add(dirname(resolve(params.command)));
+    roxPaths.add(sanitizeLandrunPath(dirname(resolve(params.command))));
   }
 
   const rwxPaths = new Set<string>([resolvedCwd, "/tmp"]);
   if (params.networkPolicy === "https_only") {
-    const home = params.sanitizedEnv.HOME?.trim();
+    const home = sanitizeLandrunPath(params.sanitizedEnv.HOME?.trim() ?? "");
     if (home) {
       rwxPaths.add(`${home}/.npm`);
       rwxPaths.add(`${home}/.cache`);
@@ -188,9 +191,6 @@ export function buildLandrunInvocation(params: {
     }
   } else if (params.networkPolicy === "https_only") {
     landrunArgs.push("--connect-tcp", "443");
-    if (typeof params.proxyPort === "number" && params.proxyPort > 0) {
-      landrunArgs.push("--connect-tcp", String(params.proxyPort));
-    }
   }
   // When networkPolicy === "offline", zero --connect-tcp flags are emitted.
 
@@ -291,6 +291,9 @@ export function buildKernelSandboxedCommand(
   };
 }
 
+let cachedDefaultCapabilities: KernelSandboxCapabilities | null = null;
+let cachedDefaultCapabilitiesPath = "";
+
 export function probeKernelSandboxCapabilities(
   runnerEnv: Readonly<Record<string, string | undefined>> = process.env
 ): KernelSandboxCapabilities {
@@ -298,8 +301,17 @@ export function probeKernelSandboxCapabilities(
     return { landrunAvailable: false, bubblewrapAvailable: false };
   }
 
+  const pathVal =
+    runnerEnv.PATH ?? process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
+  if (
+    cachedDefaultCapabilities !== null &&
+    cachedDefaultCapabilitiesPath === pathVal
+  ) {
+    return cachedDefaultCapabilities;
+  }
+
   const probeEnv: NodeJS.ProcessEnv = {
-    PATH: runnerEnv.PATH ?? process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin"
+    PATH: pathVal
   };
 
   let landrunAvailable = false;
@@ -347,7 +359,10 @@ export function probeKernelSandboxCapabilities(
     bubblewrapAvailable = false;
   }
 
-  return { landrunAvailable, bubblewrapAvailable };
+  const result = { landrunAvailable, bubblewrapAvailable };
+  cachedDefaultCapabilities = result;
+  cachedDefaultCapabilitiesPath = pathVal;
+  return result;
 }
 
 function readRequestBody(req: IncomingMessage): Promise<string> {
@@ -534,42 +549,36 @@ export async function runInUntrustedCodeSandbox(
     const timeoutMs = input.timeoutMs ?? 60 * 60 * 1000;
     const proxyPort = parsePortFromProxyUrl(proxy.proxyUrl);
 
-    let spawnCommand = input.command;
-    let spawnArgs: readonly string[] = args;
-    let kernelBackend: "landrun" | "bubblewrap" | "none" = "none";
-
-    if (enforceKernelSandbox || input.kernelCapabilities !== undefined) {
-      const capabilities =
-        input.kernelCapabilities ??
-        probeKernelSandboxCapabilities(input.runnerEnv);
-      const wrapped = buildKernelSandboxedCommand({
-        command: input.command,
-        args,
-        cwd,
-        sanitizedEnv,
-        networkPolicy,
-        proxyPort,
-        capabilities
-      });
-      kernelBackend = wrapped.backend;
-      if (wrapped.backend === "none" && enforceKernelSandbox) {
-        return {
-          isolated: false,
-          error_code: "SANDBOX_ISOLATION_UNAVAILABLE",
-          error_message:
-            "Fail-closed: kernel sandbox backend (landrun/bubblewrap) is unavailable while EPURE_ENFORCE_KERNEL_SANDBOX=true (ADR-0030).",
-          exit_code: 1,
-          stdout: "",
-          stderr: "",
-          duration_ms: Date.now() - startMs,
-          proxy_url: "",
-          kernel_backend: "none",
-          network_policy: networkPolicy
-        };
-      }
-      spawnCommand = wrapped.command;
-      spawnArgs = wrapped.args;
+    const capabilities =
+      input.kernelCapabilities ??
+      probeKernelSandboxCapabilities(input.runnerEnv);
+    const wrapped = buildKernelSandboxedCommand({
+      command: input.command,
+      args,
+      cwd,
+      sanitizedEnv,
+      networkPolicy,
+      proxyPort,
+      capabilities
+    });
+    const kernelBackend: KernelSandboxBackend = wrapped.backend;
+    if (wrapped.backend === "none" && enforceKernelSandbox) {
+      return {
+        isolated: false,
+        error_code: "SANDBOX_ISOLATION_UNAVAILABLE",
+        error_message:
+          "Fail-closed: kernel sandbox backend (landrun/bubblewrap) is unavailable while EPURE_ENFORCE_KERNEL_SANDBOX=true (ADR-0030).",
+        exit_code: 1,
+        stdout: "",
+        stderr: "",
+        duration_ms: Date.now() - startMs,
+        proxy_url: "",
+        kernel_backend: "none",
+        network_policy: networkPolicy
+      };
     }
+    const spawnCommand = wrapped.command;
+    const spawnArgs = wrapped.args;
 
     const childResult = await new Promise<{
       exitCode: number;

@@ -164,7 +164,7 @@ const RTK_NOISE_LINE_PATTERN =
   /^(?:npm warn deprecated\b|npm notice\b|added \d+ packages\b|audited \d+ packages\b|found 0 vulnerabilities\b|Downloading https?:\/\/|Collecting [a-zA-Z0-9_.-]+\s*$|\s*\[[=>.\s-]{10,}\]\s*\d+%)/i;
 
 const RTK_IGNORED_PATH_NOISE_PATTERN =
-  /(?:^|\s)(?:\.git\/|node_modules\/|__pycache__\/|\.venv\/|package-lock\.json|pnpm-lock\.yaml|[^\s]+\.min\.(?:js|css))(?:\s|$)/;
+  /(?:^|\s)(?:\.git\/|node_modules\/|dist\/|target\/|__pycache__\/|\.venv\/|[^\s]+\.lock|package-lock\.json|pnpm-lock\.yaml|[^\s]+\.min\.(?:js|css))(?:\s|$)/;
 
 const DIAGNOSTIC_PRESERVE_PATTERN =
   /\b(?:error|fail|failed|failure|err!|assertionerror|typeerror|referenceerror|syntaxerror|traceback|exception|panic)\b|^\s*at\s+/i;
@@ -1181,13 +1181,6 @@ export async function runPolyglotStage1Verification(
           }
 
           const stepPassed = execRes.isolated && execRes.exit_code === 0;
-          const formattedOutput = formatAndCondenseStage1CommandOutput({
-            step: candidate.step,
-            rawCommand: tokenized.raw,
-            exitCode: execRes.exit_code,
-            stdout: execRes.stdout,
-            stderr: execRes.stderr
-          });
 
           executedSteps.push({
             step: candidate.step,
@@ -1201,6 +1194,13 @@ export async function runPolyglotStage1Verification(
           });
 
           if (!stepPassed) {
+            const formattedOutput = formatAndCondenseStage1CommandOutput({
+              step: candidate.step,
+              rawCommand: tokenized.raw,
+              exitCode: execRes.exit_code,
+              stdout: execRes.stdout,
+              stderr: execRes.stderr
+            });
             targetPassed = false;
             targetFailureOutput = `[Target: ${target.name} (${target.working_directory})][${candidate.step}: ${tokenized.raw}] failed (exit ${execRes.exit_code}):\n${formattedOutput}`;
             break;

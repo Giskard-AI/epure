@@ -211,13 +211,17 @@ interface ParsedProviderErrorEnvelope {
   readonly quotaIds: readonly string[];
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function parseProviderErrorEnvelope(bodyText: string): ParsedProviderErrorEnvelope {
   try {
-    const parsed = JSON.parse(bodyText) as Record<string, unknown>;
-    const errObj =
-      parsed && typeof parsed.error === "object" && parsed.error !== null
-        ? (parsed.error as Record<string, unknown>)
-        : parsed;
+    const parsed: unknown = JSON.parse(bodyText);
+    if (!isRecord(parsed)) {
+      return { hasRetryInfo: false, quotaIds: [] };
+    }
+    const errObj = isRecord(parsed.error) ? parsed.error : parsed;
 
     const code = typeof errObj.code === "string" ? errObj.code : undefined;
     const type = typeof errObj.type === "string" ? errObj.type : undefined;
@@ -229,31 +233,27 @@ function parseProviderErrorEnvelope(bodyText: string): ParsedProviderErrorEnvelo
 
     if (Array.isArray(errObj.details)) {
       for (const detail of errObj.details) {
-        if (!detail || typeof detail !== "object") continue;
-        const d = detail as Record<string, unknown>;
-        const detailType = typeof d["@type"] === "string" ? d["@type"] : "";
+        if (!isRecord(detail)) continue;
+        const detailType = typeof detail["@type"] === "string" ? detail["@type"] : "";
         if (
           detailType.endsWith("google.rpc.RetryInfo") &&
-          typeof d.retryDelay === "string"
+          typeof detail.retryDelay === "string"
         ) {
           hasRetryInfo = true;
         }
         if (
           detailType.endsWith("google.rpc.ErrorInfo") &&
-          typeof d.reason === "string"
+          typeof detail.reason === "string"
         ) {
-          errorInfoReason = d.reason;
+          errorInfoReason = detail.reason;
         }
         if (
           detailType.endsWith("google.rpc.QuotaFailure") &&
-          Array.isArray(d.violations)
+          Array.isArray(detail.violations)
         ) {
-          for (const v of d.violations) {
-            if (v && typeof v === "object") {
-              const qId = (v as Record<string, unknown>).quotaId;
-              if (typeof qId === "string") {
-                quotaIds.push(qId);
-              }
+          for (const v of detail.violations) {
+            if (isRecord(v) && typeof v.quotaId === "string") {
+              quotaIds.push(v.quotaId);
             }
           }
         }

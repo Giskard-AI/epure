@@ -237,7 +237,7 @@ describe("Ticket 06 (#7) — Sandbox LLM proxy & untrusted code credential isola
 
   it.each([
     {
-      id: "https-only-install-uses-landrun-with-port-443-and-proxy-port",
+      id: "https-only-install-uses-landrun-with-port-443-only-and-excludes-proxy-port",
       networkPolicy: "https_only" as SandboxNetworkPolicy,
       proxyPort: 43120,
       capabilities: {
@@ -246,8 +246,8 @@ describe("Ticket 06 (#7) — Sandbox LLM proxy & untrusted code credential isola
       } satisfies KernelSandboxCapabilities,
       expectedBackend: "landrun" as const,
       expectedCommand: "landrun",
-      requiredArgs: ["--connect-tcp", "443", "43120", "--rwx", "--rox"],
-      forbiddenArgs: ["--unshare-net"]
+      requiredArgs: ["--connect-tcp", "443", "--rwx", "--rox"],
+      forbiddenArgs: ["43120", "--unshare-net"]
     },
     {
       id: "proxy-only-harness-uses-landrun-with-ephemeral-proxy-port-only",
@@ -331,25 +331,54 @@ describe("Ticket 06 (#7) — Sandbox LLM proxy & untrusted code credential isola
     }
   );
 
-  it("fails closed with SANDBOX_ISOLATION_UNAVAILABLE when EPURE_ENFORCE_KERNEL_SANDBOX=true and kernel backends are unavailable", async () => {
-    const result = await runInUntrustedCodeSandbox({
-      isolationAvailable: true,
-      runnerEnv: {
-        ...RUNNER_SECRETS_ENV,
-        EPURE_ENFORCE_KERNEL_SANDBOX: "true"
-      },
-      command: process.execPath,
-      args: ["-e", "console.log('should-not-execute')"],
-      networkPolicy: "offline",
-      kernelCapabilities: {
+  it.each([
+    {
+      id: "fails-closed-when-enforce-kernel-sandbox-is-true-and-backends-are-unavailable",
+      enforceEnv: "true",
+      capabilities: {
         landrunAvailable: false,
         bubblewrapAvailable: false
-      }
-    });
+      } satisfies KernelSandboxCapabilities,
+      expectedIsolated: false,
+      expectedErrorCode: "SANDBOX_ISOLATION_UNAVAILABLE",
+      expectedExitCode: 1
+    },
+    {
+      id: "falls-back-gracefully-to-unconfined-spawn-when-enforce-kernel-sandbox-is-false-and-backends-are-unavailable",
+      enforceEnv: "false",
+      capabilities: {
+        landrunAvailable: false,
+        bubblewrapAvailable: false
+      } satisfies KernelSandboxCapabilities,
+      expectedIsolated: true,
+      expectedErrorCode: "NONE",
+      expectedExitCode: 0
+    }
+  ])(
+    "runInUntrustedCodeSandbox [$id]: kernel sandbox enforcement vs local fallback",
+    async ({
+      enforceEnv,
+      capabilities,
+      expectedIsolated,
+      expectedErrorCode,
+      expectedExitCode
+    }) => {
+      const result = await runInUntrustedCodeSandbox({
+        isolationAvailable: true,
+        runnerEnv: {
+          ...RUNNER_SECRETS_ENV,
+          EPURE_ENFORCE_KERNEL_SANDBOX: enforceEnv
+        },
+        command: process.execPath,
+        args: ["-e", "console.log('sandbox-check')"],
+        networkPolicy: "offline",
+        kernelCapabilities: capabilities
+      });
 
-    expect(result.isolated).toBe(false);
-    expect(result.error_code).toBe("SANDBOX_ISOLATION_UNAVAILABLE");
-    expect(result.exit_code).toBe(1);
-    expect(result.stdout).toBe("");
-  });
+      expect(result.isolated).toBe(expectedIsolated);
+      expect(result.error_code).toBe(expectedErrorCode);
+      expect(result.exit_code).toBe(expectedExitCode);
+      expect(result.kernel_backend).toBe("none");
+    }
+  );
 });

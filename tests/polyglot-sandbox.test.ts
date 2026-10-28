@@ -543,7 +543,7 @@ describe("EPURE v1.4.0 — Polyglot Verification Discovery, Workspace Sandbox & 
 
     it.each([
       {
-        id: "enforces-https-only-for-install-and-offline-for-codegen-typecheck-lint-test",
+        id: "enforces-https-only-for-node-install-and-offline-for-codegen-typecheck-lint-test",
         target: {
           name: "api",
           working_directory: ".",
@@ -561,6 +561,23 @@ describe("EPURE v1.4.0 — Polyglot Verification Discovery, Workspace Sandbox & 
           { command: "npm run typecheck", policy: "offline" },
           { command: "npm run lint", policy: "offline" },
           { command: "npm test", policy: "offline" }
+        ]
+      },
+      {
+        id: "enforces-https-only-for-python-uv-sync-and-offline-for-ruff-and-pytest",
+        target: {
+          name: "ml-worker",
+          working_directory: ".",
+          kind: "python" as const,
+          path_patterns: ["**"],
+          install_command: "uv sync",
+          lint_command: "ruff check .",
+          test_command: "pytest -q"
+        },
+        expectedStepPolicies: [
+          { command: "uv sync", policy: "https_only" },
+          { command: "ruff check .", policy: "offline" },
+          { command: "pytest -q", policy: "offline" }
         ]
       }
     ])("$id", async ({ target, expectedStepPolicies }) => {
