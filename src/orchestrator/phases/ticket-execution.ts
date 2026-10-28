@@ -6,16 +6,13 @@ import {
 import type { parseAgentsYaml } from "../../bootstrap/setup-repo.js";
 import {
   discoverExpectedExternalWorkflows,
+  resolveLlmEscalationReason,
   waitForExternalCiChecks,
   type WaitForExternalCiChecksResult
 } from "../../execution/external-ci-gate.js";
 import { reconcileProvenTicketDependencies } from "../../execution/proven-dependency-unblocker.js";
 import { evaluateReviewFeedbackTrigger } from "../../execution/review-loop-guard.js";
-import {
-  AuthenticationError,
-  LLMError,
-  QuotaExhaustedError
-} from "../../llm/errors.js";
+import { LLMError } from "../../llm/errors.js";
 import { runMultiAgentPrReviewPass } from "../../review/multi-agent-pr-review.js";
 import type { ReviewerAgentName } from "../../review/reviewer-roster.js";
 import { generateSemanticSquashCommitFromDiff } from "../../review/squash-commit-generator.js";
@@ -820,7 +817,7 @@ export async function runTicketExecutionLoop(
 
         if (!testCheck.passed) {
           const escalated = await params.escalateToNeedsHuman({
-            reason: "code_fix_attempts_exhausted",
+            reason: "remediation_exhausted",
             ticketNumber: ticket.ticketIssueNumber,
             branch: taskBranch,
             codeFixAttemptsUsed: fixAttempt,
@@ -1351,7 +1348,7 @@ export async function runTicketExecutionLoop(
             continue;
           }
           const escalated = await params.escalateToNeedsHuman({
-            reason: "code_fix_attempts_exhausted",
+            reason: "remediation_exhausted",
             ticketNumber: ticket.ticketIssueNumber,
             branch: taskBranch,
             prNumber: taskPr.number,
@@ -1496,13 +1493,8 @@ export async function runTicketExecutionLoop(
       );
     } catch (err) {
       if (err instanceof LLMError) {
-        const reason =
-          err instanceof AuthenticationError ||
-          err instanceof QuotaExhaustedError
-            ? "llm_quota_or_auth_failure"
-            : "transient_llm_api_exhausted";
         const escalated = await params.escalateToNeedsHuman({
-          reason,
+          reason: resolveLlmEscalationReason(err),
           ticketNumber: ticket.ticketIssueNumber,
           branch: taskBranch,
           phase: "implementation",

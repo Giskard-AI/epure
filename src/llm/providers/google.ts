@@ -46,7 +46,9 @@ export interface GoogleProviderExecutionInput<T = unknown> {
     url: string,
     init: RequestInit
   ) => Promise<Response>;
-  readonly onStructuredValidationRetry?: (() => Promise<void> | void) | undefined;
+  readonly onStructuredValidationRetry?:
+    | ((retryIndex?: number) => Promise<void> | void)
+    | undefined;
 }
 
 export interface GoogleProviderExecutionOutput<T = unknown> {
@@ -217,30 +219,48 @@ export async function executeGoogleProvider<T = unknown>(
     }
 
     if (options.responseSchema) {
-      try {
-        const validated = parseAndValidateStructuredOutput(
-          text,
-          options.responseSchema
-        );
-        return { text, data: validated };
-      } catch (err) {
-        if (err instanceof StructuredOutputValidationError) {
-          await input.onStructuredValidationRetry?.();
-          const retryParts = await sendGenerateContent({
-            systemInstruction: {
-              parts: [{ text: effectiveSystemInstruction }]
-            },
-            contents,
-            generationConfig
-          });
-          const retryText = extractTextFromParts(retryParts).trim();
-          const validatedRetry = parseAndValidateStructuredOutput(
-            retryText,
+      let currentText = text;
+      const maxValidationRetries = input.onStructuredValidationRetry ? 2 : 0;
+      for (let valRetry = 0; ; valRetry += 1) {
+        try {
+          const validated = parseAndValidateStructuredOutput(
+            currentText,
             options.responseSchema
           );
-          return { text: retryText, data: validatedRetry };
+          return { text: currentText, data: validated };
+        } catch (err) {
+          if (
+            err instanceof StructuredOutputValidationError &&
+            input.onStructuredValidationRetry &&
+            valRetry < maxValidationRetries
+          ) {
+            await input.onStructuredValidationRetry(valRetry);
+            contents.push(
+              {
+                role: "model",
+                parts: [{ text: currentText || "{}" }]
+              },
+              {
+                role: "user",
+                parts: [
+                  {
+                    text: `Your previous JSON response failed schema validation: ${err.message}\nOutput ONLY a corrected, complete JSON object strictly matching the required schema.`
+                  }
+                ]
+              }
+            );
+            const retryParts = await sendGenerateContent({
+              systemInstruction: {
+                parts: [{ text: effectiveSystemInstruction }]
+              },
+              contents,
+              generationConfig
+            });
+            currentText = extractTextFromParts(retryParts).trim();
+            continue;
+          }
+          throw err;
         }
-        throw err;
       }
     }
 
@@ -400,10 +420,8 @@ export async function executeGoogleProvider<T = unknown>(
       }
     ];
 
-    const sendFinalStructuredTurn = async (): Promise<{
-      readonly text: string;
-      readonly data: T;
-    }> => {
+    const maxValidationRetries = input.onStructuredValidationRetry ? 2 : 0;
+    for (let valRetry = 0; ; valRetry += 1) {
       const finalParts = await sendGenerateContent({
         systemInstruction: {
           parts: [{ text: effectiveSystemInstruction }]
@@ -418,24 +436,37 @@ export async function executeGoogleProvider<T = unknown>(
       });
 
       const finalText = extractTextFromParts(finalParts).trim();
-      const validated = parseAndValidateStructuredOutput(
-        finalText,
-        options.responseSchema
-      );
-      return { text: finalText, data: validated };
-    };
-
-    try {
-      return await sendFinalStructuredTurn();
-    } catch (err) {
-      if (
-        err instanceof StructuredOutputValidationError &&
-        input.onStructuredValidationRetry
-      ) {
-        await input.onStructuredValidationRetry();
-        return await sendFinalStructuredTurn();
+      try {
+        const validated = parseAndValidateStructuredOutput(
+          finalText,
+          options.responseSchema
+        );
+        return { text: finalText, data: validated };
+      } catch (err) {
+        if (
+          err instanceof StructuredOutputValidationError &&
+          input.onStructuredValidationRetry &&
+          valRetry < maxValidationRetries
+        ) {
+          await input.onStructuredValidationRetry(valRetry);
+          finalContents.push(
+            {
+              role: "model",
+              parts: [{ text: finalText || "{}" }]
+            },
+            {
+              role: "user",
+              parts: [
+                {
+                  text: `Your previous JSON response failed schema validation: ${err.message}\nOutput ONLY a corrected, complete JSON object strictly matching the required schema.`
+                }
+              ]
+            }
+          );
+          continue;
+        }
+        throw err;
       }
-      throw err;
     }
   }
 

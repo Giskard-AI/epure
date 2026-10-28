@@ -6,14 +6,11 @@ import {
 import type { parseAgentsYaml } from "../../bootstrap/setup-repo.js";
 import {
   discoverExpectedExternalWorkflows,
+  resolveLlmEscalationReason,
   waitForExternalCiChecks,
   type WaitForExternalCiChecksResult
 } from "../../execution/external-ci-gate.js";
-import {
-  AuthenticationError,
-  LLMError,
-  QuotaExhaustedError
-} from "../../llm/errors.js";
+import { LLMError } from "../../llm/errors.js";
 import { prepareFeatureToDevPullRequest } from "../../planning/feature-to-dev-pr.js";
 import { runMultiAgentPrReviewPass } from "../../review/multi-agent-pr-review.js";
 import type { ReviewerAgentName } from "../../review/reviewer-roster.js";
@@ -682,14 +679,14 @@ export async function runFeatureIntegrationPhase(
           continue;
         }
         return await params.escalateToNeedsHuman({
-          reason: "code_fix_attempts_exhausted",
+          reason: "remediation_exhausted",
           ticketNumber: params.issueNumber,
           branch: params.featureBranch,
           prNumber: featurePr.number,
           prUrl: featurePr.html_url,
           featurePrUrl: featurePr.html_url,
           codeFixAttemptsUsed: featureReviewFixAttempt,
-          mustFixFindings: featureReview.must_fix_findings,
+          mustFixFindings: finalFeatureReview.must_fix_findings,
           diagnosticExcerpt: featureTestCheck.output.slice(-2000)
         });
       }
@@ -790,13 +787,8 @@ export async function runFeatureIntegrationPhase(
       }
     } catch (err) {
       if (err instanceof LLMError) {
-        const reason =
-          err instanceof AuthenticationError ||
-          err instanceof QuotaExhaustedError
-            ? "llm_quota_or_auth_failure"
-            : "transient_llm_api_exhausted";
         return await params.escalateToNeedsHuman({
-          reason,
+          reason: resolveLlmEscalationReason(err),
           ticketNumber: params.issueNumber,
           branch: params.featureBranch,
           phase: "implementation",

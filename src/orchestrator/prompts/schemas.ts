@@ -646,7 +646,13 @@ export const GENERATED_TICKET_IMPLEMENTATION_SCHEMA: ResponseSchemaSpec<Generate
           items: { type: "string" }
         }
       },
-      required: ["commit_message", "test_summary"]
+      required: [
+        "commit_message",
+        "test_summary",
+        "files",
+        "patches",
+        "deleted_files"
+      ]
     },
     validate(parsed: unknown): GeneratedTicketImplementation {
       const obj = asRecord(parsed, "GeneratedTicketImplementation");

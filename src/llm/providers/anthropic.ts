@@ -1,7 +1,8 @@
 import {
   classifyHttpError,
   LLMError,
-  parseAndValidateStructuredOutput
+  parseAndValidateStructuredOutput,
+  StructuredOutputValidationError
 } from "../errors.js";
 import {
   buildProtectedSystemInstruction,
@@ -22,6 +23,9 @@ export interface AnthropicProviderExecutionInput<T = unknown> {
     url: string,
     init: RequestInit
   ) => Promise<Response>;
+  readonly onStructuredValidationRetry?:
+    | ((retryIndex?: number) => Promise<void> | void)
+    | undefined;
 }
 
 export interface AnthropicProviderExecutionOutput<T = unknown> {
@@ -212,11 +216,67 @@ export async function executeAnthropicProvider<T = unknown>(
     }
 
     if (options.responseSchema) {
-      const validated = parseAndValidateStructuredOutput(
-        text,
-        options.responseSchema
-      );
-      return { text, data: validated };
+      let currentText = text;
+      const maxValidationRetries = input.onStructuredValidationRetry ? 2 : 0;
+      for (let valRetry = 0; ; valRetry += 1) {
+        try {
+          const validated = parseAndValidateStructuredOutput(
+            currentText,
+            options.responseSchema
+          );
+          return { text: currentText, data: validated };
+        } catch (err) {
+          if (
+            err instanceof StructuredOutputValidationError &&
+            input.onStructuredValidationRetry &&
+            valRetry < maxValidationRetries
+          ) {
+            await input.onStructuredValidationRetry(valRetry);
+            messages.push(
+              {
+                role: "assistant",
+                content: currentText || "{}"
+              },
+              {
+                role: "user",
+                content: `Your previous JSON response failed schema validation: ${err.message}\nOutput ONLY a corrected, complete JSON object strictly matching the required schema.`
+              }
+            );
+            const retryBody: Record<string, unknown> = {
+              ...body,
+              messages,
+              ...(anthropicTools
+                ? { tools: anthropicTools, tool_choice: { type: "none" } }
+                : {})
+            };
+            const retryResponse = await executeRequest(url, {
+              method: "POST",
+              headers,
+              body: JSON.stringify(retryBody)
+            });
+            if (!retryResponse.ok) {
+              const errText = await retryResponse.text();
+              throw classifyHttpError({
+                status: retryResponse.status,
+                bodyText: errText,
+                provider: "anthropic",
+                model,
+                retryAfterHeader: retryResponse.headers.get("retry-after")
+              });
+            }
+            const retryData = (await retryResponse.json()) as {
+              content?: AnthropicContentBlock[];
+            };
+            currentText = (retryData.content ?? [])
+              .filter((b) => b.type === "text")
+              .map((b) => b.text ?? "")
+              .join("")
+              .trim();
+            continue;
+          }
+          throw err;
+        }
+      }
     }
 
     return { text };

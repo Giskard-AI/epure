@@ -2,7 +2,8 @@ import {
   BadRequestError,
   classifyHttpError,
   LLMError,
-  parseAndValidateStructuredOutput
+  parseAndValidateStructuredOutput,
+  StructuredOutputValidationError
 } from "../errors.js";
 import {
   buildProtectedSystemInstruction,
@@ -26,6 +27,9 @@ export interface OpenAIProviderExecutionInput<T = unknown> {
     url: string,
     init: RequestInit
   ) => Promise<Response>;
+  readonly onStructuredValidationRetry?:
+    | ((retryIndex?: number) => Promise<void> | void)
+    | undefined;
 }
 
 export interface OpenAIProviderExecutionOutput<T = unknown> {
@@ -339,11 +343,69 @@ export async function executeOpenAIProvider<T = unknown>(
     }
 
     if (options.responseSchema) {
-      const validated = parseAndValidateStructuredOutput(
-        text,
-        options.responseSchema
-      );
-      return { text, data: validated };
+      let currentText = text;
+      const maxValidationRetries = input.onStructuredValidationRetry ? 2 : 0;
+      for (let valRetry = 0; ; valRetry += 1) {
+        try {
+          const validated = parseAndValidateStructuredOutput(
+            currentText,
+            options.responseSchema
+          );
+          return { text: currentText, data: validated };
+        } catch (err) {
+          if (
+            err instanceof StructuredOutputValidationError &&
+            input.onStructuredValidationRetry &&
+            valRetry < maxValidationRetries
+          ) {
+            await input.onStructuredValidationRetry(valRetry);
+            messages.push(
+              {
+                role: "assistant",
+                content: currentText || "{}"
+              },
+              {
+                role: "user",
+                content: `Your previous JSON response failed schema validation: ${err.message}\nOutput ONLY a corrected, complete JSON object strictly matching the required schema.`
+              }
+            );
+            const retryBody: Record<string, unknown> = {
+              ...body,
+              messages,
+              ...(openAiTools
+                ? { tools: openAiTools, tool_choice: "none" }
+                : {})
+            };
+            const retryResponse = await executeRequest(url, {
+              method: "POST",
+              headers,
+              body: JSON.stringify(retryBody)
+            });
+            if (!retryResponse.ok) {
+              const errText = await retryResponse.text();
+              throw classifyHttpError({
+                status: retryResponse.status,
+                bodyText: errText,
+                provider,
+                model,
+                retryAfterHeader: retryResponse.headers.get("retry-after")
+              });
+            }
+            const retryData = (await retryResponse.json()) as {
+              choices?: Array<{
+                message?: {
+                  content?: string | null;
+                };
+              }>;
+            };
+            currentText = (
+              retryData.choices?.[0]?.message?.content ?? ""
+            ).trim();
+            continue;
+          }
+          throw err;
+        }
+      }
     }
 
     return { text };

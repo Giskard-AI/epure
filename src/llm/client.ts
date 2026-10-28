@@ -4,8 +4,7 @@ import {
   isTransientLLMError,
   LLMError,
   LLMTimeoutError,
-  RateLimitError,
-  StructuredOutputValidationError
+  RateLimitError
 } from "./errors.js";
 import { executeAnthropicProvider } from "./providers/anthropic.js";
 import { executeGoogleProvider } from "./providers/google.js";
@@ -404,12 +403,11 @@ export class LLMClient {
       }
     };
 
-    let structuredValidationRetried = false;
     const onStructuredValidationRetry =
       maxTransientRetries > 0
-        ? async () => {
-            structuredValidationRetried = true;
-            const backoffSec = backoffSeconds[0] ?? 0;
+        ? async (retryIndex = 0) => {
+            const backoffSec =
+              backoffSeconds[retryIndex] ?? backoffSeconds[0] ?? 0;
             totalTransientRetriesUsed += 1;
             await sleepMs(backoffSec * 1000);
           }
@@ -436,7 +434,8 @@ export class LLMClient {
           apiKey,
           providerConfig,
           options,
-          executeRequest
+          executeRequest,
+          onStructuredValidationRetry
         });
       }
 
@@ -446,33 +445,29 @@ export class LLMClient {
         apiKey,
         providerConfig,
         options,
-        executeRequest
+        executeRequest,
+        onStructuredValidationRetry
       });
     };
 
-    while (true) {
-      try {
-        const result = await invokeProvider();
-        return {
-          text: result.text,
-          ...(result.data !== undefined ? { data: result.data } : {}),
-          provider,
-          model,
-          attempts: 1 + totalTransientRetriesUsed + totalRateLimitWaitsUsed,
-          transientRetriesUsed: totalTransientRetriesUsed,
-          rateLimitWaitsUsed: totalRateLimitWaitsUsed
-        };
-      } catch (err) {
-        if (
-          err instanceof StructuredOutputValidationError &&
-          !structuredValidationRetried &&
-          onStructuredValidationRetry
-        ) {
-          await onStructuredValidationRetry();
-          continue;
-        }
-        throw err;
+    try {
+      const result = await invokeProvider();
+      return {
+        text: result.text,
+        ...(result.data !== undefined ? { data: result.data } : {}),
+        provider,
+        model,
+        attempts: 1 + totalTransientRetriesUsed + totalRateLimitWaitsUsed,
+        transientRetriesUsed: totalTransientRetriesUsed,
+        rateLimitWaitsUsed: totalRateLimitWaitsUsed
+      };
+    } catch (err) {
+      if (err && typeof err === "object" && totalTransientRetriesUsed > 0) {
+        (
+          err as { transientRetriesUsed?: number }
+        ).transientRetriesUsed = totalTransientRetriesUsed;
       }
+      throw err;
     }
   }
 

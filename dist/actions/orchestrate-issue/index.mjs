@@ -1340,6 +1340,289 @@ function appendEpureCommandsSpoiler(markdown, context) {
 ${spoiler}` : spoiler;
 }
 
+// src/llm/errors.ts
+var LLMError = class extends Error {
+  status;
+  provider;
+  reasonCode;
+  retryAfterSeconds;
+  constructor(message, options) {
+    const normalized = typeof options === "string" ? { provider: options } : options;
+    super(message, normalized.cause ? { cause: normalized.cause } : void 0);
+    this.name = "LLMError";
+    this.provider = normalized.provider;
+    this.status = normalized.status;
+    this.reasonCode = normalized.reasonCode;
+    this.retryAfterSeconds = normalized.retryAfterSeconds;
+  }
+};
+var AuthenticationError = class extends LLMError {
+  constructor(message, options) {
+    const normalized = typeof options === "string" ? { provider: options, status: 401 } : options;
+    super(message, {
+      ...normalized,
+      reasonCode: "LLM_AUTH_INVALID"
+    });
+    this.name = "AuthenticationError";
+  }
+};
+var QuotaExhaustedError = class extends LLMError {
+  constructor(message, options) {
+    const normalized = typeof options === "string" ? { provider: options, status: 402 } : options;
+    super(message, {
+      ...normalized,
+      reasonCode: "LLM_QUOTA_EXHAUSTED"
+    });
+    this.name = "QuotaExhaustedError";
+  }
+};
+var RateLimitError = class extends LLMError {
+  constructor(message, options) {
+    const normalized = typeof options === "string" ? { provider: options, status: 429 } : options;
+    super(message, {
+      ...normalized,
+      status: normalized.status ?? 429,
+      reasonCode: "RATE_LIMITED"
+    });
+    this.name = "RateLimitError";
+  }
+};
+var ServerError = class extends LLMError {
+  constructor(message, options) {
+    const normalized = typeof options === "string" ? { provider: options, status: 500 } : options;
+    super(message, {
+      ...normalized,
+      status: normalized.status ?? 500,
+      reasonCode: "SERVER_ERROR"
+    });
+    this.name = "ServerError";
+  }
+};
+var LLMTimeoutError = class extends LLMError {
+  constructor(message, options) {
+    const normalized = typeof options === "string" ? { provider: options, status: 408 } : options;
+    super(message, {
+      ...normalized,
+      status: normalized.status ?? 408,
+      reasonCode: "TIMEOUT"
+    });
+    this.name = "LLMTimeoutError";
+  }
+};
+var BadRequestError = class extends LLMError {
+  constructor(message, options) {
+    const normalized = typeof options === "string" ? { provider: options, status: 400 } : options;
+    super(message, {
+      ...normalized,
+      status: normalized.status ?? 400,
+      reasonCode: "BAD_REQUEST"
+    });
+    this.name = "BadRequestError";
+  }
+};
+var StructuredOutputValidationError = class extends LLMError {
+  rawText;
+  constructor(message, options) {
+    const normalized = typeof options === "string" ? { provider: "unknown", rawText: options } : options ?? { provider: "unknown" };
+    super(message, {
+      ...normalized,
+      reasonCode: "STRUCTURED_OUTPUT_INVALID"
+    });
+    this.name = "StructuredOutputValidationError";
+    this.rawText = normalized.rawText;
+  }
+};
+function parseRetryAfterSeconds(headerVal, bodyText, nowMs = Date.now()) {
+  if (headerVal) {
+    const trimmed = headerVal.trim();
+    if (/^\d+(?:\.\d+)?$/.test(trimmed)) {
+      const num = Number.parseFloat(trimmed);
+      if (Number.isFinite(num) && num >= 0) {
+        return Math.ceil(num);
+      }
+    }
+    const parsedDateMs = Date.parse(trimmed);
+    if (!Number.isNaN(parsedDateMs)) {
+      return Math.max(0, Math.ceil((parsedDateMs - nowMs) / 1e3));
+    }
+  }
+  if (bodyText) {
+    const jsonDelayMatch = /"(?:retryDelay|retry_delay|retryAfter|retry_after)"\s*:\s*"?(\d+(?:\.\d+)?)s?"?/i.exec(
+      bodyText
+    );
+    if (jsonDelayMatch?.[1]) {
+      const sec = Number.parseFloat(jsonDelayMatch[1]);
+      if (Number.isFinite(sec) && sec >= 0) {
+        return Math.ceil(sec);
+      }
+    }
+    const proseDelayMatch = /(?:retry\s+after|try\s+again\s+in|retry\s+in)\s+(\d+(?:\.\d+)?)\s*(?:s|sec|seconds)\b/i.exec(
+      bodyText
+    );
+    if (proseDelayMatch?.[1]) {
+      const sec = Number.parseFloat(proseDelayMatch[1]);
+      if (Number.isFinite(sec) && sec >= 0) {
+        return Math.ceil(sec);
+      }
+    }
+  }
+  return void 0;
+}
+function classifyHttpError(params) {
+  const { status, bodyText, provider, model, retryAfterHeader } = params;
+  const lowerBody = bodyText.toLowerCase();
+  const prefix = provider === "google" ? `Gemini API call failed (${model}, HTTP ${status})` : `LLM API call failed (${provider}/${model}, HTTP ${status})`;
+  const message = `${prefix}: ${bodyText}`;
+  const isQuota = status === 402 || lowerBody.includes("insufficient_quota") || lowerBody.includes("exceeded your current quota") || lowerBody.includes("quota_exceeded") || lowerBody.includes("billing_hard_limit_reached") || lowerBody.includes("credit balance is too low");
+  if (isQuota) {
+    return new QuotaExhaustedError(message, { status, provider });
+  }
+  const isAuth = status === 401 || status === 403 || lowerBody.includes("invalid_api_key") || lowerBody.includes("authentication_error") || lowerBody.includes("api_key_invalid");
+  if (isAuth) {
+    return new AuthenticationError(message, { status, provider });
+  }
+  if (status === 408) {
+    return new LLMTimeoutError(message, { status, provider });
+  }
+  if (status === 429) {
+    return new RateLimitError(message, {
+      status,
+      provider,
+      retryAfterSeconds: parseRetryAfterSeconds(retryAfterHeader, bodyText)
+    });
+  }
+  if (status === 400 || status === 422) {
+    return new BadRequestError(message, { status, provider });
+  }
+  if (status >= 500) {
+    return new ServerError(message, { status, provider });
+  }
+  return new LLMError(message, { status, provider });
+}
+function isTransientLLMError(err) {
+  if (err instanceof AuthenticationError || err instanceof QuotaExhaustedError || err instanceof BadRequestError || err instanceof StructuredOutputValidationError) {
+    return false;
+  }
+  if (err instanceof RateLimitError || err instanceof ServerError || err instanceof LLMTimeoutError) {
+    return true;
+  }
+  if (err instanceof LLMError) {
+    const st = err.status;
+    return st === 408 || st === 429 || st === 500 || st === 502 || st === 503 || st === 504;
+  }
+  return err instanceof Error;
+}
+function sanitizeJsonStringLiterals(candidate) {
+  let out = "";
+  let inString = false;
+  for (let i = 0; i < candidate.length; i += 1) {
+    const ch = candidate[i];
+    if (!inString) {
+      if (ch === '"') {
+        inString = true;
+      }
+      out += ch;
+      continue;
+    }
+    if (ch === '"') {
+      inString = false;
+      out += ch;
+      continue;
+    }
+    if (ch === "\\") {
+      const next = candidate[i + 1];
+      if (next === void 0) {
+        out += "\\\\";
+        continue;
+      }
+      if (next === '"' || next === "\\" || next === "/" || next === "n" || next === "r" || next === "t") {
+        out += ch + next;
+        i += 1;
+        continue;
+      }
+      if (next === "u" && /^[0-9a-fA-F]{4}$/.test(candidate.slice(i + 2, i + 6))) {
+        out += candidate.slice(i, i + 6);
+        i += 5;
+        continue;
+      }
+      out += "\\\\";
+      continue;
+    }
+    const code = ch.charCodeAt(0);
+    if (code < 32) {
+      if (ch === "\n") {
+        out += "\\n";
+      } else if (ch === "\r") {
+        out += "\\r";
+      } else if (ch === "	") {
+        out += "\\t";
+      } else {
+        out += `\\u${code.toString(16).padStart(4, "0")}`;
+      }
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+function extractJsonObject(raw) {
+  const trimmed = raw.trim();
+  if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+    return trimmed;
+  }
+  const outerFenceMatch = /^```(?:json)?\s*\r?\n?([\s\S]*?)\r?\n?```\s*$/i.exec(
+    trimmed
+  );
+  if (outerFenceMatch && outerFenceMatch[1]) {
+    const inner = outerFenceMatch[1].trim();
+    if (inner.startsWith("{")) {
+      return inner;
+    }
+  }
+  const firstBrace = raw.indexOf("{");
+  const lastBrace = raw.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    return raw.slice(firstBrace, lastBrace + 1);
+  }
+  return trimmed;
+}
+function parseAndValidateStructuredOutput(rawText, schemaSpec) {
+  const extracted = extractJsonObject(rawText);
+  if (!extracted) {
+    throw new StructuredOutputValidationError(
+      "LLM returned empty text when structured JSON output was expected.",
+      { provider: "unknown", rawText }
+    );
+  }
+  let parsed;
+  try {
+    try {
+      parsed = JSON.parse(sanitizeJsonStringLiterals(extracted));
+    } catch {
+      parsed = JSON.parse(extracted);
+    }
+  } catch (err) {
+    throw new StructuredOutputValidationError(
+      `Failed to parse structured JSON output: ${err instanceof Error ? err.message : String(err)}`,
+      { provider: "unknown", rawText, cause: err }
+    );
+  }
+  if (!schemaSpec) {
+    return parsed;
+  }
+  try {
+    return schemaSpec.validate(parsed);
+  } catch (err) {
+    if (err instanceof StructuredOutputValidationError) {
+      throw err;
+    }
+    throw new StructuredOutputValidationError(
+      `Structured output failed validation for schema '${schemaSpec.name}': ${err instanceof Error ? err.message : String(err)}`,
+      { provider: "unknown", rawText, cause: err }
+    );
+  }
+}
+
 // src/sandbox/polyglot-workspace-runner.ts
 import { execFileSync } from "node:child_process";
 import {
@@ -2511,6 +2794,15 @@ function detectPromptInjectionInPrFiles(changedFiles) {
 }
 
 // src/execution/external-ci-gate.ts
+function resolveLlmEscalationReason(err) {
+  if (err instanceof AuthenticationError || err instanceof QuotaExhaustedError) {
+    return "llm_quota_or_auth_failure";
+  }
+  if (isTransientLLMError(err)) {
+    return "transient_llm_api_exhausted";
+  }
+  return "llm_request_invalid";
+}
 var EPURE_SYNTHETIC_CHECK_NAMES = /* @__PURE__ */ new Set([
   "ai-review",
   "impeccable-gate",
@@ -3122,6 +3414,10 @@ function formatNeedsHumanEscalationComment(input) {
     reasonHeadline = "Transient LLM API retries or unitary request timeout exhausted (`max_transient_api_retries`) \u2014 code-fix budget preserved";
   } else if (input.reason === "llm_quota_or_auth_failure") {
     reasonHeadline = "LLM provider quota/billing exhaustion or authentication failure (ADR-0012: no automatic fallback)";
+  } else if (input.reason === "llm_request_invalid") {
+    reasonHeadline = "LLM request rejected or response invalid after structured-output retry (non-transient) \u2014 code-fix budget preserved";
+  } else if (input.reason === "internal_error") {
+    reasonHeadline = "Internal orchestrator error \u2014 code-fix budget preserved";
   } else {
     reasonHeadline = "Runner wall-clock timeout budget exhausted";
   }
@@ -3193,289 +3489,6 @@ function formatNeedsHumanEscalationComment(input) {
     status: "suspended",
     issueNumber: input.issueNumber
   });
-}
-
-// src/llm/errors.ts
-var LLMError = class extends Error {
-  status;
-  provider;
-  reasonCode;
-  retryAfterSeconds;
-  constructor(message, options) {
-    const normalized = typeof options === "string" ? { provider: options } : options;
-    super(message, normalized.cause ? { cause: normalized.cause } : void 0);
-    this.name = "LLMError";
-    this.provider = normalized.provider;
-    this.status = normalized.status;
-    this.reasonCode = normalized.reasonCode;
-    this.retryAfterSeconds = normalized.retryAfterSeconds;
-  }
-};
-var AuthenticationError = class extends LLMError {
-  constructor(message, options) {
-    const normalized = typeof options === "string" ? { provider: options, status: 401 } : options;
-    super(message, {
-      ...normalized,
-      reasonCode: "LLM_AUTH_INVALID"
-    });
-    this.name = "AuthenticationError";
-  }
-};
-var QuotaExhaustedError = class extends LLMError {
-  constructor(message, options) {
-    const normalized = typeof options === "string" ? { provider: options, status: 402 } : options;
-    super(message, {
-      ...normalized,
-      reasonCode: "LLM_QUOTA_EXHAUSTED"
-    });
-    this.name = "QuotaExhaustedError";
-  }
-};
-var RateLimitError = class extends LLMError {
-  constructor(message, options) {
-    const normalized = typeof options === "string" ? { provider: options, status: 429 } : options;
-    super(message, {
-      ...normalized,
-      status: normalized.status ?? 429,
-      reasonCode: "RATE_LIMITED"
-    });
-    this.name = "RateLimitError";
-  }
-};
-var ServerError = class extends LLMError {
-  constructor(message, options) {
-    const normalized = typeof options === "string" ? { provider: options, status: 500 } : options;
-    super(message, {
-      ...normalized,
-      status: normalized.status ?? 500,
-      reasonCode: "SERVER_ERROR"
-    });
-    this.name = "ServerError";
-  }
-};
-var LLMTimeoutError = class extends LLMError {
-  constructor(message, options) {
-    const normalized = typeof options === "string" ? { provider: options, status: 408 } : options;
-    super(message, {
-      ...normalized,
-      status: normalized.status ?? 408,
-      reasonCode: "TIMEOUT"
-    });
-    this.name = "LLMTimeoutError";
-  }
-};
-var BadRequestError = class extends LLMError {
-  constructor(message, options) {
-    const normalized = typeof options === "string" ? { provider: options, status: 400 } : options;
-    super(message, {
-      ...normalized,
-      status: normalized.status ?? 400,
-      reasonCode: "BAD_REQUEST"
-    });
-    this.name = "BadRequestError";
-  }
-};
-var StructuredOutputValidationError = class extends LLMError {
-  rawText;
-  constructor(message, options) {
-    const normalized = typeof options === "string" ? { provider: "unknown", rawText: options } : options ?? { provider: "unknown" };
-    super(message, {
-      ...normalized,
-      reasonCode: "STRUCTURED_OUTPUT_INVALID"
-    });
-    this.name = "StructuredOutputValidationError";
-    this.rawText = normalized.rawText;
-  }
-};
-function parseRetryAfterSeconds(headerVal, bodyText, nowMs = Date.now()) {
-  if (headerVal) {
-    const trimmed = headerVal.trim();
-    if (/^\d+(?:\.\d+)?$/.test(trimmed)) {
-      const num = Number.parseFloat(trimmed);
-      if (Number.isFinite(num) && num >= 0) {
-        return Math.ceil(num);
-      }
-    }
-    const parsedDateMs = Date.parse(trimmed);
-    if (!Number.isNaN(parsedDateMs)) {
-      return Math.max(0, Math.ceil((parsedDateMs - nowMs) / 1e3));
-    }
-  }
-  if (bodyText) {
-    const jsonDelayMatch = /"(?:retryDelay|retry_delay|retryAfter|retry_after)"\s*:\s*"?(\d+(?:\.\d+)?)s?"?/i.exec(
-      bodyText
-    );
-    if (jsonDelayMatch?.[1]) {
-      const sec = Number.parseFloat(jsonDelayMatch[1]);
-      if (Number.isFinite(sec) && sec >= 0) {
-        return Math.ceil(sec);
-      }
-    }
-    const proseDelayMatch = /(?:retry\s+after|try\s+again\s+in|retry\s+in)\s+(\d+(?:\.\d+)?)\s*(?:s|sec|seconds)\b/i.exec(
-      bodyText
-    );
-    if (proseDelayMatch?.[1]) {
-      const sec = Number.parseFloat(proseDelayMatch[1]);
-      if (Number.isFinite(sec) && sec >= 0) {
-        return Math.ceil(sec);
-      }
-    }
-  }
-  return void 0;
-}
-function classifyHttpError(params) {
-  const { status, bodyText, provider, model, retryAfterHeader } = params;
-  const lowerBody = bodyText.toLowerCase();
-  const prefix = provider === "google" ? `Gemini API call failed (${model}, HTTP ${status})` : `LLM API call failed (${provider}/${model}, HTTP ${status})`;
-  const message = `${prefix}: ${bodyText}`;
-  const isQuota = status === 402 || lowerBody.includes("insufficient_quota") || lowerBody.includes("exceeded your current quota") || lowerBody.includes("quota_exceeded") || lowerBody.includes("billing_hard_limit_reached") || lowerBody.includes("credit balance is too low");
-  if (isQuota) {
-    return new QuotaExhaustedError(message, { status, provider });
-  }
-  const isAuth = status === 401 || status === 403 || lowerBody.includes("invalid_api_key") || lowerBody.includes("authentication_error") || lowerBody.includes("api_key_invalid");
-  if (isAuth) {
-    return new AuthenticationError(message, { status, provider });
-  }
-  if (status === 408) {
-    return new LLMTimeoutError(message, { status, provider });
-  }
-  if (status === 429) {
-    return new RateLimitError(message, {
-      status,
-      provider,
-      retryAfterSeconds: parseRetryAfterSeconds(retryAfterHeader, bodyText)
-    });
-  }
-  if (status === 400 || status === 422) {
-    return new BadRequestError(message, { status, provider });
-  }
-  if (status >= 500) {
-    return new ServerError(message, { status, provider });
-  }
-  return new LLMError(message, { status, provider });
-}
-function isTransientLLMError(err) {
-  if (err instanceof AuthenticationError || err instanceof QuotaExhaustedError || err instanceof BadRequestError || err instanceof StructuredOutputValidationError) {
-    return false;
-  }
-  if (err instanceof RateLimitError || err instanceof ServerError || err instanceof LLMTimeoutError) {
-    return true;
-  }
-  if (err instanceof LLMError) {
-    const st = err.status;
-    return st === 408 || st === 429 || st === 500 || st === 502 || st === 503 || st === 504;
-  }
-  return err instanceof Error;
-}
-function sanitizeJsonStringLiterals(candidate) {
-  let out = "";
-  let inString = false;
-  for (let i = 0; i < candidate.length; i += 1) {
-    const ch = candidate[i];
-    if (!inString) {
-      if (ch === '"') {
-        inString = true;
-      }
-      out += ch;
-      continue;
-    }
-    if (ch === '"') {
-      inString = false;
-      out += ch;
-      continue;
-    }
-    if (ch === "\\") {
-      const next = candidate[i + 1];
-      if (next === void 0) {
-        out += "\\\\";
-        continue;
-      }
-      if (next === '"' || next === "\\" || next === "/" || next === "b" || next === "f" || next === "n" || next === "r" || next === "t") {
-        out += ch + next;
-        i += 1;
-        continue;
-      }
-      if (next === "u" && /^[0-9a-fA-F]{4}$/.test(candidate.slice(i + 2, i + 6))) {
-        out += candidate.slice(i, i + 6);
-        i += 5;
-        continue;
-      }
-      out += "\\\\";
-      continue;
-    }
-    const code = ch.charCodeAt(0);
-    if (code < 32) {
-      if (ch === "\n") {
-        out += "\\n";
-      } else if (ch === "\r") {
-        out += "\\r";
-      } else if (ch === "	") {
-        out += "\\t";
-      } else {
-        out += `\\u${code.toString(16).padStart(4, "0")}`;
-      }
-      continue;
-    }
-    out += ch;
-  }
-  return out;
-}
-function extractJsonObject(raw) {
-  const trimmed = raw.trim();
-  if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
-    return trimmed;
-  }
-  const outerFenceMatch = /^```(?:json)?\s*\r?\n?([\s\S]*?)\r?\n?```\s*$/i.exec(
-    trimmed
-  );
-  if (outerFenceMatch && outerFenceMatch[1]) {
-    const inner = outerFenceMatch[1].trim();
-    if (inner.startsWith("{")) {
-      return inner;
-    }
-  }
-  const firstBrace = raw.indexOf("{");
-  const lastBrace = raw.lastIndexOf("}");
-  if (firstBrace >= 0 && lastBrace > firstBrace) {
-    return raw.slice(firstBrace, lastBrace + 1);
-  }
-  return trimmed;
-}
-function parseAndValidateStructuredOutput(rawText, schemaSpec) {
-  const extracted = extractJsonObject(rawText);
-  if (!extracted) {
-    throw new StructuredOutputValidationError(
-      "LLM returned empty text when structured JSON output was expected.",
-      { provider: "unknown", rawText }
-    );
-  }
-  let parsed;
-  try {
-    try {
-      parsed = JSON.parse(extracted);
-    } catch {
-      parsed = JSON.parse(sanitizeJsonStringLiterals(extracted));
-    }
-  } catch (err) {
-    throw new StructuredOutputValidationError(
-      `Failed to parse structured JSON output: ${err instanceof Error ? err.message : String(err)}`,
-      { provider: "unknown", rawText, cause: err }
-    );
-  }
-  if (!schemaSpec) {
-    return parsed;
-  }
-  try {
-    return schemaSpec.validate(parsed);
-  } catch (err) {
-    if (err instanceof StructuredOutputValidationError) {
-      throw err;
-    }
-    throw new StructuredOutputValidationError(
-      `Structured output failed validation for schema '${schemaSpec.name}': ${err instanceof Error ? err.message : String(err)}`,
-      { provider: "unknown", rawText, cause: err }
-    );
-  }
 }
 
 // src/llm/types.ts
@@ -3752,11 +3765,56 @@ async function executeAnthropicProvider(input) {
       );
     }
     if (options.responseSchema) {
-      const validated = parseAndValidateStructuredOutput(
-        text,
-        options.responseSchema
-      );
-      return { text, data: validated };
+      let currentText = text;
+      const maxValidationRetries = input.onStructuredValidationRetry ? 2 : 0;
+      for (let valRetry = 0; ; valRetry += 1) {
+        try {
+          const validated = parseAndValidateStructuredOutput(
+            currentText,
+            options.responseSchema
+          );
+          return { text: currentText, data: validated };
+        } catch (err) {
+          if (err instanceof StructuredOutputValidationError && input.onStructuredValidationRetry && valRetry < maxValidationRetries) {
+            await input.onStructuredValidationRetry(valRetry);
+            messages.push(
+              {
+                role: "assistant",
+                content: currentText || "{}"
+              },
+              {
+                role: "user",
+                content: `Your previous JSON response failed schema validation: ${err.message}
+Output ONLY a corrected, complete JSON object strictly matching the required schema.`
+              }
+            );
+            const retryBody = {
+              ...body,
+              messages,
+              ...anthropicTools ? { tools: anthropicTools, tool_choice: { type: "none" } } : {}
+            };
+            const retryResponse = await executeRequest(url, {
+              method: "POST",
+              headers,
+              body: JSON.stringify(retryBody)
+            });
+            if (!retryResponse.ok) {
+              const errText = await retryResponse.text();
+              throw classifyHttpError({
+                status: retryResponse.status,
+                bodyText: errText,
+                provider: "anthropic",
+                model,
+                retryAfterHeader: retryResponse.headers.get("retry-after")
+              });
+            }
+            const retryData = await retryResponse.json();
+            currentText = (retryData.content ?? []).filter((b) => b.type === "text").map((b) => b.text ?? "").join("").trim();
+            continue;
+          }
+          throw err;
+        }
+      }
     }
     return { text };
   }
@@ -3880,30 +3938,45 @@ async function executeGoogleProvider(input) {
       );
     }
     if (options.responseSchema) {
-      try {
-        const validated = parseAndValidateStructuredOutput(
-          text,
-          options.responseSchema
-        );
-        return { text, data: validated };
-      } catch (err) {
-        if (err instanceof StructuredOutputValidationError) {
-          await input.onStructuredValidationRetry?.();
-          const retryParts = await sendGenerateContent({
-            systemInstruction: {
-              parts: [{ text: effectiveSystemInstruction }]
-            },
-            contents,
-            generationConfig
-          });
-          const retryText = extractTextFromParts(retryParts).trim();
-          const validatedRetry = parseAndValidateStructuredOutput(
-            retryText,
+      let currentText = text;
+      const maxValidationRetries = input.onStructuredValidationRetry ? 2 : 0;
+      for (let valRetry = 0; ; valRetry += 1) {
+        try {
+          const validated = parseAndValidateStructuredOutput(
+            currentText,
             options.responseSchema
           );
-          return { text: retryText, data: validatedRetry };
+          return { text: currentText, data: validated };
+        } catch (err) {
+          if (err instanceof StructuredOutputValidationError && input.onStructuredValidationRetry && valRetry < maxValidationRetries) {
+            await input.onStructuredValidationRetry(valRetry);
+            contents.push(
+              {
+                role: "model",
+                parts: [{ text: currentText || "{}" }]
+              },
+              {
+                role: "user",
+                parts: [
+                  {
+                    text: `Your previous JSON response failed schema validation: ${err.message}
+Output ONLY a corrected, complete JSON object strictly matching the required schema.`
+                  }
+                ]
+              }
+            );
+            const retryParts = await sendGenerateContent({
+              systemInstruction: {
+                parts: [{ text: effectiveSystemInstruction }]
+              },
+              contents,
+              generationConfig
+            });
+            currentText = extractTextFromParts(retryParts).trim();
+            continue;
+          }
+          throw err;
         }
-        throw err;
       }
     }
     return { text };
@@ -4035,7 +4108,8 @@ async function executeGoogleProvider(input) {
         ]
       }
     ];
-    const sendFinalStructuredTurn = async () => {
+    const maxValidationRetries = input.onStructuredValidationRetry ? 2 : 0;
+    for (let valRetry = 0; ; valRetry += 1) {
       const finalParts = await sendGenerateContent({
         systemInstruction: {
           parts: [{ text: effectiveSystemInstruction }]
@@ -4049,20 +4123,34 @@ async function executeGoogleProvider(input) {
         generationConfig: finalGenerationConfig
       });
       const finalText = extractTextFromParts(finalParts).trim();
-      const validated = parseAndValidateStructuredOutput(
-        finalText,
-        options.responseSchema
-      );
-      return { text: finalText, data: validated };
-    };
-    try {
-      return await sendFinalStructuredTurn();
-    } catch (err) {
-      if (err instanceof StructuredOutputValidationError && input.onStructuredValidationRetry) {
-        await input.onStructuredValidationRetry();
-        return await sendFinalStructuredTurn();
+      try {
+        const validated = parseAndValidateStructuredOutput(
+          finalText,
+          options.responseSchema
+        );
+        return { text: finalText, data: validated };
+      } catch (err) {
+        if (err instanceof StructuredOutputValidationError && input.onStructuredValidationRetry && valRetry < maxValidationRetries) {
+          await input.onStructuredValidationRetry(valRetry);
+          finalContents.push(
+            {
+              role: "model",
+              parts: [{ text: finalText || "{}" }]
+            },
+            {
+              role: "user",
+              parts: [
+                {
+                  text: `Your previous JSON response failed schema validation: ${err.message}
+Output ONLY a corrected, complete JSON object strictly matching the required schema.`
+                }
+              ]
+            }
+          );
+          continue;
+        }
+        throw err;
       }
-      throw err;
     }
   }
   const fallbackContents = [
@@ -4305,11 +4393,56 @@ async function executeOpenAIProvider(input) {
       );
     }
     if (options.responseSchema) {
-      const validated = parseAndValidateStructuredOutput(
-        text,
-        options.responseSchema
-      );
-      return { text, data: validated };
+      let currentText = text;
+      const maxValidationRetries = input.onStructuredValidationRetry ? 2 : 0;
+      for (let valRetry = 0; ; valRetry += 1) {
+        try {
+          const validated = parseAndValidateStructuredOutput(
+            currentText,
+            options.responseSchema
+          );
+          return { text: currentText, data: validated };
+        } catch (err) {
+          if (err instanceof StructuredOutputValidationError && input.onStructuredValidationRetry && valRetry < maxValidationRetries) {
+            await input.onStructuredValidationRetry(valRetry);
+            messages.push(
+              {
+                role: "assistant",
+                content: currentText || "{}"
+              },
+              {
+                role: "user",
+                content: `Your previous JSON response failed schema validation: ${err.message}
+Output ONLY a corrected, complete JSON object strictly matching the required schema.`
+              }
+            );
+            const retryBody = {
+              ...body,
+              messages,
+              ...openAiTools ? { tools: openAiTools, tool_choice: "none" } : {}
+            };
+            const retryResponse = await executeRequest(url, {
+              method: "POST",
+              headers,
+              body: JSON.stringify(retryBody)
+            });
+            if (!retryResponse.ok) {
+              const errText = await retryResponse.text();
+              throw classifyHttpError({
+                status: retryResponse.status,
+                bodyText: errText,
+                provider,
+                model,
+                retryAfterHeader: retryResponse.headers.get("retry-after")
+              });
+            }
+            const retryData = await retryResponse.json();
+            currentText = (retryData.choices?.[0]?.message?.content ?? "").trim();
+            continue;
+          }
+          throw err;
+        }
+      }
     }
     return { text };
   }
@@ -4579,10 +4712,8 @@ var LLMClient = class {
         }
       }
     };
-    let structuredValidationRetried = false;
-    const onStructuredValidationRetry = maxTransientRetries > 0 ? async () => {
-      structuredValidationRetried = true;
-      const backoffSec = backoffSeconds[0] ?? 0;
+    const onStructuredValidationRetry = maxTransientRetries > 0 ? async (retryIndex = 0) => {
+      const backoffSec = backoffSeconds[retryIndex] ?? backoffSeconds[0] ?? 0;
       totalTransientRetriesUsed += 1;
       await sleepMs(backoffSec * 1e3);
     } : void 0;
@@ -4603,7 +4734,8 @@ var LLMClient = class {
           apiKey,
           providerConfig,
           options,
-          executeRequest
+          executeRequest,
+          onStructuredValidationRetry
         });
       }
       return await executeOpenAIProvider({
@@ -4612,28 +4744,26 @@ var LLMClient = class {
         apiKey,
         providerConfig,
         options,
-        executeRequest
+        executeRequest,
+        onStructuredValidationRetry
       });
     };
-    while (true) {
-      try {
-        const result = await invokeProvider();
-        return {
-          text: result.text,
-          ...result.data !== void 0 ? { data: result.data } : {},
-          provider,
-          model,
-          attempts: 1 + totalTransientRetriesUsed + totalRateLimitWaitsUsed,
-          transientRetriesUsed: totalTransientRetriesUsed,
-          rateLimitWaitsUsed: totalRateLimitWaitsUsed
-        };
-      } catch (err) {
-        if (err instanceof StructuredOutputValidationError && !structuredValidationRetried && onStructuredValidationRetry) {
-          await onStructuredValidationRetry();
-          continue;
-        }
-        throw err;
+    try {
+      const result = await invokeProvider();
+      return {
+        text: result.text,
+        ...result.data !== void 0 ? { data: result.data } : {},
+        provider,
+        model,
+        attempts: 1 + totalTransientRetriesUsed + totalRateLimitWaitsUsed,
+        transientRetriesUsed: totalTransientRetriesUsed,
+        rateLimitWaitsUsed: totalRateLimitWaitsUsed
+      };
+    } catch (err) {
+      if (err && typeof err === "object" && totalTransientRetriesUsed > 0) {
+        err.transientRetriesUsed = totalTransientRetriesUsed;
       }
+      throw err;
     }
   }
   async completeText(options) {
@@ -4649,43 +4779,14 @@ var LLMClient = class {
 // src/orchestrator/gemini-client.ts
 async function callGeminiText(options) {
   const client = new LLMClient(options.providers);
-  const res = await client.complete({
-    apiKey: options.apiKey,
-    model: options.model ?? "gemini-3.8-flash",
-    systemInstruction: options.systemInstruction ?? "",
-    userPrompt: options.userPrompt ?? options.prompt ?? "",
-    temperature: options.temperature,
-    responseMimeType: options.responseMimeType,
-    responseSchema: options.responseSchema,
-    tools: options.tools,
-    toolHandlers: options.toolHandlers,
-    maxToolRounds: options.maxToolRounds,
-    thinkingLevel: options.thinkingLevel,
-    maxTransientRetries: options.maxTransientRetries,
-    transientRetryBackoffSeconds: options.transientRetryBackoffSeconds,
-    requestTimeoutMs: options.requestTimeoutMs,
-    maxRateLimitWaits: options.maxRateLimitWaits,
-    fetchImpl: options.fetchImpl,
-    sleepMs: options.sleepMs,
-    logLabel: options.logLabel,
-    providers: options.providers
-  });
-  const used = res.transientRetriesUsed ?? 0;
-  if (used > 0 && options.onTransientRetriesUsed) {
-    options.onTransientRetriesUsed(used);
-  }
-  return res.text;
-}
-async function callGeminiJson(options) {
-  const client = new LLMClient(options.providers);
-  if (options.responseSchema) {
+  try {
     const res = await client.complete({
       apiKey: options.apiKey,
       model: options.model ?? "gemini-3.8-flash",
       systemInstruction: options.systemInstruction ?? "",
       userPrompt: options.userPrompt ?? options.prompt ?? "",
       temperature: options.temperature,
-      responseMimeType: "application/json",
+      responseMimeType: options.responseMimeType,
       responseSchema: options.responseSchema,
       tools: options.tools,
       toolHandlers: options.toolHandlers,
@@ -4704,7 +4805,52 @@ async function callGeminiJson(options) {
     if (used > 0 && options.onTransientRetriesUsed) {
       options.onTransientRetriesUsed(used);
     }
-    return res.data;
+    return res.text;
+  } catch (err) {
+    const used = err && typeof err === "object" ? err.transientRetriesUsed ?? 0 : 0;
+    if (used > 0 && options.onTransientRetriesUsed) {
+      options.onTransientRetriesUsed(used);
+    }
+    throw err;
+  }
+}
+async function callGeminiJson(options) {
+  const client = new LLMClient(options.providers);
+  if (options.responseSchema) {
+    try {
+      const res = await client.complete({
+        apiKey: options.apiKey,
+        model: options.model ?? "gemini-3.8-flash",
+        systemInstruction: options.systemInstruction ?? "",
+        userPrompt: options.userPrompt ?? options.prompt ?? "",
+        temperature: options.temperature,
+        responseMimeType: "application/json",
+        responseSchema: options.responseSchema,
+        tools: options.tools,
+        toolHandlers: options.toolHandlers,
+        maxToolRounds: options.maxToolRounds,
+        thinkingLevel: options.thinkingLevel,
+        maxTransientRetries: options.maxTransientRetries,
+        transientRetryBackoffSeconds: options.transientRetryBackoffSeconds,
+        requestTimeoutMs: options.requestTimeoutMs,
+        maxRateLimitWaits: options.maxRateLimitWaits,
+        fetchImpl: options.fetchImpl,
+        sleepMs: options.sleepMs,
+        logLabel: options.logLabel,
+        providers: options.providers
+      });
+      const used = res.transientRetriesUsed ?? 0;
+      if (used > 0 && options.onTransientRetriesUsed) {
+        options.onTransientRetriesUsed(used);
+      }
+      return res.data;
+    } catch (err) {
+      const used = err && typeof err === "object" ? err.transientRetriesUsed ?? 0 : 0;
+      if (used > 0 && options.onTransientRetriesUsed) {
+        options.onTransientRetriesUsed(used);
+      }
+      throw err;
+    }
   }
   const rawText = await callGeminiText({
     ...options,
@@ -5121,7 +5267,13 @@ var GENERATED_TICKET_IMPLEMENTATION_SCHEMA = {
         items: { type: "string" }
       }
     },
-    required: ["commit_message", "test_summary"]
+    required: [
+      "commit_message",
+      "test_summary",
+      "files",
+      "patches",
+      "deleted_files"
+    ]
   },
   validate(parsed) {
     const obj = asRecord(parsed, "GeneratedTicketImplementation");
@@ -9319,14 +9471,14 @@ ${c}`).join("\n\n");
           continue;
         }
         return await params.escalateToNeedsHuman({
-          reason: "code_fix_attempts_exhausted",
+          reason: "remediation_exhausted",
           ticketNumber: params.issueNumber,
           branch: params.featureBranch,
           prNumber: featurePr.number,
           prUrl: featurePr.html_url,
           featurePrUrl: featurePr.html_url,
           codeFixAttemptsUsed: featureReviewFixAttempt,
-          mustFixFindings: featureReview.must_fix_findings,
+          mustFixFindings: finalFeatureReview.must_fix_findings,
           diagnosticExcerpt: featureTestCheck.output.slice(-2e3)
         });
       }
@@ -9409,9 +9561,8 @@ Refs #${params.issueNumber}`
       }
     } catch (err) {
       if (err instanceof LLMError) {
-        const reason = err instanceof AuthenticationError || err instanceof QuotaExhaustedError ? "llm_quota_or_auth_failure" : "transient_llm_api_exhausted";
         return await params.escalateToNeedsHuman({
-          reason,
+          reason: resolveLlmEscalationReason(err),
           ticketNumber: params.issueNumber,
           branch: params.featureBranch,
           phase: "implementation",
@@ -11370,7 +11521,7 @@ ${c}`).join("\n\n");
         }
         if (!testCheck.passed) {
           const escalated = await params.escalateToNeedsHuman({
-            reason: "code_fix_attempts_exhausted",
+            reason: "remediation_exhausted",
             ticketNumber: ticket.ticketIssueNumber,
             branch: taskBranch,
             codeFixAttemptsUsed: fixAttempt,
@@ -11833,7 +11984,7 @@ ${c}`).join("\n\n");
             continue;
           }
           const escalated = await params.escalateToNeedsHuman({
-            reason: "code_fix_attempts_exhausted",
+            reason: "remediation_exhausted",
             ticketNumber: ticket.ticketIssueNumber,
             branch: taskBranch,
             prNumber: taskPr.number,
@@ -11960,9 +12111,8 @@ ${c}`).join("\n\n");
       );
     } catch (err) {
       if (err instanceof LLMError) {
-        const reason = err instanceof AuthenticationError || err instanceof QuotaExhaustedError ? "llm_quota_or_auth_failure" : "transient_llm_api_exhausted";
         const escalated = await params.escalateToNeedsHuman({
-          reason,
+          reason: resolveLlmEscalationReason(err),
           ticketNumber: ticket.ticketIssueNumber,
           branch: taskBranch,
           phase: "implementation",
@@ -12024,139 +12174,307 @@ async function orchestrateIssueCommand(input) {
       fetchImpl: input.fetchImpl
     });
     const refName = buildIssueStateRefName(input.issueNumber);
-    const currentSnapshot = await store.readRef(refName);
-    const currentState = currentSnapshot.state;
-    if (input.command === "status") {
-      const updated = await updateIssueStateWithCas({
-        issueNumber: input.issueNumber,
-        store,
-        mutator: (prev) => ({
-          ...prev,
-          last_processed_comment_id: input.commentId ?? prev.last_processed_comment_id
-        })
-      });
-      const statusBody = appendEpureCommandsSpoiler(
-        updated.issue_mirror_markdown,
-        {
+    let planBranch = `plan/${input.issueNumber}`;
+    let featureBranch = `feature/${input.issueNumber}`;
+    let maxCodeFixAttempts = 3;
+    let totalTransientRetriesUsed = 0;
+    try {
+      const currentSnapshot = await store.readRef(refName);
+      const currentState = currentSnapshot.state;
+      if (input.command === "status") {
+        const updated = await updateIssueStateWithCas({
+          issueNumber: input.issueNumber,
+          store,
+          mutator: (prev) => ({
+            ...prev,
+            last_processed_comment_id: input.commentId ?? prev.last_processed_comment_id
+          })
+        });
+        const statusBody = appendEpureCommandsSpoiler(
+          updated.issue_mirror_markdown,
+          {
+            phase: updated.state.phase,
+            status: updated.state.status,
+            issueNumber: input.issueNumber
+          }
+        );
+        await gh.postIssueComment(input.issueNumber, statusBody);
+        return {
+          executed: true,
           phase: updated.state.phase,
           status: updated.state.status,
-          issueNumber: input.issueNumber
-        }
-      );
-      await gh.postIssueComment(input.issueNumber, statusBody);
-      return {
-        executed: true,
-        phase: updated.state.phase,
-        status: updated.state.status,
-        active_branch: updated.state.active_branch,
-        summary_markdown: statusBody,
-        created_ticket_numbers: [],
-        feature_pr_url: ""
-      };
-    }
-    if (input.command === "cancel") {
-      const updated = await updateIssueStateWithCas({
-        issueNumber: input.issueNumber,
-        store,
-        mutator: (prev) => ({
-          ...prev,
-          status: "cancelled",
-          last_processed_comment_id: input.commentId ?? prev.last_processed_comment_id
-        })
-      });
-      const body = appendEpureCommandsSpoiler(
-        [
-          updated.issue_mirror_markdown,
-          "",
-          `Plan #${input.issueNumber} has been **cancelled** by \`@${input.actor}\`. No further automated executions or merges will occur.`
-        ].join("\n"),
-        {
-          phase: "cancelled",
-          status: "cancelled",
-          issueNumber: input.issueNumber
-        }
-      );
-      await gh.postIssueComment(input.issueNumber, body);
-      return {
-        executed: true,
-        phase: updated.state.phase,
-        status: updated.state.status,
-        active_branch: updated.state.active_branch,
-        summary_markdown: body,
-        created_ticket_numbers: [],
-        feature_pr_url: ""
-      };
-    }
-    const issue = await gh.getIssue(input.issueNumber);
-    const allComments = await gh.listIssueComments(input.issueNumber);
-    const planSlug = slugifyTitle(issue.title);
-    const planBranch = `plan/${input.issueNumber}-${planSlug}`;
-    const featureBranch = `feature/${input.issueNumber}-${planSlug}`;
-    const parsedDevAgentsConfig = await loadRepoAgentsConfig(gh, "dev") ?? await loadRepoAgentsConfig(gh, "main");
-    const phaseModels = resolvePhaseModels(
-      input.model ?? input.geminiModel,
-      parsedDevAgentsConfig
-    );
-    const maxCodeFixAttempts = parsedDevAgentsConfig?.max_code_fix_attempts ?? 3;
-    let totalTransientRetriesUsed = 0;
-    if (input.command === "plan" || input.command === "to-spec" || input.command === "to-tickets" || input.command === "reply" && (currentState?.phase === "grilling" || currentState?.phase === "spec") && currentState?.status !== "cancelled") {
-      try {
-        return await runGrillAndPlanPhase({
-          command: input.command,
-          currentPhase: currentState?.phase,
-          currentStatus: currentState?.status,
-          repository: input.repository,
+          active_branch: updated.state.active_branch,
+          summary_markdown: statusBody,
+          created_ticket_numbers: [],
+          feature_pr_url: ""
+        };
+      }
+      if (input.command === "cancel") {
+        const updated = await updateIssueStateWithCas({
           issueNumber: input.issueNumber,
-          commentId: input.commentId,
-          issue,
-          allComments,
-          planSlug,
-          planBranch,
-          gh,
           store,
-          llmApiKey: input.llmApiKey,
-          phaseModels,
-          onTransientRetriesUsed: (used) => {
-            totalTransientRetriesUsed += used;
-          },
-          fetchImpl: input.fetchImpl
+          mutator: (prev) => ({
+            ...prev,
+            status: "cancelled",
+            last_processed_comment_id: input.commentId ?? prev.last_processed_comment_id
+          })
         });
-      } catch (err) {
-        if (err instanceof LLMError) {
+        const body = appendEpureCommandsSpoiler(
+          [
+            updated.issue_mirror_markdown,
+            "",
+            `Plan #${input.issueNumber} has been **cancelled** by \`@${input.actor}\`. No further automated executions or merges will occur.`
+          ].join("\n"),
+          {
+            phase: "cancelled",
+            status: "cancelled",
+            issueNumber: input.issueNumber
+          }
+        );
+        await gh.postIssueComment(input.issueNumber, body);
+        return {
+          executed: true,
+          phase: updated.state.phase,
+          status: updated.state.status,
+          active_branch: updated.state.active_branch,
+          summary_markdown: body,
+          created_ticket_numbers: [],
+          feature_pr_url: ""
+        };
+      }
+      const issue = await gh.getIssue(input.issueNumber);
+      const allComments = await gh.listIssueComments(input.issueNumber);
+      const planSlug = slugifyTitle(issue.title);
+      planBranch = `plan/${input.issueNumber}-${planSlug}`;
+      featureBranch = `feature/${input.issueNumber}-${planSlug}`;
+      const parsedDevAgentsConfig = await loadRepoAgentsConfig(gh, "dev") ?? await loadRepoAgentsConfig(gh, "main");
+      const phaseModels = resolvePhaseModels(
+        input.model ?? input.geminiModel,
+        parsedDevAgentsConfig
+      );
+      maxCodeFixAttempts = parsedDevAgentsConfig?.max_code_fix_attempts ?? 3;
+      if (input.command === "plan" || input.command === "to-spec" || input.command === "to-tickets" || input.command === "reply" && (currentState?.phase === "grilling" || currentState?.phase === "spec") && currentState?.status !== "cancelled") {
+        try {
+          return await runGrillAndPlanPhase({
+            command: input.command,
+            currentPhase: currentState?.phase,
+            currentStatus: currentState?.status,
+            repository: input.repository,
+            issueNumber: input.issueNumber,
+            commentId: input.commentId,
+            issue,
+            allComments,
+            planSlug,
+            planBranch,
+            gh,
+            store,
+            llmApiKey: input.llmApiKey,
+            phaseModels,
+            onTransientRetriesUsed: (used) => {
+              totalTransientRetriesUsed += used;
+            },
+            fetchImpl: input.fetchImpl
+          });
+        } catch (err) {
+          if (err instanceof LLMError) {
+            await gh.ensureLabel(
+              "needs-human",
+              "D93F0B",
+              "Requires human maintainer intervention"
+            );
+            await gh.addIssueLabels(input.issueNumber, ["needs-human"]);
+            const suspendedPhase = input.command === "to-tickets" ? "tickets" : input.command === "to-spec" || currentState?.phase === "spec" ? "spec" : "grilling";
+            const updatedSuspended = await updateIssueStateWithCas({
+              issueNumber: input.issueNumber,
+              store,
+              mutator: (prev) => ({
+                ...prev,
+                phase: suspendedPhase,
+                status: "suspended",
+                active_branch: planBranch,
+                transient_retries_used: totalTransientRetriesUsed || prev.transient_retries_used,
+                last_processed_comment_id: input.commentId ?? prev.last_processed_comment_id
+              })
+            });
+            const escalationMarkdown = appendEpureCommandsSpoiler(
+              [
+                updatedSuspended.issue_mirror_markdown,
+                "",
+                formatNeedsHumanEscalationComment({
+                  reason: resolveLlmEscalationReason(err),
+                  issueNumber: input.issueNumber,
+                  ticketIssueNumber: input.issueNumber,
+                  branch: planBranch,
+                  maxCodeFixAttempts,
+                  diagnosticExcerpt: redactSecrets(err.message, [
+                    activeToken,
+                    input.llmApiKey
+                  ])
+                })
+              ].join("\n"),
+              {
+                phase: "suspended",
+                status: "suspended",
+                issueNumber: input.issueNumber
+              }
+            );
+            await gh.postIssueComment(input.issueNumber, escalationMarkdown);
+            return {
+              executed: true,
+              phase: updatedSuspended.state.phase,
+              status: updatedSuspended.state.status,
+              active_branch: planBranch,
+              summary_markdown: escalationMarkdown,
+              created_ticket_numbers: [],
+              feature_pr_url: ""
+            };
+          }
+          throw err;
+        }
+      }
+      if (input.command === "approve" || input.command === "reply" && currentState?.phase === "implementation" && currentState?.status === "suspended") {
+        if (currentState?.status === "suspended") {
+          await gh.removeIssueLabel?.(input.issueNumber, "needs-human");
+        }
+        let ticketsManifest = parseTrackedTicketsFromComments(allComments);
+        const hasExplicitPlanManifest = ticketsManifest.length > 0;
+        if (!hasExplicitPlanManifest) {
+          const parsedCriteria = Array.from(
+            issue.body.matchAll(/^\s*-\s*\[[ xX]\]\s+(.+)$/gm)
+          ).map((m) => m[1].trim());
+          const parsedFiles = Array.from(
+            issue.body.matchAll(/`([A-Za-z0-9_./-]+\.[A-Za-z0-9]+)`/g)
+          ).map((m) => m[1].trim());
+          ticketsManifest = [
+            {
+              ticketIssueNumber: issue.number,
+              slug: planSlug,
+              title: issue.title,
+              description: issue.body,
+              acceptanceCriteria: parsedCriteria.length > 0 ? parsedCriteria : [issue.title],
+              blockedByIssueNumbers: [],
+              filesToTouch: parsedFiles
+            }
+          ];
+        }
+        await gh.ensureBranch("dev", "main");
+        const trustedBaseRoster = adaptReviewerRosterForDomain({
+          repository: input.repository,
+          planTitle: issue.title,
+          glossaryMarkdown: issue.body,
+          specMarkdown: issue.body,
+          touchesFrontendUi: true
+        });
+        const trustedBaseFilesMap = /* @__PURE__ */ new Map();
+        for (const f of trustedBaseRoster.files) {
+          trustedBaseFilesMap.set(f.path, f.content);
+        }
+        if (hasExplicitPlanManifest) {
+          try {
+            const planPr = await gh.openPullRequest({
+              head: planBranch,
+              base: "dev",
+              title: `docs(plan): integrate approved specification and ADRs for #${input.issueNumber}`,
+              body: appendEpureCommandsSpoiler(
+                `Integrates approved planning artifacts and reviewer roster from \`${planBranch}\` for #${input.issueNumber}.`,
+                {
+                  phase: "tickets",
+                  status: "active",
+                  issueNumber: input.issueNumber
+                }
+              )
+            });
+            await gh.publishCheckRun({
+              name: "PR title",
+              headSha: planPr.head_sha,
+              conclusion: "success",
+              summary: "Conventional Commit PR title verified."
+            });
+            await gh.publishCheckRun({
+              name: "ai-review",
+              headSha: planPr.head_sha,
+              conclusion: "success",
+              summary: `Human-approved planning bundle #${input.issueNumber} verified.`
+            });
+            await gh.mergePullRequest(planPr.number, {
+              headBranch: planBranch,
+              baseBranch: "dev",
+              commitTitle: `docs(plan): integrate approved plan #${input.issueNumber} (#${planPr.number})`,
+              commitMessage: `Integrates GLOSSARY.md, ADRs, specification, DESIGN.md, and .cursor/agents/ roster.
+
+Refs #${input.issueNumber}`
+            });
+          } catch {
+          }
+        }
+        const remoteTrustedRoster = await gh.readTrustedBaseRosterFiles("dev");
+        for (const [relPath, content] of remoteTrustedRoster.entries()) {
+          trustedBaseFilesMap.set(relPath, content);
+        }
+        const devWorkflowsMap = await gh.readDevWorkflowsMap("dev");
+        const devBranchPaths = await gh.listBranchPaths("dev");
+        const discoveredDevProfile = discoverVerificationProfile({
+          targetFilesHint: [
+            ...devBranchPaths,
+            ...ticketsManifest.flatMap((t) => t.filesToTouch)
+          ],
+          workflowFilesMap: Object.fromEntries(devWorkflowsMap)
+        });
+        const verificationProfile = parsedDevAgentsConfig?.verification?.targets && parsedDevAgentsConfig.verification.targets.length > 0 ? {
+          ...parsedDevAgentsConfig.verification,
+          deferred_external_workflows: parsedDevAgentsConfig.verification.deferred_external_workflows?.length ? parsedDevAgentsConfig.verification.deferred_external_workflows : discoveredDevProfile.deferred_external_workflows
+        } : {
+          ...discoveredDevProfile,
+          wait_for_external_ci: parsedDevAgentsConfig?.verification?.wait_for_external_ci ?? discoveredDevProfile.wait_for_external_ci,
+          external_ci_timeout_minutes: parsedDevAgentsConfig?.verification?.external_ci_timeout_minutes ?? discoveredDevProfile.external_ci_timeout_minutes,
+          grace_window_seconds: parsedDevAgentsConfig?.verification?.grace_window_seconds ?? discoveredDevProfile.grace_window_seconds
+        };
+        const verificationGuideMarkdown = formatVerificationToolingGuideMarkdown(verificationProfile);
+        const effectiveSleepFn = input.sleepFn ?? (input.fetchImpl ? async () => {
+        } : void 0);
+        const infraRerunsBySha = /* @__PURE__ */ new Map();
+        const escalateToNeedsHuman = async (params) => {
           await gh.ensureLabel(
             "needs-human",
             "D93F0B",
             "Requires human maintainer intervention"
           );
           await gh.addIssueLabels(input.issueNumber, ["needs-human"]);
-          const suspendedPhase = input.command === "to-tickets" ? "tickets" : input.command === "to-spec" || currentState?.phase === "spec" ? "spec" : "grilling";
+          if (params.ticketNumber !== input.issueNumber) {
+            await gh.addIssueLabels(params.ticketNumber, ["needs-human"]);
+          }
           const updatedSuspended = await updateIssueStateWithCas({
             issueNumber: input.issueNumber,
             store,
             mutator: (prev) => ({
               ...prev,
-              phase: suspendedPhase,
+              phase: params.phase ?? "implementation",
               status: "suspended",
-              active_branch: planBranch,
+              active_branch: params.branch,
+              code_fix_attempts_used: params.codeFixAttemptsUsed ?? prev.code_fix_attempts_used,
               transient_retries_used: totalTransientRetriesUsed || prev.transient_retries_used,
               last_processed_comment_id: input.commentId ?? prev.last_processed_comment_id
             })
           });
-          const reason = err instanceof AuthenticationError || err instanceof QuotaExhaustedError ? "llm_quota_or_auth_failure" : "transient_llm_api_exhausted";
           const escalationMarkdown = appendEpureCommandsSpoiler(
             [
               updatedSuspended.issue_mirror_markdown,
               "",
               formatNeedsHumanEscalationComment({
-                reason,
+                reason: params.reason,
                 issueNumber: input.issueNumber,
-                ticketIssueNumber: input.issueNumber,
-                branch: planBranch,
+                ticketIssueNumber: params.ticketNumber,
+                prNumber: params.prNumber,
+                prUrl: params.prUrl,
+                branch: params.branch,
+                codeFixAttemptsUsed: params.codeFixAttemptsUsed,
                 maxCodeFixAttempts,
-                diagnosticExcerpt: redactSecrets(err.message, [
-                  activeToken,
-                  input.llmApiKey
-                ])
+                graceWindowSeconds: verificationProfile.grace_window_seconds,
+                failedChecks: params.failedChecks,
+                mustFixFindings: params.mustFixFindings,
+                sensitivePaths: params.sensitivePaths,
+                traversalPaths: params.traversalPaths,
+                diagnosticExcerpt: params.diagnosticExcerpt
               })
             ].join("\n"),
             {
@@ -12170,304 +12488,96 @@ async function orchestrateIssueCommand(input) {
             executed: true,
             phase: updatedSuspended.state.phase,
             status: updatedSuspended.state.status,
-            active_branch: planBranch,
+            active_branch: params.branch,
             summary_markdown: escalationMarkdown,
-            created_ticket_numbers: [],
-            feature_pr_url: ""
+            created_ticket_numbers: ticketsManifest.map(
+              (t) => t.ticketIssueNumber
+            ),
+            feature_pr_url: params.featurePrUrl ?? params.prUrl ?? ""
           };
-        }
-        throw err;
-      }
-    }
-    if (input.command === "approve" || input.command === "reply" && currentState?.phase === "implementation" && currentState?.status === "suspended") {
-      if (currentState?.status === "suspended") {
-        await gh.removeIssueLabel?.(input.issueNumber, "needs-human");
-      }
-      let ticketsManifest = parseTrackedTicketsFromComments(allComments);
-      const hasExplicitPlanManifest = ticketsManifest.length > 0;
-      if (!hasExplicitPlanManifest) {
-        const parsedCriteria = Array.from(
-          issue.body.matchAll(/^\s*-\s*\[[ xX]\]\s+(.+)$/gm)
-        ).map((m) => m[1].trim());
-        const parsedFiles = Array.from(
-          issue.body.matchAll(/`([A-Za-z0-9_./-]+\.[A-Za-z0-9]+)`/g)
-        ).map((m) => m[1].trim());
-        ticketsManifest = [
-          {
-            ticketIssueNumber: issue.number,
-            slug: planSlug,
-            title: issue.title,
-            description: issue.body,
-            acceptanceCriteria: parsedCriteria.length > 0 ? parsedCriteria : [issue.title],
-            blockedByIssueNumbers: [],
-            filesToTouch: parsedFiles
-          }
-        ];
-      }
-      await gh.ensureBranch("dev", "main");
-      const trustedBaseRoster = adaptReviewerRosterForDomain({
-        repository: input.repository,
-        planTitle: issue.title,
-        glossaryMarkdown: issue.body,
-        specMarkdown: issue.body,
-        touchesFrontendUi: true
-      });
-      const trustedBaseFilesMap = /* @__PURE__ */ new Map();
-      for (const f of trustedBaseRoster.files) {
-        trustedBaseFilesMap.set(f.path, f.content);
-      }
-      if (hasExplicitPlanManifest) {
-        try {
-          const planPr = await gh.openPullRequest({
-            head: planBranch,
-            base: "dev",
-            title: `docs(plan): integrate approved specification and ADRs for #${input.issueNumber}`,
-            body: appendEpureCommandsSpoiler(
-              `Integrates approved planning artifacts and reviewer roster from \`${planBranch}\` for #${input.issueNumber}.`,
-              {
-                phase: "tickets",
-                status: "active",
-                issueNumber: input.issueNumber
-              }
-            )
-          });
-          await gh.publishCheckRun({
-            name: "PR title",
-            headSha: planPr.head_sha,
-            conclusion: "success",
-            summary: "Conventional Commit PR title verified."
-          });
-          await gh.publishCheckRun({
-            name: "ai-review",
-            headSha: planPr.head_sha,
-            conclusion: "success",
-            summary: `Human-approved planning bundle #${input.issueNumber} verified.`
-          });
-          await gh.mergePullRequest(planPr.number, {
-            headBranch: planBranch,
-            baseBranch: "dev",
-            commitTitle: `docs(plan): integrate approved plan #${input.issueNumber} (#${planPr.number})`,
-            commitMessage: `Integrates GLOSSARY.md, ADRs, specification, DESIGN.md, and .cursor/agents/ roster.
-
-Refs #${input.issueNumber}`
-          });
-        } catch {
-        }
-      }
-      const remoteTrustedRoster = await gh.readTrustedBaseRosterFiles("dev");
-      for (const [relPath, content] of remoteTrustedRoster.entries()) {
-        trustedBaseFilesMap.set(relPath, content);
-      }
-      const devWorkflowsMap = await gh.readDevWorkflowsMap("dev");
-      const devBranchPaths = await gh.listBranchPaths("dev");
-      const discoveredDevProfile = discoverVerificationProfile({
-        targetFilesHint: [
-          ...devBranchPaths,
-          ...ticketsManifest.flatMap((t) => t.filesToTouch)
-        ],
-        workflowFilesMap: Object.fromEntries(devWorkflowsMap)
-      });
-      const verificationProfile = parsedDevAgentsConfig?.verification?.targets && parsedDevAgentsConfig.verification.targets.length > 0 ? {
-        ...parsedDevAgentsConfig.verification,
-        deferred_external_workflows: parsedDevAgentsConfig.verification.deferred_external_workflows?.length ? parsedDevAgentsConfig.verification.deferred_external_workflows : discoveredDevProfile.deferred_external_workflows
-      } : {
-        ...discoveredDevProfile,
-        wait_for_external_ci: parsedDevAgentsConfig?.verification?.wait_for_external_ci ?? discoveredDevProfile.wait_for_external_ci,
-        external_ci_timeout_minutes: parsedDevAgentsConfig?.verification?.external_ci_timeout_minutes ?? discoveredDevProfile.external_ci_timeout_minutes,
-        grace_window_seconds: parsedDevAgentsConfig?.verification?.grace_window_seconds ?? discoveredDevProfile.grace_window_seconds
-      };
-      const verificationGuideMarkdown = formatVerificationToolingGuideMarkdown(verificationProfile);
-      const effectiveSleepFn = input.sleepFn ?? (input.fetchImpl ? async () => {
-      } : void 0);
-      const infraRerunsBySha = /* @__PURE__ */ new Map();
-      const escalateToNeedsHuman = async (params) => {
-        await gh.ensureLabel(
-          "needs-human",
-          "D93F0B",
-          "Requires human maintainer intervention"
-        );
-        await gh.addIssueLabels(input.issueNumber, ["needs-human"]);
-        if (params.ticketNumber !== input.issueNumber) {
-          await gh.addIssueLabels(params.ticketNumber, ["needs-human"]);
-        }
-        const updatedSuspended = await updateIssueStateWithCas({
+        };
+        await gh.ensureBranch(featureBranch, "dev");
+        const updatedStart = await updateIssueStateWithCas({
           issueNumber: input.issueNumber,
           store,
           mutator: (prev) => ({
             ...prev,
-            phase: params.phase ?? "implementation",
-            status: "suspended",
-            active_branch: params.branch,
-            code_fix_attempts_used: params.codeFixAttemptsUsed ?? prev.code_fix_attempts_used,
-            transient_retries_used: totalTransientRetriesUsed || prev.transient_retries_used,
+            phase: "implementation",
+            status: "active",
+            active_branch: featureBranch,
             last_processed_comment_id: input.commentId ?? prev.last_processed_comment_id
           })
         });
-        const escalationMarkdown = appendEpureCommandsSpoiler(
-          [
-            updatedSuspended.issue_mirror_markdown,
-            "",
-            formatNeedsHumanEscalationComment({
-              reason: params.reason,
-              issueNumber: input.issueNumber,
-              ticketIssueNumber: params.ticketNumber,
-              prNumber: params.prNumber,
-              prUrl: params.prUrl,
-              branch: params.branch,
-              codeFixAttemptsUsed: params.codeFixAttemptsUsed,
-              maxCodeFixAttempts,
-              graceWindowSeconds: verificationProfile.grace_window_seconds,
-              failedChecks: params.failedChecks,
-              mustFixFindings: params.mustFixFindings,
-              sensitivePaths: params.sensitivePaths,
-              traversalPaths: params.traversalPaths,
-              diagnosticExcerpt: params.diagnosticExcerpt
-            })
-          ].join("\n"),
-          {
-            phase: "suspended",
-            status: "suspended",
-            issueNumber: input.issueNumber
-          }
-        );
-        await gh.postIssueComment(input.issueNumber, escalationMarkdown);
-        return {
-          executed: true,
-          phase: updatedSuspended.state.phase,
-          status: updatedSuspended.state.status,
-          active_branch: params.branch,
-          summary_markdown: escalationMarkdown,
-          created_ticket_numbers: ticketsManifest.map(
-            (t) => t.ticketIssueNumber
-          ),
-          feature_pr_url: params.featurePrUrl ?? params.prUrl ?? ""
-        };
-      };
-      await gh.ensureBranch(featureBranch, "dev");
-      const updatedStart = await updateIssueStateWithCas({
-        issueNumber: input.issueNumber,
-        store,
-        mutator: (prev) => ({
-          ...prev,
-          phase: "implementation",
-          status: "active",
-          active_branch: featureBranch,
-          last_processed_comment_id: input.commentId ?? prev.last_processed_comment_id
-        })
-      });
-      const hintForWorkspace = [
-        issue.title,
-        issue.body,
-        ...ticketsManifest.map(
-          (t) => `${t.title}
+        const hintForWorkspace = [
+          issue.title,
+          issue.body,
+          ...ticketsManifest.map(
+            (t) => `${t.title}
 ${t.description}
 ${t.filesToTouch.join(" ")}`
-        )
-      ].join("\n");
-      const accumulatedFiles = await gh.readBranchWorkspaceFiles(
-        featureBranch,
-        hintForWorkspace
-      );
-      const featureChangedFilesMap = /* @__PURE__ */ new Map();
-      const featureDeletedFilesSet = /* @__PURE__ */ new Set();
-      const completedTicketsSummary = [];
-      const existingFeaturePrAtStart = await gh.findOpenPullRequestByHead(
-        featureBranch,
-        "dev"
-      );
-      let skipTicketLoopForExistingFeaturePr = false;
-      if (existingFeaturePrAtStart) {
-        let hasOpenTaskPr = false;
-        for (const ticket of ticketsManifest) {
-          const candidateTaskBranch = `task/${ticket.ticketIssueNumber}-${ticket.slug}`;
-          const openTaskPr = await gh.findOpenPullRequestByHead(
-            candidateTaskBranch,
-            featureBranch
-          );
-          if (openTaskPr) {
-            hasOpenTaskPr = true;
-            break;
-          }
-        }
-        if (!hasOpenTaskPr) {
-          skipTicketLoopForExistingFeaturePr = true;
-          const featurePrFiles = await gh.listPullRequestFiles(
-            existingFeaturePrAtStart.number
-          );
-          for (const prFile of featurePrFiles) {
-            const cleanPath = prFile.filename.replace(/^\/+/, "");
-            if (prFile.status === "removed") {
-              accumulatedFiles.delete(cleanPath);
-              featureChangedFilesMap.delete(cleanPath);
-              featureDeletedFilesSet.add(cleanPath);
-            } else {
-              const content = await gh.readSingleBranchFile(featureBranch, cleanPath) ?? accumulatedFiles.get(cleanPath) ?? null;
-              if (content !== null) {
-                accumulatedFiles.set(cleanPath, content);
-                featureChangedFilesMap.set(cleanPath, content);
-                featureDeletedFilesSet.delete(cleanPath);
-              }
+          )
+        ].join("\n");
+        const accumulatedFiles = await gh.readBranchWorkspaceFiles(
+          featureBranch,
+          hintForWorkspace
+        );
+        const featureChangedFilesMap = /* @__PURE__ */ new Map();
+        const featureDeletedFilesSet = /* @__PURE__ */ new Set();
+        const completedTicketsSummary = [];
+        const existingFeaturePrAtStart = await gh.findOpenPullRequestByHead(
+          featureBranch,
+          "dev"
+        );
+        let skipTicketLoopForExistingFeaturePr = false;
+        if (existingFeaturePrAtStart) {
+          let hasOpenTaskPr = false;
+          for (const ticket of ticketsManifest) {
+            const candidateTaskBranch = `task/${ticket.ticketIssueNumber}-${ticket.slug}`;
+            const openTaskPr = await gh.findOpenPullRequestByHead(
+              candidateTaskBranch,
+              featureBranch
+            );
+            if (openTaskPr) {
+              hasOpenTaskPr = true;
+              break;
             }
           }
-          for (const ticket of ticketsManifest) {
-            completedTicketsSummary.push(
-              `- **#${ticket.ticketIssueNumber}** (${ticket.title}) \u2014 previously squash-merged into \`${featureBranch}\``
+          if (!hasOpenTaskPr) {
+            skipTicketLoopForExistingFeaturePr = true;
+            const featurePrFiles = await gh.listPullRequestFiles(
+              existingFeaturePrAtStart.number
             );
+            for (const prFile of featurePrFiles) {
+              const cleanPath = prFile.filename.replace(/^\/+/, "");
+              if (prFile.status === "removed") {
+                accumulatedFiles.delete(cleanPath);
+                featureChangedFilesMap.delete(cleanPath);
+                featureDeletedFilesSet.add(cleanPath);
+              } else {
+                const content = await gh.readSingleBranchFile(featureBranch, cleanPath) ?? accumulatedFiles.get(cleanPath) ?? null;
+                if (content !== null) {
+                  accumulatedFiles.set(cleanPath, content);
+                  featureChangedFilesMap.set(cleanPath, content);
+                  featureDeletedFilesSet.delete(cleanPath);
+                }
+              }
+            }
+            for (const ticket of ticketsManifest) {
+              completedTicketsSummary.push(
+                `- **#${ticket.ticketIssueNumber}** (${ticket.title}) \u2014 previously squash-merged into \`${featureBranch}\``
+              );
+            }
           }
         }
-      }
-      const loopOutcome = await runTicketExecutionLoop({
-        repository: input.repository,
-        issueNumber: input.issueNumber,
-        commentId: input.commentId,
-        activeToken,
-        issue,
-        featureBranch,
-        ticketsManifest,
-        skipTicketLoopForExistingFeaturePr,
-        accumulatedFiles,
-        featureChangedFilesMap,
-        featureDeletedFilesSet,
-        completedTicketsSummary,
-        devBranchPaths,
-        devWorkflowsMap,
-        trustedBaseFilesMap,
-        trustedBaseDesignMarkdown: trustedBaseRoster.designMarkdown,
-        parsedDevAgentsConfig,
-        initialVerificationProfile: verificationProfile,
-        initialVerificationGuideMarkdown: verificationGuideMarkdown,
-        maxCodeFixAttempts,
-        hintForWorkspace,
-        infraRerunsBySha,
-        getTotalTransientRetriesUsed: () => totalTransientRetriesUsed,
-        addTransientRetriesUsed: (delta) => {
-          totalTransientRetriesUsed += delta;
-        },
-        escalateToNeedsHuman,
-        gh,
-        store,
-        llmApiKey: input.llmApiKey,
-        phaseModels,
-        fetchImpl: input.fetchImpl,
-        effectiveSleepFn,
-        pollIntervalMs: input.pollIntervalMs,
-        sandboxRunner: input.sandboxRunner
-      });
-      if (loopOutcome.halted && loopOutcome.result) {
-        return loopOutcome.result;
-      }
-      try {
-        return await runFeatureIntegrationPhase({
+        const loopOutcome = await runTicketExecutionLoop({
           repository: input.repository,
           issueNumber: input.issueNumber,
           commentId: input.commentId,
           activeToken,
           issue,
-          planSlug,
           featureBranch,
-          activeBranchForStartState: updatedStart.state.active_branch,
           ticketsManifest,
-          existingFeaturePrAtStart,
+          skipTicketLoopForExistingFeaturePr,
           accumulatedFiles,
           featureChangedFilesMap,
           featureDeletedFilesSet,
@@ -12477,9 +12587,10 @@ ${t.filesToTouch.join(" ")}`
           trustedBaseFilesMap,
           trustedBaseDesignMarkdown: trustedBaseRoster.designMarkdown,
           parsedDevAgentsConfig,
-          initialVerificationProfile: loopOutcome.verificationProfile,
-          initialVerificationGuideMarkdown: loopOutcome.verificationGuideMarkdown,
+          initialVerificationProfile: verificationProfile,
+          initialVerificationGuideMarkdown: verificationGuideMarkdown,
           maxCodeFixAttempts,
+          hintForWorkspace,
           infraRerunsBySha,
           getTotalTransientRetriesUsed: () => totalTransientRetriesUsed,
           addTransientRetriesUsed: (delta) => {
@@ -12495,32 +12606,131 @@ ${t.filesToTouch.join(" ")}`
           pollIntervalMs: input.pollIntervalMs,
           sandboxRunner: input.sandboxRunner
         });
-      } catch (err) {
-        if (err instanceof LLMError) {
-          const reason = err instanceof AuthenticationError || err instanceof QuotaExhaustedError ? "llm_quota_or_auth_failure" : "transient_llm_api_exhausted";
-          return await escalateToNeedsHuman({
-            reason,
-            ticketNumber: input.issueNumber,
-            branch: featureBranch,
-            phase: "implementation",
-            diagnosticExcerpt: redactSecrets(err.message, [
+        if (loopOutcome.halted && loopOutcome.result) {
+          return loopOutcome.result;
+        }
+        try {
+          return await runFeatureIntegrationPhase({
+            repository: input.repository,
+            issueNumber: input.issueNumber,
+            commentId: input.commentId,
+            activeToken,
+            issue,
+            planSlug,
+            featureBranch,
+            activeBranchForStartState: updatedStart.state.active_branch,
+            ticketsManifest,
+            existingFeaturePrAtStart,
+            accumulatedFiles,
+            featureChangedFilesMap,
+            featureDeletedFilesSet,
+            completedTicketsSummary,
+            devBranchPaths,
+            devWorkflowsMap,
+            trustedBaseFilesMap,
+            trustedBaseDesignMarkdown: trustedBaseRoster.designMarkdown,
+            parsedDevAgentsConfig,
+            initialVerificationProfile: loopOutcome.verificationProfile,
+            initialVerificationGuideMarkdown: loopOutcome.verificationGuideMarkdown,
+            maxCodeFixAttempts,
+            infraRerunsBySha,
+            getTotalTransientRetriesUsed: () => totalTransientRetriesUsed,
+            addTransientRetriesUsed: (delta) => {
+              totalTransientRetriesUsed += delta;
+            },
+            escalateToNeedsHuman,
+            gh,
+            store,
+            llmApiKey: input.llmApiKey,
+            phaseModels,
+            fetchImpl: input.fetchImpl,
+            effectiveSleepFn,
+            pollIntervalMs: input.pollIntervalMs,
+            sandboxRunner: input.sandboxRunner
+          });
+        } catch (err) {
+          if (err instanceof LLMError) {
+            return await escalateToNeedsHuman({
+              reason: resolveLlmEscalationReason(err),
+              ticketNumber: input.issueNumber,
+              branch: featureBranch,
+              phase: "implementation",
+              diagnosticExcerpt: redactSecrets(err.message, [
+                activeToken,
+                input.llmApiKey
+              ])
+            });
+          }
+          throw err;
+        }
+      }
+      return {
+        executed: false,
+        phase: currentState?.phase ?? "idle",
+        status: currentState?.status ?? "active",
+        active_branch: currentState?.active_branch ?? "",
+        summary_markdown: "No orchestration transition matched.",
+        created_ticket_numbers: [],
+        feature_pr_url: ""
+      };
+    } catch (err) {
+      await gh.ensureLabel(
+        "needs-human",
+        "D93F0B",
+        "Requires human maintainer intervention"
+      );
+      await gh.addIssueLabels(input.issueNumber, ["needs-human"]);
+      const latestSnap = await store.readRef(refName);
+      const fallbackPhase = latestSnap.state?.phase && latestSnap.state.phase !== "idle" ? latestSnap.state.phase : input.command === "approve" ? "implementation" : input.command === "to-tickets" ? "tickets" : input.command === "to-spec" ? "spec" : "grilling";
+      const fallbackBranch = latestSnap.state?.active_branch || (fallbackPhase === "implementation" ? featureBranch : planBranch);
+      const updatedSuspended = await updateIssueStateWithCas({
+        issueNumber: input.issueNumber,
+        store,
+        mutator: (prev) => ({
+          ...prev,
+          phase: prev.phase !== "idle" ? prev.phase : fallbackPhase,
+          status: "suspended",
+          active_branch: prev.active_branch || fallbackBranch,
+          transient_retries_used: totalTransientRetriesUsed || prev.transient_retries_used,
+          last_processed_comment_id: input.commentId ?? prev.last_processed_comment_id
+        })
+      });
+      const rawErrMessage = err instanceof Error ? err.message : String(err);
+      const escalationReason = err instanceof LLMError ? resolveLlmEscalationReason(err) : "internal_error";
+      const escalationMarkdown = appendEpureCommandsSpoiler(
+        [
+          updatedSuspended.issue_mirror_markdown,
+          "",
+          formatNeedsHumanEscalationComment({
+            reason: escalationReason,
+            issueNumber: input.issueNumber,
+            ticketIssueNumber: input.issueNumber,
+            branch: updatedSuspended.state.active_branch || fallbackBranch,
+            codeFixAttemptsUsed: updatedSuspended.state.code_fix_attempts_used,
+            maxCodeFixAttempts,
+            diagnosticExcerpt: redactSecrets(rawErrMessage, [
               activeToken,
               input.llmApiKey
             ])
-          });
+          })
+        ].join("\n"),
+        {
+          phase: "suspended",
+          status: "suspended",
+          issueNumber: input.issueNumber
         }
-        throw err;
-      }
+      );
+      await gh.postIssueComment(input.issueNumber, escalationMarkdown);
+      return {
+        executed: true,
+        phase: updatedSuspended.state.phase,
+        status: updatedSuspended.state.status,
+        active_branch: updatedSuspended.state.active_branch,
+        summary_markdown: escalationMarkdown,
+        created_ticket_numbers: [],
+        feature_pr_url: ""
+      };
     }
-    return {
-      executed: false,
-      phase: currentState?.phase ?? "idle",
-      status: currentState?.status ?? "active",
-      active_branch: currentState?.active_branch ?? "",
-      summary_markdown: "No orchestration transition matched.",
-      created_ticket_numbers: [],
-      feature_pr_url: ""
-    };
   } finally {
     if (mintedAppToken) {
       try {

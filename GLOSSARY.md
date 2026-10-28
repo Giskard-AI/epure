@@ -45,8 +45,8 @@ _Éviter_ : revue automatisée d'un ticket.
 **Exception sensible** : changement dont le niveau de risque exclut l'intégration automatique, même si les contrôles automatisés sont concluants.
 _Éviter_ : ticket ordinaire.
 
-**Escalade humaine** : passage d'un ticket ou d'un plan à un état requérant une décision humaine avant reprise.
-_Éviter_ : échec définitif, annulation.
+**Escalade humaine** : passage d'un ticket ou d'un plan à l'état technique `suspended` (label `needs-human`) requérant une décision ou action humaine avant reprise vers `active`. Se distingue du **Plan annulé** (`cancelled`), qui désactive toute exécution ultérieure.
+_Éviter_ : échec définitif, annulation, crash silencieux du runner.
 
 ## Unités d'intégration
 
@@ -185,6 +185,12 @@ _Éviter_ : fallback automatique contournant les plafonds définis par l'utilisa
 
 **Reprise après suspension (`suspended -> active`)** : réactivation idempotente d'une issue de pilotage ou d'un ticket en état `suspended` (`needs-human`) lorsqu'un contributeur autorisé (`write` ou supérieur) publie une réponse ou relance la commande de phase correspondante, retirant le label `needs-human`, restaurant le statut `active` tout en conservant la phase courante (`grilling`, `spec`, `tickets`, `implementation`) et reprenant au dernier jalon validé.
 _Éviter_ : bloquer définitivement une issue suspendue après une panne API temporaire ou écraser la phase d'orchestration lors de la suspension.
+
+**Épuisement des tentatives de remédiation (`remediation_exhausted`)** : atteinte du plafond de corrections automatisées d'un ticket ou d'une branche de fonctionnalité (`max_code_fix_attempts`, fixé à 3 par ADR-0012), que l'échec provienne des tests en sandbox isolée, de la revue multi-agents ou de la CI externe, entraînant une escalade humaine.
+_Éviter_ : confusion avec un dépassement du budget d'horloge du runner (`wall_clock_budget_exhausted`) ou code d'escalade parallèle non typé.
+
+**Réponse LLM invalide après relance corrective (`llm_request_invalid`)** : rejet non transitoire d'une requête LLM (`HTTP 400`) ou sortie structurée violant encore les invariants du schéma après les relances correctives avec rétroaction de l'erreur de validation ; déclenche une escalade humaine sans consommer le quota de corrections de code du ticket.
+_Éviter_ : qualifier une sortie invalide d'échec réseau transitoire ou relancer à l'aveugle sans transmettre l'erreur de validation au modèle.
 
 ## Orchestration des conversations et des reviews (ronde 9)
 
