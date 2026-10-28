@@ -60,6 +60,19 @@ const DEFAULT_MAX_RATE_LIMIT_WAITS = 10;
 function isQuotaExhausted(resp: LlmProviderResponse): boolean {
   const errType = (resp.errorType ?? "").toLowerCase();
   const body = resp.body.toLowerCase();
+  const retryAfterSec =
+    resp.retryAfterSeconds ??
+    parseRetryAfterSeconds(resp.retryAfterHeader, resp.body);
+
+  if (
+    resp.status === 429 &&
+    (retryAfterSec !== undefined || errType === "rate_limit_exceeded") &&
+    !errType.includes("insufficient_quota") &&
+    !errType.includes("billing")
+  ) {
+    return false;
+  }
+
   return (
     resp.status === 402 ||
     errType.includes("insufficient_quota") ||

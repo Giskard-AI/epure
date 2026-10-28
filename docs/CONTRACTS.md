@@ -152,7 +152,7 @@ jobs:
       strict_sha_pinning: true
 
   consume-custom-action:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
       contents: read

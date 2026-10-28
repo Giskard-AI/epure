@@ -37,6 +37,7 @@ import {
 import { appendEpureCommandsSpoiler } from "../formatting/comments.js";
 import { callGeminiJson } from "../gemini-client.js";
 import { loadOrchestratorStateFromGitRef } from "../github/rest-client.js";
+import { EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT } from "../prompts/code-discipline.js";
 import {
   GENERATED_TICKET_IMPLEMENTATION_SCHEMA,
   type EscalateToNeedsHumanFn,
@@ -567,7 +568,9 @@ export async function runTicketExecutionLoop(
                 '    { "path": "tests/...", "content": "..." }',
                 "  ]",
                 "}"
-              ])
+              ]),
+          "",
+          EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
         ].join("\n");
 
         const tddPrompt = [
@@ -713,7 +716,9 @@ export async function runTicketExecutionLoop(
             '    { "path": "...", "content": "..." }',
             "  ],",
             '  "deleted_files": []',
-            "}"
+            "}",
+            "",
+            EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
           ].join("\n");
 
           const fixPrompt = [
@@ -1102,7 +1107,9 @@ export async function runTicketExecutionLoop(
           '    { "path": "...", "content": "..." }',
           "  ],",
           '  "deleted_files": ["..."]',
-          "}"
+          "}",
+          "",
+          EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
         ].join("\n");
 
         const promptParts: string[] = [];

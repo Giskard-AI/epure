@@ -21,7 +21,7 @@ jobs:
 
   consume-custom-action:
     name: "Invoke EPURE Pre-bundled Custom Action Standalone"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
       contents: read

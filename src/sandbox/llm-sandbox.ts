@@ -1,7 +1,8 @@
 import { randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import type { AddressInfo } from "node:net";
+import { dirname, resolve } from "node:path";
 import { containsPrivateKeyMaterial } from "../auth/github-apps.js";
 import { redactSecrets } from "../auth/issue-command-gate.js";
 
@@ -12,6 +13,29 @@ export type SandboxErrorCode =
   | "PROXY_UNAUTHORIZED_NONCE"
   | "PROXY_FORBIDDEN_ENDPOINT"
   | "SANDBOX_COMMAND_FAILED";
+
+export type SandboxNetworkPolicy = "proxy_only" | "https_only" | "offline";
+
+export interface KernelSandboxCapabilities {
+  readonly landrunAvailable: boolean;
+  readonly bubblewrapAvailable: boolean;
+}
+
+export interface BuildKernelSandboxedCommandInput {
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly cwd: string;
+  readonly sanitizedEnv: Readonly<Record<string, string>>;
+  readonly networkPolicy: SandboxNetworkPolicy;
+  readonly proxyPort?: number | undefined;
+  readonly capabilities: KernelSandboxCapabilities;
+}
+
+export interface BuiltKernelSandboxedCommand {
+  readonly backend: "landrun" | "bubblewrap" | "none";
+  readonly command: string;
+  readonly args: readonly string[];
+}
 
 export interface SandboxProxyEndpoint {
   readonly proxyUrl: string;
@@ -50,6 +74,9 @@ export interface SandboxExecutionInput {
   readonly args?: readonly string[] | undefined;
   readonly cwd?: string | undefined;
   readonly timeoutMs?: number | undefined;
+  readonly networkPolicy?: SandboxNetworkPolicy | undefined;
+  readonly enforceKernelSandbox?: boolean | undefined;
+  readonly kernelCapabilities?: KernelSandboxCapabilities | undefined;
   readonly upstreamHandler?:
     | ((
         req: LlmProxyRequestPayload,
@@ -67,6 +94,8 @@ export interface SandboxExecutionResult {
   readonly stderr: string;
   readonly duration_ms: number;
   readonly proxy_url: string;
+  readonly kernel_backend?: "landrun" | "bubblewrap" | "none" | undefined;
+  readonly network_policy?: SandboxNetworkPolicy | undefined;
 }
 
 const SECRET_ENV_NAME_PATTERN =
@@ -104,8 +133,221 @@ export function buildSanitizedSandboxEnv(
   sanitized.EPURE_LLM_PROXY_URL = proxy.proxyUrl;
   sanitized.EPURE_LLM_PROXY_NONCE = proxy.proxyNonce;
   sanitized.GITHUB_TOKEN_PERMISSIONS = "none";
+  sanitized.RTK_TELEMETRY_DISABLED = "1";
+  sanitized.RTK_RECALL = "0";
+  sanitized.RTK_TEE = "0";
+  sanitized.RTK_SUPPRESS_HOOK_WARNING = "1";
+  sanitized.NO_COLOR = "1";
 
   return sanitized;
+}
+
+export function buildLandrunInvocation(params: {
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly cwd: string;
+  readonly sanitizedEnv: Readonly<Record<string, string>>;
+  readonly networkPolicy: SandboxNetworkPolicy;
+  readonly proxyPort?: number | undefined;
+}): readonly string[] {
+  const resolvedCwd = resolve(params.cwd);
+  const roxPaths = new Set<string>([
+    "/usr",
+    "/bin",
+    "/lib",
+    "/lib64",
+    "/etc",
+    "/opt"
+  ]);
+  if (params.command.startsWith("/")) {
+    roxPaths.add(dirname(resolve(params.command)));
+  }
+
+  const rwxPaths = new Set<string>([resolvedCwd, "/tmp"]);
+  if (params.networkPolicy === "https_only") {
+    const home = params.sanitizedEnv.HOME?.trim();
+    if (home) {
+      rwxPaths.add(`${home}/.npm`);
+      rwxPaths.add(`${home}/.cache`);
+      rwxPaths.add(`${home}/.cargo`);
+    }
+  }
+
+  const landrunArgs: string[] = [
+    "--rox",
+    Array.from(roxPaths).join(","),
+    "--ro",
+    "/dev,/proc",
+    "--rwx",
+    Array.from(rwxPaths).join(",")
+  ];
+
+  if (params.networkPolicy === "proxy_only") {
+    if (typeof params.proxyPort === "number" && params.proxyPort > 0) {
+      landrunArgs.push("--connect-tcp", String(params.proxyPort));
+    }
+  } else if (params.networkPolicy === "https_only") {
+    landrunArgs.push("--connect-tcp", "443");
+    if (typeof params.proxyPort === "number" && params.proxyPort > 0) {
+      landrunArgs.push("--connect-tcp", String(params.proxyPort));
+    }
+  }
+  // When networkPolicy === "offline", zero --connect-tcp flags are emitted.
+
+  for (const key of Object.keys(params.sanitizedEnv).sort()) {
+    landrunArgs.push("--env", key);
+  }
+
+  landrunArgs.push("--", params.command, ...params.args);
+  return landrunArgs;
+}
+
+export function buildBubblewrapInvocation(params: {
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly cwd: string;
+}): readonly string[] {
+  const resolvedCwd = resolve(params.cwd);
+  return [
+    "--unshare-net",
+    "--unshare-pid",
+    "--unshare-ipc",
+    "--die-with-parent",
+    "--ro-bind",
+    "/",
+    "/",
+    "--dev",
+    "/dev",
+    "--proc",
+    "/proc",
+    "--tmpfs",
+    "/tmp",
+    "--bind",
+    resolvedCwd,
+    resolvedCwd,
+    "--chdir",
+    resolvedCwd,
+    "--",
+    params.command,
+    ...params.args
+  ];
+}
+
+export function buildKernelSandboxedCommand(
+  input: BuildKernelSandboxedCommandInput
+): BuiltKernelSandboxedCommand {
+  if (input.networkPolicy === "offline") {
+    if (input.capabilities.bubblewrapAvailable) {
+      return {
+        backend: "bubblewrap",
+        command: "bwrap",
+        args: buildBubblewrapInvocation({
+          command: input.command,
+          args: input.args,
+          cwd: input.cwd
+        })
+      };
+    }
+    if (input.capabilities.landrunAvailable) {
+      return {
+        backend: "landrun",
+        command: "landrun",
+        args: buildLandrunInvocation({
+          command: input.command,
+          args: input.args,
+          cwd: input.cwd,
+          sanitizedEnv: input.sanitizedEnv,
+          networkPolicy: "offline",
+          proxyPort: input.proxyPort
+        })
+      };
+    }
+    return {
+      backend: "none",
+      command: input.command,
+      args: input.args
+    };
+  }
+
+  if (input.capabilities.landrunAvailable) {
+    return {
+      backend: "landrun",
+      command: "landrun",
+      args: buildLandrunInvocation({
+        command: input.command,
+        args: input.args,
+        cwd: input.cwd,
+        sanitizedEnv: input.sanitizedEnv,
+        networkPolicy: input.networkPolicy,
+        proxyPort: input.proxyPort
+      })
+    };
+  }
+
+  return {
+    backend: "none",
+    command: input.command,
+    args: input.args
+  };
+}
+
+export function probeKernelSandboxCapabilities(
+  runnerEnv: Readonly<Record<string, string | undefined>> = process.env
+): KernelSandboxCapabilities {
+  if (process.platform !== "linux") {
+    return { landrunAvailable: false, bubblewrapAvailable: false };
+  }
+
+  const probeEnv: NodeJS.ProcessEnv = {
+    PATH: runnerEnv.PATH ?? process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin"
+  };
+
+  let landrunAvailable = false;
+  try {
+    const res = spawnSync(
+      "landrun",
+      ["--rox", "/usr,/bin,/lib,/lib64", "--", "/bin/true"],
+      {
+        env: probeEnv,
+        stdio: "ignore",
+        timeout: 3000
+      }
+    );
+    landrunAvailable = res.status === 0;
+  } catch {
+    landrunAvailable = false;
+  }
+
+  let bubblewrapAvailable = false;
+  try {
+    const res = spawnSync(
+      "bwrap",
+      [
+        "--unshare-net",
+        "--ro-bind",
+        "/",
+        "/",
+        "--dev",
+        "/dev",
+        "--proc",
+        "/proc",
+        "--tmpfs",
+        "/tmp",
+        "--",
+        "/bin/true"
+      ],
+      {
+        env: probeEnv,
+        stdio: "ignore",
+        timeout: 3000
+      }
+    );
+    bubblewrapAvailable = res.status === 0;
+  } catch {
+    bubblewrapAvailable = false;
+  }
+
+  return { landrunAvailable, bubblewrapAvailable };
 }
 
 function readRequestBody(req: IncomingMessage): Promise<string> {
@@ -215,10 +457,20 @@ function collectRunnerSecretValues(
   return values;
 }
 
+function parsePortFromProxyUrl(proxyUrl: string): number | undefined {
+  const match = /:(\d+)(?:\/|$)/.exec(proxyUrl);
+  if (!match || !match[1]) {
+    return undefined;
+  }
+  const parsed = Number.parseInt(match[1], 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
 export async function runInUntrustedCodeSandbox(
   input: SandboxExecutionInput
 ): Promise<SandboxExecutionResult> {
   const startMs = Date.now();
+  const networkPolicy: SandboxNetworkPolicy = input.networkPolicy ?? "proxy_only";
 
   if (!input.isolationAvailable) {
     return {
@@ -230,7 +482,9 @@ export async function runInUntrustedCodeSandbox(
       stdout: "",
       stderr: "",
       duration_ms: Date.now() - startMs,
-      proxy_url: ""
+      proxy_url: "",
+      kernel_backend: "none",
+      network_policy: networkPolicy
     };
   }
 
@@ -253,9 +507,15 @@ export async function runInUntrustedCodeSandbox(
       stdout: "",
       stderr: "",
       duration_ms: Date.now() - startMs,
-      proxy_url: ""
+      proxy_url: "",
+      kernel_backend: "none",
+      network_policy: networkPolicy
     };
   }
+
+  const enforceKernelSandbox =
+    input.enforceKernelSandbox === true ||
+    input.runnerEnv.EPURE_ENFORCE_KERNEL_SANDBOX === "true";
 
   const secretValues = collectRunnerSecretValues(input.runnerEnv);
   const proxy = await createLlmSandboxProxy({
@@ -270,15 +530,54 @@ export async function runInUntrustedCodeSandbox(
     });
 
     const args = input.args ? [...input.args] : [];
+    const cwd = input.cwd ?? process.cwd();
     const timeoutMs = input.timeoutMs ?? 60 * 60 * 1000;
+    const proxyPort = parsePortFromProxyUrl(proxy.proxyUrl);
+
+    let spawnCommand = input.command;
+    let spawnArgs: readonly string[] = args;
+    let kernelBackend: "landrun" | "bubblewrap" | "none" = "none";
+
+    if (enforceKernelSandbox || input.kernelCapabilities !== undefined) {
+      const capabilities =
+        input.kernelCapabilities ??
+        probeKernelSandboxCapabilities(input.runnerEnv);
+      const wrapped = buildKernelSandboxedCommand({
+        command: input.command,
+        args,
+        cwd,
+        sanitizedEnv,
+        networkPolicy,
+        proxyPort,
+        capabilities
+      });
+      kernelBackend = wrapped.backend;
+      if (wrapped.backend === "none" && enforceKernelSandbox) {
+        return {
+          isolated: false,
+          error_code: "SANDBOX_ISOLATION_UNAVAILABLE",
+          error_message:
+            "Fail-closed: kernel sandbox backend (landrun/bubblewrap) is unavailable while EPURE_ENFORCE_KERNEL_SANDBOX=true (ADR-0030).",
+          exit_code: 1,
+          stdout: "",
+          stderr: "",
+          duration_ms: Date.now() - startMs,
+          proxy_url: "",
+          kernel_backend: "none",
+          network_policy: networkPolicy
+        };
+      }
+      spawnCommand = wrapped.command;
+      spawnArgs = wrapped.args;
+    }
 
     const childResult = await new Promise<{
       exitCode: number;
       stdout: string;
       stderr: string;
-    }>((resolve) => {
-      const child = spawn(input.command, args, {
-        cwd: input.cwd ?? process.cwd(),
+    }>((resolvePromise) => {
+      const child = spawn(spawnCommand, [...spawnArgs], {
+        cwd,
         env: sanitizedEnv,
         stdio: ["ignore", "pipe", "pipe"]
       });
@@ -295,7 +594,7 @@ export async function runInUntrustedCodeSandbox(
 
       child.on("error", (err) => {
         clearTimeout(timer);
-        resolve({
+        resolvePromise({
           exitCode: 1,
           stdout: Buffer.concat(stdoutChunks).toString("utf8"),
           stderr: err.message
@@ -304,7 +603,7 @@ export async function runInUntrustedCodeSandbox(
 
       child.on("close", (code) => {
         clearTimeout(timer);
-        resolve({
+        resolvePromise({
           exitCode: code ?? 1,
           stdout: Buffer.concat(stdoutChunks).toString("utf8"),
           stderr: Buffer.concat(stderrChunks).toString("utf8")
@@ -326,7 +625,9 @@ export async function runInUntrustedCodeSandbox(
       stdout: cleanStdout,
       stderr: cleanStderr,
       duration_ms: Date.now() - startMs,
-      proxy_url: proxy.proxyUrl
+      proxy_url: proxy.proxyUrl,
+      kernel_backend: kernelBackend,
+      network_policy: networkPolicy
     };
   } finally {
     await proxy.close();

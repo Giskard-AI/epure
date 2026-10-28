@@ -20,7 +20,8 @@ import type {
 import {
   runInUntrustedCodeSandbox,
   type SandboxExecutionInput,
-  type SandboxExecutionResult
+  type SandboxExecutionResult,
+  type SandboxNetworkPolicy
 } from "./llm-sandbox.js";
 
 export interface WorkspaceFileEntry {
@@ -92,6 +93,22 @@ export interface TargetStepExecutionRecord {
   readonly stdout: string;
   readonly stderr: string;
   readonly duration_ms: number;
+  readonly network_policy?: SandboxNetworkPolicy | undefined;
+}
+
+export interface FormatStage1CommandOutputInput {
+  readonly step:
+    | "install"
+    | "codegen"
+    | "typecheck"
+    | "lint"
+    | "test"
+    | "build";
+  readonly rawCommand: string;
+  readonly exitCode: number;
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly maxFailureRawTailChars?: number | undefined;
 }
 
 export interface TargetVerificationResult {
@@ -140,6 +157,87 @@ const SENSITIVE_TASK_BRANCH_PATH_PATTERNS: readonly RegExp[] = [
 ];
 
 const SHELL_INJECTION_PATTERN = /[;|`><\r\n]|\$\(|\$\{\{/;
+
+const ANSI_ESCAPE_PATTERN = /\x1b\[[0-9;]*[A-Za-z]/g;
+
+const RTK_NOISE_LINE_PATTERN =
+  /^(?:npm warn deprecated\b|npm notice\b|added \d+ packages\b|audited \d+ packages\b|found 0 vulnerabilities\b|Downloading https?:\/\/|Collecting [a-zA-Z0-9_.-]+\s*$|\s*\[[=>.\s-]{10,}\]\s*\d+%)/i;
+
+const RTK_IGNORED_PATH_NOISE_PATTERN =
+  /(?:^|\s)(?:\.git\/|node_modules\/|__pycache__\/|\.venv\/|package-lock\.json|pnpm-lock\.yaml|[^\s]+\.min\.(?:js|css))(?:\s|$)/;
+
+const DIAGNOSTIC_PRESERVE_PATTERN =
+  /\b(?:error|fail|failed|failure|err!|assertionerror|typeerror|referenceerror|syntaxerror|traceback|exception|panic)\b|^\s*at\s+/i;
+
+export function formatAndCondenseStage1CommandOutput(
+  input: FormatStage1CommandOutputInput
+): string {
+  const rawCombined = `${input.stdout}\n${input.stderr}`
+    .replace(ANSI_ESCAPE_PATTERN, "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .trim();
+
+  if (!rawCombined) {
+    return "";
+  }
+
+  const lines = rawCombined.split("\n");
+  const filteredLines: string[] = [];
+  let droppedLinesCount = 0;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      if (
+        filteredLines.length > 0 &&
+        filteredLines[filteredLines.length - 1] !== ""
+      ) {
+        filteredLines.push("");
+      }
+      continue;
+    }
+
+    const isDiagnosticLine = DIAGNOSTIC_PRESERVE_PATTERN.test(trimmed);
+    if (
+      !isDiagnosticLine &&
+      (RTK_NOISE_LINE_PATTERN.test(trimmed) ||
+        RTK_IGNORED_PATH_NOISE_PATTERN.test(trimmed))
+    ) {
+      droppedLinesCount += 1;
+      continue;
+    }
+
+    filteredLines.push(line);
+  }
+
+  const condensed = filteredLines.join("\n").trim();
+
+  if (input.exitCode === 0) {
+    if (!condensed && droppedLinesCount > 0) {
+      return `[rtk stateless] ${input.rawCommand}: ok (${droppedLinesCount} noise lines filtered)`;
+    }
+    return condensed;
+  }
+
+  const maxTailChars = input.maxFailureRawTailChars ?? 4000;
+  const rawTail =
+    rawCombined.length > maxTailChars
+      ? rawCombined.slice(-maxTailChars)
+      : rawCombined;
+
+  if (droppedLinesCount === 0 && condensed === rawTail) {
+    return condensed;
+  }
+
+  return [
+    condensed,
+    `--- [raw failure tail (${rawTail.length} chars, stateless in-memory)] ---`,
+    rawTail
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
 
 const ALLOWLISTED_BINARIES = new Set([
   "npm",
@@ -1037,12 +1135,16 @@ export async function runPolyglotStage1Verification(
             break;
           }
 
+          const stepNetworkPolicy: SandboxNetworkPolicy =
+            candidate.step === "install" ? "https_only" : "offline";
+
           let execRes = await sandboxRunner({
             isolationAvailable: true,
             runnerEnv: baseRunnerEnv,
             command: tokenized.command,
             args: tokenized.args,
             cwd: targetCwd,
+            networkPolicy: stepNetworkPolicy,
             timeoutMs:
               candidate.step === "install" || candidate.step === "test"
                 ? 300_000
@@ -1072,12 +1174,21 @@ export async function runPolyglotStage1Verification(
                   "--user"
                 ],
                 cwd: targetCwd,
+                networkPolicy: stepNetworkPolicy,
                 timeoutMs: 300_000
               });
             }
           }
 
           const stepPassed = execRes.isolated && execRes.exit_code === 0;
+          const formattedOutput = formatAndCondenseStage1CommandOutput({
+            step: candidate.step,
+            rawCommand: tokenized.raw,
+            exitCode: execRes.exit_code,
+            stdout: execRes.stdout,
+            stderr: execRes.stderr
+          });
+
           executedSteps.push({
             step: candidate.step,
             raw_command: tokenized.raw,
@@ -1085,13 +1196,13 @@ export async function runPolyglotStage1Verification(
             passed: stepPassed,
             stdout: execRes.stdout,
             stderr: execRes.stderr,
-            duration_ms: execRes.duration_ms
+            duration_ms: execRes.duration_ms,
+            network_policy: stepNetworkPolicy
           });
 
           if (!stepPassed) {
             targetPassed = false;
-            const combined = `${execRes.stdout}\n${execRes.stderr}`.trim();
-            targetFailureOutput = `[Target: ${target.name} (${target.working_directory})][${candidate.step}: ${tokenized.raw}] failed (exit ${execRes.exit_code}):\n${combined}`;
+            targetFailureOutput = `[Target: ${target.name} (${target.working_directory})][${candidate.step}: ${tokenized.raw}] failed (exit ${execRes.exit_code}):\n${formattedOutput}`;
             break;
           }
         }
@@ -1107,7 +1218,15 @@ export async function runPolyglotStage1Verification(
 
       const stepOutSummary = targetPassed
         ? executedSteps
-            .map((s) => `${s.stdout}\n${s.stderr}`.trim())
+            .map((s) =>
+              formatAndCondenseStage1CommandOutput({
+                step: s.step,
+                rawCommand: s.raw_command,
+                exitCode: s.exit_code,
+                stdout: s.stdout,
+                stderr: s.stderr
+              })
+            )
             .filter(Boolean)
             .join("\n")
         : targetFailureOutput;

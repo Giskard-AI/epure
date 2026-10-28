@@ -1221,6 +1221,13 @@ function buildRenovateConfigJson(stack) {
       minimumReleaseAge: "7 days"
     },
     {
+      description: "CLI and sandbox security binaries cooldown (7 days) on GitHub releases/tags (rtk-ai/rtk, zizmorcore/zizmor)",
+      groupName: "cli-security-and-sandbox-tools",
+      matchDatasources: ["github-releases", "github-tags"],
+      minimumReleaseAge: "7 days",
+      automerge: false
+    },
+    {
       description: "Group GitHub Actions digest & version updates",
       groupName: "github-actions",
       matchManagers: ["github-actions"],
@@ -1355,6 +1362,20 @@ function buildRenovateConfigJson(stack) {
     },
     prHourlyLimit: 2,
     prConcurrentLimit: 5,
+    customManagers: [
+      {
+        customType: "regex",
+        description: "Track pinned CLI and security binary versions via # renovate: comments",
+        managerFilePatterns: [
+          "/^\\.github/workflows/[^/]+\\.ya?ml$/",
+          "/^src/.*\\.ts$/",
+          "/^scripts/.*\\.sh$/"
+        ],
+        matchStrings: [
+          `#\\s*renovate:\\s*datasource=(?<datasource>[a-z-]+)\\s+depName=(?<depName>[^\\s]+)(?:\\s+extractVersion=(?<extractVersion>[^\\s]+))?\\s*\\n\\s*(?:export\\s+const\\s+)?[A-Z0-9_]+\\s*=\\s*["'](?<currentValue>[^"']+)["']`
+        ]
+      }
+    ],
     packageRules
   };
   return {
@@ -1480,14 +1501,14 @@ function buildStackAwareCiWorkflowYaml(params) {
       "jobs:",
       "  quality:",
       '    name: "Quality (Format, Lint, Typecheck, Test & Build)"',
-      "    runs-on: ubuntu-latest",
+      "    runs-on: ubuntu-26.04",
       "    timeout-minutes: 20",
       "    steps:",
       ...qualitySteps,
       "",
       "  zizmor:",
       '    name: "Zizmor"',
-      "    runs-on: ubuntu-latest",
+      "    runs-on: ubuntu-26.04",
       "    timeout-minutes: 10",
       "    permissions:",
       "      contents: read # checkout the workflows zizmor audits",
@@ -2304,7 +2325,7 @@ function buildCallerWorkflows(pinnedSha, stack, jobTimeoutMinutes = DEFAULT_AGEN
         "jobs:",
         "  authorize-command:",
         '    name: "Authorize /epure Issue Command"',
-        "    runs-on: ubuntu-latest",
+        "    runs-on: ubuntu-26.04",
         "    timeout-minutes: 10",
         "    permissions:",
         "      contents: read # read repository metadata and collaborator permission level",
@@ -2331,7 +2352,7 @@ function buildCallerWorkflows(pinnedSha, stack, jobTimeoutMinutes = DEFAULT_AGEN
         '    name: "Orchestrate Authorized /epure Lifecycle"',
         "    needs: authorize-command",
         "    if: ${{ needs.authorize-command.outputs.authorized == 'true' }}",
-        "    runs-on: ubuntu-latest",
+        "    runs-on: ubuntu-26.04",
         `    timeout-minutes: ${jobTimeoutMinutes}`,
         "    environment: gemini",
         "    concurrency:",
@@ -2400,7 +2421,7 @@ function buildCallerWorkflows(pinnedSha, stack, jobTimeoutMinutes = DEFAULT_AGEN
         "jobs:",
         "  pr-title:",
         '    name: "PR title"',
-        "    runs-on: ubuntu-latest",
+        "    runs-on: ubuntu-26.04",
         "    timeout-minutes: 5",
         "    steps:",
         "      - name: Validate Conventional Commit PR title",
@@ -2434,7 +2455,7 @@ function buildCallerWorkflows(pinnedSha, stack, jobTimeoutMinutes = DEFAULT_AGEN
         "jobs:",
         "  release:",
         '    name: "Release Promotion (dev -> main)"',
-        "    runs-on: ubuntu-latest",
+        "    runs-on: ubuntu-26.04",
         "    timeout-minutes: 30",
         "    environment: release",
         "    permissions:",

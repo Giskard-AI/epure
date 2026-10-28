@@ -989,6 +989,13 @@ function buildRenovateConfigJson(stack) {
       minimumReleaseAge: "7 days"
     },
     {
+      description: "CLI and sandbox security binaries cooldown (7 days) on GitHub releases/tags (rtk-ai/rtk, zizmorcore/zizmor)",
+      groupName: "cli-security-and-sandbox-tools",
+      matchDatasources: ["github-releases", "github-tags"],
+      minimumReleaseAge: "7 days",
+      automerge: false
+    },
+    {
       description: "Group GitHub Actions digest & version updates",
       groupName: "github-actions",
       matchManagers: ["github-actions"],
@@ -1123,6 +1130,20 @@ function buildRenovateConfigJson(stack) {
     },
     prHourlyLimit: 2,
     prConcurrentLimit: 5,
+    customManagers: [
+      {
+        customType: "regex",
+        description: "Track pinned CLI and security binary versions via # renovate: comments",
+        managerFilePatterns: [
+          "/^\\.github/workflows/[^/]+\\.ya?ml$/",
+          "/^src/.*\\.ts$/",
+          "/^scripts/.*\\.sh$/"
+        ],
+        matchStrings: [
+          `#\\s*renovate:\\s*datasource=(?<datasource>[a-z-]+)\\s+depName=(?<depName>[^\\s]+)(?:\\s+extractVersion=(?<extractVersion>[^\\s]+))?\\s*\\n\\s*(?:export\\s+const\\s+)?[A-Z0-9_]+\\s*=\\s*["'](?<currentValue>[^"']+)["']`
+        ]
+      }
+    ],
     packageRules
   };
   return {
@@ -1248,14 +1269,14 @@ function buildStackAwareCiWorkflowYaml(params) {
       "jobs:",
       "  quality:",
       '    name: "Quality (Format, Lint, Typecheck, Test & Build)"',
-      "    runs-on: ubuntu-latest",
+      "    runs-on: ubuntu-26.04",
       "    timeout-minutes: 20",
       "    steps:",
       ...qualitySteps,
       "",
       "  zizmor:",
       '    name: "Zizmor"',
-      "    runs-on: ubuntu-latest",
+      "    runs-on: ubuntu-26.04",
       "    timeout-minutes: 10",
       "    permissions:",
       "      contents: read # checkout the workflows zizmor audits",
@@ -1468,18 +1489,69 @@ function parseRetryAfterSeconds(headerVal, bodyText, nowMs = Date.now()) {
   }
   return void 0;
 }
+function parseProviderErrorEnvelope(bodyText) {
+  try {
+    const parsed = JSON.parse(bodyText);
+    const errObj = parsed && typeof parsed.error === "object" && parsed.error !== null ? parsed.error : parsed;
+    const code = typeof errObj.code === "string" ? errObj.code : void 0;
+    const type = typeof errObj.type === "string" ? errObj.type : void 0;
+    const status = typeof errObj.status === "string" ? errObj.status : void 0;
+    let errorInfoReason;
+    let hasRetryInfo = false;
+    const quotaIds = [];
+    if (Array.isArray(errObj.details)) {
+      for (const detail of errObj.details) {
+        if (!detail || typeof detail !== "object") continue;
+        const d = detail;
+        const detailType = typeof d["@type"] === "string" ? d["@type"] : "";
+        if (detailType.endsWith("google.rpc.RetryInfo") && typeof d.retryDelay === "string") {
+          hasRetryInfo = true;
+        }
+        if (detailType.endsWith("google.rpc.ErrorInfo") && typeof d.reason === "string") {
+          errorInfoReason = d.reason;
+        }
+        if (detailType.endsWith("google.rpc.QuotaFailure") && Array.isArray(d.violations)) {
+          for (const v of d.violations) {
+            if (v && typeof v === "object") {
+              const qId = v.quotaId;
+              if (typeof qId === "string") {
+                quotaIds.push(qId);
+              }
+            }
+          }
+        }
+      }
+    }
+    return { code, type, status, errorInfoReason, hasRetryInfo, quotaIds };
+  } catch {
+    return { hasRetryInfo: false, quotaIds: [] };
+  }
+}
 function classifyHttpError(params) {
   const { status, bodyText, provider, model, retryAfterHeader } = params;
   const lowerBody = bodyText.toLowerCase();
   const prefix = provider === "google" ? `Gemini API call failed (${model}, HTTP ${status})` : `LLM API call failed (${provider}/${model}, HTTP ${status})`;
   const message = `${prefix}: ${bodyText}`;
-  const isQuota = status === 402 || lowerBody.includes("insufficient_quota") || lowerBody.includes("exceeded your current quota") || lowerBody.includes("quota_exceeded") || lowerBody.includes("billing_hard_limit_reached") || lowerBody.includes("credit balance is too low");
-  if (isQuota) {
-    return new QuotaExhaustedError(message, { status, provider });
-  }
-  const isAuth = status === 401 || status === 403 || lowerBody.includes("invalid_api_key") || lowerBody.includes("authentication_error") || lowerBody.includes("api_key_invalid");
+  const retryAfterSeconds = parseRetryAfterSeconds(retryAfterHeader, bodyText);
+  const envelope = parseProviderErrorEnvelope(bodyText);
+  const errCodeLower = envelope.code?.toLowerCase();
+  const errTypeLower = envelope.type?.toLowerCase();
+  const errReasonLower = envelope.errorInfoReason?.toLowerCase();
+  const isAuth = status === 401 || status === 403 || errCodeLower === "invalid_api_key" || errTypeLower === "authentication_error" || errTypeLower === "permission_error" || errReasonLower === "api_key_invalid" || lowerBody.includes("invalid_api_key") || lowerBody.includes("authentication_error") || lowerBody.includes("api_key_invalid");
   if (isAuth) {
     return new AuthenticationError(message, { status, provider });
+  }
+  const hasExplicitRateLimitSignal = status === 429 && (envelope.hasRetryInfo || retryAfterSeconds !== void 0 || errCodeLower === "rate_limit_exceeded" || errTypeLower === "rate_limit_error" || errTypeLower === "tokens" || errTypeLower === "requests" || envelope.quotaIds.length > 0 && envelope.quotaIds.every((id) => /perminute/i.test(id)));
+  if (hasExplicitRateLimitSignal) {
+    return new RateLimitError(message, {
+      status,
+      provider,
+      retryAfterSeconds
+    });
+  }
+  const isQuota = status === 402 || errCodeLower === "insufficient_quota" || errTypeLower === "insufficient_quota" || errCodeLower === "billing_hard_limit_reached" || errReasonLower === "billing_disabled" || lowerBody.includes("insufficient_quota") || lowerBody.includes("exceeded your current quota") || lowerBody.includes("quota_exceeded") || lowerBody.includes("billing_hard_limit_reached") || lowerBody.includes("credit balance is too low");
+  if (isQuota) {
+    return new QuotaExhaustedError(message, { status, provider });
   }
   if (status === 408) {
     return new LLMTimeoutError(message, { status, provider });
@@ -1488,7 +1560,7 @@ function classifyHttpError(params) {
     return new RateLimitError(message, {
       status,
       provider,
-      retryAfterSeconds: parseRetryAfterSeconds(retryAfterHeader, bodyText)
+      retryAfterSeconds
     });
   }
   if (status === 400 || status === 422) {
@@ -1638,12 +1710,13 @@ import {
   writeFileSync
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join as join2, resolve, sep } from "node:path";
+import { dirname as dirname2, join as join2, resolve as resolve2, sep } from "node:path";
 
 // src/sandbox/llm-sandbox.ts
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { dirname, resolve } from "node:path";
 
 // src/auth/github-apps.ts
 var PRIVATE_KEY_DETECTION_PATTERN = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|EPURE_(?:AGENT|RELEASE)_APP_PRIVATE_KEY\s*=\s*\S+/i;
@@ -1679,13 +1752,195 @@ function buildSanitizedSandboxEnv(runnerEnv, proxy) {
   sanitized.EPURE_LLM_PROXY_URL = proxy.proxyUrl;
   sanitized.EPURE_LLM_PROXY_NONCE = proxy.proxyNonce;
   sanitized.GITHUB_TOKEN_PERMISSIONS = "none";
+  sanitized.RTK_TELEMETRY_DISABLED = "1";
+  sanitized.RTK_RECALL = "0";
+  sanitized.RTK_TEE = "0";
+  sanitized.RTK_SUPPRESS_HOOK_WARNING = "1";
+  sanitized.NO_COLOR = "1";
   return sanitized;
 }
+function buildLandrunInvocation(params) {
+  const resolvedCwd = resolve(params.cwd);
+  const roxPaths = /* @__PURE__ */ new Set([
+    "/usr",
+    "/bin",
+    "/lib",
+    "/lib64",
+    "/etc",
+    "/opt"
+  ]);
+  if (params.command.startsWith("/")) {
+    roxPaths.add(dirname(resolve(params.command)));
+  }
+  const rwxPaths = /* @__PURE__ */ new Set([resolvedCwd, "/tmp"]);
+  if (params.networkPolicy === "https_only") {
+    const home = params.sanitizedEnv.HOME?.trim();
+    if (home) {
+      rwxPaths.add(`${home}/.npm`);
+      rwxPaths.add(`${home}/.cache`);
+      rwxPaths.add(`${home}/.cargo`);
+    }
+  }
+  const landrunArgs = [
+    "--rox",
+    Array.from(roxPaths).join(","),
+    "--ro",
+    "/dev,/proc",
+    "--rwx",
+    Array.from(rwxPaths).join(",")
+  ];
+  if (params.networkPolicy === "proxy_only") {
+    if (typeof params.proxyPort === "number" && params.proxyPort > 0) {
+      landrunArgs.push("--connect-tcp", String(params.proxyPort));
+    }
+  } else if (params.networkPolicy === "https_only") {
+    landrunArgs.push("--connect-tcp", "443");
+    if (typeof params.proxyPort === "number" && params.proxyPort > 0) {
+      landrunArgs.push("--connect-tcp", String(params.proxyPort));
+    }
+  }
+  for (const key of Object.keys(params.sanitizedEnv).sort()) {
+    landrunArgs.push("--env", key);
+  }
+  landrunArgs.push("--", params.command, ...params.args);
+  return landrunArgs;
+}
+function buildBubblewrapInvocation(params) {
+  const resolvedCwd = resolve(params.cwd);
+  return [
+    "--unshare-net",
+    "--unshare-pid",
+    "--unshare-ipc",
+    "--die-with-parent",
+    "--ro-bind",
+    "/",
+    "/",
+    "--dev",
+    "/dev",
+    "--proc",
+    "/proc",
+    "--tmpfs",
+    "/tmp",
+    "--bind",
+    resolvedCwd,
+    resolvedCwd,
+    "--chdir",
+    resolvedCwd,
+    "--",
+    params.command,
+    ...params.args
+  ];
+}
+function buildKernelSandboxedCommand(input) {
+  if (input.networkPolicy === "offline") {
+    if (input.capabilities.bubblewrapAvailable) {
+      return {
+        backend: "bubblewrap",
+        command: "bwrap",
+        args: buildBubblewrapInvocation({
+          command: input.command,
+          args: input.args,
+          cwd: input.cwd
+        })
+      };
+    }
+    if (input.capabilities.landrunAvailable) {
+      return {
+        backend: "landrun",
+        command: "landrun",
+        args: buildLandrunInvocation({
+          command: input.command,
+          args: input.args,
+          cwd: input.cwd,
+          sanitizedEnv: input.sanitizedEnv,
+          networkPolicy: "offline",
+          proxyPort: input.proxyPort
+        })
+      };
+    }
+    return {
+      backend: "none",
+      command: input.command,
+      args: input.args
+    };
+  }
+  if (input.capabilities.landrunAvailable) {
+    return {
+      backend: "landrun",
+      command: "landrun",
+      args: buildLandrunInvocation({
+        command: input.command,
+        args: input.args,
+        cwd: input.cwd,
+        sanitizedEnv: input.sanitizedEnv,
+        networkPolicy: input.networkPolicy,
+        proxyPort: input.proxyPort
+      })
+    };
+  }
+  return {
+    backend: "none",
+    command: input.command,
+    args: input.args
+  };
+}
+function probeKernelSandboxCapabilities(runnerEnv = process.env) {
+  if (process.platform !== "linux") {
+    return { landrunAvailable: false, bubblewrapAvailable: false };
+  }
+  const probeEnv = {
+    PATH: runnerEnv.PATH ?? process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin"
+  };
+  let landrunAvailable = false;
+  try {
+    const res = spawnSync(
+      "landrun",
+      ["--rox", "/usr,/bin,/lib,/lib64", "--", "/bin/true"],
+      {
+        env: probeEnv,
+        stdio: "ignore",
+        timeout: 3e3
+      }
+    );
+    landrunAvailable = res.status === 0;
+  } catch {
+    landrunAvailable = false;
+  }
+  let bubblewrapAvailable = false;
+  try {
+    const res = spawnSync(
+      "bwrap",
+      [
+        "--unshare-net",
+        "--ro-bind",
+        "/",
+        "/",
+        "--dev",
+        "/dev",
+        "--proc",
+        "/proc",
+        "--tmpfs",
+        "/tmp",
+        "--",
+        "/bin/true"
+      ],
+      {
+        env: probeEnv,
+        stdio: "ignore",
+        timeout: 3e3
+      }
+    );
+    bubblewrapAvailable = res.status === 0;
+  } catch {
+    bubblewrapAvailable = false;
+  }
+  return { landrunAvailable, bubblewrapAvailable };
+}
 function readRequestBody(req) {
-  return new Promise((resolve2, reject) => {
+  return new Promise((resolve3, reject) => {
     const chunks = [];
     req.on("data", (chunk) => chunks.push(chunk));
-    req.on("end", () => resolve2(Buffer.concat(chunks).toString("utf8")));
+    req.on("end", () => resolve3(Buffer.concat(chunks).toString("utf8")));
     req.on("error", reject);
   });
 }
@@ -1743,17 +1998,17 @@ async function createLlmSandboxProxy(options) {
       res.end(redactSecrets(upstreamResp.body, [realKey]));
     }
   );
-  await new Promise((resolve2, reject) => {
+  await new Promise((resolve3, reject) => {
     server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => resolve2());
+    server.listen(0, "127.0.0.1", () => resolve3());
   });
   const address = server.address();
   const proxyUrl = `http://127.0.0.1:${address.port}`;
   return {
     proxyUrl,
     proxyNonce,
-    close: () => new Promise((resolve2) => {
-      server.close(() => resolve2());
+    close: () => new Promise((resolve3) => {
+      server.close(() => resolve3());
     })
   };
 }
@@ -1768,8 +2023,17 @@ function collectRunnerSecretValues(runnerEnv) {
   }
   return values;
 }
+function parsePortFromProxyUrl(proxyUrl) {
+  const match = /:(\d+)(?:\/|$)/.exec(proxyUrl);
+  if (!match || !match[1]) {
+    return void 0;
+  }
+  const parsed = Number.parseInt(match[1], 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : void 0;
+}
 async function runInUntrustedCodeSandbox(input) {
   const startMs = Date.now();
+  const networkPolicy = input.networkPolicy ?? "proxy_only";
   if (!input.isolationAvailable) {
     return {
       isolated: false,
@@ -1779,7 +2043,9 @@ async function runInUntrustedCodeSandbox(input) {
       stdout: "",
       stderr: "",
       duration_ms: Date.now() - startMs,
-      proxy_url: ""
+      proxy_url: "",
+      kernel_backend: "none",
+      network_policy: networkPolicy
     };
   }
   const llmApiKey = (input.runnerEnv.OPENAI_API_KEY ?? input.runnerEnv.ANTHROPIC_API_KEY ?? input.runnerEnv.GOOGLE_API_KEY ?? input.runnerEnv.GEMINI_API_KEY ?? input.runnerEnv.LLM_API_KEY ?? "").trim();
@@ -1792,9 +2058,12 @@ async function runInUntrustedCodeSandbox(input) {
       stdout: "",
       stderr: "",
       duration_ms: Date.now() - startMs,
-      proxy_url: ""
+      proxy_url: "",
+      kernel_backend: "none",
+      network_policy: networkPolicy
     };
   }
+  const enforceKernelSandbox = input.enforceKernelSandbox === true || input.runnerEnv.EPURE_ENFORCE_KERNEL_SANDBOX === "true";
   const secretValues = collectRunnerSecretValues(input.runnerEnv);
   const proxy = await createLlmSandboxProxy({
     llmApiKey,
@@ -1806,10 +2075,44 @@ async function runInUntrustedCodeSandbox(input) {
       proxyNonce: proxy.proxyNonce
     });
     const args = input.args ? [...input.args] : [];
+    const cwd = input.cwd ?? process.cwd();
     const timeoutMs = input.timeoutMs ?? 60 * 60 * 1e3;
-    const childResult = await new Promise((resolve2) => {
-      const child = spawn(input.command, args, {
-        cwd: input.cwd ?? process.cwd(),
+    const proxyPort = parsePortFromProxyUrl(proxy.proxyUrl);
+    let spawnCommand = input.command;
+    let spawnArgs = args;
+    let kernelBackend = "none";
+    if (enforceKernelSandbox || input.kernelCapabilities !== void 0) {
+      const capabilities = input.kernelCapabilities ?? probeKernelSandboxCapabilities(input.runnerEnv);
+      const wrapped = buildKernelSandboxedCommand({
+        command: input.command,
+        args,
+        cwd,
+        sanitizedEnv,
+        networkPolicy,
+        proxyPort,
+        capabilities
+      });
+      kernelBackend = wrapped.backend;
+      if (wrapped.backend === "none" && enforceKernelSandbox) {
+        return {
+          isolated: false,
+          error_code: "SANDBOX_ISOLATION_UNAVAILABLE",
+          error_message: "Fail-closed: kernel sandbox backend (landrun/bubblewrap) is unavailable while EPURE_ENFORCE_KERNEL_SANDBOX=true (ADR-0030).",
+          exit_code: 1,
+          stdout: "",
+          stderr: "",
+          duration_ms: Date.now() - startMs,
+          proxy_url: "",
+          kernel_backend: "none",
+          network_policy: networkPolicy
+        };
+      }
+      spawnCommand = wrapped.command;
+      spawnArgs = wrapped.args;
+    }
+    const childResult = await new Promise((resolvePromise) => {
+      const child = spawn(spawnCommand, [...spawnArgs], {
+        cwd,
         env: sanitizedEnv,
         stdio: ["ignore", "pipe", "pipe"]
       });
@@ -1822,7 +2125,7 @@ async function runInUntrustedCodeSandbox(input) {
       child.stderr.on("data", (chunk) => stderrChunks.push(chunk));
       child.on("error", (err) => {
         clearTimeout(timer);
-        resolve2({
+        resolvePromise({
           exitCode: 1,
           stdout: Buffer.concat(stdoutChunks).toString("utf8"),
           stderr: err.message
@@ -1830,7 +2133,7 @@ async function runInUntrustedCodeSandbox(input) {
       });
       child.on("close", (code) => {
         clearTimeout(timer);
-        resolve2({
+        resolvePromise({
           exitCode: code ?? 1,
           stdout: Buffer.concat(stdoutChunks).toString("utf8"),
           stderr: Buffer.concat(stderrChunks).toString("utf8")
@@ -1848,7 +2151,9 @@ async function runInUntrustedCodeSandbox(input) {
       stdout: cleanStdout,
       stderr: cleanStderr,
       duration_ms: Date.now() - startMs,
-      proxy_url: proxy.proxyUrl
+      proxy_url: proxy.proxyUrl,
+      kernel_backend: kernelBackend,
+      network_policy: networkPolicy
     };
   } finally {
     await proxy.close();
@@ -1863,6 +2168,52 @@ var SENSITIVE_TASK_BRANCH_PATH_PATTERNS = [
   /(?:^|\/)\.env(?:\.(?!example$|sample$|template$).+)?$/i
 ];
 var SHELL_INJECTION_PATTERN = /[;|`><\r\n]|\$\(|\$\{\{/;
+var ANSI_ESCAPE_PATTERN = /\x1b\[[0-9;]*[A-Za-z]/g;
+var RTK_NOISE_LINE_PATTERN = /^(?:npm warn deprecated\b|npm notice\b|added \d+ packages\b|audited \d+ packages\b|found 0 vulnerabilities\b|Downloading https?:\/\/|Collecting [a-zA-Z0-9_.-]+\s*$|\s*\[[=>.\s-]{10,}\]\s*\d+%)/i;
+var RTK_IGNORED_PATH_NOISE_PATTERN = /(?:^|\s)(?:\.git\/|node_modules\/|__pycache__\/|\.venv\/|package-lock\.json|pnpm-lock\.yaml|[^\s]+\.min\.(?:js|css))(?:\s|$)/;
+var DIAGNOSTIC_PRESERVE_PATTERN = /\b(?:error|fail|failed|failure|err!|assertionerror|typeerror|referenceerror|syntaxerror|traceback|exception|panic)\b|^\s*at\s+/i;
+function formatAndCondenseStage1CommandOutput(input) {
+  const rawCombined = `${input.stdout}
+${input.stderr}`.replace(ANSI_ESCAPE_PATTERN, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+  if (!rawCombined) {
+    return "";
+  }
+  const lines = rawCombined.split("\n");
+  const filteredLines = [];
+  let droppedLinesCount = 0;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      if (filteredLines.length > 0 && filteredLines[filteredLines.length - 1] !== "") {
+        filteredLines.push("");
+      }
+      continue;
+    }
+    const isDiagnosticLine = DIAGNOSTIC_PRESERVE_PATTERN.test(trimmed);
+    if (!isDiagnosticLine && (RTK_NOISE_LINE_PATTERN.test(trimmed) || RTK_IGNORED_PATH_NOISE_PATTERN.test(trimmed))) {
+      droppedLinesCount += 1;
+      continue;
+    }
+    filteredLines.push(line);
+  }
+  const condensed = filteredLines.join("\n").trim();
+  if (input.exitCode === 0) {
+    if (!condensed && droppedLinesCount > 0) {
+      return `[rtk stateless] ${input.rawCommand}: ok (${droppedLinesCount} noise lines filtered)`;
+    }
+    return condensed;
+  }
+  const maxTailChars = input.maxFailureRawTailChars ?? 4e3;
+  const rawTail = rawCombined.length > maxTailChars ? rawCombined.slice(-maxTailChars) : rawCombined;
+  if (droppedLinesCount === 0 && condensed === rawTail) {
+    return condensed;
+  }
+  return [
+    condensed,
+    `--- [raw failure tail (${rawTail.length} chars, stateless in-memory)] ---`,
+    rawTail
+  ].filter(Boolean).join("\n");
+}
 var ALLOWLISTED_BINARIES = /* @__PURE__ */ new Set([
   "npm",
   "npx",
@@ -1959,7 +2310,7 @@ function isContainedRelativePath(resolvedRoot, rawPath, allowRootDot) {
       return false;
     }
   }
-  const resolvedTarget = resolve(resolvedRoot, trimmed);
+  const resolvedTarget = resolve2(resolvedRoot, trimmed);
   if (allowRootDot && resolvedTarget === resolvedRoot) {
     return true;
   }
@@ -1972,7 +2323,7 @@ function isContainedRelativePath(resolvedRoot, rawPath, allowRootDot) {
   return true;
 }
 function validateWorkspaceFileOperations(input) {
-  const resolvedRoot = resolve(input.workDir);
+  const resolvedRoot = resolve2(input.workDir);
   const sensitiveSet = /* @__PURE__ */ new Set();
   const traversalSet = /* @__PURE__ */ new Set();
   const filePaths = [];
@@ -2071,7 +2422,7 @@ function materializeSeedFilesIntoWorkspace(workDir, seedFiles) {
   if (!seedFiles) {
     return;
   }
-  const resolvedRoot = resolve(workDir);
+  const resolvedRoot = resolve2(workDir);
   const entries = [];
   if (Array.isArray(seedFiles)) {
     for (const item of seedFiles) {
@@ -2093,8 +2444,8 @@ function materializeSeedFilesIntoWorkspace(workDir, seedFiles) {
     if (!isContainedRelativePath(resolvedRoot, cleanRel, false)) {
       continue;
     }
-    const targetPath = resolve(resolvedRoot, cleanRel);
-    mkdirSync(dirname(targetPath), { recursive: true });
+    const targetPath = resolve2(resolvedRoot, cleanRel);
+    mkdirSync(dirname2(targetPath), { recursive: true });
     writeFileSync(targetPath, content, "utf8");
   }
 }
@@ -2444,16 +2795,16 @@ async function runPolyglotStage1Verification(input) {
         output: validation.reason || fullContainment.reason
       };
     }
-    const resolvedRoot = resolve(workDir);
+    const resolvedRoot = resolve2(workDir);
     for (const file of input.files ?? []) {
       const cleanRel = file.path.replace(/^\/+/, "");
-      const fullPath = resolve(resolvedRoot, cleanRel);
-      mkdirSync(dirname(fullPath), { recursive: true });
+      const fullPath = resolve2(resolvedRoot, cleanRel);
+      mkdirSync(dirname2(fullPath), { recursive: true });
       writeFileSync(fullPath, file.content, "utf8");
     }
     for (const del of input.deleted_files ?? []) {
       const cleanRel = del.replace(/^\/+/, "");
-      const fullPath = resolve(resolvedRoot, cleanRel);
+      const fullPath = resolve2(resolvedRoot, cleanRel);
       if (existsSync2(fullPath)) {
         unlinkSync(fullPath);
       }
@@ -2475,7 +2826,7 @@ async function runPolyglotStage1Verification(input) {
       LLM_API_KEY: input.llmApiKey
     };
     for (const target of affectedTargets) {
-      const targetCwd = target.working_directory === "." ? resolvedRoot : resolve(resolvedRoot, target.working_directory);
+      const targetCwd = target.working_directory === "." ? resolvedRoot : resolve2(resolvedRoot, target.working_directory);
       if (!existsSync2(targetCwd)) {
         if (!hasCustomSandboxRunner) {
           targetResults.push({
@@ -2588,12 +2939,14 @@ async function runPolyglotStage1Verification(input) {
             });
             break;
           }
+          const stepNetworkPolicy = candidate.step === "install" ? "https_only" : "offline";
           let execRes = await sandboxRunner({
             isolationAvailable: true,
             runnerEnv: baseRunnerEnv,
             command: tokenized.command,
             args: tokenized.args,
             cwd: targetCwd,
+            networkPolicy: stepNetworkPolicy,
             timeoutMs: candidate.step === "install" || candidate.step === "test" ? 3e5 : 18e4
           });
           if (!execRes.isolated || execRes.exit_code !== 0 && (tokenized.command === "pip" || tokenized.command === "pip3") && tokenized.args[0] === "install" && /externally-managed-environment/i.test(
@@ -2611,11 +2964,19 @@ ${execRes.stderr}`
                   "--user"
                 ],
                 cwd: targetCwd,
+                networkPolicy: stepNetworkPolicy,
                 timeoutMs: 3e5
               });
             }
           }
           const stepPassed = execRes.isolated && execRes.exit_code === 0;
+          const formattedOutput = formatAndCondenseStage1CommandOutput({
+            step: candidate.step,
+            rawCommand: tokenized.raw,
+            exitCode: execRes.exit_code,
+            stdout: execRes.stdout,
+            stderr: execRes.stderr
+          });
           executedSteps.push({
             step: candidate.step,
             raw_command: tokenized.raw,
@@ -2623,14 +2984,13 @@ ${execRes.stderr}`
             passed: stepPassed,
             stdout: execRes.stdout,
             stderr: execRes.stderr,
-            duration_ms: execRes.duration_ms
+            duration_ms: execRes.duration_ms,
+            network_policy: stepNetworkPolicy
           });
           if (!stepPassed) {
             targetPassed = false;
-            const combined = `${execRes.stdout}
-${execRes.stderr}`.trim();
             targetFailureOutput = `[Target: ${target.name} (${target.working_directory})][${candidate.step}: ${tokenized.raw}] failed (exit ${execRes.exit_code}):
-${combined}`;
+${formattedOutput}`;
             break;
           }
         }
@@ -2641,8 +3001,15 @@ ${combined}`;
       if (targetPassed) {
         bootstrapped.add(target.name);
       }
-      const stepOutSummary = targetPassed ? executedSteps.map((s) => `${s.stdout}
-${s.stderr}`.trim()).filter(Boolean).join("\n") : targetFailureOutput;
+      const stepOutSummary = targetPassed ? executedSteps.map(
+        (s) => formatAndCondenseStage1CommandOutput({
+          step: s.step,
+          rawCommand: s.raw_command,
+          exitCode: s.exit_code,
+          stdout: s.stdout,
+          stderr: s.stderr
+        })
+      ).filter(Boolean).join("\n") : targetFailureOutput;
       targetResults.push({
         target_name: target.name,
         working_directory: target.working_directory,
@@ -3195,7 +3562,7 @@ async function waitForExternalCiChecks(input) {
   const timeoutMs = (input.timeoutMinutes ?? 15) * 60 * 1e3;
   const graceWindowMs = (input.graceWindowSeconds ?? 45) * 1e3;
   const pollIntervalMs = input.pollIntervalMs ?? 5e3;
-  const sleepFn = input.sleepFn ?? ((ms) => new Promise((resolve2) => setTimeout(resolve2, ms)));
+  const sleepFn = input.sleepFn ?? ((ms) => new Promise((resolve3) => setTimeout(resolve3, ms)));
   let simulatedElapsedMs = 0;
   const startWallMs = input.nowFn ? input.nowFn() : Date.now();
   const getElapsedMs = () => {
@@ -4650,7 +5017,7 @@ var LLMClient = class {
     const rateLimitFallback = options.rateLimitFallbackSeconds ?? defaultRateLimitFallback;
     const sleepMs = options.sleepMs ?? (async (ms) => {
       if (ms > 0) {
-        await new Promise((resolve2) => setTimeout(resolve2, ms));
+        await new Promise((resolve3) => setTimeout(resolve3, ms));
       }
     });
     let totalTransientRetriesUsed = 0;
@@ -8678,6 +9045,22 @@ ${snippet}`;
   }
 }
 
+// src/orchestrator/prompts/code-discipline.ts
+var EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT = [
+  "## Discipline de code anti-slop (`kill-slop`) & Concision (`caveman` mode `lite` + Auto-Clarity) \u2014 ADR-0030",
+  "",
+  "### 1. R\xE8gles imp\xE9ratives Anti-Slop (`kill-slop`)",
+  "- **Diff minimal et chirurgical** : modifie uniquement les lignes strictement requises par le ticket ou le constat de revue. Z\xE9ro refactoring opportuniste du code adjacent non cass\xE9.",
+  "- **Z\xE9ro fichier ou abstraction \xE0 usage unique** : n'invente jamais de dossier `utils/`, `helpers/` ou `common/` ni de fonction g\xE9n\xE9rique d'encapsulation pour une logique appel\xE9e \xE0 un seul endroit.",
+  "- **Z\xE9ro d\xE9pendance non demand\xE9e** : n'ajoute aucun package tiers (`package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`) qui n'est pas explicitement requis par la sp\xE9cification.",
+  "- **Z\xE9ro commentaire paraphrasant le code** : n'\xE9cris pas de commentaires qui r\xE9p\xE8tent ce que le code dit d\xE9j\xE0 ; ne documente que les invariants m\xE9tier non \xE9vidents ou contraintes de s\xE9curit\xE9.",
+  "- **Nettoyage imm\xE9diat des orphelins** : supprime imm\xE9diatement tout import, variable ou fonction rendus inutilis\xE9s par tes propres modifications.",
+  "",
+  "### 2. Concision `caveman` (niveau `lite`) et fronti\xE8res d'Auto-Clarity",
+  "- **Mode `caveman-lite` dans les r\xE9sum\xE9s et tours d'outils** : supprime toute formule de politesse, pr\xE9ambule, remplissage ou h\xE9sitation (\xAB Bien s\xFBr \xBB, \xAB Voici la correction \xBB, \xAB Il semble que \xBB). Phrases directes, factuelles et courtes.",
+  "- **Fronti\xE8re stricte d'Auto-Clarity (100 % exact et non abr\xE9g\xE9)** : ne compresse JAMAIS le code source, les chemins de fichiers, les commandes shell, les identifiants techniques, les sch\xE9mas JSON de sortie (`commit_message`, `test_summary`, `patches`, `files`, `deleted_files`), les diagnostics de s\xE9curit\xE9 ni les messages de commit Conventional Commits."
+].join("\n");
+
 // src/orchestrator/types.ts
 function canUsePhaseModelFromConfig(candidateModel, hasProvidersMap) {
   if (!candidateModel || candidateModel.trim().length === 0) {
@@ -9330,7 +9713,9 @@ ${c}`).join("\n\n");
         '    { "path": "...", "content": "..." }',
         "  ],",
         '  "deleted_files": ["..."]',
-        "}"
+        "}",
+        "",
+        EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
       ].join("\n");
       const featureFixPromptParts = [];
       if (finalFeatureReview.must_fix_findings.length > 0) {
@@ -11356,7 +11741,9 @@ ${content}`).join("\n\n");
             '    { "path": "tests/...", "content": "..." }',
             "  ]",
             "}"
-          ]
+          ],
+          "",
+          EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
         ].join("\n");
         const tddPrompt = [
           `Plan parent (#${params.issueNumber}) et cahier des charges :`,
@@ -11496,7 +11883,9 @@ ${c}`).join("\n\n");
             '    { "path": "...", "content": "..." }',
             "  ],",
             '  "deleted_files": []',
-            "}"
+            "}",
+            "",
+            EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
           ].join("\n");
           const fixPrompt = [
             `La v\xE9rification Stage 1 du Ticket #${ticket.ticketIssueNumber} a \xE9chou\xE9 dans la sandbox avec la sortie suivante :`,
@@ -11827,7 +12216,9 @@ ${c}`).join("\n\n");
           '    { "path": "...", "content": "..." }',
           "  ],",
           '  "deleted_files": ["..."]',
-          "}"
+          "}",
+          "",
+          EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
         ].join("\n");
         const promptParts = [];
         if (reviewResult.must_fix_findings.length > 0) {

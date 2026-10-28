@@ -758,6 +758,7 @@ describe("EPURE v1.1.0 — Real Orchestration Wiring (Q84–Q90, ADR-0026)", () 
           Array<{ path: string; mode: string; type: string; sha: string | null }>
         > = [];
         const geminiPrompts: string[] = [];
+        const geminiSystemInstructions: string[] = [];
         let commitCounter = 0;
 
         const mockFetch = async (
@@ -778,6 +779,7 @@ describe("EPURE v1.1.0 — Real Orchestration Wiring (Q84–Q90, ADR-0026)", () 
             const userPrompt =
               parsedReq.contents?.[0]?.parts?.[0]?.text ?? "";
             geminiPrompts.push(userPrompt);
+            geminiSystemInstructions.push(sysText);
 
             // Reviewer pass or squash commit synthesis
             if (
@@ -1213,6 +1215,12 @@ describe("EPURE v1.1.0 — Real Orchestration Wiring (Q84–Q90, ADR-0026)", () 
           expect(remediationPrompt).not.toContain(
             "AIzaSyD-1234567890abcdefghijklmnopqrstu"
           );
+          const implSysInstruction = geminiSystemInstructions.find((s) =>
+            s.includes("kill-slop")
+          );
+          expect(implSysInstruction).toBeDefined();
+          expect(implSysInstruction).toContain("caveman-lite");
+          expect(implSysInstruction).toContain("Auto-Clarity");
         }
 
         if (scenario === "open_pr_reconciliation") {

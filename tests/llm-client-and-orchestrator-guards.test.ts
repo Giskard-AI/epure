@@ -12,6 +12,7 @@ import {
 import {
   AuthenticationError,
   BadRequestError,
+  classifyHttpError,
   DEFAULT_LLM_REQUEST_TIMEOUT_MS,
   GEMINI_SKIP_THOUGHT_SIGNATURE_SENTINEL,
   LLMClient,
@@ -2581,5 +2582,120 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
       expect(rangeOut.deleted_in_pr).toBe(true);
       expect(rangeOut.status).toContain("DELETED");
     });
+  });
+
+  describe("15. Structured provider error classification (Google gRPC RetryInfo/QuotaFailure vs OpenAI insufficient_quota)", () => {
+    it.each([
+      {
+        id: "gemini-429-tpm-rate-limit-with-retry-info-and-exceeded-quota-prose",
+        status: 429,
+        provider: "google",
+        model: "gemini-3.8-flash",
+        bodyText: JSON.stringify({
+          error: {
+            code: 429,
+            message:
+              "You exceeded your current quota, please check your plan and billing details.\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_paid_tier_3_input_token_count, limit: 20000000\nPlease retry in 12.552685711s.",
+            status: "RESOURCE_EXHAUSTED",
+            details: [
+              {
+                "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                violations: [
+                  {
+                    quotaId:
+                      "GenerateContentPaidTierInputTokensPerModelPerMinute-PaidTier3"
+                  }
+                ]
+              },
+              {
+                "@type": "type.googleapis.com/google.rpc.RetryInfo",
+                retryDelay: "12s"
+              }
+            ]
+          }
+        }),
+        expectedClass: RateLimitError,
+        expectedRetryAfterSeconds: 12
+      },
+      {
+        id: "openai-429-hard-billing-insufficient-quota-without-retry-delay",
+        status: 429,
+        provider: "openai",
+        model: "gpt-5.4",
+        bodyText: JSON.stringify({
+          error: {
+            message:
+              "You exceeded your current quota, please check your plan and billing details.",
+            type: "insufficient_quota",
+            code: "insufficient_quota"
+          }
+        }),
+        expectedClass: QuotaExhaustedError,
+        expectedRetryAfterSeconds: undefined
+      },
+      {
+        id: "gemini-403-billing-disabled-via-grpc-error-info",
+        status: 429,
+        provider: "google",
+        model: "gemini-3.8-flash",
+        bodyText: JSON.stringify({
+          error: {
+            code: 429,
+            message: "Billing account is disabled.",
+            status: "RESOURCE_EXHAUSTED",
+            details: [
+              {
+                "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                reason: "BILLING_DISABLED"
+              }
+            ]
+          }
+        }),
+        expectedClass: QuotaExhaustedError,
+        expectedRetryAfterSeconds: undefined
+      },
+      {
+        id: "gemini-400-api-key-invalid-via-grpc-error-info",
+        status: 400,
+        provider: "google",
+        model: "gemini-3.8-flash",
+        bodyText: JSON.stringify({
+          error: {
+            code: 400,
+            message: "API key not valid.",
+            status: "INVALID_ARGUMENT",
+            details: [
+              {
+                "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                reason: "API_KEY_INVALID"
+              }
+            ]
+          }
+        }),
+        expectedClass: AuthenticationError,
+        expectedRetryAfterSeconds: undefined
+      }
+    ])(
+      "classifyHttpError [$id] classifies structured provider error accurately",
+      ({
+        status,
+        provider,
+        model,
+        bodyText,
+        expectedClass,
+        expectedRetryAfterSeconds
+      }) => {
+        const err = classifyHttpError({
+          status,
+          bodyText,
+          provider,
+          model
+        });
+        expect(err).toBeInstanceOf(expectedClass);
+        if (err instanceof RateLimitError) {
+          expect(err.retryAfterSeconds).toBe(expectedRetryAfterSeconds);
+        }
+      }
+    );
   });
 });
