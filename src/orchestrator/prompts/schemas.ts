@@ -591,6 +591,11 @@ export const GENERATED_TICKET_DAG_SCHEMA: ResponseSchemaSpec<GeneratedTicketDag>
         spec_markdown: "# Specification\n\nExisting specification.",
         tickets: obj.tickets
       });
+      if (validatedBundle.tickets.length === 0) {
+        throw new Error(
+          "GeneratedTicketDag.tickets must contain at least 1 atomic TDD ticket."
+        );
+      }
       return {
         tickets: validatedBundle.tickets
       };

@@ -1703,7 +1703,7 @@ import {
   cpSync,
   existsSync as existsSync2,
   lstatSync,
-  mkdirSync,
+  mkdirSync as mkdirSync2,
   mkdtempSync,
   readFileSync as readFileSync2,
   realpathSync,
@@ -1716,6 +1716,7 @@ import { dirname as dirname2, join as join2, resolve as resolve2, sep } from "no
 
 // src/sandbox/llm-sandbox.ts
 import { randomBytes } from "node:crypto";
+import { mkdirSync } from "node:fs";
 import { createServer } from "node:http";
 import { spawn, spawnSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
@@ -1770,7 +1771,8 @@ function buildLandrunInvocation(params) {
     "/lib",
     "/lib64",
     "/etc",
-    "/opt"
+    "/opt",
+    "/run"
   ]);
   if (params.command.startsWith("/")) {
     roxPaths.add(sanitizeLandrunPath(dirname(resolve(params.command))));
@@ -1914,28 +1916,11 @@ function probeKernelSandboxCapabilities(runnerEnv = process.env) {
   }
   let bubblewrapAvailable = false;
   try {
-    const res = spawnSync(
-      "bwrap",
-      [
-        "--unshare-net",
-        "--ro-bind",
-        "/",
-        "/",
-        "--dev",
-        "/dev",
-        "--proc",
-        "/proc",
-        "--tmpfs",
-        "/tmp",
-        "--",
-        "/bin/true"
-      ],
-      {
-        env: probeEnv,
-        stdio: "ignore",
-        timeout: 3e3
-      }
-    );
+    const res = spawnSync("bwrap", ["--version"], {
+      env: probeEnv,
+      stdio: "ignore",
+      timeout: 3e3
+    });
     bubblewrapAvailable = res.status === 0;
   } catch {
     bubblewrapAvailable = false;
@@ -2088,6 +2073,17 @@ async function runInUntrustedCodeSandbox(input) {
     const timeoutMs = input.timeoutMs ?? 60 * 60 * 1e3;
     const proxyPort = parsePortFromProxyUrl(proxy.proxyUrl);
     const capabilities = input.kernelCapabilities ?? probeKernelSandboxCapabilities(input.runnerEnv);
+    if (networkPolicy === "https_only") {
+      const home = sanitizedEnv.HOME?.trim() ?? "";
+      if (home) {
+        for (const sub of [".npm", ".cache", ".cargo"]) {
+          try {
+            mkdirSync(resolve(home, sub), { recursive: true });
+          } catch {
+          }
+        }
+      }
+    }
     const wrapped = buildKernelSandboxedCommand({
       command: input.command,
       args,
@@ -2449,13 +2445,13 @@ function materializeSeedFilesIntoWorkspace(workDir, seedFiles) {
       continue;
     }
     const targetPath = resolve2(resolvedRoot, cleanRel);
-    mkdirSync(dirname2(targetPath), { recursive: true });
+    mkdirSync2(dirname2(targetPath), { recursive: true });
     writeFileSync(targetPath, content, "utf8");
   }
 }
 function prepareRepositorySandboxWorkspace(input) {
   const workDir = input.workDir ?? mkdtempSync(join2(tmpdir(), "epure-polyglot-sandbox-"));
-  mkdirSync(workDir, { recursive: true });
+  mkdirSync2(workDir, { recursive: true });
   const repoSlug = (input.repository ?? "").trim();
   const [owner, repo] = repoSlug.split("/");
   const cleanRemoteUrl = owner && repo ? `https://github.com/${owner}/${repo}.git` : "";
@@ -2503,7 +2499,7 @@ function prepareRepositorySandboxWorkspace(input) {
   } finally {
     if (cleanRemoteUrl) {
       if (clonedFromRemote && !existsSync2(join2(workDir, ".git"))) {
-        mkdirSync(join2(workDir, ".git"), { recursive: true });
+        mkdirSync2(join2(workDir, ".git"), { recursive: true });
       }
       sanitizeGitConfigFile(workDir, cleanRemoteUrl);
     }
@@ -2763,7 +2759,7 @@ function shouldSkipDefaultNodeStepInOfflineTempDir(params) {
 async function runPolyglotStage1Verification(input) {
   const ownsTempWorkDir = !input.workDir;
   const workDir = input.workDir ?? mkdtempSync(join2(tmpdir(), "epure-stage1-sandbox-"));
-  mkdirSync(workDir, { recursive: true });
+  mkdirSync2(workDir, { recursive: true });
   const hasCustomSandboxRunner = Boolean(input.sandboxRunner);
   const sandboxRunner = input.sandboxRunner ?? runInUntrustedCodeSandbox;
   const bootstrapped = input.bootstrappedTargets ?? /* @__PURE__ */ new Set();
@@ -2803,7 +2799,7 @@ async function runPolyglotStage1Verification(input) {
     for (const file of input.files ?? []) {
       const cleanRel = file.path.replace(/^\/+/, "");
       const fullPath = resolve2(resolvedRoot, cleanRel);
-      mkdirSync(dirname2(fullPath), { recursive: true });
+      mkdirSync2(dirname2(fullPath), { recursive: true });
       writeFileSync(fullPath, file.content, "utf8");
     }
     for (const del of input.deleted_files ?? []) {
@@ -2844,7 +2840,7 @@ async function runPolyglotStage1Verification(input) {
           });
           continue;
         }
-        mkdirSync(targetCwd, { recursive: true });
+        mkdirSync2(targetCwd, { recursive: true });
       }
       if (target.kind === "node") {
         const nodeCheck = shouldSkipDefaultNodeStepInOfflineTempDir({
@@ -5586,6 +5582,11 @@ var GENERATED_TICKET_DAG_SCHEMA = {
       spec_markdown: "# Specification\n\nExisting specification.",
       tickets: obj.tickets
     });
+    if (validatedBundle.tickets.length === 0) {
+      throw new Error(
+        "GeneratedTicketDag.tickets must contain at least 1 atomic TDD ticket."
+      );
+    }
     return {
       tickets: validatedBundle.tickets
     };

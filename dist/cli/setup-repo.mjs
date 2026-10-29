@@ -417,6 +417,7 @@ function buildSandboxToolingSetupSteps(rtkVersion = PINNED_RTK_VERSION) {
     "        run: |",
     "          sudo apt-get update -qq",
     "          sudo apt-get install -y --no-install-recommends landrun bubblewrap ca-certificates curl",
+    '          mkdir -p "$HOME/.npm" "$HOME/.cache" "$HOME/.cargo"',
     "          # renovate: datasource=github-releases depName=rtk-ai/rtk",
     `          RTK_VERSION="${safeRtkVersion}"`,
     '          RTK_ARCHIVE="rtk-x86_64-unknown-linux-musl.tar.gz"',
