@@ -700,12 +700,19 @@ export function createGitHubRestHelper(params: {
 
     async listPullRequestFiles(
       prNumber: number
-    ): Promise<ReadonlyArray<{ filename: string; status: string }>> {
+    ): Promise<
+      ReadonlyArray<{
+        readonly filename: string;
+        readonly status: string;
+        readonly patch?: string | undefined;
+      }>
+    > {
       try {
         const existing = await apiRequest<
           Array<{
             filename?: string;
             status?: string;
+            patch?: string;
           }>
         >(
           "GET",
@@ -716,13 +723,20 @@ export function createGitHubRestHelper(params: {
         if (Array.isArray(existing.data)) {
           return existing.data
             .filter(
-              (item): item is { filename: string; status?: string } =>
+              (
+                item
+              ): item is {
+                filename: string;
+                status?: string;
+                patch?: string;
+              } =>
                 typeof item?.filename === "string" &&
                 item.filename.trim().length > 0
             )
             .map((item) => ({
               filename: item.filename.trim().replace(/^\/+/, ""),
-              status: item.status ?? "modified"
+              status: item.status ?? "modified",
+              ...(typeof item.patch === "string" ? { patch: item.patch } : {})
             }));
         }
       } catch {

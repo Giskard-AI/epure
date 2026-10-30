@@ -176,7 +176,13 @@ export interface GitHubRestHelper {
   }): Promise<string>;
   listPullRequestFiles(
     prNumber: number
-  ): Promise<ReadonlyArray<{ filename: string; status: string }>>;
+  ): Promise<
+    ReadonlyArray<{
+      readonly filename: string;
+      readonly status: string;
+      readonly patch?: string | undefined;
+    }>
+  >;
   findOpenPullRequestByHead(
     headBranch: string,
     baseBranch: string

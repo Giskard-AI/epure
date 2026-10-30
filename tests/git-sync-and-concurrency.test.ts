@@ -778,5 +778,79 @@ describe("EPURE v1.2 Chantier 1 & 2 — Git Sync, Concurrency & Event-Driven CI 
         expect(res.status).toBe(expectedStatus);
       }
     );
+
+    it.each([
+      {
+        id: "falls through to ticket loop when /epure continue is posted manually (commentId > 0) while subphase is idle in implementation",
+        commentId: 999,
+        expectedExecuted: true
+      },
+      {
+        id: "returns executed=false when event-driven continue (commentId = 0) fires while subphase is idle",
+        commentId: 0,
+        expectedExecuted: false
+      }
+    ])("$id", async ({ commentId, expectedExecuted }) => {
+      const store = createInMemoryGitRefStateStore();
+      await updateIssueStateWithCas({
+        issueNumber: 153,
+        store,
+        mutator: (prev) => ({
+          ...prev,
+          phase: "implementation",
+          subphase: "idle",
+          status: "suspended",
+          active_branch: "feature/153-tokens"
+        })
+      });
+
+      const mockFetch: typeof fetch = async (reqInput) => {
+        const url = String(reqInput);
+        if (url.endsWith("/issues/153")) {
+          return new Response(
+            JSON.stringify({
+              number: 153,
+              title: "fix(tokens): Token Manager Fixes",
+              body: "- [ ] Escape LIKE metacharacters",
+              labels: [{ name: "ready-for-agent" }]
+            }),
+            { status: 200, headers: { "content-type": "application/json" } }
+          );
+        }
+        if (url.includes("/comments")) {
+          return new Response(JSON.stringify([]), {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          });
+        }
+        if (url.includes("generativelanguage.googleapis.com")) {
+          return new Response(
+            JSON.stringify({
+              error: { code: 400, message: "Invalid schema" }
+            }),
+            { status: 400, headers: { "content-type": "application/json" } }
+          );
+        }
+        return new Response(JSON.stringify({}), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      };
+
+      const res = await orchestrateIssueCommand({
+        repository: "acme/demo",
+        issueNumber: 153,
+        command: "continue",
+        commandArgs: "",
+        commentId,
+        actor: "Hartorn",
+        fallbackGithubToken: "ghs_test",
+        llmApiKey: "key_test",
+        stateStore: store,
+        fetchImpl: mockFetch
+      });
+
+      expect(res.executed).toBe(expectedExecuted);
+    });
   });
 });

@@ -612,11 +612,15 @@ export async function orchestrateIssueCommand(
 
       // 4c. Handle event-driven CI continuation (check_suite / workflow_run / /epure continue)
       if (effectiveInput.command === "continue") {
-        if (
-          !currentState ||
-          (currentState.subphase !== "waiting_ticket_ci" &&
-            currentState.subphase !== "waiting_feature_ci")
-        ) {
+        const isWaitingExternalCi =
+          currentState?.subphase === "waiting_ticket_ci" ||
+          currentState?.subphase === "waiting_feature_ci";
+        const isManualContinueInImplementation =
+          !isWaitingExternalCi &&
+          (effectiveInput.commentId ?? 0) > 0 &&
+          currentState?.phase === "implementation";
+
+        if (!isWaitingExternalCi && !isManualContinueInImplementation) {
           return {
             executed: false,
             phase: currentState?.phase ?? "idle",
@@ -629,163 +633,187 @@ export async function orchestrateIssueCommand(
           };
         }
 
-        const activeHeadSha =
-          currentState.active_head_sha ?? effectiveInput.triggerHeadSha ?? "";
-        const devWorkflowsMapForContinue = await gh.readDevWorkflowsMap("dev");
-        const expectedContinueWorkflows = discoverExpectedExternalWorkflows({
-          workflowFilesMap: devWorkflowsMapForContinue,
-          changedPaths: ["src/index.ts"],
-          targetBranch:
-            currentState.subphase === "waiting_feature_ci"
-              ? "dev"
-              : currentState.active_branch || featureBranch
-        });
+        if (isWaitingExternalCi && currentState) {
+          const activeHeadSha =
+            currentState.active_head_sha ?? effectiveInput.triggerHeadSha ?? "";
+          const devWorkflowsMapForContinue = await gh.readDevWorkflowsMap("dev");
+          const expectedContinueWorkflows = discoverExpectedExternalWorkflows({
+            workflowFilesMap: devWorkflowsMapForContinue,
+            changedPaths: ["src/index.ts"],
+            targetBranch:
+              currentState.subphase === "waiting_feature_ci"
+                ? "dev"
+                : currentState.active_branch || featureBranch
+          });
 
-        const snapshot = await evaluateSingleExternalCiSnapshot({
-          headSha: activeHeadSha,
-          expectedWorkflows: expectedContinueWorkflows,
-          extraSecrets: [activeToken, effectiveInput.llmApiKey],
-          listWorkflowRunsForSha: (sha) => gh.listWorkflowRunsForSha(sha),
-          listCheckRunsForRef: (sha) => gh.listCheckRunsForRef(sha),
-          listCheckRunAnnotations: (id) => gh.listCheckRunAnnotations(id),
-          getJobLogs: (id) => gh.getActionJobLogs(id)
-        });
+          const snapshot = await evaluateSingleExternalCiSnapshot({
+            headSha: activeHeadSha,
+            expectedWorkflows: expectedContinueWorkflows,
+            extraSecrets: [activeToken, effectiveInput.llmApiKey],
+            listWorkflowRunsForSha: (sha) => gh.listWorkflowRunsForSha(sha),
+            listCheckRunsForRef: (sha) => gh.listCheckRunsForRef(sha),
+            listCheckRunAnnotations: (id) => gh.listCheckRunAnnotations(id),
+            getJobLogs: (id) => gh.getActionJobLogs(id)
+          });
 
-        if (!snapshot.completed) {
-          return {
-            executed: false,
-            phase: currentState.phase,
-            status: currentState.status,
-            active_branch: currentState.active_branch,
-            summary_markdown: `External CI still in progress on SHA ${activeHeadSha}.`,
-            created_ticket_numbers: [],
-            feature_pr_url: ""
-          };
-        }
+          if (!snapshot.completed) {
+            return {
+              executed: false,
+              phase: currentState.phase,
+              status: currentState.status,
+              active_branch: currentState.active_branch,
+              summary_markdown: `External CI still in progress on SHA ${activeHeadSha}.`,
+              created_ticket_numbers: [],
+              feature_pr_url: ""
+            };
+          }
 
-        if (snapshot.passed && snapshot.aiReviewPassed) {
-          if (currentState.subphase === "waiting_feature_ci") {
-            const featurePrNumber = currentState.active_pr_number ?? 0;
-            const openFeaturePr = await gh.findOpenPullRequestByHead(
-              currentState.active_branch || featureBranch,
-              "dev"
-            );
-            const featurePrUrl = openFeaturePr?.html_url ?? "";
-            const updatedReviewReady = await updateIssueStateWithCas({
+          if (snapshot.passed && snapshot.aiReviewPassed) {
+            if (currentState.subphase === "waiting_feature_ci") {
+              const featurePrNumber = currentState.active_pr_number ?? 0;
+              const openFeaturePr = await gh.findOpenPullRequestByHead(
+                currentState.active_branch || featureBranch,
+                "dev"
+              );
+              const featurePrUrl = openFeaturePr?.html_url ?? "";
+              const updatedReviewReady = await updateIssueStateWithCas({
+                issueNumber: effectiveInput.issueNumber,
+                store,
+                mutator: (prev) => ({
+                  ...prev,
+                  phase: "review",
+                  status: "awaiting_human_approval",
+                  subphase: "idle",
+                  active_head_sha: undefined,
+                  code_fix_attempts_used: 0
+                })
+              });
+              const readyMd = appendEpureCommandsSpoiler(
+                [
+                  `<!-- epure-state:${JSON.stringify(updatedReviewReady.state)} -->`,
+                  updatedReviewReady.issue_mirror_markdown,
+                  "",
+                  `### ✅ Feature Pull Request prête pour validation humaine — PR #${featurePrNumber}`,
+                  `- **Pull Request** : ${featurePrUrl || `#${featurePrNumber}`}`,
+                  `- **CI externe & \`ai-review\`** : \`success\` sur \`${activeHeadSha}\``,
+                  "- **Prochaine étape** : Revue humaine et squash-merge vers `dev`."
+                ].join("\n"),
+                {
+                  phase: "completed",
+                  status: "completed",
+                  issueNumber: effectiveInput.issueNumber
+                }
+              );
+              await gh.ensureLabel(
+                "ready-for-human",
+                "0E8A16",
+                "Ready for human review and merge"
+              );
+              await gh.addIssueLabels(effectiveInput.issueNumber, [
+                "ready-for-human"
+              ]);
+              await gh.postIssueComment(effectiveInput.issueNumber, readyMd);
+              return {
+                executed: true,
+                phase: updatedReviewReady.state.phase,
+                status: updatedReviewReady.state.status,
+                active_branch: updatedReviewReady.state.active_branch,
+                summary_markdown: readyMd,
+                created_ticket_numbers: [],
+                feature_pr_url: featurePrUrl
+              };
+            }
+
+            // waiting_ticket_ci passed: squash-merge current ticket PR and continue to next ticket!
+            const ticketNum =
+              currentState.active_ticket_number ?? effectiveInput.issueNumber;
+            const taskBranchToMerge =
+              currentState.active_task_branch ?? `task/${ticketNum}`;
+            const prNumberToMerge = currentState.active_pr_number ?? 0;
+            const targetFeatureBranch =
+              currentState.active_branch || featureBranch;
+
+            if (prNumberToMerge > 0) {
+              const openTaskPr = await gh.findOpenPullRequestByHead(
+                taskBranchToMerge,
+                targetFeatureBranch
+              );
+              const prFiles = await gh.listPullRequestFiles(prNumberToMerge);
+              const changedFilesForSquash = await Promise.all(
+                prFiles.map(async (f) => ({
+                  path: f.filename,
+                  ...(f.patch
+                    ? { patch: f.patch }
+                    : {
+                        content:
+                          (await gh.readSingleBranchFile(
+                            taskBranchToMerge,
+                            f.filename
+                          )) ?? undefined
+                      })
+                }))
+              );
+
+              const squashCommit = await generateSemanticSquashCommitFromDiff({
+                prNumber: prNumberToMerge,
+                targetBranch: targetFeatureBranch,
+                defaultBranch: "dev",
+                planIssueNumber: effectiveInput.issueNumber,
+                ticketNumbers: [ticketNum],
+                fallbackTitle:
+                  openTaskPr?.title ||
+                  `feat(ticket-${ticketNum}): complete ticket #${ticketNum}`,
+                changedFiles: changedFilesForSquash,
+                llmApiKey: effectiveInput.llmApiKey,
+                model: phaseModels.reviewModel,
+                providers: phaseModels.providers,
+                maxTransientRetries: phaseModels.maxTransientRetries,
+                transientRetryBackoffSeconds:
+                  phaseModels.transientRetryBackoffSeconds,
+                requestTimeoutMs: phaseModels.requestTimeoutMs,
+                fetchImpl: effectiveInput.fetchImpl
+              });
+
+              await gh.updatePullRequest(prNumberToMerge, {
+                title: squashCommit.pr_title
+              });
+              await gh.publishCheckRun({
+                name: "PR title",
+                headSha: activeHeadSha,
+                conclusion: "success",
+                summary: `Conventional Commit title verified: '${squashCommit.pr_title}'`
+              });
+              await gh.mergePullRequest(prNumberToMerge, {
+                headBranch: taskBranchToMerge,
+                baseBranch: targetFeatureBranch,
+                commitTitle: squashCommit.commit_title,
+                commitMessage: squashCommit.commit_message
+              });
+            }
+
+            if (ticketNum !== effectiveInput.issueNumber) {
+              await gh.closeIssue(ticketNum);
+            }
+
+            const updatedAfterTicketMerge = await updateIssueStateWithCas({
               issueNumber: effectiveInput.issueNumber,
               store,
               mutator: (prev) => ({
                 ...prev,
-                phase: "review",
-                status: "awaiting_human_approval",
                 subphase: "idle",
+                active_ticket_number: undefined,
+                active_task_branch: undefined,
+                active_pr_number: undefined,
                 active_head_sha: undefined,
                 code_fix_attempts_used: 0
               })
             });
-            const readyMd = appendEpureCommandsSpoiler(
-              [
-                `<!-- epure-state:${JSON.stringify(updatedReviewReady.state)} -->`,
-                updatedReviewReady.issue_mirror_markdown,
-                "",
-                `### ✅ Feature Pull Request prête pour validation humaine — PR #${featurePrNumber}`,
-                `- **Pull Request** : ${featurePrUrl || `#${featurePrNumber}`}`,
-                `- **CI externe & \`ai-review\`** : \`success\` sur \`${activeHeadSha}\``,
-                "- **Prochaine étape** : Revue humaine et squash-merge vers `dev`."
-              ].join("\n"),
-              {
-                phase: "completed",
-                status: "completed",
-                issueNumber: effectiveInput.issueNumber
-              }
-            );
-            await gh.ensureLabel(
-              "ready-for-human",
-              "0E8A16",
-              "Ready for human review and merge"
-            );
-            await gh.addIssueLabels(effectiveInput.issueNumber, [
-              "ready-for-human"
-            ]);
-            await gh.postIssueComment(effectiveInput.issueNumber, readyMd);
-            return {
-              executed: true,
-              phase: updatedReviewReady.state.phase,
-              status: updatedReviewReady.state.status,
-              active_branch: updatedReviewReady.state.active_branch,
-              summary_markdown: readyMd,
-              created_ticket_numbers: [],
-              feature_pr_url: featurePrUrl
-            };
+            currentState = updatedAfterTicketMerge.state;
+            initialCodeFixAttemptsUsed = 0;
+          } else {
+            // External CI or ai-review failed on activeHeadSha -> run one remediation round
+            forceOneRemediationRoundOnOpenPr = true;
           }
-
-          // waiting_ticket_ci passed: squash-merge current ticket PR and continue to next ticket!
-          const ticketNum =
-            currentState.active_ticket_number ?? effectiveInput.issueNumber;
-          const taskBranchToMerge =
-            currentState.active_task_branch ?? `task/${ticketNum}`;
-          const prNumberToMerge = currentState.active_pr_number ?? 0;
-          const targetFeatureBranch =
-            currentState.active_branch || featureBranch;
-
-          if (prNumberToMerge > 0) {
-            const squashCommit = await generateSemanticSquashCommitFromDiff({
-              prNumber: prNumberToMerge,
-              targetBranch: targetFeatureBranch,
-              defaultBranch: "dev",
-              planIssueNumber: effectiveInput.issueNumber,
-              ticketNumbers: [ticketNum],
-              fallbackTitle: `feat(ticket-${ticketNum}): complete ticket #${ticketNum}`,
-              changedFiles: [],
-              llmApiKey: effectiveInput.llmApiKey,
-              model: phaseModels.reviewModel,
-              providers: phaseModels.providers,
-              maxTransientRetries: phaseModels.maxTransientRetries,
-              transientRetryBackoffSeconds:
-                phaseModels.transientRetryBackoffSeconds,
-              requestTimeoutMs: phaseModels.requestTimeoutMs,
-              fetchImpl: effectiveInput.fetchImpl
-            });
-
-            await gh.updatePullRequest(prNumberToMerge, {
-              title: squashCommit.pr_title
-            });
-            await gh.publishCheckRun({
-              name: "PR title",
-              headSha: activeHeadSha,
-              conclusion: "success",
-              summary: `Conventional Commit title verified: '${squashCommit.pr_title}'`
-            });
-            await gh.mergePullRequest(prNumberToMerge, {
-              headBranch: taskBranchToMerge,
-              baseBranch: targetFeatureBranch,
-              commitTitle: squashCommit.commit_title,
-              commitMessage: squashCommit.commit_message
-            });
-          }
-
-          if (ticketNum !== effectiveInput.issueNumber) {
-            await gh.closeIssue(ticketNum);
-          }
-
-          const updatedAfterTicketMerge = await updateIssueStateWithCas({
-            issueNumber: effectiveInput.issueNumber,
-            store,
-            mutator: (prev) => ({
-              ...prev,
-              subphase: "idle",
-              active_ticket_number: undefined,
-              active_task_branch: undefined,
-              active_pr_number: undefined,
-              active_head_sha: undefined,
-              code_fix_attempts_used: 0
-            })
-          });
-          currentState = updatedAfterTicketMerge.state;
-          initialCodeFixAttemptsUsed = 0;
-        } else {
-          // External CI or ai-review failed on activeHeadSha -> run one remediation round
-          forceOneRemediationRoundOnOpenPr = true;
         }
       }
 
