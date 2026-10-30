@@ -9,6 +9,9 @@ var SUPPORTED_COMMANDS = /* @__PURE__ */ new Set([
   "to-spec",
   "to-tickets",
   "approve",
+  "sync",
+  "rebase",
+  "continue",
   "cancel",
   "reply"
 ]);
@@ -77,8 +80,9 @@ function parseEpureCommand(commentBody) {
   if (!SUPPORTED_COMMANDS.has(extracted.subcommand)) {
     return null;
   }
+  const normalizedCommand = extracted.subcommand === "rebase" ? "sync" : extracted.subcommand;
   return {
-    command: extracted.subcommand,
+    command: normalizedCommand,
     args: extracted.args
   };
 }
@@ -180,7 +184,7 @@ async function evaluateIssueCommandGate(input) {
   }
   if (!parsedCommand) {
     const errMsg = redactSecrets(
-      `Unsupported EPURE command '/epure ${rawSlash?.subcommand ?? ""}'. Supported commands: status, plan, to-spec, to-tickets, approve, cancel.`,
+      `Unsupported EPURE command '/epure ${rawSlash?.subcommand ?? ""}'. Supported commands: status, plan, to-spec, to-tickets, approve, sync, rebase, continue, cancel.`,
       secrets
     );
     const md2 = redactSecrets(
@@ -299,7 +303,7 @@ async function evaluateIssueCommandGate(input) {
     };
   }
   const safeArgs = redactSecrets(parsedCommand.args, secrets);
-  const llmAllowed = parsedCommand.command === "plan" || parsedCommand.command === "to-spec" || parsedCommand.command === "to-tickets" || parsedCommand.command === "approve" || parsedCommand.command === "reply";
+  const llmAllowed = parsedCommand.command === "plan" || parsedCommand.command === "to-spec" || parsedCommand.command === "to-tickets" || parsedCommand.command === "approve" || parsedCommand.command === "sync" || parsedCommand.command === "rebase" || parsedCommand.command === "continue" || parsedCommand.command === "reply";
   const md = redactSecrets(
     [
       "### EPURE Command Authorized",

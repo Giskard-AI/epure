@@ -4,6 +4,9 @@ export type EpureCommandName =
   | "to-spec"
   | "to-tickets"
   | "approve"
+  | "sync"
+  | "rebase"
+  | "continue"
   | "cancel"
   | "reply";
 
@@ -79,6 +82,9 @@ const SUPPORTED_COMMANDS = new Set<EpureCommandName>([
   "to-spec",
   "to-tickets",
   "approve",
+  "sync",
+  "rebase",
+  "continue",
   "cancel",
   "reply"
 ]);
@@ -161,11 +167,17 @@ export function parseEpureCommand(commentBody: string): ParsedEpureCommand | nul
   if (!SUPPORTED_COMMANDS.has(extracted.subcommand as EpureCommandName)) {
     return null;
   }
+  const normalizedCommand: EpureCommandName =
+    extracted.subcommand === "rebase"
+      ? "sync"
+      : (extracted.subcommand as EpureCommandName);
   return {
-    command: extracted.subcommand as EpureCommandName,
+    command: normalizedCommand,
     args: extracted.args
   };
 }
+
+export const parseSlashCommand = parseEpureCommand;
 
 export function isBotActor(
   actor: IssueCommandActor,
@@ -297,7 +309,7 @@ export async function evaluateIssueCommandGate(
 
   if (!parsedCommand) {
     const errMsg = redactSecrets(
-      `Unsupported EPURE command '/epure ${rawSlash?.subcommand ?? ""}'. Supported commands: status, plan, to-spec, to-tickets, approve, cancel.`,
+      `Unsupported EPURE command '/epure ${rawSlash?.subcommand ?? ""}'. Supported commands: status, plan, to-spec, to-tickets, approve, sync, rebase, continue, cancel.`,
       secrets
     );
     const md = redactSecrets(
@@ -430,6 +442,9 @@ export async function evaluateIssueCommandGate(
     parsedCommand.command === "to-spec" ||
     parsedCommand.command === "to-tickets" ||
     parsedCommand.command === "approve" ||
+    parsedCommand.command === "sync" ||
+    parsedCommand.command === "rebase" ||
+    parsedCommand.command === "continue" ||
     parsedCommand.command === "reply";
   const md = redactSecrets(
     [

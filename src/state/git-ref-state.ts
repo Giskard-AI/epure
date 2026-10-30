@@ -16,6 +16,14 @@ export type IssueOrchestrationStatus =
   | "suspended"
   | "done";
 
+export type EpureIssueSubphase =
+  | "idle"
+  | "implementing_ticket"
+  | "waiting_ticket_ci"
+  | "remediating_ticket"
+  | "waiting_feature_ci"
+  | "remediating_feature";
+
 export interface EpureIssueState {
   readonly issue_number: number;
   readonly version: number;
@@ -26,6 +34,11 @@ export interface EpureIssueState {
   readonly code_fix_attempts_used: number;
   readonly transient_retries_used: number;
   readonly updated_at: string;
+  readonly subphase?: EpureIssueSubphase | undefined;
+  readonly active_ticket_number?: number | undefined;
+  readonly active_task_branch?: string | undefined;
+  readonly active_pr_number?: number | undefined;
+  readonly active_head_sha?: string | undefined;
 }
 
 export interface GitRefSnapshot {
@@ -40,6 +53,7 @@ export interface GitRefStateStore {
     expectedOldSha: string | null,
     nextState: EpureIssueState
   ): Promise<{ readonly swapped: boolean; readonly newSha: string }>;
+  listIssueStates?(): Promise<readonly EpureIssueState[]>;
 }
 
 export interface UpdateIssueStateWithCasInput {
@@ -133,6 +147,9 @@ export function createInMemoryGitRefStateStore(options?: {
       const newSha = computeDeterministicSha(nextState);
       refs.set(refName, { sha: newSha, state: nextState });
       return { swapped: true, newSha };
+    },
+    listIssueStates: async (): Promise<readonly EpureIssueState[]> => {
+      return [...refs.values()].map((entry) => entry.state);
     }
   };
 }
@@ -177,9 +194,6 @@ export async function updateIssueStateWithCas(
     conflictsRecovered += 1;
   }
 
-  if ( conflictsRecovered > 0 ) {
-    // kept for TS
-  }
   throw new Error(
     `CAS conflict retry budget exhausted (${maxRetries}) on '${refName}'.`
   );
@@ -327,6 +341,51 @@ export function createGitHubApiRefStateStore(
         }
       );
       return { swapped: updateRefResp.ok, newSha: updateRefResp.ok ? newSha : "" };
+    },
+
+    listIssueStates: async (): Promise<readonly EpureIssueState[]> => {
+      try {
+        const listResp = await fetchFn(
+          `${baseUrl}/repos/${owner}/${repo}/git/matching-refs/epure/state/`,
+          { method: "GET", headers }
+        );
+        if (!listResp.ok) {
+          return [];
+        }
+        const entries = (await listResp.json()) as Array<{
+          ref?: string;
+          object?: { sha?: string };
+        }>;
+        if (!Array.isArray(entries)) {
+          return [];
+        }
+        const states: EpureIssueState[] = [];
+        for (const entry of entries) {
+          const blobSha = entry.object?.sha;
+          if (!blobSha) {
+            continue;
+          }
+          const blobResp = await fetchFn(
+            `${baseUrl}/repos/${owner}/${repo}/git/blobs/${blobSha}`,
+            { method: "GET", headers }
+          );
+          if (!blobResp.ok) {
+            continue;
+          }
+          const blobData = (await blobResp.json()) as {
+            content?: string;
+            encoding?: string;
+          };
+          const rawJson = Buffer.from(
+            blobData.content ?? "",
+            blobData.encoding === "base64" ? "base64" : "utf8"
+          ).toString("utf8");
+          states.push(JSON.parse(rawJson) as EpureIssueState);
+        }
+        return states;
+      } catch {
+        return [];
+      }
     }
   };
 }

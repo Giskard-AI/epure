@@ -1,4 +1,5 @@
 import type { ResponseSchemaSpec } from "../../llm/types.js";
+import { slugifyTitle } from "../github/rest-client.js";
 
 export interface GrillRoundEvaluation {
   readonly frontier_resolved: boolean;
@@ -167,16 +168,7 @@ function asNumberArray(value: unknown): number[] {
 }
 
 function deriveTicketSlug(title: string, fallbackIndex: number): string {
-  const clean = title
-    .toLowerCase()
-    .replace(/^\[ticket\s*\d+\]\s*/i, "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 36)
-    .replace(/-+$/g, "");
-  return clean || `ticket-${fallbackIndex}`;
+  return slugifyTitle(title, `ticket-${fallbackIndex}`);
 }
 
 function extractTitleFromMarkdown(markdown: string, fallback: string): string {
@@ -1054,3 +1046,148 @@ export const SQUASH_COMMIT_SCHEMA: ResponseSchemaSpec<SquashCommitPayload> = {
     };
   }
 };
+
+export interface ConflictResolutionPayload {
+  readonly commit_message: string;
+  readonly resolution_summary: string;
+  readonly resolved_files: ReadonlyArray<{
+    readonly path: string;
+    readonly content: string;
+  }>;
+}
+
+export const CONFLICT_RESOLUTION_SCHEMA: ResponseSchemaSpec<ConflictResolutionPayload> =
+  {
+    name: "conflict_resolution_payload",
+    description:
+      "3-way Git merge conflict resolution payload producing clean merged file contents without conflict markers.",
+    schema: {
+      type: "object",
+      properties: {
+        commit_message: { type: "string" },
+        resolution_summary: { type: "string" },
+        resolved_files: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              path: { type: "string" },
+              content: { type: "string" }
+            },
+            required: ["path", "content"]
+          }
+        }
+      },
+      required: ["commit_message", "resolution_summary", "resolved_files"]
+    },
+    validate(parsed: unknown): ConflictResolutionPayload {
+      const obj = asRecord(parsed, "ConflictResolutionPayload");
+      const commitMessage =
+        typeof obj.commit_message === "string" &&
+        obj.commit_message.trim().length > 0
+          ? obj.commit_message.trim()
+          : "chore(sync): resolve 3-way merge conflicts";
+      const resolutionSummary =
+        typeof obj.resolution_summary === "string"
+          ? obj.resolution_summary.trim()
+          : "";
+      const rawFiles = Array.isArray(obj.resolved_files)
+        ? obj.resolved_files
+        : [];
+      const resolvedFiles = rawFiles
+        .map((item, idx) => {
+          const rec = asRecord(item, `ConflictResolutionPayload.resolved_files[${idx}]`);
+          const path =
+            typeof rec.path === "string"
+              ? rec.path.trim().replace(/^\/+/, "")
+              : "";
+          const content =
+            typeof rec.content === "string" ? rec.content : "";
+          return { path, content };
+        })
+        .filter((f) => f.path.length > 0);
+      return {
+        commit_message: commitMessage,
+        resolution_summary: resolutionSummary,
+        resolved_files: resolvedFiles
+      };
+    }
+  };
+
+export interface GoldfishSpecAuditPayload {
+  readonly passed: boolean;
+  readonly comprehension_self_contained: boolean;
+  readonly zoom_out_yagni_passed: boolean;
+  readonly implementation_readiness_passed: boolean;
+  readonly missing_context_questions: readonly string[];
+  readonly overengineering_warnings: readonly string[];
+  readonly untestable_criteria: readonly string[];
+  readonly amended_sections_suggestion: string;
+}
+
+export const GOLDFISH_SPEC_AUDIT_SCHEMA: ResponseSchemaSpec<GoldfishSpecAuditPayload> =
+  {
+    name: "goldfish_spec_audit",
+    description:
+      "Zero-context Goldfish Spec Auditor evaluation (Google Elephant-Goldfish Model) checking self-contained comprehension, YAGNI zoom-out, and implementation readiness.",
+    schema: {
+      type: "object",
+      properties: {
+        passed: { type: "boolean" },
+        comprehension_self_contained: { type: "boolean" },
+        zoom_out_yagni_passed: { type: "boolean" },
+        implementation_readiness_passed: { type: "boolean" },
+        missing_context_questions: {
+          type: "array",
+          items: { type: "string" }
+        },
+        overengineering_warnings: {
+          type: "array",
+          items: { type: "string" }
+        },
+        untestable_criteria: {
+          type: "array",
+          items: { type: "string" }
+        },
+        amended_sections_suggestion: { type: "string" }
+      },
+      required: [
+        "passed",
+        "comprehension_self_contained",
+        "zoom_out_yagni_passed",
+        "implementation_readiness_passed",
+        "missing_context_questions",
+        "overengineering_warnings",
+        "untestable_criteria",
+        "amended_sections_suggestion"
+      ]
+    },
+    validate(parsed: unknown): GoldfishSpecAuditPayload {
+      const obj = asRecord(parsed, "GoldfishSpecAuditPayload");
+      if (typeof obj.passed !== "boolean") {
+        throw new Error("GoldfishSpecAuditPayload.passed must be a boolean.");
+      }
+      return {
+        passed: obj.passed,
+        comprehension_self_contained:
+          typeof obj.comprehension_self_contained === "boolean"
+            ? obj.comprehension_self_contained
+            : obj.passed,
+        zoom_out_yagni_passed:
+          typeof obj.zoom_out_yagni_passed === "boolean"
+            ? obj.zoom_out_yagni_passed
+            : obj.passed,
+        implementation_readiness_passed:
+          typeof obj.implementation_readiness_passed === "boolean"
+            ? obj.implementation_readiness_passed
+            : obj.passed,
+        missing_context_questions: asStringArray(obj.missing_context_questions),
+        overengineering_warnings: asStringArray(obj.overengineering_warnings),
+        untestable_criteria: asStringArray(obj.untestable_criteria),
+        amended_sections_suggestion:
+          typeof obj.amended_sections_suggestion === "string"
+            ? obj.amended_sections_suggestion
+            : ""
+      };
+    }
+  };

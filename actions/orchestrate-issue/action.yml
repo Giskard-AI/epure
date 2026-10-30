@@ -9,7 +9,7 @@ inputs:
     description: "GitHub Issue number"
     required: true
   command:
-    description: "Authorized EPURE command ('status', 'plan', 'to-spec', 'to-tickets', 'approve', 'cancel', 'reply')"
+    description: "Authorized EPURE command ('status', 'plan', 'to-spec', 'to-tickets', 'approve', 'sync', 'rebase', 'continue', 'cancel', 'reply')"
     required: true
   command_args:
     description: "Command arguments or human reply body"
@@ -22,6 +22,18 @@ inputs:
   actor:
     description: "Authorized human actor login"
     required: true
+  trigger_head_sha:
+    description: "Optional head SHA from check_suite or workflow_run continuation event"
+    required: false
+    default: ""
+  trigger_branch:
+    description: "Optional branch name from check_suite or workflow_run continuation event"
+    required: false
+    default: ""
+  async_ci_continuation:
+    description: "Whether to exit immediately while waiting for external CI ('true' or 'false')"
+    required: false
+    default: "false"
   agent_app_id:
     description: "Consumer Agent App ID (EPURE_AGENT_APP_ID)"
     required: false

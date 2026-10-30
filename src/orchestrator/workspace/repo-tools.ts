@@ -2,6 +2,7 @@ import {
   discoverVerificationProfile,
   type VerificationProfile
 } from "../../bootstrap/ci-and-renovate.js";
+import type { WebToolsConfig } from "../../bootstrap/setup-repo.js";
 import type {
   SandboxExecutionInput,
   SandboxExecutionResult
@@ -21,6 +22,10 @@ import type {
   IssueCommentRecord,
   TrackedTicketCommentMetadata
 } from "../types.js";
+import {
+  buildWebExplorationToolsAndHandlers,
+  type WebToolsPhase
+} from "./web-tools.js";
 
 export async function applyTicketImplementationPayload(params: {
   readonly parsed: GeneratedTicketImplementation;
@@ -223,6 +228,9 @@ export function buildRepoExplorationToolsAndHandlers(params: {
   readonly deletedFilesSet?: ReadonlySet<string> | undefined;
   readonly devBranchPaths: readonly string[];
   readonly gh: GitHubRestHelper;
+  readonly phase?: WebToolsPhase | undefined;
+  readonly webToolsConfig?: WebToolsConfig | undefined;
+  readonly fetchImpl?: typeof fetch | undefined;
 }): {
   readonly tools?: readonly GeminiFunctionDeclaration[];
   readonly toolHandlers?: Readonly<Record<string, GeminiToolHandler>>;
@@ -232,10 +240,17 @@ export function buildRepoExplorationToolsAndHandlers(params: {
       params.accumulatedFiles,
       params.devBranchPaths
     ) &&
-    process.env.GITHUB_ACTIONS !== "true"
+    process.env.GITHUB_ACTIONS !== "true" &&
+    params.webToolsConfig === undefined
   ) {
     return {};
   }
+
+  const webExploration = buildWebExplorationToolsAndHandlers({
+    phase: params.phase,
+    webToolsConfig: params.webToolsConfig,
+    fetchImpl: params.fetchImpl
+  });
 
   return {
     tools: [
@@ -295,9 +310,11 @@ export function buildRepoExplorationToolsAndHandlers(params: {
           },
           required: ["path"]
         }
-      }
+      },
+      ...webExploration.tools
     ],
     toolHandlers: {
+      ...webExploration.toolHandlers,
       list_repo_files: async (args: Readonly<Record<string, unknown>>) => {
         const rawQuery = String(args.query ?? "")
           .trim()

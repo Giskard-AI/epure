@@ -132,12 +132,24 @@ describe("Ticket 07 (#8) — Pi agent harness execution & isolated PR publicatio
     }
   );
 
-  it("PiHarnessAdapter builds deterministic non-interactive command args", () => {
-    const adapter = new PiHarnessAdapter();
-    expect(adapter.name).toBe("pi");
+  it.each([
+    {
+      id: "pi-harness-adapter-builds-deterministic-non-interactive-command-args",
+      adapter: new PiHarnessAdapter(),
+      expectedName: "pi",
+      ticketTitle: "Implement first ticket with Pi"
+    },
+    {
+      id: "codex-harness-adapter-builds-deterministic-non-interactive-command-args",
+      adapter: new CodexHarnessAdapter(),
+      expectedName: "codex",
+      ticketTitle: "Implement ticket with Codex"
+    }
+  ])("$id", ({ adapter, expectedName, ticketTitle }) => {
+    expect(adapter.name).toBe(expectedName);
     const invocation = adapter.buildSandboxInvocation({
       ticketIssueNumber: 8,
-      ticketTitle: "Implement first ticket with Pi",
+      ticketTitle,
       acceptanceCriteria: ["Adds healthcheck endpoint"],
       changedFiles: ["src/health.ts"]
     });
@@ -209,17 +221,4 @@ describe("Ticket 07 (#8) — Pi agent harness execution & isolated PR publicatio
       expect(result.publisher_token_revoked).toBe(true);
     }
   );
-
-  it("CodexHarnessAdapter builds deterministic non-interactive command args", () => {
-    const adapter = new CodexHarnessAdapter();
-    expect(adapter.name).toBe("codex");
-    const invocation = adapter.buildSandboxInvocation({
-      ticketIssueNumber: 8,
-      ticketTitle: "Implement ticket with Codex",
-      acceptanceCriteria: ["Adds healthcheck endpoint"],
-      changedFiles: ["src/health.ts"]
-    });
-    expect(invocation.command).toBe(process.execPath);
-    expect(invocation.args.length).toBeGreaterThan(0);
-  });
 });

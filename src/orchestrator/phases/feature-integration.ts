@@ -34,6 +34,7 @@ import {
 } from "../../state/git-ref-state.js";
 import { appendEpureCommandsSpoiler } from "../formatting/comments.js";
 import { callGeminiJson } from "../gemini-client.js";
+import { syncBranchWithBase } from "../github/branch-sync.js";
 import { EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT } from "../prompts/code-discipline.js";
 import {
   GENERATED_TICKET_IMPLEMENTATION_SCHEMA,
@@ -94,6 +95,9 @@ export interface RunFeatureIntegrationPhaseParams {
   readonly sandboxRunner?:
     | ((input: SandboxExecutionInput) => Promise<SandboxExecutionResult>)
     | undefined;
+  readonly asyncCiContinuation?: boolean | undefined;
+  readonly forceOneRemediationRoundOnOpenPr?: boolean | undefined;
+  readonly initialCodeFixAttemptsUsed?: number | undefined;
 }
 
 export async function runFeatureIntegrationPhase(
@@ -127,6 +131,25 @@ export async function runFeatureIntegrationPhase(
       ticketNumber: params.issueNumber,
       branch: params.featureBranch,
       diagnosticExcerpt: `${featurePrGate.error_code}: ${featurePrGate.error_message}`
+    });
+  }
+
+  const featureSync = await syncBranchWithBase({
+    gh: params.gh,
+    targetBranch: params.featureBranch,
+    baseBranch: "dev",
+    issueNumber: params.issueNumber,
+    llmApiKey: params.llmApiKey,
+    fetchImpl: params.fetchImpl,
+    model: params.phaseModels.implementationModel,
+    sandboxRunner: params.sandboxRunner
+  });
+  if (featureSync.status === "escalated") {
+    return await params.escalateToNeedsHuman({
+      reason: featureSync.escalationReason ?? "merge_conflict_unresolved",
+      ticketNumber: params.issueNumber,
+      branch: params.featureBranch,
+      diagnosticExcerpt: featureSync.diagnosticExcerpt
     });
   }
 
@@ -225,9 +248,11 @@ export async function runFeatureIntegrationPhase(
     headSha: string;
     isReReviewPass: boolean;
     previousFailedReviewers?: ReadonlyArray<ReviewerAgentName>;
+    reviewFixAttemptsUsed?: number | undefined;
   }): Promise<{
     reviewResult: Awaited<ReturnType<typeof runMultiAgentPrReviewPass>>;
     ciGateResult: WaitForExternalCiChecksResult;
+    releasedForAsyncCi?: OrchestrateIssueResult | undefined;
   }> => {
     const currentChangedFeatureFiles = Array.from(
       (params.featureChangedFilesMap.size > 0
@@ -298,6 +323,67 @@ export async function runFeatureIntegrationPhase(
       });
     }
 
+    const currentAttempts =
+      passParams.reviewFixAttemptsUsed ??
+      params.initialCodeFixAttemptsUsed ??
+      0;
+    const shouldReleaseRunnerForAsyncFeatureCi =
+      Boolean(params.asyncCiContinuation) &&
+      verificationProfile.wait_for_external_ci !== false &&
+      expectedFeatureWorkflows.length > 0 &&
+      (!params.forceOneRemediationRoundOnOpenPr ||
+        currentAttempts > (params.initialCodeFixAttemptsUsed ?? 0));
+
+    if (shouldReleaseRunnerForAsyncFeatureCi) {
+      const updatedWaitingFeature = await updateIssueStateWithCas({
+        issueNumber: params.issueNumber,
+        store: params.store,
+        mutator: (prev) => ({
+          ...prev,
+          phase: "review",
+          status: "active",
+          active_branch: params.featureBranch,
+          subphase: "waiting_feature_ci",
+          active_ticket_number: params.issueNumber,
+          active_task_branch: undefined,
+          active_pr_number: featurePr.number,
+          active_head_sha: passParams.headSha,
+          code_fix_attempts_used: currentAttempts
+        })
+      });
+      const asyncFeatureSummary = [
+        `<!-- epure-state:${JSON.stringify(updatedWaitingFeature.state)} -->`,
+        updatedWaitingFeature.issue_mirror_markdown,
+        "",
+        `### ⏳ Attente événementielle CI externe (\`waiting_feature_ci\`) — Feature PR #${featurePr.number}`,
+        `- **Pull Request** : ${featurePr.html_url} (\`${params.featureBranch}\` -> \`dev\`)`,
+        `- **HEAD SHA** : \`${passParams.headSha}\``,
+        `- **Revue Multi-Agents (\`ai-review\`)** : \`${reviewRes.conclusion}\``,
+        "- **Action** : Runner GitHub Actions libéré (`exit 0`). Reprise automatique sur `check_suite` / `workflow_run: completed` ou `/epure continue`."
+      ].join("\n");
+      return {
+        reviewResult: reviewRes,
+        ciGateResult: {
+          passed: true,
+          reason: "all_passed",
+          infraRerunsTriggered: 0,
+          failedChecks: [],
+          formattedDiagnostics: "",
+          registeredWorkflowNames: [],
+          registeredCheckNames: []
+        },
+        releasedForAsyncCi: {
+          executed: true,
+          phase: updatedWaitingFeature.state.phase,
+          status: updatedWaitingFeature.state.status,
+          active_branch: params.featureBranch,
+          summary_markdown: asyncFeatureSummary,
+          created_ticket_numbers: allTicketNumbers,
+          feature_pr_url: featurePr.html_url
+        }
+      };
+    }
+
     const ciRes = await waitForExternalCiChecks({
       headSha: passParams.headSha,
       expectedWorkflows: expectedFeatureWorkflows,
@@ -330,13 +416,20 @@ export async function runFeatureIntegrationPhase(
     return { reviewResult: reviewRes, ciGateResult: ciRes };
   };
 
+  let featureReviewFixAttempt = params.initialCodeFixAttemptsUsed ?? 0;
+
+  const initialFeaturePass = await runStage2AndStage3ForFeaturePr({
+    headSha: currentFeaturePrHeadSha,
+    isReReviewPass: false,
+    reviewFixAttemptsUsed: featureReviewFixAttempt
+  });
+  if (initialFeaturePass.releasedForAsyncCi) {
+    return initialFeaturePass.releasedForAsyncCi;
+  }
   let {
     reviewResult: finalFeatureReview,
     ciGateResult: finalFeatureCiGate
-  } = await runStage2AndStage3ForFeaturePr({
-    headSha: currentFeaturePrHeadSha,
-    isReReviewPass: false
-  });
+  } = initialFeaturePass;
 
   if (
     !finalFeatureCiGate.passed &&
@@ -357,7 +450,6 @@ export async function runFeatureIntegrationPhase(
     });
   }
 
-  let featureReviewFixAttempt = 0;
   const maxFeatureReviewFixAttempts = params.maxCodeFixAttempts;
   while (
     (finalFeatureReview.conclusion === "failure" ||
@@ -768,8 +860,12 @@ export async function runFeatureIntegrationPhase(
       const nextFeaturePass = await runStage2AndStage3ForFeaturePr({
         headSha: currentFeaturePrHeadSha,
         isReReviewPass: true,
-        previousFailedReviewers: finalFeatureReview.failed_reviewers
+        previousFailedReviewers: finalFeatureReview.failed_reviewers,
+        reviewFixAttemptsUsed: featureReviewFixAttempt
       });
+      if (nextFeaturePass.releasedForAsyncCi) {
+        return nextFeaturePass.releasedForAsyncCi;
+      }
       finalFeatureReview = nextFeaturePass.reviewResult;
       finalFeatureCiGate = nextFeaturePass.ciGateResult;
 

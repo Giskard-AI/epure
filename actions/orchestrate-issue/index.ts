@@ -3,13 +3,19 @@ import type { EpureCommandName } from "../../src/auth/issue-command-gate.js";
 import { redactSecrets } from "../../src/auth/issue-command-gate.js";
 import { orchestrateIssueCommand } from "../../src/orchestrator/issue-orchestrator.js";
 
-function writeGitHubOutputs(outputs: Record<string, string>): void {
+function writeGitHubOutputs(
+  outputs: Record<string, string>,
+  secrets: readonly string[]
+): void {
   const outputPath = process.env.GITHUB_OUTPUT;
   if (!outputPath) {
     return;
   }
   const lines = Object.entries(outputs)
-    .map(([key, value]) => `${key}=${value.replace(/\r?\n/g, " ")}`)
+    .map(
+      ([key, value]) =>
+        `${key}=${redactSecrets(value.replace(/\r?\n/g, " "), secrets)}`
+    )
     .join("\n");
   appendFileSync(outputPath, `${lines}\n`, "utf8");
 }
@@ -53,6 +59,11 @@ async function run(): Promise<void> {
     ""
   ).trim();
   const model = (process.env.INPUT_MODEL ?? "gemini-3.8-flash").trim();
+  const triggerHeadSha = (process.env.INPUT_TRIGGER_HEAD_SHA ?? "").trim();
+  const triggerBranch = (process.env.INPUT_TRIGGER_BRANCH ?? "").trim();
+  const asyncCiContinuation =
+    (process.env.INPUT_ASYNC_CI_CONTINUATION ?? "").trim().toLowerCase() ===
+    "true";
 
   const secrets = [agentAppPrivateKey, fallbackGithubToken, llmApiKey].filter(
     (s) => s.length >= 4
@@ -70,16 +81,22 @@ async function run(): Promise<void> {
       agentAppPrivateKey,
       fallbackGithubToken,
       llmApiKey,
-      model
+      model,
+      ...(triggerHeadSha ? { triggerHeadSha } : {}),
+      ...(triggerBranch ? { triggerBranch } : {}),
+      ...(asyncCiContinuation ? { asyncCiContinuation } : {})
     });
 
-    writeGitHubOutputs({
-      executed: String(result.executed),
-      phase: result.phase,
-      status: result.status,
-      active_branch: result.active_branch,
-      feature_pr_url: result.feature_pr_url
-    });
+    writeGitHubOutputs(
+      {
+        executed: String(result.executed),
+        phase: result.phase,
+        status: result.status,
+        active_branch: result.active_branch,
+        feature_pr_url: result.feature_pr_url
+      },
+      secrets
+    );
 
     if (result.summary_markdown) {
       writeStepSummary(redactSecrets(result.summary_markdown, secrets));

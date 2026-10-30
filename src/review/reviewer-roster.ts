@@ -141,24 +141,32 @@ const JSON_OUTPUT_CONTRACT_BLOCK = [
 function buildStackStandardsBullets(
   stackKind: "node" | "python" | "rust" | "go" | "generic"
 ): readonly string[] {
+  const ponytailBullets = [
+    "- Enforce Ponytail 5 Reuse Hierarchy (existing repo code -> stdlib/platform -> installed packages -> minimal readable code) and Caller-Reach (update all callers and tests in the same diff).",
+    "- Enforce Ponytail 5 Safety Floor: never allow trust-boundary validation, critical error handling, security guards, or accessibility to be removed for brevity.",
+    "- Enforce ASD-STE100 Controlled Technical Prompting in prompts, specs, and docs (bijective `GLOSSARY.md` vocabulary, active voice with explicit actor, 1 sentence = 1 action, deterministic `WHEN/IF ... THEN` conditionals)."
+  ];
   switch (stackKind) {
     case "python":
       return [
         "- Enforce strict Python type annotations (`mypy` / `pyright`) and `ruff` compliance without blanket `# type: ignore`.",
         "- Verify that tests use parameterized `@pytest.mark.parametrize` tables with descriptive test IDs covering nominal and edge cases.",
-        "- Ensure surgical, minimal code free of dead imports or speculative abstractions."
+        "- Ensure surgical, minimal code free of dead imports or speculative abstractions.",
+        ...ponytailBullets
       ];
     case "rust":
       return [
         "- Enforce idiomatic, warning-free Rust (`cargo clippy -- -D warnings`), avoiding `unwrap()` / `expect()` in production paths.",
         "- Verify that tests use table-driven or parameterized test cases covering nominal and boundary conditions.",
-        "- Ensure surgical, minimal code free of dead code or speculative traits."
+        "- Ensure surgical, minimal code free of dead code or speculative traits.",
+        ...ponytailBullets
       ];
     case "go":
       return [
         "- Enforce idiomatic Go error handling and strict `go vet` / `golangci-lint` cleanliness.",
         "- Verify that tests use table-driven `t.Run` subtests with descriptive case names covering nominal and edge cases.",
-        "- Ensure surgical, minimal code free of unused exports or premature abstractions."
+        "- Ensure surgical, minimal code free of unused exports or premature abstractions.",
+        ...ponytailBullets
       ];
     case "node":
     case "generic":
@@ -166,7 +174,8 @@ function buildStackStandardsBullets(
       return [
         "- Enforce strict TypeScript types (no `any` or unsafe casts without guard).",
         "- Verify that tests use parameterized `it.each` tables with descriptive test IDs covering nominal and edge cases.",
-        "- Ensure surgical, minimal code free of dead imports or speculative abstractions."
+        "- Ensure surgical, minimal code free of dead imports or speculative abstractions.",
+        ...ponytailBullets
       ];
   }
 }
@@ -301,7 +310,7 @@ export function buildDefaultReviewerRosterFiles(
         "",
         "## Scope & Responsibilities",
         "- Verify strict separation between pure domain models (`src/domain/*`) and UI/IO layers.",
-        "- Check compliance with accepted ADRs (`docs/adr/*.md`) and canonical terminology in `GLOSSARY.md`.",
+        "- Check compliance with accepted ADRs (`docs/adr/*.md`) and canonical bijective terminology in `GLOSSARY.md` (ASD-STE100: zero `_Avoid_` synonyms).",
         "- Flag circular dependencies, leaky abstractions, or unnecessary complexity.",
         "",
         JSON_OUTPUT_CONTRACT_BLOCK,
@@ -344,7 +353,7 @@ export function buildDefaultReviewerRosterFiles(
         "## Scope & Responsibilities",
         "- Compare every acceptance criterion of the ticket and `docs/specs/*.md` against the implemented code and tests.",
         "- Flag any omitted requirement, partial implementation, or unrequested scope creep.",
-        "- Verify that parameterized unit/integration tests actually assert the specified domain rules.",
+        "- Verify that parameterized unit/integration tests actually assert the specified domain rules and ASD-STE100 acceptance criteria.",
         "",
         JSON_OUTPUT_CONTRACT_BLOCK,
         ""

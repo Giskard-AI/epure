@@ -379,9 +379,11 @@ All `/epure` commands are posted as comments on a GitHub Issue. Every command is
 | *(Any human comment during Grill)* | <span class="epure-badge epure-badge--human">Mandatory Human Gate 1</span> | `grilling` | Implicit Grill continuity (Q84): processes human answers via the batch cursor (`last_processed_comment_id`). If follow-up questions remain (`frontier_resolved: false`), posts the next Grill round. Once all ambiguities are settled (`frontier_resolved: true`), posts a **Settled Decisions Summary** and pauses in `grilling` (`awaiting_human_approval`) so the human validates the decision frontier before `/epure to-spec`. |
 | `/epure to-spec` | <span class="epure-badge epure-badge--human">Human Frontier Validation</span> | `spec` | Validates the Grill decision frontier (or forces an early transition) and generates `GLOSSARY.md`, ADRs, `DESIGN.md`, and `docs/specs/<slug>.md` on `plan/*`, then pauses in `spec` (`awaiting_human_approval`) for human review. Free-form comments during `spec` revise the specification on `plan/*`. |
 | `/epure to-tickets` | <span class="epure-badge epure-badge--human">Human Spec Validation</span> | `tickets` | Validates the specification on `plan/*` and decomposes it into an acyclic dependency-ordered GitHub Issue DAG (`blocked_by`, `ready-for-agent`), pausing in `tickets` (`awaiting_human_approval`) before `/epure approve`. |
-| `/epure approve` | <span class="epure-badge epure-badge--human">Mandatory Human Gate 2</span> | `implementation` | Squash-merges the documentation-only `plan/* -> dev` PR, locks the signed `spec_sha` mandate in `refs/epure/state/<issue>`, opens `feature/<issue>-<slug>`, and executes the ticket DAG (`task/* -> feature/*`). Also supports **idempotent resumption** if re-run after an error. |
+| `/epure approve` | <span class="epure-badge epure-badge--human">Mandatory Human Gate 2</span> | `implementation` | Integrates the approved `plan/*` artifacts (`GLOSSARY.md` additive merge, ADR collision renumbering, `docs/specs/<slug>.md`, `DESIGN.md`) directly into `feature/<issue>-<slug>` without an intermediate `plan/* -> dev` PR (ADR-0031), locks the signed `spec_sha` mandate in `refs/epure/state/<issue>`, and executes the ticket DAG (`task/* -> feature/*`). |
+| `/epure continue` | <span class="epure-badge epure-badge--optional">Lifecycle Continuation</span> | `implementation` | Resumes orchestration after a `needs-human` suspension, after resolving a 3-way conflict, or after external CI (`waiting_ticket_ci` / `waiting_feature_ci`) completes (ADR-0031). |
+| `/epure sync` (alias `/epure rebase`) | <span class="epure-badge epure-badge--optional">Git Branch Sync</span> | `implementation` | Synchronizes `dev -> feature/<issue>-<slug>` (and cascades `feature/* -> active_task_branch`) with additive `GLOSSARY.md` merging, 3-way LLM conflict resolution, and **Stage 1 Sandbox** verification before committing (ADR-0031). |
 | `/epure status` | <span class="epure-badge epure-badge--optional">Optional Override</span> | *(Read-only)* | Reads `refs/epure/state/<issue>` and posts a fresh summary of the current phase, locked `spec_sha`, and per-ticket progress without mutating code. |
-| `/epure cancel` | <span class="epure-badge epure-badge--optional">Optional Override</span> | `cancelled` | Marks the mandate as `cancelled` in `refs/epure/state/<issue>`, stops any new ticket execution, and preserves existing branches and audit logs. |
+| `/epure cancel` (alias `/epure stop`) | <span class="epure-badge epure-badge--optional">Optional Override</span> | `cancelled` | Marks the mandate as `cancelled` in `refs/epure/state/<issue>`, stops any new ticket execution, and preserves existing branches and audit logs. |
 
 > **Contextual `/epure` Command Cheat-Sheet Spoiler (`<details>`)**: Every issue comment, sub-issue body, and pull request description posted by EPURE automatically includes a collapsible `<details>` block at the bottom (`⌨️ Commandes /epure disponibles`) summarizing the available slash commands and highlighting the recommended next action for the current lifecycle phase (`grilling`, `spec`, `tickets`, `implementation`, `suspended`, `cancelled`, or `completed`).
 
@@ -559,7 +561,7 @@ sensitive_paths:
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `default_integration` | `string` | `"dev"` | Default branch of the repository where approved `plan/*` and human-reviewed `feature/*` PRs land. |
+| `default_integration` | `string` | `"dev"` | Default branch of the repository where human-reviewed `feature/* -> dev` PRs land (approved `plan/*` artifacts integrate directly into `feature/*` per ADR-0031). |
 | `release` | `string` | `"main"` | Immutable release branch updated exclusively by `release-promote.yml` via fast-forward from `dev`. |
 
 ### `llm`, `models` & `providers` (Multi-Provider Routing — ADR-0029)
@@ -596,6 +598,10 @@ For each phase call, `LLMClient` resolves the API key deterministically without 
 | `job_timeout_minutes` | `integer` | `60` | Wall-clock timeout in minutes for `orchestrate-command` in `.github/workflows/epure-issue-command.yml` (Q78). |
 | `max_parallel_reviewers` | `integer` | `4` | Ceiling on domain/transverse reviewers selected per PR diff so review latency and signal-to-noise remain optimal (Q92). |
 | `secretless_sandbox` | `boolean` | `true` | Strips `LLM_API_KEY` and GitHub App private keys from all child build/test processes; fails closed if isolation is unavailable (Q74). |
+| `web_tools.enabled` | `boolean` | `true` | Enables zero-API-key read-only public Web exploration tools (`web_search`, `web_fetch`) constrained to `https://` port `443` with strict Anti-SSRF filtering and `<untrusted_web_content>` wrapping (ADR-0031). |
+| `web_tools.phases` | `string[]` | `["plan", "spec", "implementation"]` | Lifecycle phases allowed to invoke `web_search` and `web_fetch` (excluded from `review` by default). |
+| `web_tools.max_requests_per_turn` | `integer` | `4` | Maximum Web tool requests permitted within a single LLM turn. |
+| `web_tools.max_fetch_bytes` | `integer` | `16384` | Maximum UTF-8 byte budget returned per `web_fetch` call after HTML stripping. |
 
 ### `ui_governance`
 
@@ -1388,9 +1394,11 @@ Toutes les commandes `/epure` se postent sous forme de commentaires sur une Issu
 | *(Tout commentaire humain pendant le Grill)* | <span class="epure-badge epure-badge--human">Jalon Humain Obligatoire 1</span> | `grilling` | Continuité implicite du Grill (Q84) : traite les réponses humaines via `last_processed_comment_id`. S'il reste des points ouverts (`frontier_resolved: false`), publie le round suivant. Dès que la frontière est résolue (`frontier_resolved: true`), publie une **Synthèse des Décisions** et attend la validation humaine (`/epure to-spec`) avant de générer la spec et les tickets. |
 | `/epure to-spec` | <span class="epure-badge epure-badge--human">Validation Humaine de la Frontière</span> | `spec` | Valide la frontière de cadrage du Grill (ou force la fin du cadrage) et génère `GLOSSARY.md`, les ADRs, `DESIGN.md` et `docs/specs/<slug>.md` sur `plan/*`, puis passe en phase `spec` (`awaiting_human_approval`). Tout commentaire libre en phase `spec` révise la spécification sur `plan/*`. |
 | `/epure to-tickets` | <span class="epure-badge epure-badge--human">Validation Humaine de la Spécification</span> | `tickets` | Valide la spécification sur `plan/*` et la découpe en un graphe orienté acyclique (DAG) de sous-issues GitHub (`blocked_by`, `ready-for-agent`), puis passe en phase `tickets` (`awaiting_human_approval`) avant `/epure approve`. |
-| `/epure approve` | <span class="epure-badge epure-badge--human">Jalon Humain Obligatoire 2</span> | `implementation` | Fusionne en squash la PR documentaire `plan/* -> dev`, scelle le mandat signé `spec_sha` dans `refs/epure/state/<issue>`, ouvre `feature/<issue>-<slug>` et exécute le DAG de tickets (`task/* -> feature/*`). Permet aussi la **reprise idempotente** après un échec. |
+| `/epure approve` | <span class="epure-badge epure-badge--human">Jalon Humain Obligatoire 2</span> | `implementation` | Intègre directement les artefacts de `plan/*` (`GLOSSARY.md` en fusion additive, renumérotation des ADRs en collision, `docs/specs/<slug>.md`, `DESIGN.md`) dans `feature/<issue>-<slug>` sans PR intermédiaire `plan/* -> dev` (ADR-0031), scelle le mandat signé `spec_sha` dans `refs/epure/state/<issue>` et exécute le DAG de tickets (`task/* -> feature/*`). |
+| `/epure continue` | <span class="epure-badge epure-badge--optional">Reprise d'Exécution</span> | `implementation` | Reprend l'orchestration après la résolution d'une suspension `needs-human`, d'un conflit Git 3-way ou à l'issue de la CI externe (`waiting_ticket_ci` / `waiting_feature_ci`, ADR-0031). |
+| `/epure sync` (alias `/epure rebase`) | <span class="epure-badge epure-badge--optional">Synchronisation Git</span> | `implementation` | Synchronise `dev -> feature/<issue>-<slug>` (et propage `feature/* -> active_task_branch`) avec fusion additive de `GLOSSARY.md`, résolution 3-way assistée par LLM et validation **Sandbox Stage 1** avant commit (ADR-0031). |
 | `/epure status` | <span class="epure-badge epure-badge--optional">Commande Facultative</span> | *(Lecture seule)* | Lit `refs/epure/state/<issue>` et publie un rapport à jour de la phase courante, du `spec_sha` verrouillé et de l'état de chaque ticket sans modifier le code. |
-| `/epure cancel` | <span class="epure-badge epure-badge--optional">Commande Facultative</span> | `cancelled` | Marque le mandat comme `cancelled` dans `refs/epure/state/<issue>`, bloque toute nouvelle exécution de ticket et conserve les branches et traces d'audit existantes. |
+| `/epure cancel` (alias `/epure stop`) | <span class="epure-badge epure-badge--optional">Commande Facultative</span> | `cancelled` | Marque le mandat comme `cancelled` dans `refs/epure/state/<issue>`, bloque toute nouvelle exécution de ticket et conserve les branches et traces d'audit existantes. |
 
 > **Aide-mémoire contextuel repliable (`<details>`)** : Chaque commentaire d'issue, corps de sous-issue de ticket et description de Pull Request publié par EPURE intègre automatiquement en pied de message un bloc repliable `<details>` (`⌨️ Commandes /epure disponibles`) récapitulant les commandes disponibles et mettant en évidence la prochaine action recommandée selon la phase courante (`grilling`, `spec`, `tickets`, `implementation`, `suspended`, `cancelled` ou `completed`).
 
@@ -1568,7 +1576,7 @@ sensitive_paths:
 
 | Clé | Type | Défaut | Description |
 | --- | --- | --- | --- |
-| `default_integration` | `string` | `"dev"` | Branche par défaut du dépôt où atterrissent les PRs documentaires `plan/*` approuvées et les PRs applicatives `feature/*` mergées par un humain. |
+| `default_integration` | `string` | `"dev"` | Branche par défaut du dépôt où atterrissent les PRs applicatives `feature/* -> dev` validées par un humain (les artefacts documentaires `plan/*` s'intègrent directement dans `feature/*` selon ADR-0031). |
 | `release` | `string` | `"main"` | Branche de production immuable mise à jour exclusivement par `release-promote.yml` en fast-forward depuis `dev`. |
 
 ### `llm`, `models` & `providers` (Routage Multi-Fournisseurs — ADR-0029)
@@ -1605,6 +1613,10 @@ Pour chaque appel LLM, `LLMClient` résout la clé API de manière déterministe
 | `job_timeout_minutes` | `integer` | `60` | Délai d'expiration global en minutes du job `orchestrate-command` dans `.github/workflows/epure-issue-command.yml` (Q78). |
 | `max_parallel_reviewers` | `integer` | `4` | Plafond de reviewers métier/transverses sélectionnés par diff pour maîtriser la latence et la pertinence (Q92). |
 | `secretless_sandbox` | `boolean` | `true` | Purge `LLM_API_KEY` et les clés privées PEM des GitHub Apps de tous les sous-processus de test/build ; échoue en mode *fail-closed* si l'isolation est impossible (Q74). |
+| `web_tools.enabled` | `boolean` | `true` | Active les outils d'exploration Web publics sans clé API (`web_search`, `web_fetch`) restreints à `https://` sur le port `443` avec filtrage anti-SSRF strict et balisage `<untrusted_web_content>` (ADR-0031). |
+| `web_tools.phases` | `string[]` | `["plan", "spec", "implementation"]` | Phases autorisées à invoquer `web_search` et `web_fetch` (exclu de `review` par défaut). |
+| `web_tools.max_requests_per_turn` | `integer` | `4` | Nombre maximal d'appels Web autorisés au cours d'un même tour LLM. |
+| `web_tools.max_fetch_bytes` | `integer` | `16384` | Volume maximal en octets UTF-8 retourné par appel `web_fetch` après nettoyage HTML. |
 
 ### `ui_governance`
 
