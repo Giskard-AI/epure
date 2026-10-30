@@ -37,20 +37,21 @@ export function verifyPublisherMergeBoundary(params: {
   }
 }
 
-export function slugifyTitle(raw: string): string {
+export function slugifyTitle(raw: string, fallback = "feature"): string {
   const clean = raw
     .toLowerCase()
     .replace(/\[plan\]/gi, "")
+    .replace(/^\[ticket\s*\d+\]\s*/i, "")
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 36)
     .replace(/-+$/g, "");
-  return clean || "feature";
+  return clean || fallback;
 }
 
-export function encodeGitHubContentsPath(filePath: string): string {
+function encodeGitHubContentsPath(filePath: string): string {
   return filePath
     .split("/")
     .filter((segment) => segment.length > 0)
@@ -813,7 +814,11 @@ export function createGitHubRestHelper(params: {
 
     async updatePullRequest(
       prNumber: number,
-      input: { title?: string | undefined; body?: string | undefined }
+      input: {
+        title?: string | undefined;
+        body?: string | undefined;
+        state?: "open" | "closed" | undefined;
+      }
     ): Promise<{ head_sha: string }> {
       const payload: Record<string, string> = {};
       if (input.title !== undefined) {
@@ -821,6 +826,9 @@ export function createGitHubRestHelper(params: {
       }
       if (input.body !== undefined) {
         payload.body = input.body;
+      }
+      if (input.state !== undefined) {
+        payload.state = input.state;
       }
       const { data } = await apiRequest<{ head?: { sha?: string } }>(
         "PATCH",
@@ -830,6 +838,82 @@ export function createGitHubRestHelper(params: {
       return {
         head_sha: data?.head?.sha ?? ""
       };
+    },
+
+    async mergeBranches(input: {
+      base: string;
+      head: string;
+      commitMessage?: string | undefined;
+    }): Promise<{
+      status: "merged" | "up_to_date" | "conflict";
+      sha: string;
+    }> {
+      const resp = await fetchFn(`${baseUrl}/repos/${owner}/${repo}/merges`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          base: input.base,
+          head: input.head,
+          commit_message:
+            input.commitMessage ??
+            `chore(sync): merge ${input.head} into ${input.base}`
+        })
+      });
+      if (resp.status === 204) {
+        const currentSha = (await this.getDefaultBranchSha(input.base)) ?? "";
+        return { status: "up_to_date", sha: currentSha };
+      }
+      if (resp.status === 409) {
+        return { status: "conflict", sha: "" };
+      }
+      if (resp.ok) {
+        try {
+          const data = (await resp.json()) as { sha?: string };
+          return {
+            status: data.sha ? "merged" : "up_to_date",
+            sha:
+              data.sha ?? (await this.getDefaultBranchSha(input.base)) ?? ""
+          };
+        } catch {
+          return {
+            status: "up_to_date",
+            sha: (await this.getDefaultBranchSha(input.base)) ?? ""
+          };
+        }
+      }
+      const errText = await resp.text();
+      throw new Error(
+        `GitHub API POST /repos/${owner}/${repo}/merges failed (HTTP ${resp.status}): ${errText}`
+      );
+    },
+
+    async compareCommits(
+      base: string,
+      head: string
+    ): Promise<{
+      mergeBaseSha: string;
+      changedFiles: readonly string[];
+    }> {
+      try {
+        const res = await apiRequest<{
+          merge_base_commit?: { sha?: string };
+          files?: Array<{ filename?: string }>;
+        }>(
+          "GET",
+          `/repos/${owner}/${repo}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`,
+          undefined,
+          true
+        );
+        const mergeBaseSha = res.data?.merge_base_commit?.sha ?? base;
+        const changedFiles = Array.isArray(res.data?.files)
+          ? res.data!.files
+              .map((f) => f.filename?.trim().replace(/^\/+/, "") ?? "")
+              .filter((p) => p.length > 0)
+          : [];
+        return { mergeBaseSha, changedFiles };
+      } catch {
+        return { mergeBaseSha: base, changedFiles: [] };
+      }
     },
 
     async postPullRequestReview(

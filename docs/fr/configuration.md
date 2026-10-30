@@ -109,7 +109,7 @@ sensitive_paths:
 
 | Clé | Type | Défaut | Description |
 | --- | --- | --- | --- |
-| `default_integration` | `string` | `"dev"` | Branche par défaut du dépôt où atterrissent les PRs documentaires `plan/*` approuvées et les PRs applicatives `feature/*` mergées par un humain. |
+| `default_integration` | `string` | `"dev"` | Branche par défaut du dépôt où atterrissent les PRs applicatives `feature/* -> dev` validées par un humain (les artefacts documentaires `plan/*` s'intègrent directement dans `feature/*` selon ADR-0031). |
 | `release` | `string` | `"main"` | Branche de production immuable mise à jour exclusivement par `release-promote.yml` en fast-forward depuis `dev`. |
 
 ### `llm`, `models` & `providers` (Routage Multi-Fournisseurs — ADR-0029)
@@ -146,6 +146,10 @@ Pour chaque appel LLM, `LLMClient` résout la clé API de manière déterministe
 | `job_timeout_minutes` | `integer` | `60` | Délai d'expiration global en minutes du job `orchestrate-command` dans `.github/workflows/epure-issue-command.yml` (Q78). |
 | `max_parallel_reviewers` | `integer` | `4` | Plafond de reviewers métier/transverses sélectionnés par diff pour maîtriser la latence et la pertinence (Q92). |
 | `secretless_sandbox` | `boolean` | `true` | Purge `LLM_API_KEY` et les clés privées PEM des GitHub Apps de tous les sous-processus de test/build ; échoue en mode *fail-closed* si l'isolation est impossible (Q74). |
+| `web_tools.enabled` | `boolean` | `true` | Active les outils d'exploration Web publics sans clé API (`web_search`, `web_fetch`) restreints à `https://` sur le port `443` avec filtrage anti-SSRF strict et balisage `<untrusted_web_content>` (ADR-0031). |
+| `web_tools.phases` | `string[]` | `["plan", "spec", "implementation"]` | Phases autorisées à invoquer `web_search` et `web_fetch` (exclu de `review` par défaut). |
+| `web_tools.max_requests_per_turn` | `integer` | `4` | Nombre maximal d'appels Web autorisés au cours d'un même tour LLM. |
+| `web_tools.max_fetch_bytes` | `integer` | `16384` | Volume maximal en octets UTF-8 retourné par appel `web_fetch` après nettoyage HTML. |
 
 ### `ui_governance`
 

@@ -109,7 +109,7 @@ sensitive_paths:
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `default_integration` | `string` | `"dev"` | Default branch of the repository where approved `plan/*` and human-reviewed `feature/*` PRs land. |
+| `default_integration` | `string` | `"dev"` | Default branch of the repository where human-reviewed `feature/* -> dev` PRs land (approved `plan/*` artifacts integrate directly into `feature/*` per ADR-0031). |
 | `release` | `string` | `"main"` | Immutable release branch updated exclusively by `release-promote.yml` via fast-forward from `dev`. |
 
 ### `llm`, `models` & `providers` (Multi-Provider Routing — ADR-0029)
@@ -146,6 +146,10 @@ For each phase call, `LLMClient` resolves the API key deterministically without 
 | `job_timeout_minutes` | `integer` | `60` | Wall-clock timeout in minutes for `orchestrate-command` in `.github/workflows/epure-issue-command.yml` (Q78). |
 | `max_parallel_reviewers` | `integer` | `4` | Ceiling on domain/transverse reviewers selected per PR diff so review latency and signal-to-noise remain optimal (Q92). |
 | `secretless_sandbox` | `boolean` | `true` | Strips `LLM_API_KEY` and GitHub App private keys from all child build/test processes; fails closed if isolation is unavailable (Q74). |
+| `web_tools.enabled` | `boolean` | `true` | Enables zero-API-key read-only public Web exploration tools (`web_search`, `web_fetch`) constrained to `https://` port `443` with strict Anti-SSRF filtering and `<untrusted_web_content>` wrapping (ADR-0031). |
+| `web_tools.phases` | `string[]` | `["plan", "spec", "implementation"]` | Lifecycle phases allowed to invoke `web_search` and `web_fetch` (excluded from `review` by default). |
+| `web_tools.max_requests_per_turn` | `integer` | `4` | Maximum Web tool requests permitted within a single LLM turn. |
+| `web_tools.max_fetch_bytes` | `integer` | `16384` | Maximum UTF-8 byte budget returned per `web_fetch` call after HTML stripping. |
 
 ### `ui_governance`
 

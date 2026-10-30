@@ -38,11 +38,11 @@ function buildContextualActionHint(
       : "";
 
   if (status === "suspended" || phase === "suspended") {
-    return `Inspectez le diagnostic ci-dessus, poussez un correctif si nécessaire, puis postez \`/epure approve\`${issueRef} pour reprendre l'exécution (ou \`/epure cancel\` pour l'arrêter).`;
+    return `Inspectez le diagnostic ci-dessus, poussez un correctif si nécessaire, puis postez \`/epure continue\` (ou \`/epure approve\`, ou \`/epure sync\` / \`/epure rebase\` en cas de conflit Git)${issueRef} pour reprendre l'exécution (ou \`/epure cancel\` pour l'arrêter).`;
   }
 
   if (status === "cancelled" || phase === "cancelled") {
-    return `L'orchestration est suspendue suite à une annulation. Postez \`/epure plan\`${issueRef} pour relancer un cadrage ou \`/epure approve\` pour reprendre.`;
+    return `L'orchestration est suspendue suite à une annulation. Postez \`/epure plan\`${issueRef} pour relancer un cadrage ou \`/epure continue\` (ou \`/epure approve\`) pour reprendre.`;
   }
 
   if (phase === "grilling") {
@@ -64,11 +64,11 @@ function buildContextualActionHint(
     status === "awaiting-human" ||
     status === "awaiting_human_approval"
   ) {
-    return `Vérifiez la spécification et le graphe de tickets générés, puis postez \`/epure approve\`${issueRef} pour lancer l'implémentation TDD autonome.`;
+    return `Vérifiez la spécification et le graphe de tickets générés, puis postez \`/epure approve\`${issueRef} pour lancer l'implémentation TDD autonome (intégration directe \`plan/* -> feature/*\`).`;
   }
 
   if (phase === "implementation") {
-    return `L'implémentation autonome est en cours. Postez \`/epure status\`${issueRef} pour suivre l'avancement ou \`/epure cancel\` pour interrompre l'orchestration.`;
+    return `L'implémentation autonome est en cours. Postez \`/epure status\`${issueRef} pour suivre l'avancement, \`/epure continue\` pour reprendre après la CI externe, \`/epure sync\` (\`/epure rebase\`) pour rattraper \`dev\`, ou \`/epure cancel\` pour interrompre l'orchestration.`;
   }
 
   if (
@@ -100,7 +100,9 @@ export function formatEpureCommandsSpoiler(
     "| *Réponse libre en commentaire* | Répondre aux questions du Grill ou demander un ajustement de la spécification (sans préfixe `/epure`) |",
     "| `/epure to-spec` | Valider la frontière du Grill et générer `GLOSSARY.md`, les ADRs et la spécification sur `plan/*` |",
     "| `/epure to-tickets` | Valider la spécification sur `plan/*` et générer le graphe de tickets GitHub (`blocked_by`) |",
-    "| `/epure approve` | Approuver le plan (ou reprendre après une suspension `needs-human`) et lancer l'implémentation |",
+    "| `/epure approve` | Approuver le plan (`plan/* -> feature/*`), verrouiller `spec_sha` et lancer l'implémentation |",
+    "| `/epure continue` | Reprendre l'orchestration après une suspension `needs-human` ou une attente de CI externe |",
+    "| `/epure sync` (ou `/epure rebase`) | Synchroniser `dev -> feature/*` (et `feature/* -> task/*`) avec résolution 3-way assistée + Stage 1 |",
     "| `/epure status` | Afficher l'état d'avancement de l'issue et des tickets |",
     "| `/epure cancel` (ou `/epure stop`) | Suspendre immédiatement l'orchestration et empêcher tout auto-merge |",
     "",

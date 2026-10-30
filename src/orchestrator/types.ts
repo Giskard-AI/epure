@@ -18,14 +18,17 @@ import type {
 } from "../state/git-ref-state.js";
 
 export {
+  CONFLICT_RESOLUTION_SCHEMA,
   GENERATED_PLANNING_BUNDLE_SCHEMA,
   GENERATED_SPEC_ARTIFACTS_SCHEMA,
   GENERATED_TICKET_DAG_SCHEMA,
   GENERATED_TICKET_IMPLEMENTATION_SCHEMA,
+  GOLDFISH_SPEC_AUDIT_SCHEMA,
   GRILL_ROUND_EVALUATION_SCHEMA,
   REVIEWER_FINDINGS_SCHEMA,
   SQUASH_COMMIT_SCHEMA,
   USER_ADVOCATE_SCHEMA,
+  type ConflictResolutionPayload,
   type GeneratedAdrDocument,
   type GeneratedFileChange,
   type GeneratedFilePatch,
@@ -37,6 +40,7 @@ export {
   type GeneratedTicketImplementation,
   type GeneratedTicketPatchEdit,
   type GeneratedTicketSpec,
+  type GoldfishSpecAuditPayload,
   type GrillRoundEvaluation,
   type PlannedTicketDefinition,
   type ReviewerFindingPayloadItem,
@@ -117,6 +121,9 @@ export interface OrchestrateIssueInput {
   readonly sandboxRunner?:
     | ((input: SandboxExecutionInput) => Promise<SandboxExecutionResult>)
     | undefined;
+  readonly asyncCiContinuation?: boolean | undefined;
+  readonly triggerHeadSha?: string | undefined;
+  readonly triggerBranch?: string | undefined;
 }
 
 export type IssueOrchestratorInput = OrchestrateIssueInput;
@@ -188,8 +195,27 @@ export interface GitHubRestHelper {
   }): Promise<{ number: number; html_url: string; head_sha: string }>;
   updatePullRequest(
     prNumber: number,
-    params: { title?: string | undefined; body?: string | undefined }
+    params: {
+      title?: string | undefined;
+      body?: string | undefined;
+      state?: "open" | "closed" | undefined;
+    }
   ): Promise<{ head_sha: string }>;
+  mergeBranches?(params: {
+    base: string;
+    head: string;
+    commitMessage?: string | undefined;
+  }): Promise<{
+    status: "merged" | "up_to_date" | "conflict";
+    sha: string;
+  }>;
+  compareCommits?(
+    base: string,
+    head: string
+  ): Promise<{
+    mergeBaseSha: string;
+    changedFiles: readonly string[];
+  }>;
   postPullRequestReview(
     prNumber: number,
     params: { commitId: string; body: string }

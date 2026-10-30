@@ -92,12 +92,6 @@ export async function callGeminiText(
   }
 }
 
-export async function callGeminiGenerateContent(
-  options: GeminiGenerateOptions
-): Promise<string> {
-  return callGeminiText(options);
-}
-
 export async function callGeminiJson<T = unknown>(
   options: GeminiCallOptions<T>
 ): Promise<T> {

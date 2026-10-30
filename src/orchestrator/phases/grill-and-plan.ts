@@ -27,11 +27,13 @@ import {
   GENERATED_PLANNING_BUNDLE_SCHEMA,
   GENERATED_SPEC_ARTIFACTS_SCHEMA,
   GENERATED_TICKET_DAG_SCHEMA,
+  GOLDFISH_SPEC_AUDIT_SCHEMA,
   GRILL_ROUND_EVALUATION_SCHEMA,
   type GeneratedPlanningBundle,
   type GeneratedSpecArtifacts,
   type GeneratedTicketDag,
   type GitHubRestHelper,
+  type GoldfishSpecAuditPayload,
   type GrillRoundEvaluation,
   type IssueCommentRecord,
   type IssueMetadata,
@@ -45,6 +47,80 @@ interface StoredSpecManifest {
   readonly specPath: string;
   readonly adrPaths: readonly string[];
   readonly targetFilesHint: readonly string[];
+}
+
+export interface RunGoldfishSpecAuditParams {
+  readonly specArtifacts: GeneratedSpecArtifacts;
+  readonly apiKey: string;
+  readonly model: string;
+  readonly providers?: ResolvedPhaseModels["providers"] | undefined;
+  readonly maxTransientRetries?: number | undefined;
+  readonly transientRetryBackoffSeconds?: readonly number[] | undefined;
+  readonly requestTimeoutMs?: number | undefined;
+  readonly onTransientRetriesUsed?: ((used: number) => void) | undefined;
+  readonly fetchImpl?: typeof fetch | undefined;
+}
+
+/**
+ * Zero-context Goldfish Spec Auditor (Google Elephant-Goldfish Model, ADR-0031).
+ * Evaluates a drafted specification WITHOUT any access to the grilling comment history,
+ * checking: (1) self-contained comprehension, (2) Zoom-Out / YAGNI sobriety, and
+ * (3) Implementation Readiness.
+ */
+export async function runGoldfishSpecAudit(
+  params: RunGoldfishSpecAuditParams
+): Promise<GoldfishSpecAuditPayload> {
+  const systemInstruction = [
+    "Tu es le 'Goldfish Spec Auditor' (modèle Google Elephant-Goldfish, ADR-0031) : un auditeur d'architecture totalement vierge de l'historique conversationnel de l'issue.",
+    PROMPT_INJECTION_IMMUNITY_CLAUSE,
+    "Tu disposes UNIQUEMENT des documents livrés (`spec_markdown`, `glossary_markdown`, `adrs`, `target_files_hint`) — tu n'as AUCUNE mémoire de la discussion préalable.",
+    "Évalue rigoureusement trois axes :",
+    "1. Auto-suffisance de compréhension (`comprehension_self_contained`) : un ingénieur ou agent vierge du contexte peut-il comprendre 100 % des règles métier et contrats techniques sans lire les commentaires de l'issue ? Signale toute décision implicite dans `missing_context_questions`.",
+    "2. Zoom-Out / YAGNI (`zoom_out_yagni_passed`) : la spécification évite-t-elle toute sur-ingénierie, abstraction spéculative ou couche inutile (Ponytail 5) ? Signale tout excès dans `overengineering_warnings`.",
+    "3. Implementation Readiness & ASD-STE100 (`implementation_readiness_passed`) : chaque exigence et critère d'acceptation respecte-t-il les règles ASD-STE100 (vocabulaire bijectif `GLOSSARY.md` sans synonymes `_Avoid_`, voix active avec acteur explicite, 1 phrase = 1 action, conditionnelles déterministes `WHEN/IF ... THEN` sans modalité floue `should`/`might`/`if needed`/`correctement`) et est-il directement vérifiable par un test automatisé ? Signale toute violation ou critère flou dans `untestable_criteria`.",
+    "Renvoie un objet JSON strictement conforme au schéma `goldfish_spec_audit` (`passed: true` uniquement si les 3 axes sont validés)."
+  ].join("\n");
+
+  const adrsSummary = params.specArtifacts.adrs
+    .map((a) => `### ADR: ${a.path}\n${a.content}`)
+    .join("\n\n");
+
+  const userPrompt = [
+    "Audite en mode zéro-contexte (Goldfish) le dossier de spécification suivant :",
+    "",
+    `### Spécification (\`${params.specArtifacts.spec_path}\`) :`,
+    wrapUntrustedContent(
+      "untrusted_spec_content",
+      params.specArtifacts.spec_markdown
+    ),
+    "",
+    "### Glossaire (`GLOSSARY.md`) :",
+    wrapUntrustedContent(
+      "untrusted_spec_content",
+      params.specArtifacts.glossary_markdown
+    ),
+    "",
+    "### ADRs :",
+    wrapUntrustedContent("untrusted_spec_content", adrsSummary),
+    "",
+    `### Fichiers cibles pressentis : ${(params.specArtifacts.target_files_hint ?? []).join(", ") || "aucun"}`
+  ].join("\n");
+
+  return await callGeminiJson<GoldfishSpecAuditPayload>({
+    apiKey: params.apiKey,
+    model: params.model,
+    providers: params.providers,
+    maxTransientRetries: params.maxTransientRetries,
+    transientRetryBackoffSeconds: params.transientRetryBackoffSeconds,
+    requestTimeoutMs: params.requestTimeoutMs,
+    onTransientRetriesUsed: params.onTransientRetriesUsed,
+    systemInstruction,
+    prompt: userPrompt,
+    temperature: 0.1,
+    logLabel: `goldfish-spec-audit:${params.specArtifacts.plan_slug}`,
+    responseSchema: GOLDFISH_SPEC_AUDIT_SCHEMA,
+    fetchImpl: params.fetchImpl
+  });
 }
 
 function parseLatestSpecManifest(
@@ -129,7 +205,9 @@ export async function runGrillAndPlanPhase(params: {
     branch: "dev",
     featureBranch: "main",
     accumulatedFiles: grillExplorationCache,
-    devBranchPaths: []
+    devBranchPaths: [],
+    phase: command === "to-spec" ? "spec" : "plan",
+    fetchImpl
   });
 
   if (command === "plan") {
@@ -414,6 +492,10 @@ export async function runGrillAndPlanPhase(params: {
       "Tu es l'architecte EPURE chargé de produire (ou réviser) le dossier de spécification complet (`GLOSSARY.md`, ADRs dans `docs/adr/`, et spécification `docs/specs/<slug>.md`) SANS créer les tickets pour l'instant.",
       PROMPT_INJECTION_IMMUNITY_CLAUSE,
       "Si tu as besoin de vérifier des chemins ou le contenu existant de GLOSSARY.md / docs/adr/ avant de rédiger, utilise les outils d'exploration avec parcimonie (1 à 3 appels maximum), puis génère immédiatement l'objet JSON final.",
+      "NORME DE RÉDACTION ASD-STE100 (Controlled Technical Prompting, ADR-0031) :",
+      "- Vocabulaire bijectif : utilise exclusivement les termes définis dans `GLOSSARY.md` (zéro synonyme listé sous `_Avoid_`).",
+      "- Voix active et acteur explicite : chaque règle nomme le composant/module sujet qui exécute l'action (`Sujet-Verbe-Objet`).",
+      "- Atomicité : 1 phrase = 1 action ou invariant vérifiable ; conditionnelles explicites `WHEN/IF <condition>, THEN <acteur> <action>` sans modalité floue (`should`, `might`, `if needed`, `as appropriate`).",
       "RÈGLE CRITIQUE : INTERDICTION STRICTE d'utiliser des ellipses ('...', '# Spécification...', etc.) ou des valeurs tronquées. Chaque champ ('glossary_markdown', 'adrs[*].content', 'spec_markdown', 'target_files_hint') DOIT contenir le texte intégral, détaillé et complet prêt à être commité dans le dépôt.",
       "Produis un objet JSON strictement valide (sans markdown autour) respectant exactement cette structure :",
       "{",
@@ -449,7 +531,7 @@ export async function runGrillAndPlanPhase(params: {
       )
     ].join("\n");
 
-    const specArtifacts = await callGeminiJson<GeneratedSpecArtifacts>({
+    let specArtifacts = await callGeminiJson<GeneratedSpecArtifacts>({
       apiKey: llmApiKey,
       model: phaseModels.planningModel,
       providers: phaseModels.providers,
@@ -469,6 +551,74 @@ export async function runGrillAndPlanPhase(params: {
       responseSchema: GENERATED_SPEC_ARTIFACTS_SCHEMA,
       fetchImpl
     });
+
+    // Goldfish Zero-Context Spec Audit (Google EGM, ADR-0031)
+    let goldfishAudit: GoldfishSpecAuditPayload | null = null;
+    try {
+      goldfishAudit = await runGoldfishSpecAudit({
+        specArtifacts,
+        apiKey: llmApiKey,
+        model: phaseModels.reviewModel || phaseModels.planningModel,
+        providers: phaseModels.providers,
+        maxTransientRetries: phaseModels.maxTransientRetries,
+        transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+        requestTimeoutMs: phaseModels.requestTimeoutMs,
+        onTransientRetriesUsed,
+        fetchImpl
+      });
+    } catch {
+      goldfishAudit = null;
+    }
+
+    if (goldfishAudit && !goldfishAudit.passed) {
+      const amendmentPrompt = [
+        specOnlyPrompt,
+        "",
+        "### 🔍 Constats de l'Auditeur Goldfish Zéro-Contexte (à corriger impérativement dans la spécification) :",
+        ...(goldfishAudit.missing_context_questions.length > 0
+          ? [
+              `- Contexte implicite manquant : ${goldfishAudit.missing_context_questions.join(" ; ")}`
+            ]
+          : []),
+        ...(goldfishAudit.overengineering_warnings.length > 0
+          ? [
+              `- Avertissements YAGNI / sur-ingénierie : ${goldfishAudit.overengineering_warnings.join(" ; ")}`
+            ]
+          : []),
+        ...(goldfishAudit.untestable_criteria.length > 0
+          ? [
+              `- Critères non vérifiables : ${goldfishAudit.untestable_criteria.join(" ; ")}`
+            ]
+          : []),
+        ...(goldfishAudit.amended_sections_suggestion
+          ? [
+              `- Suggestion d'amendement : ${goldfishAudit.amended_sections_suggestion}`
+            ]
+          : []),
+        "",
+        "Produis la version amendée et auto-suffisante du JSON de spécification."
+      ].join("\n");
+
+      try {
+        specArtifacts = await callGeminiJson<GeneratedSpecArtifacts>({
+          apiKey: llmApiKey,
+          model: phaseModels.planningModel,
+          providers: phaseModels.providers,
+          maxTransientRetries: phaseModels.maxTransientRetries,
+          transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+          requestTimeoutMs: phaseModels.requestTimeoutMs,
+          onTransientRetriesUsed,
+          systemInstruction: specOnlySystemInstruction,
+          prompt: amendmentPrompt,
+          temperature: 0.1,
+          logLabel: `spec-goldfish-amend#${issueNumber}`,
+          responseSchema: GENERATED_SPEC_ARTIFACTS_SCHEMA,
+          fetchImpl
+        });
+      } catch {
+        // Keep initial specArtifacts if amendment fails in mock environments
+      }
+    }
 
     // Validate GLOSSARY.md, ADRs, and spec_markdown via artifacts gate
     const specGateResult = validatePlanningArtifactsAndGraph({
@@ -728,6 +878,7 @@ export async function runGrillAndPlanPhase(params: {
     const ticketsOnlySystemInstruction = [
       "Tu es l'architecte EPURE chargé de découper la spécification approuvée en un graphe acyclique (DAG) de tickets atomiques TDD.",
       PROMPT_INJECTION_IMMUNITY_CLAUSE,
+      "NORME ASD-STE100 POUR LES TICKETS (`acceptance_criteria` et `description`, ADR-0031) : rédige chaque critère d'acceptation à la voix active avec un acteur explicite, 1 phrase = 1 comportement vérifiable (`WHEN <entrée>, <module> returns/throws <sortie exacte>`), en utilisant le vocabulaire bijectif de `GLOSSARY.md` et sans aucun modal flou (`should`, `might`, `if needed`, `correctement`).",
       "RÈGLE CRITIQUE : INTERDICTION STRICTE d'utiliser des ellipses ('...', etc.) ou des valeurs tronquées. Chaque champ ('tickets[*].title', 'tickets[*].description', 'tickets[*].acceptance_criteria', 'tickets[*].files_to_create_or_update') DOIT contenir le texte intégral, détaillé et complet.",
       "Produis un objet JSON strictement valide (sans markdown autour) respectant exactement cette structure :",
       "{",
@@ -808,6 +959,7 @@ export async function runGrillAndPlanPhase(params: {
       "Tu es l'architecte EPURE chargé de produire le dossier de spécification complet et le découpage en tickets atomiques TDD.",
       PROMPT_INJECTION_IMMUNITY_CLAUSE,
       "Si tu as besoin de vérifier des chemins ou le contenu existant de GLOSSARY.md / docs/adr/ avant de rédiger, utilise les outils d'exploration avec parcimonie (1 à 3 appels maximum), puis génère immédiatement l'objet JSON final.",
+      "NORME ASD-STE100 (Controlled Technical Prompting, ADR-0031) : utilise exclusivement le vocabulaire bijectif de `GLOSSARY.md` (zéro synonyme `_Avoid_`), la voix active avec acteur explicite (`Sujet-Verbe-Objet`), 1 phrase = 1 action ou critère vérifiable, et des conditionnelles déterministes `WHEN/IF ... THEN` sans modalité floue (`should`, `might`, `if needed`).",
       "RÈGLE CRITIQUE : INTERDICTION STRICTE d'utiliser des ellipses ('...', '# Spécification...', etc.) ou des valeurs tronquées. Chaque champ ('glossary_markdown', 'adrs[*].content', 'spec_markdown', 'tickets[*].title', 'tickets[*].description', 'tickets[*].acceptance_criteria', 'tickets[*].files_to_create_or_update') DOIT contenir le texte intégral, détaillé et complet prêt à être commité dans le dépôt.",
       "Produis un objet JSON strictement valide (sans markdown autour) respectant exactement cette structure :",
       "{",

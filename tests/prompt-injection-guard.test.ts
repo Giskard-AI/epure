@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { callGeminiGenerateContent } from "../src/orchestrator/gemini-client.js";
+import { callGeminiText } from "../src/orchestrator/gemini-client.js";
 import { runMultiAgentPrReviewPass } from "../src/review/multi-agent-pr-review.js";
 import { buildDefaultReviewerRosterFiles } from "../src/review/reviewer-roster.js";
 import { generateSemanticSquashCommitFromDiff } from "../src/review/squash-commit-generator.js";
@@ -240,7 +240,7 @@ describe("OWASP LLM01 — Prompt Injection Guard & Spotlighting Defenses", () =>
       expect(userText).toContain("&lt;/untrusted_pr_diff&gt;");
     });
 
-    it("injects default PROMPT_INJECTION_IMMUNITY_CLAUSE when callGeminiGenerateContent is called without explicit systemInstruction", async () => {
+    it("injects default PROMPT_INJECTION_IMMUNITY_CLAUSE when callGeminiText is called without explicit systemInstruction", async () => {
       interface CapturedGeminiRequest {
         systemInstruction?: { parts?: Array<{ text?: string }> };
       }
@@ -258,7 +258,7 @@ describe("OWASP LLM01 — Prompt Injection Guard & Spotlighting Defenses", () =>
         );
       };
 
-      await callGeminiGenerateContent({
+      await callGeminiText({
         apiKey: "test-key",
         prompt: "Hello",
         fetchImpl: mockFetch

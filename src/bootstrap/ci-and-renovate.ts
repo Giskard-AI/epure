@@ -84,6 +84,7 @@ export function buildSandboxToolingSetupSteps(
     "        run: |",
     "          sudo apt-get update -qq",
     "          sudo apt-get install -y --no-install-recommends landrun bubblewrap ca-certificates curl",
+    '          mkdir -p "$HOME/.npm" "$HOME/.cache" "$HOME/.cargo"',
     "          # renovate: datasource=github-releases depName=rtk-ai/rtk",
     `          RTK_VERSION="${safeRtkVersion}"`,
     '          RTK_ARCHIVE="rtk-x86_64-unknown-linux-musl.tar.gz"',
@@ -577,13 +578,15 @@ function parseNonEpureWorkflows(
   };
 }
 
-export function discoverVerificationProfile(params: {
-  readonly repoRootDir?: string | undefined;
-  readonly targetFilesHint?: readonly string[] | undefined;
-  readonly workflowFilesMap?: Readonly<Record<string, string>> | undefined;
-}): VerificationProfile {
-  const root = params.repoRootDir;
-  const hints = (params.targetFilesHint ?? []).map((f) =>
+function createRepoFileReader(
+  root: string | undefined,
+  targetFilesHint: readonly string[] | undefined
+): {
+  readonly hints: readonly string[];
+  readonly fileExists: (relPath: string) => boolean;
+  readonly readFileSafe: (relPath: string) => string | undefined;
+} {
+  const hints = (targetFilesHint ?? []).map((f) =>
     f.trim().replace(/^\/+/, "")
   );
 
@@ -609,6 +612,20 @@ export function discoverVerificationProfile(params: {
     }
     return undefined;
   };
+
+  return { hints, fileExists, readFileSafe };
+}
+
+export function discoverVerificationProfile(params: {
+  readonly repoRootDir?: string | undefined;
+  readonly targetFilesHint?: readonly string[] | undefined;
+  readonly workflowFilesMap?: Readonly<Record<string, string>> | undefined;
+}): VerificationProfile {
+  const root = params.repoRootDir;
+  const { hints, fileExists, readFileSafe } = createRepoFileReader(
+    root,
+    params.targetFilesHint
+  );
 
   // 1. Collect workflow files from workflowFilesMap and repoRootDir/.github/workflows
   const workflowMap = new Map<string, string>();
@@ -1105,30 +1122,10 @@ export function detectRepositoryStack(params: {
   readonly workflowFilesMap?: Readonly<Record<string, string>> | undefined;
 }): DetectedStackProfile {
   const root = params.repoRootDir;
-  const hints = (params.targetFilesHint ?? []).map((f) =>
-    f.trim().replace(/^\/+/, "")
+  const { hints, fileExists, readFileSafe } = createRepoFileReader(
+    root,
+    params.targetFilesHint
   );
-
-  const fileExists = (relPath: string): boolean => {
-    if (hints.includes(relPath)) {
-      return true;
-    }
-    if (root && existsSync(join(root, relPath))) {
-      return true;
-    }
-    return false;
-  };
-
-  const readFileSafe = (relPath: string): string | undefined => {
-    if (root && existsSync(join(root, relPath))) {
-      try {
-        return readFileSync(join(root, relPath), "utf8");
-      } catch {
-        return undefined;
-      }
-    }
-    return undefined;
-  };
 
   const makefileContent = readFileSafe("Makefile");
   const hasMakefile = Boolean(makefileContent) || fileExists("Makefile");

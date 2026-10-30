@@ -155,6 +155,8 @@ export type NeedsHumanEscalationReason =
   | "remediation_exhausted"
   | "grace_window_timeout"
   | "sensitive_path_violation"
+  | "merge_conflict_unresolved"
+  | "merge_conflict_stage1_failed"
   | "wall_clock_budget_exhausted"
   | "transient_llm_api_exhausted"
   | "llm_quota_or_auth_failure"
@@ -1025,6 +1027,160 @@ export async function waitForExternalCiChecks(
   }
 }
 
+export interface EvaluateSingleExternalCiSnapshotResult {
+  readonly completed: boolean;
+  readonly passed: boolean;
+  readonly aiReviewPassed: boolean;
+  readonly failedChecks: readonly FailedExternalCheckSummary[];
+  readonly formattedDiagnostics: string;
+}
+
+export async function evaluateSingleExternalCiSnapshot(params: {
+  readonly headSha: string;
+  readonly expectedWorkflows: readonly (ExpectedExternalWorkflow | string)[];
+  readonly extraSecrets?: readonly string[] | undefined;
+  readonly listWorkflowRunsForSha: (
+    headSha: string
+  ) => Promise<readonly ExternalWorkflowRunRecord[]>;
+  readonly listCheckRunsForRef: (
+    headSha: string
+  ) => Promise<readonly ExternalCheckRunRecord[]>;
+  readonly listCheckRunAnnotations?:
+    | ((checkRunId: number) => Promise<readonly CheckRunAnnotationRecord[]>)
+    | undefined;
+  readonly getJobLogs?: ((jobId: number) => Promise<string>) | undefined;
+}): Promise<EvaluateSingleExternalCiSnapshotResult> {
+  const [allWorkflowRuns, allCheckRuns] = await Promise.all([
+    params.listWorkflowRunsForSha(params.headSha),
+    params.listCheckRunsForRef(params.headSha)
+  ]);
+
+  const aiReviewCheck = allCheckRuns.find(
+    (c) => c.name.trim().toLowerCase() === "ai-review"
+  );
+  const aiReviewPassed =
+    !aiReviewCheck ||
+    (aiReviewCheck.status === "completed" &&
+      aiReviewCheck.conclusion === "success");
+
+  const externalWorkflowRuns = allWorkflowRuns.filter(
+    (r) => !isEpureSyntheticCheckOrRun(r.path ?? r.name ?? "")
+  );
+  const externalCheckRuns = allCheckRuns.filter(
+    (c) => !isEpureSyntheticCheckOrRun(c.name)
+  );
+
+  const totalExternalRegistered =
+    externalWorkflowRuns.length + externalCheckRuns.length;
+
+  if (totalExternalRegistered === 0 && params.expectedWorkflows.length > 0) {
+    return {
+      completed: false,
+      passed: false,
+      aiReviewPassed,
+      failedChecks: [],
+      formattedDiagnostics: ""
+    };
+  }
+
+  const activeWorkflowRuns = externalWorkflowRuns.filter(
+    (r) => r.status !== "completed"
+  );
+  const activeCheckRuns = externalCheckRuns.filter(
+    (c) => c.status !== "completed"
+  );
+
+  if (
+    activeWorkflowRuns.length > 0 ||
+    activeCheckRuns.length > 0 ||
+    (externalWorkflowRuns.length > 0 &&
+      externalWorkflowRuns.length < params.expectedWorkflows.length)
+  ) {
+    return {
+      completed: false,
+      passed: false,
+      aiReviewPassed,
+      failedChecks: [],
+      formattedDiagnostics: ""
+    };
+  }
+
+  const failedCheckRuns = externalCheckRuns.filter((c) =>
+    isFailedConclusion(c.conclusion)
+  );
+  const failedWorkflowRuns = externalWorkflowRuns.filter((r) =>
+    isFailedConclusion(r.conclusion)
+  );
+
+  if (failedCheckRuns.length === 0 && failedWorkflowRuns.length === 0) {
+    return {
+      completed: true,
+      passed: true,
+      aiReviewPassed,
+      failedChecks: [],
+      formattedDiagnostics: ""
+    };
+  }
+
+  const failureItems: Array<{
+    readonly id: number;
+    readonly name: string;
+    readonly conclusion: string;
+    readonly html_url: string;
+  }> =
+    failedCheckRuns.length > 0
+      ? failedCheckRuns.map((c) => ({
+          id: c.id,
+          name: c.name,
+          conclusion: c.conclusion ?? "failure",
+          html_url: c.html_url ?? c.details_url ?? ""
+        }))
+      : failedWorkflowRuns.map((r) => ({
+          id: r.id,
+          name: r.name ?? r.path ?? `workflow-${r.id}`,
+          conclusion: r.conclusion ?? "failure",
+          html_url: r.html_url ?? ""
+        }));
+
+  const failedChecksSummary: FailedExternalCheckSummary[] = [];
+  const diagnosticBlocks: string[] = [];
+
+  for (const item of failureItems) {
+    const [annotations, rawLog] = await Promise.all([
+      params.listCheckRunAnnotations
+        ? params.listCheckRunAnnotations(item.id).catch(() => [])
+        : Promise.resolve([]),
+      params.getJobLogs
+        ? params.getJobLogs(item.id).catch(() => "")
+        : Promise.resolve("")
+    ]);
+    const sanitized = sanitizeAndFormatFailedCheckLogs({
+      checkName: item.name,
+      htmlUrl: item.html_url,
+      annotations,
+      rawLog,
+      extraSecrets: params.extraSecrets
+    });
+    failedChecksSummary.push({
+      id: item.id,
+      name: item.name,
+      conclusion: item.conclusion,
+      html_url: item.html_url,
+      sanitized_log: sanitized.sanitizedExcerpt,
+      wrapped_untrusted_output: sanitized.wrappedUntrustedOutput
+    });
+    diagnosticBlocks.push(sanitized.wrappedUntrustedOutput);
+  }
+
+  return {
+    completed: true,
+    passed: false,
+    aiReviewPassed,
+    failedChecks: failedChecksSummary,
+    formattedDiagnostics: diagnosticBlocks.join("\n\n")
+  };
+}
+
 export function formatNeedsHumanEscalationComment(
   input: FormatNeedsHumanEscalationInput
 ): string {
@@ -1049,6 +1205,12 @@ export function formatNeedsHumanEscalationComment(
   } else if (input.reason === "sensitive_path_violation") {
     reasonHeadline =
       "Forbidden modification of sensitive path or path traversal blocked pre-Stage-1";
+  } else if (input.reason === "merge_conflict_unresolved") {
+    reasonHeadline =
+      "Git 3-way merge conflict touched sensitive paths or exceeded automated resolution threshold (`MERGE_CONFLICT_UNRESOLVED`)";
+  } else if (input.reason === "merge_conflict_stage1_failed") {
+    reasonHeadline =
+      "Automated 3-way conflict resolution failed Stage 1 Sandbox verification (`MERGE_CONFLICT_STAGE1_FAILED`)";
   } else if (input.reason === "transient_llm_api_exhausted") {
     reasonHeadline =
       "Transient LLM API retries or unitary request timeout exhausted (`max_transient_api_retries`) — code-fix budget preserved";

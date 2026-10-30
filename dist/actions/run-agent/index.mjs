@@ -434,6 +434,7 @@ async function publishAgentProposal(input) {
 
 // src/sandbox/llm-sandbox.ts
 import { randomBytes } from "node:crypto";
+import { mkdirSync } from "node:fs";
 import { createServer } from "node:http";
 import { spawn, spawnSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
@@ -480,7 +481,8 @@ function buildLandrunInvocation(params) {
     "/lib",
     "/lib64",
     "/etc",
-    "/opt"
+    "/opt",
+    "/run"
   ]);
   if (params.command.startsWith("/")) {
     roxPaths.add(sanitizeLandrunPath(dirname(resolve(params.command))));
@@ -624,28 +626,11 @@ function probeKernelSandboxCapabilities(runnerEnv = process.env) {
   }
   let bubblewrapAvailable = false;
   try {
-    const res = spawnSync(
-      "bwrap",
-      [
-        "--unshare-net",
-        "--ro-bind",
-        "/",
-        "/",
-        "--dev",
-        "/dev",
-        "--proc",
-        "/proc",
-        "--tmpfs",
-        "/tmp",
-        "--",
-        "/bin/true"
-      ],
-      {
-        env: probeEnv,
-        stdio: "ignore",
-        timeout: 3e3
-      }
-    );
+    const res = spawnSync("bwrap", ["--version"], {
+      env: probeEnv,
+      stdio: "ignore",
+      timeout: 3e3
+    });
     bubblewrapAvailable = res.status === 0;
   } catch {
     bubblewrapAvailable = false;
@@ -798,6 +783,17 @@ async function runInUntrustedCodeSandbox(input) {
     const timeoutMs = input.timeoutMs ?? 60 * 60 * 1e3;
     const proxyPort = parsePortFromProxyUrl(proxy.proxyUrl);
     const capabilities = input.kernelCapabilities ?? probeKernelSandboxCapabilities(input.runnerEnv);
+    if (networkPolicy === "https_only") {
+      const home = sanitizedEnv.HOME?.trim() ?? "";
+      if (home) {
+        for (const sub of [".npm", ".cache", ".cargo"]) {
+          try {
+            mkdirSync(resolve(home, sub), { recursive: true });
+          } catch {
+          }
+        }
+      }
+    }
     const wrapped = buildKernelSandboxedCommand({
       command: input.command,
       args,

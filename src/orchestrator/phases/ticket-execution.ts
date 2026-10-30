@@ -36,6 +36,7 @@ import {
 } from "../../state/git-ref-state.js";
 import { appendEpureCommandsSpoiler } from "../formatting/comments.js";
 import { callGeminiJson } from "../gemini-client.js";
+import { syncBranchWithBase } from "../github/branch-sync.js";
 import { loadOrchestratorStateFromGitRef } from "../github/rest-client.js";
 import { EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT } from "../prompts/code-discipline.js";
 import {
@@ -91,6 +92,9 @@ export interface RunTicketExecutionLoopParams {
   readonly sandboxRunner?:
     | ((input: SandboxExecutionInput) => Promise<SandboxExecutionResult>)
     | undefined;
+  readonly asyncCiContinuation?: boolean | undefined;
+  readonly forceOneRemediationRoundOnOpenPr?: boolean | undefined;
+  readonly initialCodeFixAttemptsUsed?: number | undefined;
 }
 
 export interface RunTicketExecutionLoopOutcome {
@@ -379,7 +383,57 @@ export async function runTicketExecutionLoop(
         `::group::[EPURE][Ticket #${ticket.ticketIssueNumber}] Initial TDD Implementation (${taskBranch})\n`
       );
     }
+    const featureSync = await syncBranchWithBase({
+      gh: params.gh,
+      targetBranch: params.featureBranch,
+      baseBranch: "dev",
+      issueNumber: params.issueNumber,
+      llmApiKey: params.llmApiKey,
+      fetchImpl: params.fetchImpl,
+      model: params.phaseModels.implementationModel,
+      sandboxRunner: params.sandboxRunner
+    });
+    if (featureSync.status === "escalated") {
+      const escalated = await params.escalateToNeedsHuman({
+        reason: featureSync.escalationReason ?? "merge_conflict_unresolved",
+        ticketNumber: ticket.ticketIssueNumber,
+        branch: params.featureBranch,
+        diagnosticExcerpt: featureSync.diagnosticExcerpt
+      });
+      return {
+        halted: true,
+        result: escalated,
+        verificationProfile,
+        verificationGuideMarkdown
+      };
+    }
+
     await params.gh.ensureBranch(taskBranch, params.featureBranch);
+
+    const taskSync = await syncBranchWithBase({
+      gh: params.gh,
+      targetBranch: taskBranch,
+      baseBranch: params.featureBranch,
+      issueNumber: ticket.ticketIssueNumber,
+      llmApiKey: params.llmApiKey,
+      fetchImpl: params.fetchImpl,
+      model: params.phaseModels.implementationModel,
+      sandboxRunner: params.sandboxRunner
+    });
+    if (taskSync.status === "escalated") {
+      const escalated = await params.escalateToNeedsHuman({
+        reason: taskSync.escalationReason ?? "merge_conflict_unresolved",
+        ticketNumber: ticket.ticketIssueNumber,
+        branch: taskBranch,
+        diagnosticExcerpt: taskSync.diagnosticExcerpt
+      });
+      return {
+        halted: true,
+        result: escalated,
+        verificationProfile,
+        verificationGuideMarkdown
+      };
+    }
 
     const sandboxWorkspace = prepareRepositorySandboxWorkspace({
       repository: params.repository,
@@ -885,6 +939,7 @@ export async function runTicketExecutionLoop(
         reviewResult: Awaited<ReturnType<typeof runMultiAgentPrReviewPass>>;
         ciGateResult: WaitForExternalCiChecksResult;
         escalateToHuman: boolean;
+        releasedForAsyncCi?: OrchestrateIssueResult | undefined;
       }> => {
         // Bucket A Guard 3: Review loop guard on commit SHA
         const reviewGuard = evaluateReviewFeedbackTrigger({
@@ -961,6 +1016,67 @@ export async function runTicketExecutionLoop(
           });
         }
 
+        const shouldReleaseRunnerForAsyncCi =
+          Boolean(params.asyncCiContinuation) &&
+          verificationProfile.wait_for_external_ci !== false &&
+          expectedWorkflows.length > 0 &&
+          (!params.forceOneRemediationRoundOnOpenPr ||
+            passParams.reviewFixAttemptsUsed >
+              (params.initialCodeFixAttemptsUsed ?? 0));
+
+        if (shouldReleaseRunnerForAsyncCi) {
+          const updatedWaiting = await updateIssueStateWithCas({
+            issueNumber: params.issueNumber,
+            store: params.store,
+            mutator: (prev) => ({
+              ...prev,
+              phase: "implementation",
+              status: "active",
+              active_branch: params.featureBranch,
+              subphase: "waiting_ticket_ci",
+              active_ticket_number: ticket.ticketIssueNumber,
+              active_task_branch: taskBranch,
+              active_pr_number: taskPr!.number,
+              active_head_sha: passParams.headSha,
+              code_fix_attempts_used: passParams.reviewFixAttemptsUsed
+            })
+          });
+          const asyncSummary = [
+            `<!-- epure-state:${JSON.stringify(updatedWaiting.state)} -->`,
+            updatedWaiting.issue_mirror_markdown,
+            "",
+            `### ⏳ Attente événementielle CI externe (\`waiting_ticket_ci\`) — Ticket #${ticket.ticketIssueNumber} (PR #${taskPr!.number})`,
+            `- **Branche du ticket** : \`${taskBranch}\` -> \`${params.featureBranch}\``,
+            `- **HEAD SHA** : \`${passParams.headSha}\``,
+            `- **Revue Multi-Agents (\`ai-review\`)** : \`${reviewRes.conclusion}\``,
+            "- **Action** : Runner GitHub Actions libéré (`exit 0`). Reprise automatique sur `check_suite` / `workflow_run: completed` ou `/epure continue`."
+          ].join("\n");
+          return {
+            reviewResult: reviewRes,
+            ciGateResult: {
+              passed: true,
+              reason: "all_passed",
+              infraRerunsTriggered: 0,
+              failedChecks: [],
+              formattedDiagnostics: "",
+              registeredWorkflowNames: [],
+              registeredCheckNames: []
+            },
+            escalateToHuman: false,
+            releasedForAsyncCi: {
+              executed: true,
+              phase: updatedWaiting.state.phase,
+              status: updatedWaiting.state.status,
+              active_branch: params.featureBranch,
+              summary_markdown: asyncSummary,
+              created_ticket_numbers: params.ticketsManifest.map(
+                (t) => t.ticketIssueNumber
+              ),
+              feature_pr_url: ""
+            }
+          };
+        }
+
         const ciRes = await waitForExternalCiChecks({
           headSha: passParams.headSha,
           expectedWorkflows,
@@ -999,15 +1115,26 @@ export async function runTicketExecutionLoop(
         };
       };
 
+      reviewFixAttempt = params.initialCodeFixAttemptsUsed ?? 0;
+
+      const initialPass = await runStage2AndStage3ForTaskPr({
+        headSha: currentPrHeadSha,
+        isReReviewPass: false,
+        reviewFixAttemptsUsed: reviewFixAttempt
+      });
+      if (initialPass.releasedForAsyncCi) {
+        return {
+          halted: true,
+          result: initialPass.releasedForAsyncCi,
+          verificationProfile,
+          verificationGuideMarkdown
+        };
+      }
       let {
         reviewResult,
         ciGateResult,
         escalateToHuman: reviewGuardEscalate
-      } = await runStage2AndStage3ForTaskPr({
-        headSha: currentPrHeadSha,
-        isReReviewPass: false,
-        reviewFixAttemptsUsed: 0
-      });
+      } = initialPass;
 
       if (reviewGuardEscalate && reviewResult.conclusion === "failure") {
         const escalated = await params.escalateToNeedsHuman({
@@ -1390,6 +1517,14 @@ export async function runTicketExecutionLoop(
           previousFailedReviewers: reviewResult.failed_reviewers,
           reviewFixAttemptsUsed: reviewFixAttempt
         });
+        if (nextPass.releasedForAsyncCi) {
+          return {
+            halted: true,
+            result: nextPass.releasedForAsyncCi,
+            verificationProfile,
+            verificationGuideMarkdown
+          };
+        }
         reviewResult = nextPass.reviewResult;
         ciGateResult = nextPass.ciGateResult;
 
