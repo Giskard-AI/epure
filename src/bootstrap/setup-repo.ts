@@ -1519,7 +1519,7 @@ function buildCallerWorkflows(
         "  orchestrate-command:",
         '    name: "Orchestrate Authorized /epure Lifecycle"',
         "    needs: [authorize-command]",
-        "    if: ${{ always() && (needs.authorize-command.outputs.authorized == 'true' || github.event_name == 'check_suite' || github.event_name == 'workflow_run') }}",
+        "    if: ${{ always() && (needs.authorize-command.outputs.authorized == 'true' || ((github.event_name == 'check_suite' || github.event_name == 'workflow_run') && (startsWith(github.event.check_suite.head_branch, 'task/') || startsWith(github.event.check_suite.head_branch, 'feature/') || startsWith(github.event.workflow_run.head_branch, 'task/') || startsWith(github.event.workflow_run.head_branch, 'feature/')))) }}",
         "    runs-on: ubuntu-26.04",
         `    timeout-minutes: ${jobTimeoutMinutes}`,
         "    environment: gemini",

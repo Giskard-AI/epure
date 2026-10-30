@@ -633,5 +633,150 @@ describe("EPURE v1.2 Chantier 1 & 2 — Git Sync, Concurrency & Event-Driven CI 
       expect(res.phase).toBe("review");
       expect(addedLabels).toContain("ready-for-human");
     });
+
+    it.each([
+      {
+        id: "resolves issueNumber from waiting state when workflow_run passes issueNumber=0 and CI fails without throwing Invalid issueNumber 0",
+        triggerHeadSha: "head-sha-task-203",
+        triggerBranch: "task/203-door-auth",
+        expectedExecuted: true,
+        expectedStatus: "suspended"
+      },
+      {
+        id: "returns executed=false without hijacking unrelated waiting state when workflow_run fires on dev with issueNumber=0",
+        triggerHeadSha: "dev-sha-unrelated",
+        triggerBranch: "dev",
+        expectedExecuted: false,
+        expectedStatus: "active"
+      }
+    ])(
+      "$id",
+      async ({
+        triggerHeadSha,
+        triggerBranch,
+        expectedExecuted,
+        expectedStatus
+      }) => {
+        const store = createInMemoryGitRefStateStore();
+        await updateIssueStateWithCas({
+          issueNumber: 156,
+          store,
+          mutator: (prev) => ({
+            ...prev,
+            phase: "implementation",
+            subphase: "waiting_ticket_ci",
+            status: "active",
+            active_branch: "feature/156-maps",
+            active_ticket_number: 203,
+            active_task_branch: "task/203-door-auth",
+            active_pr_number: 299,
+            active_head_sha: "head-sha-task-203",
+            code_fix_attempts_used: 3
+          })
+        });
+
+        const mockFetch: typeof fetch = async (reqInput, init) => {
+          const url = String(reqInput);
+          if (url.endsWith("/issues/156")) {
+            return new Response(
+              JSON.stringify({
+                number: 156,
+                title: "fix(maps): Map Lighting & Doors",
+                body: "- [ ] Authorize door toggles",
+                labels: [{ name: "ready-for-agent" }]
+              }),
+              { status: 200, headers: { "content-type": "application/json" } }
+            );
+          }
+          if (
+            url.includes("/issues/156/comments") &&
+            (!init?.method || init.method === "GET")
+          ) {
+            return new Response(JSON.stringify([]), {
+              status: 200,
+              headers: { "content-type": "application/json" }
+            });
+          }
+          if (url.includes("/actions/runs")) {
+            return new Response(
+              JSON.stringify({
+                total_count: 1,
+                workflow_runs: [
+                  {
+                    id: 601,
+                    name: "CI",
+                    path: ".github/workflows/ci.yml",
+                    status: "completed",
+                    conclusion: "failure"
+                  }
+                ]
+              }),
+              { status: 200, headers: { "content-type": "application/json" } }
+            );
+          }
+          if (url.includes("/check-runs")) {
+            return new Response(
+              JSON.stringify({
+                total_count: 2,
+                check_runs: [
+                  {
+                    id: 11,
+                    name: "Backend",
+                    status: "completed",
+                    conclusion: "failure"
+                  },
+                  {
+                    id: 12,
+                    name: "ai-review",
+                    status: "completed",
+                    conclusion: "success"
+                  }
+                ]
+              }),
+              { status: 200, headers: { "content-type": "application/json" } }
+            );
+          }
+          if (url.includes("/pulls")) {
+            return new Response(
+              JSON.stringify([
+                {
+                  number: 299,
+                  html_url: "https://github.com/acme/demo/pull/299",
+                  head: {
+                    ref: "task/203-door-auth",
+                    sha: "head-sha-task-203"
+                  },
+                  base: { ref: "feature/156-maps" }
+                }
+              ]),
+              { status: 200, headers: { "content-type": "application/json" } }
+            );
+          }
+          return new Response(JSON.stringify({}), {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          });
+        };
+
+        const res = await orchestrateIssueCommand({
+          repository: "acme/demo",
+          issueNumber: 0,
+          command: "continue",
+          commandArgs: "",
+          commentId: 0,
+          actor: "github-actions[bot]",
+          fallbackGithubToken: "ghs_test",
+          llmApiKey: "key_test",
+          triggerHeadSha,
+          triggerBranch,
+          asyncCiContinuation: true,
+          stateStore: store,
+          fetchImpl: mockFetch
+        });
+
+        expect(res.executed).toBe(expectedExecuted);
+        expect(res.status).toBe(expectedStatus);
+      }
+    );
   });
 });

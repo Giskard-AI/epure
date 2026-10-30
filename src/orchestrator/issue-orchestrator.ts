@@ -186,15 +186,19 @@ export async function orchestrateIssueCommand(
           s.subphase === "waiting_ticket_ci" ||
           s.subphase === "waiting_feature_ci"
       );
-      const matched =
-        waitingCandidates.find(
-          (s) =>
-            (input.triggerHeadSha &&
-              s.active_head_sha === input.triggerHeadSha) ||
-            (input.triggerBranch &&
-              (s.active_task_branch === input.triggerBranch ||
-                s.active_branch === input.triggerBranch))
-        ) ?? waitingCandidates[0];
+      const hasTriggerSelector = Boolean(
+        input.triggerHeadSha?.trim() || input.triggerBranch?.trim()
+      );
+      const matched = hasTriggerSelector
+        ? waitingCandidates.find(
+            (s) =>
+              (input.triggerHeadSha &&
+                s.active_head_sha === input.triggerHeadSha) ||
+              (input.triggerBranch &&
+                (s.active_task_branch === input.triggerBranch ||
+                  s.active_branch === input.triggerBranch))
+          )
+        : waitingCandidates[0];
       if (!matched) {
         return {
           executed: false,
@@ -301,41 +305,41 @@ export async function orchestrateIssueCommand(
         (await loadRepoAgentsConfig(gh, "dev")) ??
         (await loadRepoAgentsConfig(gh, "main"));
       const phaseModels = resolvePhaseModels(
-        input.model ?? input.geminiModel,
+        effectiveInput.model ?? effectiveInput.geminiModel,
         parsedDevAgentsConfig
       );
       maxCodeFixAttempts = parsedDevAgentsConfig?.max_code_fix_attempts ?? 3;
 
     // 3 & 4. Handle /epure plan, human reply during grilling or spec review, /epure to-spec, /epure to-tickets
     if (
-      input.command === "plan" ||
-      input.command === "to-spec" ||
-      input.command === "to-tickets" ||
-      (input.command === "reply" &&
+      effectiveInput.command === "plan" ||
+      effectiveInput.command === "to-spec" ||
+      effectiveInput.command === "to-tickets" ||
+      (effectiveInput.command === "reply" &&
         (currentState?.phase === "grilling" ||
           currentState?.phase === "spec") &&
         currentState?.status !== "cancelled")
     ) {
       try {
         return await runGrillAndPlanPhase({
-          command: input.command,
+          command: effectiveInput.command,
           currentPhase: currentState?.phase,
           currentStatus: currentState?.status,
-          repository: input.repository,
-          issueNumber: input.issueNumber,
-          commentId: input.commentId,
+          repository: effectiveInput.repository,
+          issueNumber: effectiveInput.issueNumber,
+          commentId: effectiveInput.commentId,
           issue,
           allComments,
           planSlug,
           planBranch,
           gh,
           store,
-          llmApiKey: input.llmApiKey,
+          llmApiKey: effectiveInput.llmApiKey,
           phaseModels,
           onTransientRetriesUsed: (used) => {
             totalTransientRetriesUsed += used;
           },
-          fetchImpl: input.fetchImpl
+          fetchImpl: effectiveInput.fetchImpl
         });
       } catch (err) {
         if (err instanceof LLMError) {
@@ -344,17 +348,17 @@ export async function orchestrateIssueCommand(
             "D93F0B",
             "Requires human maintainer intervention"
           );
-          await gh.addIssueLabels(input.issueNumber, ["needs-human"]);
+          await gh.addIssueLabels(effectiveInput.issueNumber, ["needs-human"]);
 
           const suspendedPhase: EpureIssueState["phase"] =
-            input.command === "to-tickets"
+            effectiveInput.command === "to-tickets"
               ? "tickets"
-              : input.command === "to-spec" || currentState?.phase === "spec"
+              : effectiveInput.command === "to-spec" || currentState?.phase === "spec"
                 ? "spec"
                 : "grilling";
 
           const updatedSuspended = await updateIssueStateWithCas({
-            issueNumber: input.issueNumber,
+            issueNumber: effectiveInput.issueNumber,
             store,
             mutator: (prev) => ({
               ...prev,
@@ -364,7 +368,7 @@ export async function orchestrateIssueCommand(
               transient_retries_used:
                 totalTransientRetriesUsed || prev.transient_retries_used,
               last_processed_comment_id:
-                input.commentId ?? prev.last_processed_comment_id
+                effectiveInput.commentId ?? prev.last_processed_comment_id
             })
           });
 
@@ -374,24 +378,24 @@ export async function orchestrateIssueCommand(
               "",
               formatNeedsHumanEscalationComment({
                 reason: resolveLlmEscalationReason(err),
-                issueNumber: input.issueNumber,
-                ticketIssueNumber: input.issueNumber,
+                issueNumber: effectiveInput.issueNumber,
+                ticketIssueNumber: effectiveInput.issueNumber,
                 branch: planBranch,
                 maxCodeFixAttempts,
                 diagnosticExcerpt: redactSecrets(err.message, [
                   activeToken,
-                  input.llmApiKey
+                  effectiveInput.llmApiKey
                 ])
               })
             ].join("\n"),
             {
               phase: "suspended",
               status: "suspended",
-              issueNumber: input.issueNumber
+              issueNumber: effectiveInput.issueNumber
             }
           );
 
-          await gh.postIssueComment(input.issueNumber, escalationMarkdown);
+          await gh.postIssueComment(effectiveInput.issueNumber, escalationMarkdown);
           return {
             executed: true,
             phase: updatedSuspended.state.phase,
@@ -794,7 +798,7 @@ export async function orchestrateIssueCommand(
         currentState?.status === "suspended")
     ) {
       if (currentState?.status === "suspended") {
-        await gh.removeIssueLabel?.(input.issueNumber, "needs-human");
+        await gh.removeIssueLabel?.(effectiveInput.issueNumber, "needs-human");
       }
       let ticketsManifest = parseTrackedTicketsFromComments(allComments);
       const hasExplicitPlanManifest = ticketsManifest.length > 0;
@@ -894,7 +898,8 @@ export async function orchestrateIssueCommand(
         formatVerificationToolingGuideMarkdown(verificationProfile);
 
       const effectiveSleepFn =
-        input.sleepFn ?? (input.fetchImpl ? async () => {} : undefined);
+        effectiveInput.sleepFn ??
+        (effectiveInput.fetchImpl ? async () => {} : undefined);
       const infraRerunsBySha = new Map<string, number>();
 
       const escalateToNeedsHuman: EscalateToNeedsHumanFn = async (params) => {
@@ -903,13 +908,13 @@ export async function orchestrateIssueCommand(
           "D93F0B",
           "Requires human maintainer intervention"
         );
-        await gh.addIssueLabels(input.issueNumber, ["needs-human"]);
-        if (params.ticketNumber !== input.issueNumber) {
+        await gh.addIssueLabels(effectiveInput.issueNumber, ["needs-human"]);
+        if (params.ticketNumber !== effectiveInput.issueNumber) {
           await gh.addIssueLabels(params.ticketNumber, ["needs-human"]);
         }
 
         const updatedSuspended = await updateIssueStateWithCas({
-          issueNumber: input.issueNumber,
+          issueNumber: effectiveInput.issueNumber,
           store,
           mutator: (prev) => ({
             ...prev,
@@ -921,7 +926,7 @@ export async function orchestrateIssueCommand(
             transient_retries_used:
               totalTransientRetriesUsed || prev.transient_retries_used,
             last_processed_comment_id:
-              input.commentId ?? prev.last_processed_comment_id
+              effectiveInput.commentId ?? prev.last_processed_comment_id
           })
         });
 
@@ -931,7 +936,7 @@ export async function orchestrateIssueCommand(
             "",
             formatNeedsHumanEscalationComment({
               reason: params.reason,
-              issueNumber: input.issueNumber,
+              issueNumber: effectiveInput.issueNumber,
               ticketIssueNumber: params.ticketNumber,
               prNumber: params.prNumber,
               prUrl: params.prUrl,
@@ -949,11 +954,11 @@ export async function orchestrateIssueCommand(
           {
             phase: "suspended",
             status: "suspended",
-            issueNumber: input.issueNumber
+            issueNumber: effectiveInput.issueNumber
           }
         );
 
-        await gh.postIssueComment(input.issueNumber, escalationMarkdown);
+        await gh.postIssueComment(effectiveInput.issueNumber, escalationMarkdown);
 
         return {
           executed: true,
@@ -971,7 +976,7 @@ export async function orchestrateIssueCommand(
       await gh.ensureBranch(featureBranch, "dev");
 
       const updatedStart = await updateIssueStateWithCas({
-        issueNumber: input.issueNumber,
+        issueNumber: effectiveInput.issueNumber,
         store,
         mutator: (prev) => ({
           ...prev,
@@ -979,7 +984,7 @@ export async function orchestrateIssueCommand(
           status: "active",
           active_branch: featureBranch,
           last_processed_comment_id:
-            input.commentId ?? prev.last_processed_comment_id
+            effectiveInput.commentId ?? prev.last_processed_comment_id
         })
       });
 
@@ -1142,12 +1147,12 @@ export async function orchestrateIssueCommand(
         if (err instanceof LLMError) {
           return await escalateToNeedsHuman({
             reason: resolveLlmEscalationReason(err),
-            ticketNumber: input.issueNumber,
+            ticketNumber: effectiveInput.issueNumber,
             branch: featureBranch,
             phase: "implementation",
             diagnosticExcerpt: redactSecrets(err.message, [
               activeToken,
-              input.llmApiKey
+              effectiveInput.llmApiKey
             ])
           });
         }
@@ -1170,17 +1175,18 @@ export async function orchestrateIssueCommand(
         "D93F0B",
         "Requires human maintainer intervention"
       );
-      await gh.addIssueLabels(input.issueNumber, ["needs-human"]);
+      await gh.addIssueLabels(effectiveInput.issueNumber, ["needs-human"]);
 
       const latestSnap = await store.readRef(refName);
       const fallbackPhase: EpureIssueState["phase"] =
         latestSnap.state?.phase && latestSnap.state.phase !== "idle"
           ? latestSnap.state.phase
-          : input.command === "approve"
+          : effectiveInput.command === "approve" ||
+              effectiveInput.command === "continue"
             ? "implementation"
-            : input.command === "to-tickets"
+            : effectiveInput.command === "to-tickets"
               ? "tickets"
-              : input.command === "to-spec"
+              : effectiveInput.command === "to-spec"
                 ? "spec"
                 : "grilling";
       const fallbackBranch =
@@ -1188,7 +1194,7 @@ export async function orchestrateIssueCommand(
         (fallbackPhase === "implementation" ? featureBranch : planBranch);
 
       const updatedSuspended = await updateIssueStateWithCas({
-        issueNumber: input.issueNumber,
+        issueNumber: effectiveInput.issueNumber,
         store,
         mutator: (prev) => ({
           ...prev,
@@ -1198,7 +1204,7 @@ export async function orchestrateIssueCommand(
           transient_retries_used:
             totalTransientRetriesUsed || prev.transient_retries_used,
           last_processed_comment_id:
-            input.commentId ?? prev.last_processed_comment_id
+            effectiveInput.commentId ?? prev.last_processed_comment_id
         })
       });
 
@@ -1214,25 +1220,25 @@ export async function orchestrateIssueCommand(
           "",
           formatNeedsHumanEscalationComment({
             reason: escalationReason,
-            issueNumber: input.issueNumber,
-            ticketIssueNumber: input.issueNumber,
+            issueNumber: effectiveInput.issueNumber,
+            ticketIssueNumber: effectiveInput.issueNumber,
             branch: updatedSuspended.state.active_branch || fallbackBranch,
             codeFixAttemptsUsed: updatedSuspended.state.code_fix_attempts_used,
             maxCodeFixAttempts,
             diagnosticExcerpt: redactSecrets(rawErrMessage, [
               activeToken,
-              input.llmApiKey
+              effectiveInput.llmApiKey
             ])
           })
         ].join("\n"),
         {
           phase: "suspended",
           status: "suspended",
-          issueNumber: input.issueNumber
+          issueNumber: effectiveInput.issueNumber
         }
       );
 
-      await gh.postIssueComment(input.issueNumber, escalationMarkdown);
+      await gh.postIssueComment(effectiveInput.issueNumber, escalationMarkdown);
       return {
         executed: true,
         phase: updatedSuspended.state.phase,
