@@ -21,3 +21,8 @@ When modifying `src/llm/**` or `src/orchestrator/**`, mocked unit tests (`npm te
 1. Copy `epure.live-test.example.json` to `epure.live-test.json` (git-ignored) or set `EPURE_LIVE_TEST_CONFIG` / `EPURE_LIVE_TEST_TARGETS_JSON` with the list of LLM target configurations to verify.
 2. Run `npm run test:live` (never log or print API keys in stdout/stderr).
 
+### Semantic Versioning (`vMAJOR.MINOR.PATCH`)
+
+Determine the next release tag strictly from the semantic content of the commits since the last tag (`fix:`/`refactor:`/`chore:` -> increment `PATCH`, e.g. `v1.5.9 -> v1.5.10`; `feat:` -> increment `MINOR`, e.g. `v1.5.9 -> v1.6.0`; `BREAKING CHANGE` / `!:` -> increment `MAJOR`). Never roll `.9` over to the next minor unless the release contains a `feat:`.
+
+
