@@ -16,7 +16,7 @@
   2. Approving the locked specification mandate via `/epure approve` (integrating `plan/*` directly into `feature/*` and locking `spec_sha`).
   3. Reviewing and squash-merging the final `feature/<issue>-<slug> -> dev` Pull Request.
   4. Triggering production SemVer releases (`dev -> main` fast-forward) via `release-promote.yml` / `release.yml`.
-- **Security & Execution Invariants (33 ADRs & 10 Bilingual Archify Diagrams)**: Out-of-branch atomic CAS state (`refs/epure/state/<issue>`), Zizmor-compliant GitHub Environment secret scoping (`<llm-env>` and `release`), 2-phase Ubuntu 26.04 Linux kernel sandbox (`landrun` + `bubblewrap` with stateless `rtk` condensation), event-driven external CI continuation (`waiting_ticket_ci` / `waiting_feature_ci`), transactional incremental file tools (`StagedTicketImplementationBuffer`), zero-context `EpicConvergenceAudit`, Reviewer Roster always loaded from trusted `dev` (never from untrusted PR head), Dual GitHub Apps (`Agent App` vs `Release App`), and `iFixAi` trajectory auditing.
+- **Security & Execution Invariants (33 ADRs & 12 Bilingual Archify Diagrams)**: Out-of-branch atomic CAS state (`refs/epure/state/<issue>`), Zizmor-compliant GitHub Environment secret scoping (`<llm-env>` and `release`), 2-phase Ubuntu 26.04 Linux kernel sandbox (`landrun` + `bubblewrap` with stateless `rtk` condensation), event-driven external CI continuation (`waiting_ticket_ci` / `waiting_feature_ci`), transactional incremental file tools (`StagedTicketImplementationBuffer`), zero-context `EpicConvergenceAudit`, Reviewer Roster always loaded from trusted `dev` (never from untrusted PR head), Dual GitHub Apps (`Agent App` vs `Release App`), and `iFixAi` trajectory auditing.
 
 ## English Documentation
 

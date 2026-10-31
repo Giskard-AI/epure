@@ -6,6 +6,27 @@ Nous allons suivre l'**Issue #16** depuis son ouverture initiale en 3 lignes jus
 
 ---
 
+## Votre Parcours Utilisateur de Bout en Bout
+
+À chaque étape du cycle de vie d'une issue, EPURE distingue clairement **ce que vous faites**, **ce qui tourne automatiquement en coulisses**, **quand vous devez à nouveau agir** et **comment fonctionnent l'autofix, la résolution de conflits et la reprise** :
+
+<ArchifyDiagram
+  slug="epure-user-journey"
+  locale="fr"
+  title="Parcours Utilisateur EPURE : Mes Actions, En Coulisses, Quand Réagir & Boucles Autofix"
+  caption="Vue interactive centrée utilisateur répondant aux 4 questions clés : que faire, ce qui est automatisé, quand intervenir et comment piloter."
+/>
+
+| Étape | 1. Que fais-je ? | 2. Que se passe-t-il derrière ? | 3. Quand dois-je réagir & 4. Comment piloter ? |
+| --- | --- | --- | --- |
+| **1. Grill & Cadrage** | Ouvrir l'Issue GitHub, poster `/epure plan`, puis répondre en texte libre aux questions du Grill. | Analyse le dépôt, initialise `refs/epure/state/<issue>` et publie des rondes de questions ciblées jusqu'à résolution complète du cadrage. | **Réagir** après chaque ronde du Grill (en commentaire libre sans commande slash), puis lancer `/epure to-spec` une fois cadré. |
+| **2. Épure & Spec** | Commenter `/epure to-spec` (et demander d'éventuels ajustements en texte libre). | Crée `plan/<issue>-<slug>`, exécute l'**Audit Goldfish zéro-contexte** et commite `GLOSSARY.md`, les ADRs, `DESIGN.md` (si UI) et `docs/specs/<slug>.md`. | **Réagir** dès que la spec est prête : commenter en texte libre pour l'ajuster, ou lancer `/epure to-tickets` pour valider. |
+| **3. DAG de Tickets & Mandat** | Commenter `/epure to-tickets`, relire le découpage, puis commenter `/epure approve`. | Crée et câble nativement les `sub_issues` et `blocked_by` GitHub, fusionne directement `plan/* -> feature/*` et scelle `spec_sha` dans `refs/epure/state/<issue>`. | **Aucune action requise** après `/epure approve` — EPURE lance immédiatement l'exécution autonome du DAG. |
+| **4. Boucle Tickets Autonome** | Rien en fonctionnement nominal (commandes `/epure status` ou `/epure sync` à la demande). | Pour chaque ticket (`task/* -> feature/*`) : **Stage 1** TDD en sandbox noyau 2-phases (`bwrap`/`landrun` + `rtk`) -> **Stage 2** pause CI asynchrone à coût zéro (`waiting_ticket_ci`) -> **Stage 3** revue multi-agents depuis `dev` + Squash Sémantique IA. | **Autofix 1..3** corrige seul les échecs de tests, CI ou revue. Utiliser `/epure sync` en cas de conflit Git avec `dev`, ou `/epure continue` après une pause `needs-human`. |
+| **5. Convergence & Merge Final** | Relire la PR finale `feature/* -> dev` et cliquer sur **Squash and merge** (puis `release-promote.yml` pour `dev -> main`). | Exécute l'**`EpicConvergenceAudit`** zéro-contexte (en créant automatiquement des tickets de Phase 2 si incomplet), ouvre `feature/* -> dev` et valide la synthèse. | **Réagir** lorsque la PR finale `feature/* -> dev` est au vert pour effectuer le Squash & Merge humain sur `dev`. |
+
+---
+
 ## Machine à États Interactive de l'Issue
 
 Tout au long de ce parcours, EPURE persiste l'état d'orchestration hors des branches standard dans la référence Git atomique `refs/epure/state/16` :

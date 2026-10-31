@@ -6,6 +6,13 @@ Ce guide fournit la marche à suivre opérationnelle pour piloter une fonctionna
 
 ## 1. Lancer le Plan (`/epure plan`)
 
+<ArchifyDiagram
+  slug="epure-user-journey"
+  locale="fr"
+  title="Parcours Utilisateur EPURE : Piloter une Issue de l'Idée au Merge Final"
+  caption="Parcours complet sur 4 pistes : 1. Ce que je fais -> 2. Ce qui se passe derrière -> 3. Quand je dois réagir -> 4. Boucles Autofix, Conflits & Pilotage."
+/>
+
 1. Ouvrez une Issue GitHub décrivant l'objectif, le besoin utilisateur ou le périmètre souhaité.
 2. Postez `/epure plan` en commentaire.
 3. Patientez quelques secondes pendant que le workflow `epure-issue-command` publie la **Ronde 1 du Grill**.

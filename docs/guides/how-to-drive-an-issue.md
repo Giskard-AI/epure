@@ -6,6 +6,13 @@ This guide provides a practical checklist for steering a feature or complex bugf
 
 ## 1. Launching the Plan (`/epure plan`)
 
+<ArchifyDiagram
+  slug="epure-user-journey"
+  locale="en"
+  title="EPURE User Journey: Driving an Issue from Idea to Merged PR"
+  caption="Complete user journey across 4 lanes: 1. What I Do -> 2. What Happens Behind the Scenes -> 3. When I Act Again -> 4. Autofix Loops, Conflicts & Steering."
+/>
+
 1. Open a GitHub Issue describing the goal, user problem, or feature scope.
 2. Post `/epure plan` in a comment.
 3. Wait for the `epure-issue-command` workflow to post **Grill Round 1**.

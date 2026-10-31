@@ -1,0 +1,180 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Parcours Utilisateur EPURE : Piloter une Issue de l'Idée au Merge Final",
+    "subtitle": "1. Ce que je fais -> 2. Ce qui tourne derrière -> 3. Quand je dois réagir -> 4. Boucles autofix, conflits & pilotage",
+    "legend": {
+      "entries": {
+        "external": { "label": "Ce que je fais (Commandes)" },
+        "backend": { "label": "En coulisses (Auto EPURE)" },
+        "frontend": { "label": "Quand réagir (Attente)" },
+        "security": { "label": "Autofix, Sync & Escalade" }
+      }
+    },
+    "visual_preset": "blueprint",
+    "quality_profile": "showcase",
+    "output": "docs/public/diagrams/fr/epure-user-journey.html"
+  },
+  "lanes": [
+    { "id": "user_actions", "label": "1. Ce que je fais (Mes Actions)" },
+    { "id": "epure_behind_scenes", "label": "2. Ce qui se passe derrière (Automatisé EPURE)" },
+    { "id": "when_to_act", "label": "3. Quand je dois réagir (Attente & Retour)" },
+    { "id": "loops_and_steering", "label": "4. Boucles Autofix, Conflits & Pilotage", "variant": "exception" }
+  ],
+  "phases": [
+    { "id": "grill_framing", "label": "1. Grill & Cadrage Itératif", "fromCol": 0, "toCol": 1 },
+    { "id": "spec_and_mandate", "label": "2. Spec, Tickets & Approbation", "fromCol": 2, "toCol": 3, "variant": "emphasis" },
+    { "id": "dag_and_merge", "label": "3. Exécution DAG, Autofix & Merge Final", "fromCol": 4, "toCol": 5, "variant": "dashed" }
+  ],
+  "mainPath": [
+    "plan_and_grill",
+    "grill_engine",
+    "dag_and_lock",
+    "ticket_tdd_loop",
+    "review_and_audit",
+    "final_pr_ready"
+  ],
+  "nodes": [
+    {
+      "id": "plan_and_grill",
+      "lane": "user_actions",
+      "col": 0,
+      "type": "external",
+      "label": "1. /epure plan",
+      "sublabel": "Issue + réponses Grill",
+      "tag": "Jalon 1: humain",
+      "width": 132
+    },
+    {
+      "id": "approve_mandate",
+      "lane": "user_actions",
+      "col": 3,
+      "type": "external",
+      "label": "2. /epure approve",
+      "sublabel": "to-spec -> to-tickets",
+      "tag": "Jalon 2: spec_sha",
+      "width": 132
+    },
+    {
+      "id": "merge_final_pr",
+      "lane": "user_actions",
+      "col": 5,
+      "type": "external",
+      "label": "3. Squash & Merge",
+      "sublabel": "Merger PR sur dev",
+      "tag": "Jalon 3: humain",
+      "width": 132
+    },
+    {
+      "id": "grill_engine",
+      "lane": "epure_behind_scenes",
+      "col": 1,
+      "type": "backend",
+      "label": "Grill & Goldfish",
+      "sublabel": "Q1..Qn + Spec plan/*",
+      "tag": "GLOSSARY + ADR",
+      "width": 132
+    },
+    {
+      "id": "dag_and_lock",
+      "lane": "epure_behind_scenes",
+      "col": 2,
+      "type": "backend",
+      "label": "DAG & Fusion Plan",
+      "sublabel": "sub_issues + blocked_by",
+      "tag": "plan/*->feature/*",
+      "width": 132
+    },
+    {
+      "id": "ticket_tdd_loop",
+      "lane": "when_to_act",
+      "col": 3,
+      "type": "frontend",
+      "label": "Stages 1 & 2 Auto",
+      "sublabel": "Sandbox + pause CI async",
+      "tag": "Attente: 0 action",
+      "width": 132
+    },
+    {
+      "id": "review_and_audit",
+      "lane": "when_to_act",
+      "col": 4,
+      "type": "frontend",
+      "label": "Stage 3 & Audit",
+      "sublabel": "Squash + PR Convergence",
+      "tag": "Notifie PR prête",
+      "width": 132
+    },
+    {
+      "id": "free_text_loop",
+      "lane": "loops_and_steering",
+      "col": 1,
+      "type": "external",
+      "label": "Réponses Libres",
+      "sublabel": "Itérer Grill ou Spec",
+      "tag": "to-spec / to-tickets",
+      "width": 132
+    },
+    {
+      "id": "autofix_and_sync",
+      "lane": "loops_and_steering",
+      "col": 4,
+      "type": "security",
+      "label": "Autofix 1..3 & Sync",
+      "sublabel": "Auto-fix + /epure sync",
+      "tag": "merge Git 3-voies",
+      "width": 132
+    },
+    {
+      "id": "final_pr_ready",
+      "lane": "loops_and_steering",
+      "col": 5,
+      "type": "security",
+      "label": "Reprise & Release",
+      "sublabel": "/epure continue + release",
+      "tag": "needs-human / main",
+      "width": 132
+    }
+  ],
+  "edges": [
+    { "id": "plan-to-grill", "from": "plan_and_grill", "to": "grill_engine", "label": "lance", "variant": "security" },
+    { "id": "grill-to-dag", "from": "grill_engine", "to": "dag_and_lock", "label": "to-tickets", "variant": "emphasis" },
+    { "id": "reply-to-dag", "from": "free_text_loop", "to": "dag_and_lock", "label": "affiner", "variant": "dashed", "role": "branch" },
+    { "id": "dag-to-tdd", "from": "dag_and_lock", "to": "ticket_tdd_loop", "label": "approuvé", "variant": "emphasis" },
+    { "id": "tdd-to-review", "from": "ticket_tdd_loop", "to": "review_and_audit", "label": "CI async", "variant": "default" },
+    { "id": "approve-to-review", "from": "approve_mandate", "to": "review_and_audit", "label": "spec_sha", "variant": "dashed", "role": "branch" },
+    { "id": "review-to-autofix", "from": "review_and_audit", "to": "autofix_and_sync", "label": "autofix", "variant": "dashed" },
+    { "id": "review-to-pr", "from": "review_and_audit", "to": "final_pr_ready", "label": "PR -> dev", "variant": "emphasis" },
+    { "id": "merge-to-pr", "from": "merge_final_pr", "to": "final_pr_ready", "label": "merger", "variant": "security", "role": "branch" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Que dois-je faire & Quand réagir ?",
+      "items": [
+        "1. Ouvrir l'issue, poster /epure plan et répondre en texte libre aux questions du Grill jusqu'à résolution",
+        "2. Lancer /epure to-spec (commenter librement pour ajuster la spec si besoin), puis /epure to-tickets",
+        "3. Lancer /epure approve pour sceller le mandat, puis attendre la PR finale feature/* -> dev pour Squash & Merge"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Que se passe-t-il automatiquement derrière ?",
+      "items": [
+        "Commite GLOSSARY.md, ADRs & Spec sur plan/* avec audit Goldfish zéro-contexte, puis crée le DAG sub_issues & blocked_by",
+        "Fusionne directement plan/* -> feature/* à l'approbation, scelle spec_sha et exécute chaque ticket dans le sandbox noyau 2-phases",
+        "Pause à coût zéro pendant la CI externe (waiting_ticket_ci), revue Stage 3 depuis dev + squash IA et EpicConvergenceAudit (Phase 2)"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Comment fonctionnent l'Autofix et mon Pilotage ?",
+      "items": [
+        "Autofix automatique (1 à 3 essais) : si un test Stage 1, la CI externe ou un reviewer échoue, EPURE corrige et revérifie seul",
+        "Conflits Git : commenter /epure sync (ou /epure rebase) pour fusionner dev -> feature/* -> task/* en 3-voies assisté",
+        "Escalade & Pilotage : en cas de pause needs-human, pousser un fix ou préciser en commentaire puis lancer /epure continue (plus /epure status ou cancel)"
+      ]
+    }
+  ]
+}

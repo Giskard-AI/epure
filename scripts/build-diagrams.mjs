@@ -75,6 +75,20 @@ export const EPURE_ARCHIFY_DIAGRAMS = [
     slug: "epure-ci-actions-flow",
     input: "docs/archify/fr/epure-ci-actions-flow.workflow.json",
     output: "docs/public/diagrams/fr/epure-ci-actions-flow.html"
+  },
+  {
+    locale: "en",
+    type: "workflow",
+    slug: "epure-user-journey",
+    input: "docs/archify/en/epure-user-journey.workflow.json",
+    output: "docs/public/diagrams/en/epure-user-journey.html"
+  },
+  {
+    locale: "fr",
+    type: "workflow",
+    slug: "epure-user-journey",
+    input: "docs/archify/fr/epure-user-journey.workflow.json",
+    output: "docs/public/diagrams/fr/epure-user-journey.html"
   }
 ];
 

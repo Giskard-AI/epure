@@ -57,7 +57,7 @@ The official documentation (powered by **VitePress** and interactive **Archify**
 ### Local Documentation & Diagram Commands
 
 ```bash
-# Validate and render all 10 bilingual Archify diagrams (showcase quality)
+# Validate and render all 12 bilingual Archify diagrams (showcase quality)
 npm run docs:diagrams
 
 # Start the local VitePress documentation server

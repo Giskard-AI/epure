@@ -88,6 +88,20 @@ const ARCHIFY_DIAGRAM_CASES: readonly ArchifyDiagramCase[] = [
     type: "workflow",
     jsonPath: "docs/archify/fr/epure-ci-actions-flow.workflow.json",
     htmlPath: "docs/public/diagrams/fr/epure-ci-actions-flow.html"
+  },
+  {
+    id: "en-epure-user-journey-workflow",
+    locale: "en",
+    type: "workflow",
+    jsonPath: "docs/archify/en/epure-user-journey.workflow.json",
+    htmlPath: "docs/public/diagrams/en/epure-user-journey.html"
+  },
+  {
+    id: "fr-epure-user-journey-workflow",
+    locale: "fr",
+    type: "workflow",
+    jsonPath: "docs/archify/fr/epure-user-journey.workflow.json",
+    htmlPath: "docs/public/diagrams/fr/epure-user-journey.html"
   }
 ];
 
@@ -157,6 +171,7 @@ const BILINGUAL_PAGE_PAIRS: readonly BilingualPagePairCase[] = [
       "craft-calculator",
       "/epure plan",
       "/epure approve",
+      "epure-user-journey",
       "epure-state-machine",
       "write_repo_file",
       "EpicConvergenceAudit"
@@ -165,6 +180,7 @@ const BILINGUAL_PAGE_PAIRS: readonly BilingualPagePairCase[] = [
       "craft-calculator",
       "/epure plan",
       "/epure approve",
+      "epure-user-journey",
       "epure-state-machine",
       "write_repo_file",
       "EpicConvergenceAudit"
@@ -267,6 +283,7 @@ const BILINGUAL_PAGE_PAIRS: readonly BilingualPagePairCase[] = [
     enPath: "docs/guides/how-to-drive-an-issue.md",
     frPath: "docs/fr/guides/how-to-drive-an-issue.md",
     requiredEnMarkers: [
+      "epure-user-journey",
       "/epure plan",
       "/epure continue",
       "/epure sync",
@@ -274,6 +291,7 @@ const BILINGUAL_PAGE_PAIRS: readonly BilingualPagePairCase[] = [
       "approved-sensitive-change"
     ],
     requiredFrMarkers: [
+      "epure-user-journey",
       "/epure plan",
       "/epure continue",
       "/epure sync",
