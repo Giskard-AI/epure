@@ -153,6 +153,7 @@ export interface WaitForExternalCiChecksResult {
 
 export type NeedsHumanEscalationReason =
   | "remediation_exhausted"
+  | "epic_convergence_exhausted"
   | "grace_window_timeout"
   | "sensitive_path_violation"
   | "merge_conflict_unresolved"
@@ -178,6 +179,15 @@ export function resolveLlmEscalationReason(
     return "transient_llm_api_exhausted";
   }
   return "llm_request_invalid";
+}
+
+export interface EpicConvergenceEscalationDetails {
+  readonly epicPhase: number;
+  readonly maxEpicPhases: number;
+  readonly summary: string;
+  readonly unwiredModules: readonly string[];
+  readonly stubViolations: readonly string[];
+  readonly unmetCriteria: readonly string[];
 }
 
 export interface FormatNeedsHumanEscalationInput {
@@ -211,6 +221,7 @@ export interface FormatNeedsHumanEscalationInput {
     | undefined;
   readonly diagnosticExcerpt?: string | undefined;
   readonly stateMirrorMarkdown?: string | undefined;
+  readonly epicConvergenceDetails?: EpicConvergenceEscalationDetails | undefined;
 }
 
 const EPURE_SYNTHETIC_CHECK_NAMES = new Set([
@@ -1199,6 +1210,10 @@ export function formatNeedsHumanEscalationComment(
     const used = input.codeFixAttemptsUsed ?? 3;
     const max = input.maxCodeFixAttempts ?? 3;
     reasonHeadline = `\`${used}/${max}\` remediation rounds exhausted (\`max_code_fix_attempts = ${max}\`)`;
+  } else if (input.reason === "epic_convergence_exhausted") {
+    const usedPhases = input.epicConvergenceDetails?.epicPhase ?? 2;
+    const maxPhases = input.epicConvergenceDetails?.maxEpicPhases ?? 2;
+    reasonHeadline = `Non-convergence de la fonctionnalité après \`${usedPhases}/${maxPhases}\` phases de tickets (\`epic_convergence_exhausted\`, ADR-0032)`;
   } else if (input.reason === "grace_window_timeout") {
     const gw = input.graceWindowSeconds ?? 45;
     reasonHeadline = `${gw}s external CI workflow registration timeout (fail-closed)`;
@@ -1288,6 +1303,26 @@ export function formatNeedsHumanEscalationComment(
       lines.push(
         `- **[${f.reviewer}]** (\`${f.path}:${f.line}\`) **${f.title}** — ${f.rationale}`
       );
+    }
+  }
+
+  if (input.epicConvergenceDetails) {
+    const details = input.epicConvergenceDetails;
+    lines.push(
+      "",
+      `#### Écarts de convergence restants après Phase ${details.epicPhase}/${details.maxEpicPhases} :`
+    );
+    if (details.summary) {
+      lines.push(`- **Synthèse de l'audit Goldfish** : ${details.summary}`);
+    }
+    for (const mod of details.unwiredModules) {
+      lines.push(`- 🔌 **Module non câblé** : ${mod}`);
+    }
+    for (const stub of details.stubViolations) {
+      lines.push(`- 🚫 **Simulacre interdit détecté** : ${stub}`);
+    }
+    for (const crit of details.unmetCriteria) {
+      lines.push(`- ❌ **Critère de convergence non satisfait** : ${crit}`);
     }
   }
 

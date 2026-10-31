@@ -29,6 +29,7 @@ import { appendEpureCommandsSpoiler } from "./formatting/comments.js";
 import {
   integratePlanBranchIntoFeature,
   mergeGlossaryMarkdownAdditively,
+  reconcileAdrsWithLlm,
   renumberCollidingAdrs,
   syncBranchWithBase
 } from "./github/branch-sync.js";
@@ -38,16 +39,25 @@ import {
   slugifyTitle,
   verifyPublisherMergeBoundary
 } from "./github/rest-client.js";
+import {
+  runEpicConvergenceAudit,
+  spawnPhase2ConvergenceTickets
+} from "./phases/epic-convergence.js";
 import { runFeatureIntegrationPhase } from "./phases/feature-integration.js";
 import {
+  buildParentIssueTicketsTasklistBlock,
   runGoldfishSpecAudit,
-  runGrillAndPlanPhase
+  runGrillAndPlanPhase,
+  upsertParentIssueTicketsTasklist
 } from "./phases/grill-and-plan.js";
 import { runTicketExecutionLoop } from "./phases/ticket-execution.js";
 import { EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT } from "./prompts/code-discipline.js";
 import {
   resolvePhaseModels,
+  type AdrCoherenceReconciliationPayload,
   type CreatedTicketRecord,
+  type EpicConvergenceAuditPayload,
+  type EpicGoalContract,
   type EscalateToNeedsHumanFn,
   type ExecutedTicketRecord,
   type GeneratedAdrDocument,
@@ -74,9 +84,20 @@ import {
 } from "./types.js";
 import {
   applyTicketImplementationPayload,
+  buildCompactWorkspaceFilesContext,
   buildRepoExplorationToolsAndHandlers,
+  checkIsBrownfieldSubpackageRepo,
+  checkIsExistingRepoWorkspace,
+  createStagedTicketImplementationBuffer,
+  mergeStagedBufferIntoImplementationPayload,
+  parsePlanManifestFromComments,
   parseTrackedTicketsFromComments,
-  runTestsInIsolatedWorkspace
+  runTestsInIsolatedWorkspace,
+  validateTicketIntegrityGuard,
+  type BuildCompactWorkspaceFilesContextInput,
+  type StagedTicketImplementationBuffer,
+  type TicketIntegrityCheckResult,
+  type TicketIntegrityViolation
 } from "./workspace/repo-tools.js";
 import {
   buildWebExplorationToolsAndHandlers,
@@ -88,26 +109,43 @@ import {
 export {
   EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT,
   applyTicketImplementationPayload,
+  buildCompactWorkspaceFilesContext,
+  buildParentIssueTicketsTasklistBlock,
   buildRepoExplorationToolsAndHandlers,
   buildWebExplorationToolsAndHandlers,
+  checkIsBrownfieldSubpackageRepo,
+  checkIsExistingRepoWorkspace,
   cleanHtmlToReadableText,
   createGitHubRestHelper,
+  createStagedTicketImplementationBuffer,
   formatIssueStateMirrorMarkdown,
   integratePlanBranchIntoFeature,
   mergeGlossaryMarkdownAdditively,
+  mergeStagedBufferIntoImplementationPayload,
+  parsePlanManifestFromComments,
   parseTrackedTicketsFromComments,
+  reconcileAdrsWithLlm,
   redactSecrets,
   renumberCollidingAdrs,
   resolvePhaseModels,
+  runEpicConvergenceAudit,
   runGoldfishSpecAudit,
   runTestsInIsolatedWorkspace,
   safePublicHttpsFetch,
   slugifyTitle,
+  spawnPhase2ConvergenceTickets,
   syncBranchWithBase,
+  upsertParentIssueTicketsTasklist,
   validatePublicHttpsUrlForWebTool,
+  validateTicketIntegrityGuard,
   verifyPublisherMergeBoundary,
+  type AdrCoherenceReconciliationPayload,
+  type BuildCompactWorkspaceFilesContextInput,
   type CreatedTicketRecord,
+  type EpicConvergenceAuditPayload,
+  type EpicGoalContract,
   type EpureIssueState,
+  type StagedTicketImplementationBuffer,
   type ExecutedTicketRecord,
   type GeneratedAdrDocument,
   type GeneratedFileChange,
@@ -130,6 +168,8 @@ export {
   type OrchestratorCommand,
   type PlannedTicketDefinition,
   type ResolvedPhaseModels,
+  type TicketIntegrityCheckResult,
+  type TicketIntegrityViolation,
   type TrackedTicketCommentMetadata
 };
 
@@ -828,7 +868,10 @@ export async function orchestrateIssueCommand(
       if (currentState?.status === "suspended") {
         await gh.removeIssueLabel?.(effectiveInput.issueNumber, "needs-human");
       }
-      let ticketsManifest = parseTrackedTicketsFromComments(allComments);
+      const parsedPlanManifest = parsePlanManifestFromComments(allComments);
+      let ticketsManifest = parsedPlanManifest?.tickets
+        ? [...parsedPlanManifest.tickets]
+        : parseTrackedTicketsFromComments(allComments);
       const hasExplicitPlanManifest = ticketsManifest.length > 0;
       if (!hasExplicitPlanManifest) {
         const parsedCriteria = Array.from(
@@ -874,9 +917,12 @@ export async function orchestrateIssueCommand(
       if (hasExplicitPlanManifest && !existingFeaturePrCheck) {
         await integratePlanBranchIntoFeature({
           gh,
-          planBranch,
+          planBranch: parsedPlanManifest?.planBranch ?? planBranch,
           featureBranch,
-          baseBranch: "dev"
+          baseBranch: "dev",
+          llmApiKey: effectiveInput.llmApiKey,
+          model: phaseModels.planningModel,
+          fetchImpl: effectiveInput.fetchImpl
         });
       }
 
@@ -976,7 +1022,8 @@ export async function orchestrateIssueCommand(
               mustFixFindings: params.mustFixFindings,
               sensitivePaths: params.sensitivePaths,
               traversalPaths: params.traversalPaths,
-              diagnosticExcerpt: params.diagnosticExcerpt
+              diagnosticExcerpt: params.diagnosticExcerpt,
+              epicConvergenceDetails: params.epicConvergenceDetails
             })
           ].join("\n"),
           {
@@ -1011,6 +1058,7 @@ export async function orchestrateIssueCommand(
           phase: "implementation",
           status: "active",
           active_branch: featureBranch,
+          epic_phase: prev.epic_phase ?? 1,
           last_processed_comment_id:
             effectiveInput.commentId ?? prev.last_processed_comment_id
         })
@@ -1023,9 +1071,14 @@ export async function orchestrateIssueCommand(
           (t) => `${t.title}\n${t.description}\n${t.filesToTouch.join(" ")}`
         )
       ].join("\n");
+      const pinnedWorkspacePaths = [
+        ...(parsedPlanManifest?.epicGoalContract?.required_entrypoints ?? []),
+        ...ticketsManifest.flatMap((t) => t.filesToTouch)
+      ];
       const accumulatedFiles = await gh.readBranchWorkspaceFiles(
         featureBranch,
-        hintForWorkspace
+        hintForWorkspace,
+        pinnedWorkspacePaths
       );
       const featureChangedFilesMap = new Map<string, string>();
       const featureDeletedFilesSet = new Set<string>();
@@ -1084,7 +1137,7 @@ export async function orchestrateIssueCommand(
         effectiveInput.asyncCiContinuation ??
         process.env.EPURE_ASYNC_CI_CONTINUATION === "true";
 
-      const loopOutcome = await runTicketExecutionLoop({
+      let loopOutcome = await runTicketExecutionLoop({
         repository: effectiveInput.repository,
         issueNumber: effectiveInput.issueNumber,
         commentId: effectiveInput.commentId,
@@ -1129,6 +1182,177 @@ export async function orchestrateIssueCommand(
         return loopOutcome.result;
       }
 
+      // Multi-phase zero-context Epic Convergence Audit & automatic Phase 2 ticket loop (ADR-0032, Q116-Q121)
+      const epicGoalContract = parsedPlanManifest?.epicGoalContract;
+      let epicConvergenceSummary: string | undefined;
+      if (epicGoalContract && !skipTicketLoopForExistingFeaturePr) {
+        const maxEpicPhases = Math.min(
+          3,
+          Math.max(1, parsedDevAgentsConfig?.max_epic_phases ?? 2)
+        );
+        const highestTicketPhase = ticketsManifest.reduce(
+          (maxP, t) => Math.max(maxP, t.phase ?? 1),
+          1
+        );
+        let currentEpicPhase = Math.max(
+          updatedStart.state.epic_phase ?? 1,
+          highestTicketPhase
+        );
+        const effectiveSpecPath =
+          parsedPlanManifest?.specPath ?? `docs/specs/${planSlug}.md`;
+        const specMarkdownOnFeature =
+          (await gh.readSingleBranchFile(featureBranch, effectiveSpecPath)) ??
+          issue.body;
+        const glossaryMarkdownOnFeature =
+          (await gh.readSingleBranchFile(featureBranch, "GLOSSARY.md")) ?? "";
+
+        while (true) {
+          await updateIssueStateWithCas({
+            issueNumber: effectiveInput.issueNumber,
+            store,
+            mutator: (prev) => ({
+              ...prev,
+              phase: "implementation",
+              status: "active",
+              subphase: "auditing_epic_convergence",
+              epic_phase: currentEpicPhase
+            })
+          });
+
+          const stage1Summary =
+            completedTicketsSummary.length > 0
+              ? `Stage 1 PASSED across ${completedTicketsSummary.length} merged ticket(s) on ${featureBranch}:\n${completedTicketsSummary.join("\n")}`
+              : `Stage 1 PASSED on ${featureBranch}`;
+
+          const convergenceAudit = await runEpicConvergenceAudit({
+            issueNumber: effectiveInput.issueNumber,
+            featureBranch,
+            specPath: effectiveSpecPath,
+            specMarkdown: specMarkdownOnFeature,
+            glossaryMarkdown: glossaryMarkdownOnFeature,
+            epicGoalContract,
+            accumulatedFiles,
+            featureChangedFilesMap,
+            devBranchPaths,
+            stage1Summary,
+            gh,
+            llmApiKey: effectiveInput.llmApiKey,
+            phaseModels,
+            onTransientRetriesUsed: (used) => {
+              totalTransientRetriesUsed += used;
+            },
+            fetchImpl: effectiveInput.fetchImpl
+          });
+
+          if (convergenceAudit.verdict === "CONVERGED") {
+            epicConvergenceSummary =
+              convergenceAudit.rationale ||
+              `All required entrypoints (${epicGoalContract.required_entrypoints.join(", ")}) wired and verified in Phase ${currentEpicPhase}.`;
+            await updateIssueStateWithCas({
+              issueNumber: effectiveInput.issueNumber,
+              store,
+              mutator: (prev) => ({
+                ...prev,
+                subphase: "idle",
+                epic_phase: currentEpicPhase
+              })
+            });
+            break;
+          }
+
+          if (currentEpicPhase >= maxEpicPhases) {
+            return await escalateToNeedsHuman({
+              reason: "epic_convergence_exhausted",
+              ticketNumber: effectiveInput.issueNumber,
+              branch: featureBranch,
+              phase: "implementation",
+              diagnosticExcerpt: convergenceAudit.rationale,
+              epicConvergenceDetails: {
+                epicPhase: currentEpicPhase,
+                maxEpicPhases,
+                summary: convergenceAudit.rationale,
+                unwiredModules: convergenceAudit.unwired_modules,
+                stubViolations: convergenceAudit.stub_violations,
+                unmetCriteria: convergenceAudit.unmet_criteria
+              }
+            });
+          }
+
+          const nextEpicPhase = currentEpicPhase + 1;
+          const phase2State = await updateIssueStateWithCas({
+            issueNumber: effectiveInput.issueNumber,
+            store,
+            mutator: (prev) => ({
+              ...prev,
+              phase: "implementation",
+              status: "active",
+              subphase: "implementing_ticket",
+              epic_phase: nextEpicPhase
+            })
+          });
+
+          ticketsManifest = await spawnPhase2ConvergenceTickets({
+            gh,
+            issueNumber: effectiveInput.issueNumber,
+            issue,
+            planBranch: parsedPlanManifest?.planBranch ?? planBranch,
+            specPath: effectiveSpecPath,
+            epicGoalContract,
+            nextEpicPhase,
+            existingTickets: ticketsManifest,
+            auditResult: convergenceAudit,
+            stateMirrorMarkdown: phase2State.issue_mirror_markdown
+          });
+          currentEpicPhase = nextEpicPhase;
+
+          loopOutcome = await runTicketExecutionLoop({
+            repository: effectiveInput.repository,
+            issueNumber: effectiveInput.issueNumber,
+            commentId: effectiveInput.commentId,
+            activeToken,
+            issue,
+            featureBranch,
+            ticketsManifest,
+            skipTicketLoopForExistingFeaturePr: false,
+            accumulatedFiles,
+            featureChangedFilesMap,
+            featureDeletedFilesSet,
+            completedTicketsSummary,
+            devBranchPaths,
+            devWorkflowsMap,
+            trustedBaseFilesMap,
+            trustedBaseDesignMarkdown: trustedBaseRoster.designMarkdown,
+            parsedDevAgentsConfig,
+            initialVerificationProfile: loopOutcome.verificationProfile,
+            initialVerificationGuideMarkdown:
+              loopOutcome.verificationGuideMarkdown,
+            maxCodeFixAttempts,
+            hintForWorkspace,
+            infraRerunsBySha,
+            getTotalTransientRetriesUsed: () => totalTransientRetriesUsed,
+            addTransientRetriesUsed: (delta) => {
+              totalTransientRetriesUsed += delta;
+            },
+            escalateToNeedsHuman,
+            gh,
+            store,
+            llmApiKey: effectiveInput.llmApiKey,
+            phaseModels,
+            fetchImpl: effectiveInput.fetchImpl,
+            effectiveSleepFn,
+            pollIntervalMs: effectiveInput.pollIntervalMs,
+            sandboxRunner: effectiveInput.sandboxRunner,
+            asyncCiContinuation: asyncCiEnabled,
+            forceOneRemediationRoundOnOpenPr: false,
+            initialCodeFixAttemptsUsed: 0
+          });
+
+          if (loopOutcome.halted && loopOutcome.result) {
+            return loopOutcome.result;
+          }
+        }
+      }
+
       try {
         return await runFeatureIntegrationPhase({
           repository: effectiveInput.repository,
@@ -1145,6 +1369,9 @@ export async function orchestrateIssueCommand(
           featureChangedFilesMap,
           featureDeletedFilesSet,
           completedTicketsSummary,
+          ...(epicConvergenceSummary !== undefined
+            ? { epicConvergenceSummary }
+            : {}),
           devBranchPaths,
           devWorkflowsMap,
           trustedBaseFilesMap,

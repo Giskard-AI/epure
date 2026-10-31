@@ -21,6 +21,7 @@ export type EpureIssueSubphase =
   | "implementing_ticket"
   | "waiting_ticket_ci"
   | "remediating_ticket"
+  | "auditing_epic_convergence"
   | "waiting_feature_ci"
   | "remediating_feature";
 
@@ -39,6 +40,7 @@ export interface EpureIssueState {
   readonly active_task_branch?: string | undefined;
   readonly active_pr_number?: number | undefined;
   readonly active_head_sha?: string | undefined;
+  readonly epic_phase?: number | undefined;
 }
 
 export interface GitRefSnapshot {

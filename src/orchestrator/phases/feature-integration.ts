@@ -73,6 +73,7 @@ export interface RunFeatureIntegrationPhaseParams {
   readonly featureChangedFilesMap: Map<string, string>;
   readonly featureDeletedFilesSet: Set<string>;
   readonly completedTicketsSummary: readonly string[];
+  readonly epicConvergenceSummary?: string | undefined;
   readonly devBranchPaths: readonly string[];
   readonly devWorkflowsMap: Map<string, string>;
   readonly trustedBaseFilesMap: Map<string, string>;
@@ -199,6 +200,14 @@ export async function runFeatureIntegrationPhase(
       "",
       "## Completed Tickets & Squash History",
       ...params.completedTicketsSummary,
+      ...(params.epicConvergenceSummary
+        ? [
+            "",
+            "## Epic Convergence Audit (ADR-0032)",
+            "- **Verdict**: `CONVERGED`",
+            `- **Summary**: ${params.epicConvergenceSummary}`
+          ]
+        : []),
       "",
       "## Governance",
       "- Requires human review and squash-merge into `dev` in the GitHub UI (ADR-0001, ADR-0027, Q45, Q91, Q95)."
@@ -685,7 +694,7 @@ export async function runFeatureIntegrationPhase(
               `La correction de review finale a échoué à la vérification Stage 1 (tentative ${featureTestRetry}/2) :`,
               wrapUntrustedContent(
                 "untrusted_test_output",
-                featureTestCheck.output.slice(-6000)
+                featureTestCheck.output
               ),
               "",
               ...(findingsText

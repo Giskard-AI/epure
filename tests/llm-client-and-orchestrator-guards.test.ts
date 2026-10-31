@@ -32,11 +32,17 @@ import {
   formatEpureCommandsSpoiler
 } from "../src/orchestrator/formatting/comments.js";
 import {
+  buildCompactWorkspaceFilesContext,
+  buildRepoExplorationToolsAndHandlers,
+  checkIsExistingRepoWorkspace,
+  createGitHubRestHelper,
+  createStagedTicketImplementationBuffer,
+  mergeStagedBufferIntoImplementationPayload,
   orchestrateIssueCommand,
-  resolvePhaseModels,
-  createGitHubRestHelper
+  resolvePhaseModels
 } from "../src/orchestrator/issue-orchestrator.js";
 import {
+  createGeneratedTicketImplementationSchema,
   GENERATED_PLANNING_BUNDLE_SCHEMA,
   GENERATED_TICKET_IMPLEMENTATION_SCHEMA,
   GRILL_ROUND_EVALUATION_SCHEMA
@@ -2694,6 +2700,765 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
         expect(err).toBeInstanceOf(expectedClass);
         if (err instanceof RateLimitError) {
           expect(err.retryAfterSeconds).toBe(expectedRetryAfterSeconds);
+        }
+      }
+    );
+  });
+
+  describe("16. Incremental Workspace Mutation Tools, Compact Context & Chunked Fallback (ADR-0033)", () => {
+    it.each([
+      {
+        id: "write-patch-delete-tools-stage-mutations-and-accept-empty-final-json",
+        initialAccumulated: new Map([
+          ["src/routes.ts", "export const routes = [\n  '/health'\n];\n"],
+          ["src/legacy.ts", "export const legacy = true;\n"]
+        ]),
+        sensitivePathAttempt: ".github/workflows/ci.yml",
+        patchMismatchOld: "non_existent_snippet",
+        patchValidOld: "'/health'",
+        patchValidNew: "'/health',\n  '/campaigns'",
+        writtenPath: "src/postgres.ts",
+        writtenContent: "export const pool = 'pg://localhost';\n",
+        deletedPath: "src/legacy.ts"
+      },
+      {
+        id: "path-traversal-rejected-and-multi-edit-patch-succeeds",
+        initialAccumulated: new Map([
+          ["packages/server/http.ts", "const port = 3000;\nconst host = '0.0.0.0';\n"],
+          ["packages/server/old.ts", "// obsolete\n"]
+        ]),
+        sensitivePathAttempt: "../outside.ts",
+        patchMismatchOld: "const port = 9999;",
+        patchValidOld: "const port = 3000;",
+        patchValidNew: "const port = 8080;",
+        writtenPath: "packages/server/db.ts",
+        writtenContent: "export const dbReady = true;\n",
+        deletedPath: "packages/server/old.ts"
+      }
+    ])(
+      "StagedTicketImplementationBuffer [$id] isolates tool mutations, enforces path guards, and validates empty final arrays",
+      async ({
+        initialAccumulated,
+        sensitivePathAttempt,
+        patchMismatchOld,
+        patchValidOld,
+        patchValidNew,
+        writtenPath,
+        writtenContent,
+        deletedPath
+      }) => {
+        const baselineLoadedPaths: string[] = [];
+        const stagedBuffer = createStagedTicketImplementationBuffer(
+          async (paths) => {
+            baselineLoadedPaths.push(...paths);
+          }
+        );
+        const accumulatedCopy = new Map(initialAccumulated);
+        const targetPatchPath = Array.from(initialAccumulated.keys())[0]!;
+
+        const { tools, toolHandlers } = buildRepoExplorationToolsAndHandlers({
+          branch: "task/72-slice-1",
+          featureBranch: "feature/70-epic",
+          accumulatedFiles: accumulatedCopy,
+          stagedImplementation: stagedBuffer,
+          devBranchPaths: Array.from(initialAccumulated.keys()),
+          gh: {
+            readSingleBranchFile: async () => null,
+            listBranchPaths: async () => Array.from(initialAccumulated.keys())
+          }
+        });
+
+        const toolNames = (tools ?? []).map((t) => t.name);
+        expect(toolNames).toContain("write_repo_file");
+        expect(toolNames).toContain("patch_repo_file");
+        expect(toolNames).toContain("delete_repo_file");
+
+        // 1. Sensitive or traversal path rejected on all 3 mutation tools
+        const deniedWrite = (await toolHandlers!.write_repo_file!({
+          path: sensitivePathAttempt,
+          content: "malicious"
+        })) as { error?: string };
+        expect(deniedWrite.error).toContain("Access denied");
+
+        const deniedPatch = (await toolHandlers!.patch_repo_file!({
+          path: sensitivePathAttempt,
+          edits: [{ old_string: "a", new_string: "b" }]
+        })) as { error?: string };
+        expect(deniedPatch.error).toContain("Access denied");
+
+        const deniedDelete = (await toolHandlers!.delete_repo_file!({
+          path: sensitivePathAttempt
+        })) as { error?: string };
+        expect(deniedDelete.error).toContain("Access denied");
+        expect(stagedBuffer.hasMutations()).toBe(false);
+
+        // 2. Mismatched patch returns actionable error without mutating buffer
+        const failedPatch = (await toolHandlers!.patch_repo_file!({
+          path: targetPatchPath,
+          edits: [{ old_string: patchMismatchOld, new_string: "replacement" }]
+        })) as { error?: string };
+        expect(failedPatch.error).toContain("did not match");
+        expect(stagedBuffer.files.has(targetPatchPath)).toBe(false);
+
+        // 3. Valid patch, write, and delete stage cleanly in overlay without mutating accumulatedCopy
+        const okPatch = (await toolHandlers!.patch_repo_file!({
+          path: targetPatchPath,
+          edits: [{ old_string: patchValidOld, new_string: patchValidNew }]
+        })) as { applied?: boolean };
+        expect(okPatch.applied).toBe(true);
+
+        const okWrite = (await toolHandlers!.write_repo_file!({
+          path: writtenPath,
+          content: writtenContent
+        })) as { staged?: boolean };
+        expect(okWrite.staged).toBe(true);
+
+        const okDelete = (await toolHandlers!.delete_repo_file!({
+          path: deletedPath
+        })) as { deleted?: boolean };
+        expect(okDelete.deleted).toBe(true);
+
+        // Transactional isolation: accumulatedCopy is untouched
+        expect(accumulatedCopy.has(writtenPath)).toBe(false);
+        expect(accumulatedCopy.get(targetPatchPath)).toBe(
+          initialAccumulated.get(targetPatchPath)
+        );
+        expect(baselineLoadedPaths).toContain(targetPatchPath);
+        expect(baselineLoadedPaths).toContain(writtenPath);
+        expect(baselineLoadedPaths).toContain(deletedPath);
+
+        // Read tools see the staged overlay
+        const readPatched = (await toolHandlers!.read_repo_file!({
+          path: targetPatchPath
+        })) as { content?: string };
+        expect(readPatched.content).toContain(patchValidNew);
+
+        const readDeleted = (await toolHandlers!.read_repo_file!({
+          path: deletedPath
+        })) as { error?: string };
+        expect(readDeleted.error).toContain("was deleted");
+
+        // Contextual schema accepts empty final arrays because stagedBuffer has mutations
+        const contextualSchema = createGeneratedTicketImplementationSchema({
+          hasStagedMutations: () => stagedBuffer.hasMutations()
+        });
+        const validatedFinal = contextualSchema.validate({
+          commit_message: "feat(slice-1): stage postgres and routes",
+          test_summary: "All tests pass",
+          files: [],
+          patches: [],
+          deleted_files: []
+        });
+        const merged = mergeStagedBufferIntoImplementationPayload(
+          stagedBuffer,
+          validatedFinal
+        );
+        expect(merged.files?.map((f) => f.path)).toEqual(
+          expect.arrayContaining([targetPatchPath, writtenPath])
+        );
+        expect(merged.deleted_files).toEqual([deletedPath]);
+      }
+    );
+
+    it.each([
+      {
+        id: "monorepo-with-root-package-json-and-large-cached-files",
+        accumulatedEntries: [
+          ["package.json", '{\n  "name": "root"\n}'],
+          ["src/target.ts", "export const target = 1;\n"],
+          [
+            "src/huge-unrelated.ts",
+            Array.from({ length: 450 }, (_, i) => `const line${i} = ${i};`).join(
+              "\n"
+            )
+          ]
+        ] as const,
+        devBranchPaths: ["package.json", "src/target.ts", "src/huge-unrelated.ts"],
+        priorityPaths: ["src/target.ts"],
+        expectedInlinedPath: "--- FILE: src/target.ts ---",
+        expectedCatalogEntry: "- src/huge-unrelated.ts (450 lines)"
+      },
+      {
+        id: "polyglot-rust-repo-without-root-package-json",
+        accumulatedEntries: [
+          ["Cargo.toml", '[workspace]\nmembers = ["crates/server"]'],
+          ["crates/server/src/lib.rs", "pub fn run() {}\n"],
+          ["crates/engine/src/lib.rs", "pub fn engine() {}\n"]
+        ] as const,
+        devBranchPaths: ["Cargo.toml", "crates/server/src/lib.rs"],
+        priorityPaths: ["crates/server/src/lib.rs"],
+        expectedInlinedPath: "--- FILE: crates/server/src/lib.rs ---",
+        expectedCatalogEntry: "- crates/engine/src/lib.rs (2 lines)"
+      }
+    ])(
+      "checkIsExistingRepoWorkspace and buildCompactWorkspaceFilesContext [$id] inline priority files without mid-file truncation and catalog the rest",
+      ({
+        accumulatedEntries,
+        devBranchPaths,
+        priorityPaths,
+        expectedInlinedPath,
+        expectedCatalogEntry
+      }) => {
+        const map = new Map<string, string>(accumulatedEntries);
+        expect(checkIsExistingRepoWorkspace(map, devBranchPaths)).toBe(true);
+
+        const compact = buildCompactWorkspaceFilesContext({
+          accumulatedFiles: map,
+          priorityPaths
+        });
+        expect(compact).toContain(expectedInlinedPath);
+        expect(compact).toContain(expectedCatalogEntry);
+        expect(compact).toContain("WORKSPACE FILE CATALOG");
+      }
+    );
+
+    it.each([
+      {
+        id: "chunked-fallback-recovers-when-single-shot-returns-empty-files",
+        mode: "fallback_success" as const,
+        expectedStatus: "done"
+      },
+      {
+        id: "incremental-write-tool-succeeds-with-empty-final-json-arrays",
+        mode: "incremental_tool_write" as const,
+        expectedStatus: "done"
+      },
+      {
+        id: "chunked-fallback-discards-staged-buffer-and-escalates-when-subcall-fails",
+        mode: "fallback_exhausted" as const,
+        expectedStatus: "suspended"
+      }
+    ])(
+      "orchestrateIssueCommand [$id] handles incremental tool writes and chunked file-by-file fallback on ticket #72",
+      async ({ mode, expectedStatus }) => {
+        const stateStore = createInMemoryGitRefStateStore();
+        await updateIssueStateWithCas({
+          issueNumber: 70,
+          store: stateStore,
+          mutator: (s) => ({
+            ...s,
+            phase: "tickets",
+            status: "awaiting_human_approval",
+            spec_sha: "spec-sha-70",
+            active_branch: "plan/70-postgres-slice"
+          })
+        });
+
+        const manifestPayload = {
+          planBranch: "plan/70-postgres-slice",
+          specPath: "docs/specs/postgres-slice.md",
+          tickets: [
+            {
+              ticketIssueNumber: 72,
+              slug: "slice-1-postgres-and-routes",
+              title: "[Ticket 1] Slice 1 Postgres and Routes",
+              description: "Implement postgres store, HTTP routes, and tests",
+              acceptanceCriteria: ["Postgres store and routes work"],
+              blockedByIssueNumbers: [],
+              filesToTouch: ["src/postgres.ts", "src/routes.ts"]
+            }
+          ]
+        };
+
+        let geminiCallIndex = 0;
+        const committedBranches: string[] = [];
+
+        const mockFetch: typeof fetch = async (url, init) => {
+          const urlStr = String(url);
+          const method = init?.method ?? "GET";
+
+          if (urlStr.includes("generativelanguage.googleapis.com")) {
+            geminiCallIndex += 1;
+            const reqBody = JSON.parse(String(init?.body ?? "{}")) as {
+              contents?: Array<{
+                role?: string;
+                parts?: Array<{
+                  text?: string;
+                  functionResponse?: { name: string; response: unknown };
+                }>;
+              }>;
+              tools?: unknown[];
+              generationConfig?: {
+                responseJsonSchema?: {
+                  properties?: Record<string, unknown>;
+                };
+              };
+            };
+
+            const allText = JSON.stringify(reqBody.contents ?? []);
+            const schemaProps =
+              reqBody.generationConfig?.responseJsonSchema?.properties ?? {};
+
+            // Reviewer findings schema
+            if ("findings" in schemaProps) {
+              return new Response(
+                JSON.stringify({
+                  candidates: [
+                    {
+                      content: {
+                        parts: [
+                          {
+                            text: JSON.stringify({
+                              reviewer: "standards-reviewer",
+                              summary: "LGTM",
+                              findings: []
+                            })
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }),
+                { status: 200 }
+              );
+            }
+
+            // Epic convergence audit schema
+            if ("verdict" in schemaProps && "unwired_modules" in schemaProps) {
+              return new Response(
+                JSON.stringify({
+                  candidates: [
+                    {
+                      content: {
+                        parts: [
+                          {
+                            text: JSON.stringify({
+                              verdict: "CONVERGED",
+                              rationale: "All entrypoints wired.",
+                              unwired_modules: [],
+                              stub_violations: [],
+                              unmet_criteria: [],
+                              remediation_tickets: []
+                            })
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }),
+                { status: 200 }
+              );
+            }
+
+            // Squash commit schema
+            if ("type" in schemaProps && "scope" in schemaProps && "subject" in schemaProps) {
+              return new Response(
+                JSON.stringify({
+                  candidates: [
+                    {
+                      content: {
+                        parts: [
+                          {
+                            text: JSON.stringify({
+                              type: "feat",
+                              scope: "postgres",
+                              subject: "add postgres store and routes",
+                              body: "Implemented slice 1."
+                            })
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }),
+                { status: 200 }
+              );
+            }
+
+            // Ticket implementation calls
+            if (mode === "incremental_tool_write") {
+              const hasToolResponse = (reqBody.contents ?? []).some((c) =>
+                (c.parts ?? []).some((p) => p.functionResponse !== undefined)
+              );
+              const declaredToolNames = JSON.stringify(reqBody.tools ?? []);
+              if (
+                reqBody.tools &&
+                declaredToolNames.includes("write_repo_file") &&
+                !hasToolResponse
+              ) {
+                return new Response(
+                  JSON.stringify({
+                    candidates: [
+                      {
+                        content: {
+                          parts: [
+                            {
+                              functionCall: {
+                                name: "write_repo_file",
+                                args: {
+                                  path: "src/postgres.ts",
+                                  content: "export const pg = true;\n"
+                                }
+                              }
+                            },
+                            {
+                              functionCall: {
+                                name: "write_repo_file",
+                                args: {
+                                  path: "src/routes.ts",
+                                  content: "export const routes = ['pg'];\n"
+                                }
+                              }
+                            },
+                            {
+                              functionCall: {
+                                name: "write_repo_file",
+                                args: {
+                                  path: "tests/slice1.test.ts",
+                                  content: "export const tested = true;\n"
+                                }
+                              }
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }),
+                  { status: 200 }
+                );
+              }
+              // Phase 2 structured output returns empty arrays because files were written via tools!
+              return new Response(
+                JSON.stringify({
+                  candidates: [
+                    {
+                      content: {
+                        parts: [
+                          {
+                            text: JSON.stringify({
+                              commit_message:
+                                "feat(ticket-72): implement postgres and routes via incremental tools",
+                              test_summary: "Incremental tool writes verified",
+                              files: [],
+                              patches: [],
+                              deleted_files: []
+                            })
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }),
+                { status: 200 }
+              );
+            }
+
+            if (mode === "fallback_success") {
+              if (!allText.includes("REPLI SEGMENTÉ")) {
+                // Primary single-shot call fails validation (returns empty arrays across all retries)
+                return new Response(
+                  JSON.stringify({
+                    candidates: [
+                      {
+                        content: {
+                          parts: [
+                            {
+                              text: JSON.stringify({
+                                commit_message: "feat: truncated single-shot",
+                                test_summary: "",
+                                files: [],
+                                patches: [],
+                                deleted_files: []
+                              })
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }),
+                  { status: 200 }
+                );
+              }
+              // Chunked fallback calls succeed per target file
+              if (allText.includes("src/postgres.ts")) {
+                return new Response(
+                  JSON.stringify({
+                    candidates: [
+                      {
+                        content: {
+                          parts: [
+                            {
+                              text: JSON.stringify({
+                                commit_message: "feat(ticket-72): add postgres",
+                                test_summary: "postgres chunk",
+                                files: [
+                                  {
+                                    path: "src/postgres.ts",
+                                    content: "export const pg = 'ready';\n"
+                                  }
+                                ],
+                                patches: [],
+                                deleted_files: []
+                              })
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }),
+                  { status: 200 }
+                );
+              }
+              if (allText.includes("src/routes.ts")) {
+                return new Response(
+                  JSON.stringify({
+                    candidates: [
+                      {
+                        content: {
+                          parts: [
+                            {
+                              text: JSON.stringify({
+                                commit_message: "feat(ticket-72): add routes",
+                                test_summary: "routes chunk",
+                                files: [
+                                  {
+                                    path: "src/routes.ts",
+                                    content: "export const routes = true;\n"
+                                  }
+                                ],
+                                patches: [],
+                                deleted_files: []
+                              })
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }),
+                  { status: 200 }
+                );
+              }
+              return new Response(
+                JSON.stringify({
+                  candidates: [
+                    {
+                      content: {
+                        parts: [
+                          {
+                            text: JSON.stringify({
+                              commit_message:
+                                "feat(ticket-72): complete chunked slice 1",
+                              test_summary: "tests chunk",
+                              files: [
+                                {
+                                  path: "tests/slice1.test.ts",
+                                  content: "export const testSuite = true;\n"
+                                }
+                              ],
+                              patches: [],
+                              deleted_files: []
+                            })
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }),
+                { status: 200 }
+              );
+            }
+
+            // mode === "fallback_exhausted": both primary and fallback return empty files
+            return new Response(
+              JSON.stringify({
+                candidates: [
+                  {
+                    content: {
+                      parts: [
+                        {
+                          text: JSON.stringify({
+                            commit_message: "feat: always empty",
+                            test_summary: "",
+                            files: [],
+                            patches: [],
+                            deleted_files: []
+                          })
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }),
+              { status: 200 }
+            );
+          }
+
+          if (urlStr.endsWith("/issues/70") && method === "GET") {
+            return new Response(
+              JSON.stringify({
+                id: 7000,
+                number: 70,
+                title: "[Plan] Slice 1 Postgres",
+                body: "Plan body",
+                state: "open"
+              }),
+              { status: 200 }
+            );
+          }
+          if (urlStr.endsWith("/issues/72") && method === "GET") {
+            return new Response(
+              JSON.stringify({
+                id: 7200,
+                number: 72,
+                title: "[Ticket 1] Slice 1 Postgres and Routes",
+                body: "Ticket body",
+                state: "open"
+              }),
+              { status: 200 }
+            );
+          }
+          if (urlStr.includes("/issues/70/comments") && method === "GET") {
+            return new Response(
+              JSON.stringify([
+                {
+                  id: 701,
+                  body: `<!-- epure-plan-manifest:${JSON.stringify(manifestPayload)} -->`,
+                  user: { login: "epure-agent[bot]", type: "Bot" },
+                  created_at: "2026-10-31T10:00:00Z"
+                }
+              ]),
+              { status: 200 }
+            );
+          }
+          if (urlStr.includes("/git/trees/") && method === "GET") {
+            return new Response(
+              JSON.stringify({
+                tree: [
+                  {
+                    path: "package.json",
+                    type: "blob",
+                    size: 100
+                  }
+                ]
+              }),
+              { status: 200 }
+            );
+          }
+          if (urlStr.includes("/contents/package.json") && method === "GET") {
+            return new Response(
+              JSON.stringify({
+                content: Buffer.from(
+                  JSON.stringify({
+                    name: "slice-test",
+                    scripts: { test: "vitest run", build: "tsc -b" }
+                  })
+                ).toString("base64"),
+                encoding: "base64"
+              }),
+              { status: 200 }
+            );
+          }
+          if (urlStr.includes("/git/ref/heads/") && method === "GET") {
+            return new Response(
+              JSON.stringify({ object: { sha: "base-sha-70" } }),
+              { status: 200 }
+            );
+          }
+          if (urlStr.includes("/git/commits/") && method === "GET") {
+            return new Response(
+              JSON.stringify({
+                sha: "commit-sha-70",
+                tree: { sha: "tree-sha-70" }
+              }),
+              { status: 200 }
+            );
+          }
+          if (urlStr.endsWith("/git/blobs") && method === "POST") {
+            return new Response(JSON.stringify({ sha: "blob-sha-70" }), {
+              status: 201
+            });
+          }
+          if (urlStr.endsWith("/git/trees") && method === "POST") {
+            return new Response(JSON.stringify({ sha: "new-tree-sha-70" }), {
+              status: 201
+            });
+          }
+          if (urlStr.endsWith("/git/commits") && method === "POST") {
+            return new Response(JSON.stringify({ sha: "new-commit-sha-70" }), {
+              status: 201
+            });
+          }
+          if (urlStr.includes("/git/refs/heads/") && method === "PATCH") {
+            const branchName = decodeURIComponent(
+              urlStr.split("/git/refs/heads/")[1] ?? ""
+            );
+            committedBranches.push(branchName);
+            return new Response(
+              JSON.stringify({ object: { sha: "new-commit-sha-70" } }),
+              { status: 200 }
+            );
+          }
+          if (urlStr.endsWith("/git/refs") && method === "POST") {
+            return new Response(
+              JSON.stringify({ ref: "refs/heads/task/72-slice-1" }),
+              { status: 201 }
+            );
+          }
+          if (urlStr.includes("/pulls") && method === "GET") {
+            return new Response(JSON.stringify([]), { status: 200 });
+          }
+          if (urlStr.endsWith("/pulls") && method === "POST") {
+            return new Response(
+              JSON.stringify({
+                number: 172,
+                html_url: "https://github.com/acme/repo/pull/172",
+                head: { sha: "new-commit-sha-70" },
+                mergeable: true
+              }),
+              { status: 201 }
+            );
+          }
+          if (urlStr.includes("/pulls/172/merge") && method === "PUT") {
+            return new Response(
+              JSON.stringify({ merged: true, sha: "merged-sha-172" }),
+              { status: 200 }
+            );
+          }
+          if (urlStr.includes("/actions/workflows") && method === "GET") {
+            return new Response(
+              JSON.stringify({ total_count: 0, workflows: [] }),
+              { status: 200 }
+            );
+          }
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        };
+
+        const res = await orchestrateIssueCommand({
+          repository: "acme/repo",
+          issueNumber: 70,
+          command: "approve",
+          commandArgs: "",
+          commentId: 999,
+          actor: "Maintainer",
+          fallbackGithubToken: "ghs_mock_token",
+          llmApiKey: "AIzaMockKey",
+          stateStore,
+          fetchImpl: mockFetch,
+          sandboxRunner: async () => ({
+            isolated: true,
+            error_code: "NONE",
+            error_message: "",
+            exit_code: 0,
+            stdout: "All tests passed",
+            stderr: "",
+            duration_ms: 15,
+            proxy_url: "http://127.0.0.1:0"
+          })
+        });
+
+        expect(res.status).toBe(expectedStatus);
+        expect(geminiCallIndex).toBeGreaterThan(0);
+        if (mode === "fallback_exhausted") {
+          expect(committedBranches).not.toContain(
+            "task/72-slice-1-postgres-and-routes"
+          );
+          expect(res.summary_markdown).toContain(
+            "LLM request rejected or response invalid after structured-output retry"
+          );
+        } else {
+          expect(committedBranches).toContain(
+            "task/72-slice-1-postgres-and-routes"
+          );
         }
       }
     );

@@ -127,6 +127,7 @@ export function createGitHubRestHelper(params: {
 
     async getIssue(issueNumber: number): Promise<IssueMetadata> {
       const { data } = await apiRequest<{
+        id?: number;
         number: number;
         title: string;
         body?: string | null;
@@ -134,6 +135,7 @@ export function createGitHubRestHelper(params: {
         state_reason?: "completed" | "not_planned" | "reopened" | null;
       }>("GET", `/repos/${owner}/${repo}/issues/${issueNumber}`);
       return {
+        ...(typeof data?.id === "number" ? { id: data.id } : {}),
         number: data?.number ?? issueNumber,
         title: data?.title ?? `Issue #${issueNumber}`,
         body: data?.body ?? "",
@@ -210,20 +212,87 @@ export function createGitHubRestHelper(params: {
       }
     },
 
-    async createIssue(input): Promise<{ number: number; html_url: string }> {
-      const { data } = await apiRequest<{ number: number; html_url: string }>(
-        "POST",
-        `/repos/${owner}/${repo}/issues`,
-        {
-          title: input.title,
-          body: input.body,
-          labels: input.labels
-        }
-      );
+    async createIssue(input): Promise<{
+      id?: number | undefined;
+      number: number;
+      html_url: string;
+    }> {
+      const { data } = await apiRequest<{
+        id?: number;
+        number: number;
+        html_url: string;
+      }>("POST", `/repos/${owner}/${repo}/issues`, {
+        title: input.title,
+        body: input.body,
+        labels: input.labels
+      });
       if (!data) {
         throw new Error("Failed to create GitHub issue.");
       }
-      return data;
+      return {
+        ...(typeof data.id === "number" ? { id: data.id } : {}),
+        number: data.number,
+        html_url: data.html_url
+      };
+    },
+
+    async updateIssue(
+      issueNumber: number,
+      input: {
+        title?: string | undefined;
+        body?: string | undefined;
+        state?: "open" | "closed" | undefined;
+      }
+    ): Promise<void> {
+      try {
+        await apiRequest(
+          "PATCH",
+          `/repos/${owner}/${repo}/issues/${issueNumber}`,
+          {
+            ...(input.title !== undefined ? { title: input.title } : {}),
+            ...(input.body !== undefined ? { body: input.body } : {}),
+            ...(input.state !== undefined ? { state: input.state } : {})
+          }
+        );
+      } catch {
+        // Non-fatal if issue update is unsupported in mock tests or restricted
+      }
+    },
+
+    async addSubIssue(
+      parentIssueNumber: number,
+      subIssueDatabaseId: number
+    ): Promise<void> {
+      if (!Number.isFinite(subIssueDatabaseId) || subIssueDatabaseId <= 0) {
+        return;
+      }
+      try {
+        await apiRequest(
+          "POST",
+          `/repos/${owner}/${repo}/issues/${parentIssueNumber}/sub_issues`,
+          { sub_issue_id: subIssueDatabaseId }
+        );
+      } catch {
+        // Degraded tolerance (Q112): log/ignore if sub_issues API returns 404/422/5xx
+      }
+    },
+
+    async addIssueBlockedByDependency(
+      issueNumber: number,
+      blockerDatabaseId: number
+    ): Promise<void> {
+      if (!Number.isFinite(blockerDatabaseId) || blockerDatabaseId <= 0) {
+        return;
+      }
+      try {
+        await apiRequest(
+          "POST",
+          `/repos/${owner}/${repo}/issues/${issueNumber}/dependencies/blocked_by`,
+          { issue_id: blockerDatabaseId }
+        );
+      } catch {
+        // Degraded tolerance (Q112): log/ignore if dependencies API returns 404/422/5xx
+      }
     },
 
     async closeIssue(issueNumber: number): Promise<void> {
@@ -303,7 +372,8 @@ export function createGitHubRestHelper(params: {
 
     async readBranchWorkspaceFiles(
       branch: string,
-      hintText = ""
+      hintText = "",
+      pinnedPaths: readonly string[] = []
     ): Promise<Map<string, string>> {
       const filesMap = new Map<string, string>();
       try {
@@ -334,7 +404,7 @@ export function createGitHubRestHelper(params: {
             p === ".gitignore" ||
             p === "renovate.json" ||
             p === "GLOSSARY.md" ||
-            /(?:^|\/)(?:package-lock\.json|pnpm-lock\.yaml|yarn\.lock)$/i.test(
+            /(?:^|\/)(?:package-lock\.json|pnpm-lock\.yaml|yarn\.lock|Cargo\.lock)$/i.test(
               p
             ) ||
             /\.(?:png|jpe?g|gif|webp|svg|ico|woff2?|ttf|eot|mp3|ogg|wav|mp4|webm|pdf|zip|tar|gz)$/i.test(
@@ -374,63 +444,108 @@ export function createGitHubRestHelper(params: {
             )
           );
 
-          const scored = candidates.map((entry) => {
+          const maxTotalBytes = 380_000;
+          const maxPinnedBytes = Math.floor(maxTotalBytes * 0.35);
+          const normalizedPinnedSet = new Set(
+            pinnedPaths
+              .map((p) => p.trim().replace(/^\/+/, "").toLowerCase())
+              .filter((p) => p.length > 0)
+          );
+          for (const bt of backtickedTokens) {
+            if (bt.includes("/") || /\.[a-z0-9]{1,6}$/i.test(bt)) {
+              normalizedPinnedSet.add(bt.replace(/^\/+/, ""));
+            }
+          }
+
+          const picked: typeof candidates = [];
+          const pickedPathsSet = new Set<string>();
+          let totalBytes = 0;
+          let pinnedBytes = 0;
+
+          // 1. Dynamically pin explicit pinnedPaths, exact backticked paths, and polyglot build manifests (up to 35% byte budget)
+          const isBuildOrEntrypointManifest = (lowerPath: string): boolean =>
+            /(?:^|\/)(?:package\.json|cargo\.toml|pyproject\.toml|go\.mod|makefile|justfile|taskfile\.ya?ml|turbo\.json)$/i.test(
+              lowerPath
+            );
+
+          for (const entry of candidates) {
             const p = entry.path!;
             const lowerPath = p.toLowerCase();
-            const baseName = lowerPath.split("/").pop() ?? lowerPath;
-            const stem = baseName
-              .replace(
-                /\.(?:e2e\.test|integration\.test|test|spec)\.[a-z0-9]+$/i,
-                ""
-              )
-              .replace(/\.[a-z0-9]+$/i, "");
-            let score = 0;
+            const isExplicitlyPinned =
+              normalizedPinnedSet.has(lowerPath) ||
+              Array.from(normalizedPinnedSet).some(
+                (pin) => pin.length >= 4 && lowerPath.endsWith(`/${pin}`)
+              );
+            if (!isExplicitlyPinned && !isBuildOrEntrypointManifest(lowerPath)) {
+              continue;
+            }
+            const entrySize = entry.size ?? 4000;
+            if (pinnedBytes + entrySize > maxPinnedBytes) {
+              continue;
+            }
+            picked.push(entry);
+            pickedPathsSet.add(p);
+            pinnedBytes += entrySize;
+            totalBytes += entrySize;
+          }
 
-            for (const bt of backtickedTokens) {
+          const scored = candidates
+            .filter((entry) => !pickedPathsSet.has(entry.path!))
+            .map((entry) => {
+              const p = entry.path!;
+              const lowerPath = p.toLowerCase();
+              const baseName = lowerPath.split("/").pop() ?? lowerPath;
+              const stem = baseName
+                .replace(
+                  /\.(?:e2e\.test|integration\.test|test|spec)\.[a-z0-9]+$/i,
+                  ""
+                )
+                .replace(/\.[a-z0-9]+$/i, "");
+              let score = 0;
+
+              for (const bt of backtickedTokens) {
+                if (
+                  lowerPath === bt ||
+                  lowerPath.endsWith(`/${bt}`) ||
+                  baseName === bt
+                ) {
+                  score += 150;
+                } else if (bt.length >= 4 && stem === bt) {
+                  score += 100;
+                } else if (
+                  bt.length >= 6 &&
+                  (stem.includes(bt) || bt.includes(stem)) &&
+                  stem.length >= 5
+                ) {
+                  score += 70;
+                }
+              }
               if (
-                lowerPath === bt ||
-                lowerPath.endsWith(`/${bt}`) ||
-                baseName === bt
+                stem.length >= 5 &&
+                !stopWords.has(stem) &&
+                lowerHint.includes(stem)
               ) {
-                score += 150;
-              } else if (bt.length >= 4 && stem === bt) {
-                score += 100;
-              } else if (
-                bt.length >= 6 &&
-                (stem.includes(bt) || bt.includes(stem)) &&
-                stem.length >= 5
-              ) {
-                score += 70;
+                score += 60;
               }
-            }
-            if (
-              stem.length >= 5 &&
-              !stopWords.has(stem) &&
-              lowerHint.includes(stem)
-            ) {
-              score += 60;
-            }
-            for (const w of wordTokens) {
-              if (stem === w) {
-                score += 45;
-              } else if (w.length >= 6 && stem.includes(w)) {
-                score += 25;
+              for (const w of wordTokens) {
+                if (stem === w) {
+                  score += 45;
+                } else if (w.length >= 6 && stem.includes(w)) {
+                  score += 25;
+                }
               }
-            }
-            if (score > 0 && /(?:\.test\.|__tests__)/.test(lowerPath)) {
-              score += 10;
-            }
-            return { entry, score, size: entry.size ?? 4000 };
-          });
+              if (score > 0 && /(?:\.test\.|__tests__)/.test(lowerPath)) {
+                score += 10;
+              }
+              return { entry, score, size: entry.size ?? 4000 };
+            });
 
           scored.sort((a, b) => b.score - a.score);
-          const picked: typeof candidates = [];
-          let totalBytes = 0;
           for (const s of scored) {
-            if (s.score < 25 || picked.length >= 16) {
+            if (s.score < 25 || picked.length >= 28) {
               break;
             }
-            if (totalBytes + s.size > 380_000) {
+            if (totalBytes + s.size > maxTotalBytes) {
               continue;
             }
             picked.push(s.entry);
