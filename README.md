@@ -26,7 +26,7 @@ The preferred way to onboard a new or existing repository is to invoke the **`/s
 /setup-repo <owner>/<repo>
 ```
 
-The agent inspects your repository's stack and domain modules, guides you through creating the 2 GitHub Apps (`setup-github-apps-wizard.sh`), runs `dist/cli/setup-repo.mjs --dry-run` before `--apply --apply-github-settings` (3 Repository Rulesets + squash-only governance), and **dynamically designs your `.cursor/agents/*.md` multi-agent reviewer roster** tailored to your codebase.
+The agent inspects your repository's stack and domain modules, guides you through creating the 2 GitHub Apps and environment-scoped secrets (`setup-github-apps-wizard.sh --repo <owner>/<repo> --llm-env <env-name>`), runs `dist/cli/setup-repo.mjs --dry-run` before `--apply --apply-github-settings` (3 Repository Rulesets + squash-only governance), and **dynamically designs your `.cursor/agents/*.md` multi-agent reviewer roster** tailored to your codebase.
 
 ---
 
@@ -57,7 +57,7 @@ The official documentation (powered by **VitePress** and interactive **Archify**
 ### Local Documentation & Diagram Commands
 
 ```bash
-# Validate and render all 8 bilingual Archify diagrams (showcase quality)
+# Validate and render all 10 bilingual Archify diagrams (showcase quality)
 npm run docs:diagrams
 
 # Start the local VitePress documentation server
@@ -71,11 +71,11 @@ npm run docs:build
 
 ## Domain Model, ADRs & Specifications
 
-- [`GLOSSARY.md`](GLOSSARY.md) — Canonical Ubiquitous Language dictionary (Q1–Q103).
+- [`GLOSSARY.md`](GLOSSARY.md) — Canonical Ubiquitous Language dictionary (Q1–Q111, ADR-0029–ADR-0033).
 - [`DESIGN.md`](DESIGN.md) — Impeccable design system tokens, WCAG 2.1 AA contrast ratios, and `<ArchifyDiagram>` interaction states.
 - [`docs/DECISIONS.md`](docs/DECISIONS.md) — Complete architectural decision log across 24 Grill rounds (Q1–Q103).
 - [`docs/CONTRACTS.md`](docs/CONTRACTS.md) — Public reusable workflow and custom action contracts.
-- [`docs/adr/`](docs/adr/) — **27 Architecture Decision Records (ADRs)** tracing every structural decision.
+- [`docs/adr/`](docs/adr/) — **33 Architecture Decision Records (ADRs)** tracing every structural decision.
 - [`docs/specs/dev-automation-v1.md`](docs/specs/dev-automation-v1.md) — Complete V1 functional and technical specification.
 
 ---

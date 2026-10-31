@@ -5196,7 +5196,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <div class="pulse-dot"></div>
         <h1>Machine à États d&#39;une Issue EPURE (Ref Git CAS : refs/epure/state/&lt;issue&gt;)</h1>
       </div>
-      <p class="subtitle">Transitions atomiques Compare-And-Swap, curseur de commentaires en lot et reprise idempotente</p>
+      <p class="subtitle">Phases pilotées par commandes, sous-états CI asynchrones, EpicConvergenceAudit Phase 2 et reprise /epure continue</p>
     </div>
 
 
@@ -5204,9 +5204,9 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
     <!-- Main Diagram -->
     <div class="diagram-container" data-detail-level="read"
          data-preset-badge-editorial-plate="ARCHIFY / PLATE 04">
-      <svg viewBox="0 0 1238 368" data-reader-fit="intrinsic-height" data-lifecycle-layout="main-path-v3" role="img" lang="en" aria-labelledby="archify-diagram-title archify-diagram-description" data-animation="trace" data-preset="blueprint" data-quality-profile="showcase" data-motion-choreography="walk">
+      <svg viewBox="0 0 1274 368" data-reader-fit="intrinsic-height" data-lifecycle-layout="main-path-v3" role="img" lang="en" aria-labelledby="archify-diagram-title archify-diagram-description" data-animation="trace" data-preset="blueprint" data-quality-profile="showcase" data-motion-choreography="walk">
         <title id="archify-diagram-title">Machine à États d&#39;une Issue EPURE (Ref Git CAS : refs/epure/state/&lt;issue&gt;)</title>
-        <desc id="archify-diagram-description">Transitions atomiques Compare-And-Swap, curseur de commentaires en lot et reprise idempotente</desc>
+        <desc id="archify-diagram-description">Phases pilotées par commandes, sous-états CI asynchrones, EpicConvergenceAudit Phase 2 et reprise /epure continue</desc>
         <!-- Definitions -->
         <defs>
           <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
@@ -5234,36 +5234,36 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
 
         <!-- Transition paths -->
         <g data-graph-role="automatic-crossover" style="--step:0">
-          <path data-graph-role="automatic-crossover-underlay" d="M 219 102 L 305 102" fill="none" stroke="var(--mask)" stroke-width="5.8" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/>
-          <path data-edge-from="grilling" data-edge-to="blueprint_dag" data-edge-label="clarifié" data-edge-key="0" data-edge-id="grill-to-blueprint" data-composition-points="219,102;305,102" data-composition-crossover="halo" data-composition-independent="true" d="M 219 102 L 305 102" class="a-emphasis" data-animate="edge" style="--step:0" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+          <path data-graph-role="automatic-crossover-underlay" d="M 219 102 L 299 102" fill="none" stroke="var(--mask)" stroke-width="5.8" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/>
+          <path data-edge-from="grilling" data-edge-to="spec" data-edge-label="to-spec" data-edge-key="0" data-edge-id="grill-to-spec" data-composition-points="219,102;299,102" data-composition-crossover="halo" data-composition-independent="true" d="M 219 102 L 299 102" class="a-emphasis" data-animate="edge" style="--step:0" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
         </g>
         <g data-graph-role="automatic-crossover" style="--step:1">
-          <path data-graph-role="automatic-crossover-underlay" d="M 375 70 L 375 52 Q 375 40 363 40 L 149.5 40 Q 137.5 40 137.5 52 L 137.5 70" fill="none" stroke="var(--mask)" stroke-width="5.2" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/>
-          <path data-edge-from="blueprint_dag" data-edge-to="grilling" data-edge-label="autre tour" data-edge-key="1" data-edge-id="blueprint-to-grill" data-composition-points="375,70;375,40;137.5,40;137.5,70" data-composition-crossover="halo" data-composition-independent="true" d="M 375 70 L 375 52 Q 375 40 363 40 L 149.5 40 Q 137.5 40 137.5 52 L 137.5 70" class="a-default" data-animate="edge" style="--step:1" stroke-width="1.2" marker-end="url(#arrowhead)"/>
+          <path data-graph-role="automatic-crossover-underlay" d="M 388.5 70 L 388.5 52 Q 388.5 40 376.5 40 L 149.5 40 Q 137.5 40 137.5 52 L 137.5 70" fill="none" stroke="var(--mask)" stroke-width="5.2" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/>
+          <path data-edge-from="spec" data-edge-to="grilling" data-edge-label="affiner" data-edge-key="1" data-edge-id="spec-to-grill" data-composition-points="388.5,70;388.5,40;137.5,40;137.5,70" data-composition-crossover="halo" data-composition-independent="true" d="M 388.5 70 L 388.5 52 Q 388.5 40 376.5 40 L 149.5 40 Q 137.5 40 137.5 52 L 137.5 70" class="a-default" data-animate="edge" style="--step:1" stroke-width="1.2" marker-end="url(#arrowhead)"/>
         </g>
         <g data-graph-role="automatic-crossover" style="--step:2">
-          <path data-graph-role="automatic-crossover-underlay" d="M 445 102 L 531 102" fill="none" stroke="var(--mask)" stroke-width="5.8" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/>
-          <path data-edge-from="blueprint_dag" data-edge-to="awaiting_approval" data-edge-label="DAG prêt" data-edge-key="2" data-edge-id="blueprint-to-awaiting" data-composition-points="445,102;531,102" data-composition-crossover="halo" data-composition-independent="true" d="M 445 102 L 531 102" class="a-emphasis" data-animate="edge" style="--step:2" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+          <path data-graph-role="automatic-crossover-underlay" d="M 478 102 L 576 102" fill="none" stroke="var(--mask)" stroke-width="5.8" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/>
+          <path data-edge-from="spec" data-edge-to="tickets" data-edge-label="to-tickets" data-edge-key="2" data-edge-id="spec-to-tickets" data-composition-points="478,102;576,102" data-composition-crossover="halo" data-composition-independent="true" d="M 478 102 L 576 102" class="a-emphasis" data-animate="edge" style="--step:2" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
         </g>
         <g data-graph-role="automatic-crossover" style="--step:3">
-          <path data-graph-role="automatic-crossover-underlay" d="M 712 102 L 798 102" fill="none" stroke="var(--mask)" stroke-width="5.2" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/>
-          <path data-edge-from="awaiting_approval" data-edge-to="implementation" data-edge-label="approuvé" data-edge-key="3" data-edge-id="awaiting-to-impl" data-composition-points="712,102;798,102" data-composition-crossover="halo" data-composition-independent="true" d="M 712 102 L 798 102" class="a-security" data-animate="edge" style="--step:3" stroke-width="1.2" marker-end="url(#arrowhead-security)"/>
+          <path data-graph-role="automatic-crossover-underlay" d="M 731 102 L 811 102" fill="none" stroke="var(--mask)" stroke-width="5.2" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/>
+          <path data-edge-from="tickets" data-edge-to="implementation" data-edge-label="approve" data-edge-key="3" data-edge-id="tickets-to-impl" data-composition-points="731,102;811,102" data-composition-crossover="halo" data-composition-independent="true" d="M 731 102 L 811 102" class="a-security" data-animate="edge" style="--step:3" stroke-width="1.2" marker-end="url(#arrowhead-security)"/>
         </g>
         <g data-graph-role="automatic-crossover" style="--step:4">
-          <path data-graph-role="automatic-crossover-underlay" d="M 943 102 L 1035 102" fill="none" stroke="var(--mask)" stroke-width="5.8" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/>
-          <path data-edge-from="implementation" data-edge-to="completed" data-edge-label="DAG mergé" data-edge-key="4" data-edge-id="impl-to-completed" data-composition-points="943,102;1035,102" data-composition-crossover="halo" data-composition-independent="true" d="M 943 102 L 1035 102" class="a-emphasis" data-animate="edge" style="--step:4" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+          <path data-graph-role="automatic-crossover-underlay" d="M 985 102 L 1071 102" fill="none" stroke="var(--mask)" stroke-width="5.8" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/>
+          <path data-edge-from="implementation" data-edge-to="completed" data-edge-label="audit ok" data-edge-key="4" data-edge-id="impl-to-completed" data-composition-points="985,102;1071,102" data-composition-crossover="halo" data-composition-independent="true" d="M 985 102 L 1071 102" class="a-emphasis" data-animate="edge" style="--step:4" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
         </g>
         <g data-graph-role="automatic-crossover" style="--step:5">
-          <path data-graph-role="automatic-crossover-underlay" d="M 857.5 134 L 857.5 226" fill="none" stroke="var(--mask)" stroke-width="5.2" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/>
-          <path data-edge-from="implementation" data-edge-to="failed" data-edge-label="&gt;3 essais" data-edge-key="5" data-edge-id="impl-to-failed" data-composition-points="857.5,134;857.5,226" data-composition-crossover="halo" data-composition-independent="true" d="M 857.5 134 L 857.5 226" class="a-security" data-animate="edge" style="--step:5" stroke-width="1.2" marker-end="url(#arrowhead-security)"/>
+          <path data-graph-role="automatic-crossover-underlay" d="M 885 134 L 885 226" fill="none" stroke="var(--mask)" stroke-width="5.2" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/>
+          <path data-edge-from="implementation" data-edge-to="failed" data-edge-label="suspendre" data-edge-key="5" data-edge-id="impl-to-failed" data-composition-points="885,134;885,226" data-composition-crossover="halo" data-composition-independent="true" d="M 885 134 L 885 226" class="a-security" data-animate="edge" style="--step:5" stroke-width="1.2" marker-end="url(#arrowhead-security)"/>
         </g>
         <g data-graph-role="automatic-crossover" style="--step:6">
-          <path data-graph-role="automatic-crossover-underlay" d="M 883.5 226 L 883.5 134" fill="none" stroke="var(--mask)" stroke-width="5.8" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/>
-          <path data-edge-from="failed" data-edge-to="implementation" data-edge-label="re-approve" data-edge-key="6" data-edge-id="failed-to-impl" data-composition-points="883.5,226;883.5,134" data-composition-crossover="halo" data-composition-independent="true" d="M 883.5 226 L 883.5 134" class="a-emphasis" data-animate="edge" style="--step:6" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+          <path data-graph-role="automatic-crossover-underlay" d="M 911 226 L 911 134" fill="none" stroke="var(--mask)" stroke-width="5.8" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/>
+          <path data-edge-from="failed" data-edge-to="implementation" data-edge-label="continue" data-edge-key="6" data-edge-id="failed-to-impl" data-composition-points="911,226;911,134" data-composition-crossover="halo" data-composition-independent="true" d="M 911 226 L 911 134" class="a-emphasis" data-animate="edge" style="--step:6" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
         </g>
         <g data-graph-role="automatic-crossover" style="--step:7">
-          <path data-graph-role="automatic-crossover-underlay" d="M 621.5 134 L 621.5 226" fill="none" stroke="var(--mask)" stroke-width="5.2" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/>
-          <path data-edge-from="awaiting_approval" data-edge-to="cancelled" data-edge-label="annuler" data-edge-key="7" data-edge-id="awaiting-to-cancelled" data-composition-points="621.5,134;621.5,226" data-composition-crossover="halo" data-composition-independent="true" d="M 621.5 134 L 621.5 226" class="a-default" data-animate="edge" style="--step:7" stroke-width="1.2" marker-end="url(#arrowhead)"/>
+          <path data-graph-role="automatic-crossover-underlay" d="M 653.5 134 L 653.5 226" fill="none" stroke="var(--mask)" stroke-width="5.2" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/>
+          <path data-edge-from="tickets" data-edge-to="cancelled" data-edge-label="annuler" data-edge-key="7" data-edge-id="tickets-to-cancelled" data-composition-points="653.5,134;653.5,226" data-composition-crossover="halo" data-composition-independent="true" d="M 653.5 134 L 653.5 226" class="a-default" data-animate="edge" style="--step:7" stroke-width="1.2" marker-end="url(#arrowhead)"/>
         </g>
 
 
@@ -5280,117 +5280,117 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <text data-detail="fine" x="137.5" y="125" class="t-frontend" font-size="8" text-anchor="middle">phase: grilling</text>
         </g>
 
-        <g id="node-blueprint_dag" data-node-id="blueprint_dag" data-node-label="Spec &amp; DAG" tabindex="0" role="button" aria-label="Focus Spec &amp; DAG, plan/* + tickets, Lifecycle state" aria-pressed="false" data-node-kind="decision" data-node-sublabel="plan/* + tickets" data-node-tag="spec + tickets" data-node-context="Lifecycle state">
-          <title>Spec &amp; DAG · plan/* + tickets · Lifecycle state · spec + tickets</title>
-          <rect x="305" y="70" width="140" height="64" rx="8" class="c-mask"/>
-          <rect x="305" y="70" width="140" height="64" rx="8" class="c-database" data-animate="node" style="--step:1" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="decision" class="semantic-sigil s-database" transform="translate(311 76) scale(0.6875)">
+        <g id="node-spec" data-node-id="spec" data-node-label="Brouillon Spec" tabindex="0" role="button" aria-label="Focus Brouillon Spec, /epure to-spec sur plan/*, Lifecycle state" aria-pressed="false" data-node-kind="decision" data-node-sublabel="/epure to-spec sur plan/*" data-node-tag="GLOSSARY + ADR + spec" data-node-context="Lifecycle state">
+          <title>Brouillon Spec · /epure to-spec sur plan/* · Lifecycle state · GLOSSARY + ADR + spec</title>
+          <rect x="299" y="70" width="179" height="64" rx="8" class="c-mask"/>
+          <rect x="299" y="70" width="179" height="64" rx="8" class="c-database" data-animate="node" style="--step:1" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="decision" class="semantic-sigil s-database" transform="translate(305 76) scale(0.6875)">
             <path d="M8 2.2 13.8 8 8 13.8 2.2 8Z"/>
           </g>
-          <text data-detail="fine" x="328" y="84" class="t-database" font-size="8" font-weight="700">02</text>
-          <text data-node-label="" data-detail-anchor="" x="376.6" y="93" class="t-primary" font-size="12" font-weight="600" text-anchor="middle">Spec &amp; DAG</text>
-          <text data-detail="context" x="375" y="110" class="t-muted" font-size="9" text-anchor="middle">plan/* + tickets</text>
-          <text data-detail="fine" x="375" y="125" class="t-database" font-size="8" text-anchor="middle">spec + tickets</text>
+          <text data-detail="fine" x="322" y="84" class="t-database" font-size="8" font-weight="700">02</text>
+          <text data-node-label="" data-detail-anchor="" x="388.5" y="93" class="t-primary" font-size="12" font-weight="600" text-anchor="middle">Brouillon Spec</text>
+          <text data-detail="context" x="388.5" y="110" class="t-muted" font-size="9" text-anchor="middle">/epure to-spec sur plan/*</text>
+          <text data-detail="fine" x="388.5" y="125" class="t-database" font-size="8" text-anchor="middle">GLOSSARY + ADR + spec</text>
         </g>
 
-        <g id="node-awaiting_approval" data-node-id="awaiting_approval" data-node-label="Attente Approbation" tabindex="0" role="button" aria-label="Focus Attente Approbation, validation humaine, Lifecycle state" aria-pressed="false" data-node-kind="waiting" data-node-sublabel="validation humaine" data-node-tag="jalon 2" data-node-context="Lifecycle state">
-          <title>Attente Approbation · validation humaine · Lifecycle state · jalon 2</title>
-          <rect x="531" y="70" width="181" height="64" rx="8" class="c-mask"/>
-          <rect x="531" y="70" width="181" height="64" rx="8" class="c-cloud" data-animate="node" style="--step:2" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="waiting" class="semantic-sigil s-cloud" transform="translate(537 76) scale(0.6875)">
+        <g id="node-tickets" data-node-id="tickets" data-node-label="DAG de Tickets" tabindex="0" role="button" aria-label="Focus DAG de Tickets, /epure to-tickets, Lifecycle state" aria-pressed="false" data-node-kind="waiting" data-node-sublabel="/epure to-tickets" data-node-tag="sub_issues + blocked_by" data-node-context="Lifecycle state">
+          <title>DAG de Tickets · /epure to-tickets · Lifecycle state · sub_issues + blocked_by</title>
+          <rect x="576" y="70" width="155" height="64" rx="8" class="c-mask"/>
+          <rect x="576" y="70" width="155" height="64" rx="8" class="c-cloud" data-animate="node" style="--step:2" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="waiting" class="semantic-sigil s-cloud" transform="translate(582 76) scale(0.6875)">
             <path d="M4 2.5h8M4 13.5h8M5 3c0 2.8 2 3.2 3 5-1 1.8-3 2.2-3 5M11 3c0 2.8-2 3.2-3 5 1 1.8 3 2.2 3 5"/>
           </g>
-          <text data-detail="fine" x="554" y="84" class="t-cloud" font-size="8" font-weight="700">03</text>
-          <text data-node-label="" data-detail-anchor="" x="635" y="93" class="t-primary" font-size="12" font-weight="600" text-anchor="middle">Attente Approbation</text>
-          <text data-detail="context" x="621.5" y="110" class="t-muted" font-size="9" text-anchor="middle">validation humaine</text>
-          <text data-detail="fine" x="621.5" y="125" class="t-cloud" font-size="8" text-anchor="middle">jalon 2</text>
+          <text data-detail="fine" x="599" y="84" class="t-cloud" font-size="8" font-weight="700">03</text>
+          <text data-node-label="" data-detail-anchor="" x="662" y="93" class="t-primary" font-size="12" font-weight="600" text-anchor="middle">DAG de Tickets</text>
+          <text data-detail="context" x="653.5" y="110" class="t-muted" font-size="9" text-anchor="middle">/epure to-tickets</text>
+          <text data-detail="fine" x="653.5" y="125" class="t-cloud" font-size="8" text-anchor="middle">sub_issues + blocked_by</text>
         </g>
 
-        <g id="node-implementation" data-node-id="implementation" data-node-label="Implémentation" tabindex="0" role="button" aria-label="Focus Implémentation, boucle TDD + revue, Lifecycle state" aria-pressed="false" data-node-kind="active" data-node-sublabel="boucle TDD + revue" data-node-tag="spec_sha signé" data-node-context="Lifecycle state">
-          <title>Implémentation · boucle TDD + revue · Lifecycle state · spec_sha signé</title>
-          <rect x="798" y="70" width="145" height="64" rx="8" class="c-mask"/>
-          <rect x="798" y="70" width="145" height="64" rx="8" class="c-frontend" data-animate="node" style="--step:3" stroke-width="1.5"/>
+        <g id="node-implementation" data-node-id="implementation" data-node-label="Implémentation" tabindex="0" role="button" aria-label="Focus Implémentation, plan/* -&gt; feature/* + CI, Lifecycle state" aria-pressed="false" data-node-kind="active" data-node-sublabel="plan/* -&gt; feature/* + CI" data-node-tag="spec_sha + sync + Phase 2" data-node-context="Lifecycle state">
+          <title>Implémentation · plan/* -&gt; feature/* + CI · Lifecycle state · spec_sha + sync + Phase 2</title>
+          <rect x="811" y="70" width="174" height="64" rx="8" class="c-mask"/>
+          <rect x="811" y="70" width="174" height="64" rx="8" class="c-frontend" data-animate="node" style="--step:3" stroke-width="1.5"/>
           
-          <text data-detail="fine" x="821" y="84" class="t-frontend" font-size="8" font-weight="700">04</text>
-          <text data-node-label="" data-detail-anchor="" x="884" y="93" class="t-primary" font-size="12" font-weight="600" text-anchor="middle">Implémentation</text>
-          <text data-detail="context" x="870.5" y="110" class="t-muted" font-size="9" text-anchor="middle">boucle TDD + revue</text>
-          <text data-detail="fine" x="870.5" y="125" class="t-frontend" font-size="8" text-anchor="middle">spec_sha signé</text>
+          <text data-detail="fine" x="834" y="84" class="t-frontend" font-size="8" font-weight="700">04</text>
+          <text data-node-label="" data-detail-anchor="" x="898" y="93" class="t-primary" font-size="12" font-weight="600" text-anchor="middle">Implémentation</text>
+          <text data-detail="context" x="898" y="110" class="t-muted" font-size="9" text-anchor="middle">plan/* -&gt; feature/* + CI</text>
+          <text data-detail="fine" x="898" y="125" class="t-frontend" font-size="8" text-anchor="middle">spec_sha + sync + Phase 2</text>
         </g>
 
         <g id="node-completed" data-node-id="completed" data-node-label="Terminé" tabindex="0" role="button" aria-label="Focus Terminé, PR feature/* -&gt; dev, Lifecycle state" aria-pressed="false" data-node-kind="success" data-node-sublabel="PR feature/* -&gt; dev" data-node-tag="prêt à merger" data-node-context="Lifecycle state">
           <title>Terminé · PR feature/* -&gt; dev · Lifecycle state · prêt à merger</title>
-          <rect x="1035" y="70" width="147" height="64" rx="8" class="c-mask"/>
-          <rect x="1035" y="70" width="147" height="64" rx="8" class="c-backend" data-animate="node" style="--step:4" stroke-width="1.5"/>
-          <rect x="1038" y="73" width="141" height="58" rx="5" class="c-backend" style="fill: none" stroke-width="1"/>
-          <g aria-hidden="true" data-semantic-sigil="success" class="semantic-sigil s-backend" transform="translate(1041 76) scale(0.6875)">
+          <rect x="1071" y="70" width="147" height="64" rx="8" class="c-mask"/>
+          <rect x="1071" y="70" width="147" height="64" rx="8" class="c-backend" data-animate="node" style="--step:4" stroke-width="1.5"/>
+          <rect x="1074" y="73" width="141" height="58" rx="5" class="c-backend" style="fill: none" stroke-width="1"/>
+          <g aria-hidden="true" data-semantic-sigil="success" class="semantic-sigil s-backend" transform="translate(1077 76) scale(0.6875)">
             <circle cx="8" cy="8" r="5.3"/>
             <path d="m5.2 8 1.8 1.8 3.8-4"/>
           </g>
-          <text data-detail="fine" x="1058" y="84" class="t-backend" font-size="8" font-weight="700">05</text>
-          <text data-node-label="" data-detail-anchor="" x="1108.5" y="93" class="t-primary" font-size="12" font-weight="600" text-anchor="middle">Terminé</text>
-          <text data-detail="context" x="1108.5" y="110" class="t-muted" font-size="9" text-anchor="middle">PR feature/* -&gt; dev</text>
-          <text data-detail="fine" x="1108.5" y="125" class="t-backend" font-size="8" text-anchor="middle">prêt à merger</text>
+          <text data-detail="fine" x="1094" y="84" class="t-backend" font-size="8" font-weight="700">05</text>
+          <text data-node-label="" data-detail-anchor="" x="1144.5" y="93" class="t-primary" font-size="12" font-weight="600" text-anchor="middle">Terminé</text>
+          <text data-detail="context" x="1144.5" y="110" class="t-muted" font-size="9" text-anchor="middle">PR feature/* -&gt; dev</text>
+          <text data-detail="fine" x="1144.5" y="125" class="t-backend" font-size="8" text-anchor="middle">prêt à merger</text>
         </g>
 
-        <g id="node-failed" data-node-id="failed" data-node-label="Escalade Humaine" tabindex="0" role="button" aria-label="Focus Escalade Humaine, &gt;3 essais ou sensible, Lifecycle state" aria-pressed="false" data-node-kind="failure" data-node-sublabel="&gt;3 essais ou sensible" data-node-tag="needs-human" data-node-context="Lifecycle state">
-          <title>Escalade Humaine · &gt;3 essais ou sensible · Lifecycle state · needs-human</title>
-          <rect x="791.5" y="226" width="158" height="64" rx="8" class="c-mask"/>
-          <rect x="791.5" y="226" width="158" height="64" rx="8" class="c-security" data-animate="node" style="--step:6" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="failure" class="semantic-sigil s-security" transform="translate(797.5 232) scale(0.6875)">
+        <g id="node-failed" data-node-id="failed" data-node-label="Suspendu / Escalade" tabindex="0" role="button" aria-label="Focus Suspendu / Escalade, escalade needs-human, Lifecycle state" aria-pressed="false" data-node-kind="failure" data-node-sublabel="escalade needs-human" data-node-tag="/epure continue" data-node-context="Lifecycle state">
+          <title>Suspendu / Escalade · escalade needs-human · Lifecycle state · /epure continue</title>
+          <rect x="816" y="226" width="164" height="64" rx="8" class="c-mask"/>
+          <rect x="816" y="226" width="164" height="64" rx="8" class="c-security" data-animate="node" style="--step:6" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="failure" class="semantic-sigil s-security" transform="translate(822 232) scale(0.6875)">
             <circle cx="8" cy="8" r="5.3"/>
             <path d="m5.7 5.7 4.6 4.6m0-4.6-4.6 4.6"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="870.5" y="249" class="t-primary" font-size="12" font-weight="600" text-anchor="middle">Escalade Humaine</text>
-          <text data-detail="context" x="870.5" y="266" class="t-muted" font-size="9" text-anchor="middle">&gt;3 essais ou sensible</text>
-          <text data-detail="fine" x="870.5" y="281" class="t-security" font-size="8" text-anchor="middle">needs-human</text>
+          <text data-node-label="" data-detail-anchor="" x="903.4" y="249" class="t-primary" font-size="12" font-weight="600" text-anchor="middle">Suspendu / Escalade</text>
+          <text data-detail="context" x="898" y="266" class="t-muted" font-size="9" text-anchor="middle">escalade needs-human</text>
+          <text data-detail="fine" x="898" y="281" class="t-security" font-size="8" text-anchor="middle">/epure continue</text>
         </g>
 
         <g id="node-cancelled" data-node-id="cancelled" data-node-label="Annulé" tabindex="0" role="button" aria-label="Focus Annulé, /epure cancel, Lifecycle state" aria-pressed="false" data-node-kind="neutral" data-node-sublabel="/epure cancel" data-node-tag="terminal" data-node-context="Lifecycle state">
           <title>Annulé · /epure cancel · Lifecycle state · terminal</title>
-          <rect x="551.5" y="226" width="140" height="64" rx="8" class="c-mask"/>
-          <rect x="551.5" y="226" width="140" height="64" rx="8" class="c-external" data-animate="node" style="--step:8" stroke-width="1.5"/>
-          <rect x="554.5" y="229" width="134" height="58" rx="5" class="c-external" style="fill: none" stroke-width="1"/>
-          <g aria-hidden="true" data-semantic-sigil="stop" class="semantic-sigil s-external" transform="translate(557.5 232) scale(0.6875)">
+          <rect x="583.5" y="226" width="140" height="64" rx="8" class="c-mask"/>
+          <rect x="583.5" y="226" width="140" height="64" rx="8" class="c-external" data-animate="node" style="--step:8" stroke-width="1.5"/>
+          <rect x="586.5" y="229" width="134" height="58" rx="5" class="c-external" style="fill: none" stroke-width="1"/>
+          <g aria-hidden="true" data-semantic-sigil="stop" class="semantic-sigil s-external" transform="translate(589.5 232) scale(0.6875)">
             <circle cx="8" cy="8" r="5.3"/>
             <rect x="6.1" y="6.1" width="3.8" height="3.8" rx=".5" class="sigil-fill"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="621.5" y="249" class="t-primary" font-size="12" font-weight="600" text-anchor="middle">Annulé</text>
-          <text data-detail="context" x="621.5" y="266" class="t-muted" font-size="9" text-anchor="middle">/epure cancel</text>
-          <text data-detail="fine" x="621.5" y="281" class="t-muted" font-size="8" text-anchor="middle">terminal</text>
+          <text data-node-label="" data-detail-anchor="" x="653.5" y="249" class="t-primary" font-size="12" font-weight="600" text-anchor="middle">Annulé</text>
+          <text data-detail="context" x="653.5" y="266" class="t-muted" font-size="9" text-anchor="middle">/epure cancel</text>
+          <text data-detail="fine" x="653.5" y="281" class="t-muted" font-size="8" text-anchor="middle">terminal</text>
         </g>
 
         <!-- Transition labels -->
-        <g data-detail="context" data-edge-from="grilling" data-edge-to="blueprint_dag" data-edge-label="clarifié" data-edge-key="0" data-edge-id="grill-to-blueprint">
-          <rect x="232" y="80" width="60" height="16" rx="4" class="c-mask"/>
-          <text x="262" y="91.5" class="t-edge-emphasis" font-size="10" text-anchor="middle">clarifié</text>
+        <g data-detail="context" data-edge-from="grilling" data-edge-to="spec" data-edge-label="to-spec" data-edge-key="0" data-edge-id="grill-to-spec">
+          <rect x="232" y="80" width="54" height="16" rx="4" class="c-mask"/>
+          <text x="259" y="91.5" class="t-edge-emphasis" font-size="10" text-anchor="middle">to-spec</text>
         </g>
-        <g data-detail="context" data-edge-from="blueprint_dag" data-edge-to="grilling" data-edge-label="autre tour" data-edge-key="1" data-edge-id="blueprint-to-grill">
-          <rect x="220.25" y="32" width="72" height="16" rx="4" class="c-mask"/>
-          <text x="256.25" y="43.5" class="t-muted" font-size="10" text-anchor="middle">autre tour</text>
+        <g data-detail="context" data-edge-from="spec" data-edge-to="grilling" data-edge-label="affiner" data-edge-key="1" data-edge-id="spec-to-grill">
+          <rect x="236" y="32" width="54" height="16" rx="4" class="c-mask"/>
+          <text x="263" y="43.5" class="t-muted" font-size="10" text-anchor="middle">affiner</text>
         </g>
-        <g data-detail="context" data-edge-from="blueprint_dag" data-edge-to="awaiting_approval" data-edge-label="DAG prêt" data-edge-key="2" data-edge-id="blueprint-to-awaiting">
-          <rect x="458" y="80" width="60" height="16" rx="4" class="c-mask"/>
-          <text x="488" y="91.5" class="t-edge-emphasis" font-size="10" text-anchor="middle">DAG prêt</text>
+        <g data-detail="context" data-edge-from="spec" data-edge-to="tickets" data-edge-label="to-tickets" data-edge-key="2" data-edge-id="spec-to-tickets">
+          <rect x="491" y="80" width="72" height="16" rx="4" class="c-mask"/>
+          <text x="527" y="91.5" class="t-edge-emphasis" font-size="10" text-anchor="middle">to-tickets</text>
         </g>
-        <g data-detail="context" data-edge-from="awaiting_approval" data-edge-to="implementation" data-edge-label="approuvé" data-edge-key="3" data-edge-id="awaiting-to-impl">
-          <rect x="725" y="80" width="60" height="16" rx="4" class="c-mask"/>
-          <text x="755" y="91.5" class="t-edge-security" font-size="10" text-anchor="middle">approuvé</text>
+        <g data-detail="context" data-edge-from="tickets" data-edge-to="implementation" data-edge-label="approve" data-edge-key="3" data-edge-id="tickets-to-impl">
+          <rect x="744" y="80" width="54" height="16" rx="4" class="c-mask"/>
+          <text x="771" y="91.5" class="t-edge-security" font-size="10" text-anchor="middle">approve</text>
         </g>
-        <g data-detail="context" data-edge-from="implementation" data-edge-to="completed" data-edge-label="DAG mergé" data-edge-key="4" data-edge-id="impl-to-completed">
-          <rect x="956" y="80" width="66" height="16" rx="4" class="c-mask"/>
-          <text x="989" y="91.5" class="t-edge-emphasis" font-size="10" text-anchor="middle">DAG mergé</text>
+        <g data-detail="context" data-edge-from="implementation" data-edge-to="completed" data-edge-label="audit ok" data-edge-key="4" data-edge-id="impl-to-completed">
+          <rect x="998" y="80" width="60" height="16" rx="4" class="c-mask"/>
+          <text x="1028" y="91.5" class="t-edge-emphasis" font-size="10" text-anchor="middle">audit ok</text>
         </g>
-        <g data-detail="context" data-edge-from="implementation" data-edge-to="failed" data-edge-label="&gt;3 essais" data-edge-key="5" data-edge-id="impl-to-failed">
-          <rect x="785.5" y="172" width="66" height="16" rx="4" class="c-mask"/>
-          <text x="818.5" y="183.5" class="t-edge-security" font-size="10" text-anchor="middle">&gt;3 essais</text>
+        <g data-detail="context" data-edge-from="implementation" data-edge-to="failed" data-edge-label="suspendre" data-edge-key="5" data-edge-id="impl-to-failed">
+          <rect x="813" y="172" width="66" height="16" rx="4" class="c-mask"/>
+          <text x="846" y="183.5" class="t-edge-security" font-size="10" text-anchor="middle">suspendre</text>
         </g>
-        <g data-detail="context" data-edge-from="failed" data-edge-to="implementation" data-edge-label="re-approve" data-edge-key="6" data-edge-id="failed-to-impl">
-          <rect x="889.5" y="172" width="72" height="16" rx="4" class="c-mask"/>
-          <text x="925.5" y="183.5" class="t-edge-emphasis" font-size="10" text-anchor="middle">re-approve</text>
+        <g data-detail="context" data-edge-from="failed" data-edge-to="implementation" data-edge-label="continue" data-edge-key="6" data-edge-id="failed-to-impl">
+          <rect x="917" y="172" width="60" height="16" rx="4" class="c-mask"/>
+          <text x="947" y="183.5" class="t-edge-emphasis" font-size="10" text-anchor="middle">continue</text>
         </g>
-        <g data-detail="context" data-edge-from="awaiting_approval" data-edge-to="cancelled" data-edge-label="annuler" data-edge-key="7" data-edge-id="awaiting-to-cancelled">
-          <rect x="561.5" y="172" width="54" height="16" rx="4" class="c-mask"/>
-          <text x="588.5" y="183.5" class="t-muted" font-size="10" text-anchor="middle">annuler</text>
+        <g data-detail="context" data-edge-from="tickets" data-edge-to="cancelled" data-edge-label="annuler" data-edge-key="7" data-edge-id="tickets-to-cancelled">
+          <rect x="593.5" y="172" width="54" height="16" rx="4" class="c-mask"/>
+          <text x="620.5" y="183.5" class="t-muted" font-size="10" text-anchor="middle">annuler</text>
         </g>
 
         <!-- Legend -->
@@ -5416,17 +5416,17 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
             <rect x="549" y="328" width="14" height="9" rx="2" class="c-backend" stroke-width="1"/>
             <text x="571" y="336" class="t-muted" font-size="10" font-weight="500">succès</text>
           </g>
-          <g data-legend-semantic-kind="failure" data-legend-kind="failure" data-legend-label="escalade / échec" data-legend-x="652" data-legend-baseline="336" data-legend-width="143">
+          <g data-legend-semantic-kind="failure" data-legend-kind="failure" data-legend-label="suspendu / escalade" data-legend-x="652" data-legend-baseline="336" data-legend-width="161">
             <rect x="652" y="328" width="14" height="9" rx="2" class="c-security" stroke-width="1"/>
-            <text x="674" y="336" class="t-muted" font-size="10" font-weight="500">escalade / échec</text>
+            <text x="674" y="336" class="t-muted" font-size="10" font-weight="500">suspendu / escalade</text>
           </g>
-          <g data-legend-semantic-kind="neutral" data-legend-kind="neutral" data-legend-label="annulé" data-legend-x="817" data-legend-baseline="336" data-legend-width="81">
-            <rect x="817" y="328" width="14" height="9" rx="2" class="c-external" stroke-width="1"/>
-            <text x="839" y="336" class="t-muted" font-size="10" font-weight="500">annulé</text>
+          <g data-legend-semantic-kind="neutral" data-legend-kind="neutral" data-legend-label="annulé" data-legend-x="835" data-legend-baseline="336" data-legend-width="81">
+            <rect x="835" y="328" width="14" height="9" rx="2" class="c-external" stroke-width="1"/>
+            <text x="857" y="336" class="t-muted" font-size="10" font-weight="500">annulé</text>
           </g>
-          <g data-legend-semantic-kind="final" data-legend-x="920" data-legend-baseline="336" data-legend-width="93">
-            <rect x="920" y="328" width="14" height="9" rx="2" class="c-external" stroke-width="1"/><rect x="922.5" y="330.5" width="9" height="4" rx="1" class="c-external" style="fill: none" stroke-width="0.8"/>
-            <text x="944" y="336" class="t-muted" font-size="10" font-weight="500">final state</text>
+          <g data-legend-semantic-kind="final" data-legend-x="938" data-legend-baseline="336" data-legend-width="93">
+            <rect x="938" y="328" width="14" height="9" rx="2" class="c-external" stroke-width="1"/><rect x="940.5" y="330.5" width="9" height="4" rx="1" class="c-external" style="fill: none" stroke-width="0.8"/>
+            <text x="962" y="336" class="t-muted" font-size="10" font-weight="500">final state</text>
           </g>
         </g>
       </svg>
@@ -5609,35 +5609,35 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
       <div class="card">
         <div class="card-header">
           <div class="card-dot cyan"></div>
-          <h3>Persistance CAS Hors-Branches</h3>
+          <h3>Phases Pilotées par Commandes &amp; Ref CAS</h3>
         </div>
         <ul>
-          <li>État stocké dans refs/epure/state/&lt;issue&gt; par git update-ref atomique</li>
-          <li>Zéro pollution de commits d&#39;état machine sur les branches dev et main</li>
-          <li>Synchronisé avec un tableau de bord Markdown en haut de l&#39;issue GitHub</li>
+          <li>État stocké dans refs/epure/state/&lt;issue&gt; par git update-ref atomique CAS</li>
+          <li>/epure plan + réponses implicites -&gt; /epure to-spec (GLOSSARY.md + ADR + docs/specs/* sur plan/*)</li>
+          <li>/epure to-tickets matérialise les relations natives GitHub sub_issues et blocked_by</li>
         </ul>
       </div>
 
       <div class="card">
         <div class="card-header">
           <div class="card-dot amber"></div>
-          <h3>Curseur de Lot &amp; Grill Implicite</h3>
+          <h3>Approbation, Sous-États CI Async &amp; Convergence</h3>
         </div>
         <ul>
-          <li>last_processed_comment_id traite tous les commentaires humains dans l&#39;ordre</li>
-          <li>Toute réponse humaine en phase grilling est acceptée sans commande slash</li>
-          <li>Les commandes facultatives /epure to-spec et to-tickets forcent la transition</li>
+          <li>/epure approve intègre plan/* -&gt; feature/* directement et verrouille spec_sha</li>
+          <li>Suit les sous-états implementing, waiting_ticket_ci et waiting_feature_ci</li>
+          <li>Supporte /epure sync (merge 3-voies dev) et la Phase 2 d&#39;EpicConvergenceAudit</li>
         </ul>
       </div>
 
       <div class="card">
         <div class="card-header">
           <div class="card-dot emerald"></div>
-          <h3>Reprise Idempotente</h3>
+          <h3>Reprise après Suspension &amp; Annulation</h3>
         </div>
         <ul>
-          <li>Reposter /epure approve après un échec précharge les fichiers déjà mergés sur feature/*</li>
-          <li>Les tickets déjà fermés du DAG sont automatiquement ignorés à la reprise</li>
+          <li>Une escalade ou &gt;3 échecs place l&#39;issue en état failed (suspended / needs-human)</li>
+          <li>/epure continue reprend de manière idempotente au ticket ou check CI actif</li>
           <li>/epure cancel fige l&#39;exécution tout en préservant les branches et traces d&#39;audit</li>
         </ul>
       </div>

@@ -50,18 +50,18 @@ A core principle of EPURE is transparency about **who decides** and **what runs 
 No agent can ever bypass these four decision points. They require an explicit action from a repository contributor with `write` or `admin` permission:
 
 1. **Gate 1 — Initiate & Answer the Grill (`/epure plan`)**: A maintainer triggers `/epure plan` on a GitHub Issue and answers the clarifying questions until the design frontier is settled.
-2. **Gate 2 — Sign the Implementation Mandate (`/epure approve`)**: After reviewing the generated spec and ticket DAG on `plan/<issue>-<slug>`, a maintainer comments `/epure approve`. This merges `plan/* -> dev`, locks `spec_sha` in `refs/epure/state/<issue>`, and opens `feature/<issue>-<slug>`.
-3. **Gate 3 — Human Integration Merge (`feature/* -> dev`)**: Once all tickets in the DAG are implemented, reviewed, and squashed into `feature/*`, EPURE opens the final synthesis PR `feature/* -> dev`. The `epure-dev-governance` ruleset **blocks** the Agent App from merging application code into `dev`: a human maintainer must click **Squash and merge**.
+2. **Gate 2 — Sign the Implementation Mandate (`/epure approve`)**: After reviewing the generated spec and ticket DAG on `plan/<issue>-<slug>`, a maintainer comments `/epure approve`. This directly integrates the `plan/*` artifacts into `feature/<issue>-<slug>` (with additive `GLOSSARY.md` merging and monotonic ADR renumbering, without an intermediate `plan/* -> dev` PR per ADR-0031), locks `spec_sha` in `refs/epure/state/<issue>`, and begins executing the ticket DAG.
+3. **Gate 3 — Human Integration Merge (`feature/* -> dev`)**: Once all tickets in the DAG are implemented, reviewed, and squashed into `feature/*` (and verified by `EpicConvergenceAudit`), EPURE opens the final synthesis PR `feature/* -> dev`. The `epure-dev-governance` ruleset **blocks** the Agent App from merging application code into `dev`: a human maintainer must click **Squash and merge**.
 4. **Gate 4 — Human Release Promotion (`dev -> main`)**: Promoting `dev` to `main` and publishing a `vX.Y.Z` tag requires a human to trigger the `release-promote.yml` workflow (`workflow_dispatch`).
 
 ### 2. <span class="epure-badge epure-badge--auto">Mandatory Automated Steps</span>
 
 Once a human gate is crossed, EPURE executes these steps deterministically on every feature:
 
-- **Blueprint & Ticket DAG Generation**: Commits `GLOSSARY.md`, `docs/adr/`, and `docs/specs/<slug>.md` on `plan/<issue>-<slug>`, and creates GitHub Issues for each atomic task with `blocked_by` dependencies and the `ready-for-agent` label.
-- **Secretless Sandbox TDD Loop**: For each unblocked ticket, implements tests and production code inside an isolated environment stripped of `LLM_API_KEY` and GitHub App private keys.
-- **Trusted `dev` Multi-Agent Review & AI Semantic Squash**: Runs up to 4 domain-specialized reviewers (loaded strictly from `dev`) plus `spec-parity-reviewer`. On approval (`0 must_fix`), synthesizes a Conventional Commit title/body (`Refs #<ticket>`) and squash-merges `task/* -> feature/*`.
-- **Final Synthesis PR Review**: Audits the consolidated diff on `feature/* -> dev` with `Closes #<issue>` and `Closes #<ticket>` trailer links.
+- **Blueprint, Goldfish Spec Audit & Ticket DAG Generation**: Runs the zero-context Goldfish specification audit (`runGoldfishSpecAudit`), commits `GLOSSARY.md`, `docs/adr/`, and `docs/specs/<slug>.md` (with `EpicGoalContract`) on `plan/<issue>-<slug>`, and creates GitHub Issues for each atomic task with native `sub_issues` and `blocked_by` dependencies and the `ready-for-agent` label.
+- **Secretless Kernel Sandbox TDD Loop**: For each unblocked ticket, applies incremental mutations (`write_repo_file`, `patch_repo_file`, `delete_repo_file`) and runs Stage 1 verification inside an isolated 2-phase Linux kernel sandbox (`landrun` / `bubblewrap`) stripped of `LLM_API_KEY` and GitHub App private keys.
+- **Event-Driven External CI, Trusted `dev` Multi-Agent Review & AI Semantic Squash**: Exits immediately while external CI runs (`waiting_ticket_ci`), resumes on `check_suite.completed` / `workflow_run.completed`, runs up to 4 domain-specialized reviewers (loaded strictly from `dev`) plus `spec-parity-reviewer`, and squash-merges `task/* -> feature/*` with a synthesized Conventional Commit title/body (`Refs #<ticket>`).
+- **Zero-Context `EpicConvergenceAudit` & Final Synthesis PR Review**: Runs `runEpicConvergenceAudit` on `feature/*` to ensure all `required_entrypoints` are wired and no `forbidden_stubs` remain (spawning Phase 2 convergence tickets if needed), then opens and audits the consolidated synthesis PR `feature/* -> dev` with `Closes #<issue>` and `Closes #<ticket>` trailer links.
 
 ### 3. <span class="epure-badge epure-badge--optional">Optional or Conditional Steps</span>
 
@@ -70,10 +70,12 @@ These steps run only when triggered by the nature of the change or by an explici
 - **Conditional UI & Impeccable Gate (automatic when UI exists)**: When the feature or diff touches frontend/UI files (`.vue`, `.tsx`, `.jsx`, `.css`, `.html`), EPURE automatically generates `DESIGN.md`, runs `user-advocate` in `design-gate` mode before `/epure approve`, and enforces `user-advocate` (`implementation-review`) + `impeccable-gate` as blocking checks on every PR. Pure backend/CLI changes skip these steps automatically.
 - **Optional Exploratory Prototype (`/prototype` & Isolated Pages Preview)**: When a layout or state interaction cannot be settled in prose during the Grill, a maintainer can request a throwaway prototype on `prototype/*`. Static GitHub Pages preview is **disabled by default** (`enable_pages_preview: false`) and requires explicit opt-in.
 - **Optional Granular Slash Commands**:
-  - `/epure to-spec`: Force immediate transition from Grill to specification generation.
-  - `/epure to-tickets`: Force ticket DAG creation from an existing specification.
+  - `/epure to-spec`: Validate the Grill frontier (or force early transition) to generate the specification on `plan/*`.
+  - `/epure to-tickets`: Validate the specification on `plan/*` and generate the native GitHub ticket DAG (`sub_issues` + `blocked_by`).
+  - `/epure continue`: Resume orchestration after a `needs-human` pause, manual fix, or external CI completion (`waiting_ticket_ci` / `waiting_feature_ci`).
+  - `/epure sync` (alias `/epure rebase`): Synchronize `dev -> feature/*` (and `feature/* -> task/*`) with 3-way conflict resolution and Stage 1 sandbox verification.
   - `/epure status`: Refresh and post the current orchestration state and ticket table.
-  - `/epure cancel`: Immediately halt orchestration and mark the mandate `cancelled` in `refs/epure/state/<issue>`.
+  - `/epure cancel` (alias `/epure stop`): Immediately halt orchestration and mark the mandate `cancelled` in `refs/epure/state/<issue>`.
 - **Conditional Human Escalation (`needs-human`)**: Triggered automatically if a `task/*` branch touches sensitive paths (`.github/workflows/**`, `.cursor/agents/**`, `CODEOWNERS`) without an approved exception, or if a ticket still fails after `max_code_fix_attempts = 3` remediation rounds.
 
 ---

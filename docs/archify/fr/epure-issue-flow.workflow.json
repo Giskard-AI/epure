@@ -3,13 +3,13 @@
   "diagram_type": "workflow",
   "meta": {
     "title": "Flux Global d'une Issue & PR EPURE (Portes Humaines, Obligatoire & Conditionnel)",
-    "subtitle": "Les 4 Portes de Validation Humaine Obligatoires, le Pipeline Automatisé Obligatoire et les Étapes Facultatives/Conditionnelles (Q101)",
+    "subtitle": "Phases pilotées (/epure plan -> to-spec -> to-tickets -> approve), sandbox 2-phases, CI asynchrone & EpicConvergenceAudit",
     "legend": {
       "entries": {
         "frontend": { "label": "Porte UI / Design" },
         "backend": { "label": "Orchestrateur EPURE" },
         "security": { "label": "Porte Humaine / Gouvernance" },
-        "external": { "label": "Contrôle Facultatif" }
+        "external": { "label": "Contrôle & Pilotage" }
       }
     },
     "visual_preset": "blueprint",
@@ -20,12 +20,12 @@
     { "id": "human_mandatory", "label": "Mainteneur — 4 Portes Humaines Obligatoires" },
     { "id": "auto_mandatory", "label": "Orchestrateur EPURE — Pipeline Obligatoire" },
     { "id": "ui_conditional", "label": "Porte Conditionnelle UI & Preview" },
-    { "id": "optional_escalation", "label": "Contrôles Facultatifs & Escalade Humaine", "variant": "exception" }
+    { "id": "optional_escalation", "label": "Contrôles de Pilotage & Escalade Humaine", "variant": "exception" }
   ],
   "phases": [
-    { "id": "clarify_phase", "label": "1. Grill & Épure", "fromCol": 0, "toCol": 1 },
-    { "id": "approve_exec", "label": "2. Mandat & TDD", "fromCol": 2, "toCol": 3, "variant": "emphasis" },
-    { "id": "integrate_release", "label": "3. Merge & Release", "fromCol": 4, "toCol": 5, "variant": "dashed" }
+    { "id": "clarify_phase", "label": "1. Grill, Spec & DAG", "fromCol": 0, "toCol": 1 },
+    { "id": "approve_exec", "label": "2. Mandat & TDD 3-Stages", "fromCol": 2, "toCol": 3, "variant": "emphasis" },
+    { "id": "integrate_release", "label": "3. Convergence & Release", "fromCol": 4, "toCol": 5, "variant": "dashed" }
   ],
   "mainPath": [
     "gate1_plan",
@@ -44,7 +44,7 @@
       "col": 0,
       "type": "security",
       "label": "Jalon 1: /epure plan",
-      "sublabel": "issue + Grill",
+      "sublabel": "Grill -> to-spec",
       "tag": "porte humaine",
       "width": 132
     },
@@ -54,8 +54,8 @@
       "col": 2,
       "type": "security",
       "label": "Jalon 2: Approuver",
-      "sublabel": "signe spec_sha",
-      "tag": "porte humaine",
+      "sublabel": "plan/* -> feature/*",
+      "tag": "verrou spec_sha",
       "width": 132
     },
     {
@@ -83,9 +83,9 @@
       "lane": "auto_mandatory",
       "col": 1,
       "type": "backend",
-      "label": "Plan & Tickets",
-      "sublabel": "ADR + Spec + DAG",
-      "tag": "auto requis",
+      "label": "Spec & Tickets",
+      "sublabel": "sub_issues + blocked_by",
+      "tag": "to-tickets",
       "width": 132
     },
     {
@@ -93,9 +93,9 @@
       "lane": "auto_mandatory",
       "col": 2,
       "type": "backend",
-      "label": "TDD Sandbox",
-      "sublabel": "tsc + vitest",
-      "tag": "auto requis",
+      "label": "Sandbox 2-Phases",
+      "sublabel": "bwrap/landrun + rtk",
+      "tag": "pause CI async",
       "width": 132
     },
     {
@@ -103,9 +103,9 @@
       "lane": "auto_mandatory",
       "col": 3,
       "type": "backend",
-      "label": "Revue Multi-Agents",
-      "sublabel": "squash task/*",
-      "tag": "auto requis",
+      "label": "Stage 3 & Audit",
+      "sublabel": "squash + Convergence",
+      "tag": "Phase 2 si écart",
       "width": 132
     },
     {
@@ -143,9 +143,9 @@
       "lane": "optional_escalation",
       "col": 0,
       "type": "external",
-      "label": "Commandes Option.",
-      "sublabel": "/prototype, status",
-      "tag": "facultatif",
+      "label": "Commandes Pilotage",
+      "sublabel": "continue, sync, cancel",
+      "tag": "to-spec / status",
       "width": 132
     },
     {
@@ -154,23 +154,23 @@
       "col": 3,
       "type": "security",
       "label": "Escalade Humaine",
-      "sublabel": ">3 essais / sensible",
+      "sublabel": "suspendu -> continue",
       "tag": "conditionnel",
       "width": 132
     }
   ],
   "edges": [
-    { "id": "plan-to-blueprint", "from": "gate1_plan", "to": "gen_blueprint", "label": "clarifié", "variant": "emphasis" },
-    { "id": "blueprint-to-approve", "from": "gen_blueprint", "to": "gate2_approve", "label": "prêt", "variant": "security", "fromSide": "top", "toSide": "left" },
-    { "id": "approve-to-tdd", "from": "gate2_approve", "to": "tdd_sandbox", "label": "approuvé", "variant": "emphasis" },
-    { "id": "tdd-to-review", "from": "tdd_sandbox", "to": "review_squash", "label": "tests ok", "variant": "default" },
-    { "id": "review-to-final-pr", "from": "review_squash", "to": "final_feature_pr", "label": "DAG clos", "variant": "emphasis" },
+    { "id": "plan-to-blueprint", "from": "gate1_plan", "to": "gen_blueprint", "label": "to-spec", "variant": "emphasis" },
+    { "id": "blueprint-to-approve", "from": "gen_blueprint", "to": "gate2_approve", "label": "to-tickets", "variant": "security", "fromSide": "top", "toSide": "left" },
+    { "id": "approve-to-tdd", "from": "gate2_approve", "to": "tdd_sandbox", "label": "plan->feature", "variant": "emphasis" },
+    { "id": "tdd-to-review", "from": "tdd_sandbox", "to": "review_squash", "label": "CI async", "variant": "default" },
+    { "id": "review-to-final-pr", "from": "review_squash", "to": "final_feature_pr", "label": "convergé", "variant": "emphasis" },
     { "id": "final-pr-to-gate3", "from": "final_feature_pr", "to": "gate3_merge_dev", "label": "vérifié", "variant": "security" },
     { "id": "gate3-to-gate4", "from": "gate3_merge_dev", "to": "gate4_release", "label": "promouvoir", "variant": "emphasis" },
     { "id": "blueprint-to-ui-design", "from": "gen_blueprint", "to": "ui_design_gate", "label": "si UI", "variant": "dashed", "role": "branch" },
     { "id": "ui-design-to-impeccable", "from": "ui_design_gate", "to": "ui_impeccable_gate", "label": "tokens", "variant": "dashed" },
     { "id": "impeccable-to-review", "from": "ui_impeccable_gate", "to": "review_squash", "label": "check UI", "variant": "dashed", "fromSide": "top", "toSide": "bottom" },
-    { "id": "opt-to-ui-design", "from": "opt_commands", "to": "ui_design_gate", "label": "prototype", "variant": "dashed", "role": "branch" },
+    { "id": "opt-to-ui-design", "from": "opt_commands", "to": "ui_design_gate", "label": "pilotage", "variant": "dashed", "role": "branch" },
     { "id": "impeccable-to-escalation", "from": "ui_impeccable_gate", "to": "needs_human", "label": ">3 essais", "variant": "security", "role": "error" }
   ],
   "cards": [
@@ -178,28 +178,28 @@
       "dot": "amber",
       "title": "1. Portes Humaines Obligatoires (4)",
       "items": [
-        "Jalon 1 : /epure plan & réponses au Grill par un contributeur write+",
-        "Jalon 2 : /epure approve signe le mandat immuable spec_sha",
+        "Jalon 1 : /epure plan -> réponses Grill -> /epure to-spec -> /epure to-tickets",
+        "Jalon 2 : /epure approve fusionne plan/* -> feature/* directement et signe spec_sha",
         "Jalon 3 : Squash-merge humain de feature/* -> dev (Agent App interdit)",
-        "Jalon 4 : Workflow manuel release-promote (fast-forward dev -> main)"
+        "Jalon 4 : Dispatch manuel release.yml (fast-forward dev -> main dans env: release)"
       ]
     },
     {
       "dot": "cyan",
-      "title": "2. Étapes Automatisées Obligatoires",
+      "title": "2. Pipeline Automatisé Obligatoire",
       "items": [
-        "Génération GLOSSARY.md, ADRs, Spec & DAG de tickets sur plan/*",
-        "Boucle TDD en sandbox sans secret (tsc + vitest) sur task/*",
-        "Revue multi-agents depuis dev + squash sémantique IA vers feature/*"
+        "Génère GLOSSARY.md, ADRs & Spec sur plan/* + sub_issues & blocked_by natifs GitHub",
+        "TDD en sandbox noyau 2-phases (bwrap/landrun + rtk) + attente CI événementielle",
+        "Stage 3 revue dev + squash sémantique IA + EpicConvergenceAudit avant PR feature/* -> dev"
       ]
     },
     {
       "dot": "emerald",
-      "title": "3. Étapes Facultatives & Conditionnelles",
+      "title": "3. Pilotage, Sync & Reprise d'Escalade",
       "items": [
-        "Conditionnel UI : DESIGN.md, user-advocate & impeccable-gate si UI présente",
-        "Facultatif : détour /prototype, preview Pages isolée, /epure to-spec, status, cancel",
-        "Escalade : needs-human sur chemin sensible ou après 3 échecs de correction"
+        "Conditionnel UI : DESIGN.md, user-advocate & impeccable-gate si fichiers UI touchés",
+        "Commandes : /epure continue (reprise DAG/CI suspendu), /epure sync (merge 3-voies dev), status, cancel",
+        "Escalade : passe en état suspendu needs-human après >3 essais ou chemin sensible"
       ]
     }
   ]

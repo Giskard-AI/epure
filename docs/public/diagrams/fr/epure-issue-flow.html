@@ -5196,7 +5196,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <div class="pulse-dot"></div>
         <h1>Flux Global d&#39;une Issue &amp; PR EPURE (Portes Humaines, Obligatoire &amp; Conditionnel)</h1>
       </div>
-      <p class="subtitle">Les 4 Portes de Validation Humaine Obligatoires, le Pipeline Automatisé Obligatoire et les Étapes Facultatives/Conditionnelles (Q101)</p>
+      <p class="subtitle">Phases pilotées (/epure plan -&gt; to-spec -&gt; to-tickets -&gt; approve), sandbox 2-phases, CI asynchrone &amp; EpicConvergenceAudit</p>
     </div>
 
 
@@ -5206,7 +5206,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
          data-preset-badge-editorial-plate="ARCHIFY / PLATE 04">
       <svg viewBox="0 0 1177 660" data-layout-contract="readable-v2" role="img" lang="en" aria-labelledby="archify-diagram-title archify-diagram-description" data-animation="trace" data-preset="blueprint" data-quality-profile="showcase" data-node-ui="">
         <title id="archify-diagram-title">Flux Global d&#39;une Issue &amp; PR EPURE (Portes Humaines, Obligatoire &amp; Conditionnel)</title>
-        <desc id="archify-diagram-description">Les 4 Portes de Validation Humaine Obligatoires, le Pipeline Automatisé Obligatoire et les Étapes Facultatives/Conditionnelles (Q101)</desc>
+        <desc id="archify-diagram-description">Phases pilotées (/epure plan -&gt; to-spec -&gt; to-tickets -&gt; approve), sandbox 2-phases, CI asynchrone &amp; EpicConvergenceAudit</desc>
         <!-- Definitions -->
         <defs>
           <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
@@ -5262,39 +5262,39 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
 
         <rect data-graph-role="structural-frame" data-composition-frame-kind="lane" data-composition-frame-id="lane-3" x="40" y="430" width="1121" height="106" rx="10" class="c-lane" stroke-width="1"/>
         <rect data-graph-role="structural-frame" data-composition-frame-kind="exception-lane" data-composition-frame-id="lane-3-exception" x="46" y="436" width="1109" height="94" rx="8" class="c-security-group" stroke-width="1"/>
-        <text x="54" y="452" class="t-security" font-size="10" font-weight="600">EX / Contrôles Facultatifs &amp; Escalade Humaine</text>
+        <text x="54" y="452" class="t-security" font-size="10" font-weight="600">EX / Contrôles de Pilotage &amp; Escalade Humaine</text>
 
         <!-- Phase headers -->
         <path d="M 189.40000000000003 35 H 385.40000000000003" class="a-default phase-rule" stroke-width="1" stroke-linecap="round" fill="none"/>
-        <rect x="239.00000000000003" y="27" width="96.8" height="16" rx="8" class="c-mask phase-chip"/>
-        <text x="287.40000000000003" y="38.5" class="t-muted" font-size="8" font-weight="600" text-anchor="middle" letter-spacing=".04em">1. Grill &amp; Épure</text>
+        <rect x="229.40000000000003" y="27" width="116" height="16" rx="8" class="c-mask phase-chip"/>
+        <text x="287.40000000000003" y="38.5" class="t-muted" font-size="8" font-weight="600" text-anchor="middle" letter-spacing=".04em">1. Grill, Spec &amp; DAG</text>
         <path d="M 473.4000000000001 35 H 737.8" class="a-emphasis phase-rule" stroke-width="1" stroke-linecap="round" fill="none"/>
-        <rect x="559.6" y="27" width="92" height="16" rx="8" class="c-mask phase-chip"/>
-        <text x="605.6" y="38.5" class="t-backend" font-size="8" font-weight="600" text-anchor="middle" letter-spacing=".04em">2. Mandat &amp; TDD</text>
+        <rect x="538" y="27" width="135.2" height="16" rx="8" class="c-mask phase-chip"/>
+        <text x="605.6" y="38.5" class="t-backend" font-size="8" font-weight="600" text-anchor="middle" letter-spacing=".04em">2. Mandat &amp; TDD 3-Stages</text>
         <path d="M 850.2 35 H 1124.2" class="a-dashed phase-rule" stroke-width="1" stroke-linecap="round" fill="none"/>
-        <rect x="934" y="27" width="106.39999999999999" height="16" rx="8" class="c-mask phase-chip"/>
-        <text x="987.2" y="38.5" class="t-messagebus" font-size="8" font-weight="600" text-anchor="middle" letter-spacing=".04em">3. Merge &amp; Release</text>
+        <rect x="919.6" y="27" width="135.2" height="16" rx="8" class="c-mask phase-chip"/>
+        <text x="987.2" y="38.5" class="t-messagebus" font-size="8" font-weight="600" text-anchor="middle" letter-spacing=".04em">3. Convergence &amp; Release</text>
 
         <!-- Workflow groups -->
 
 
         <!-- Edge paths -->
-        <path data-edge-from="gate2_approve" data-edge-to="tdd_sandbox" data-edge-label="approuvé" data-edge-key="0" data-edge-id="approve-to-tdd" data-composition-routing="workflow-v2-auto" data-edge-role="" data-composition-points="511.40000000000003,154;511.40000000000003,212" d="M 511.40000000000003 154 L 511.40000000000003 212" class="a-emphasis" data-animate="edge" style="--step:2" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="gen_blueprint" data-edge-to="gate2_approve" data-edge-label="prêt" data-edge-key="1" data-edge-id="blueprint-to-approve" data-edge-role="" data-composition-points="347.40000000000003,212;347.40000000000003,120;445.40000000000003,120" d="M 347.40000000000003 212 L 347.40000000000003 128 Q 347.40000000000003 120 355.40000000000003 120 L 445.40000000000003 120" class="a-security" data-animate="edge" style="--step:1" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
+        <path data-edge-from="gate2_approve" data-edge-to="tdd_sandbox" data-edge-label="plan-&gt;feature" data-edge-key="0" data-edge-id="approve-to-tdd" data-composition-routing="workflow-v2-auto" data-edge-role="" data-composition-points="511.40000000000003,154;511.40000000000003,212" d="M 511.40000000000003 154 L 511.40000000000003 212" class="a-emphasis" data-animate="edge" style="--step:2" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="gen_blueprint" data-edge-to="gate2_approve" data-edge-label="to-tickets" data-edge-key="1" data-edge-id="blueprint-to-approve" data-edge-role="" data-composition-points="347.40000000000003,212;347.40000000000003,120;445.40000000000003,120" d="M 347.40000000000003 212 L 347.40000000000003 128 Q 347.40000000000003 120 355.40000000000003 120 L 445.40000000000003 120" class="a-security" data-animate="edge" style="--step:1" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
         <path data-edge-from="gen_blueprint" data-edge-to="ui_design_gate" data-edge-label="si UI" data-edge-key="2" data-edge-id="blueprint-to-ui-design" data-composition-routing="workflow-v2-auto" data-edge-role="branch" data-composition-points="347.40000000000003,280;347.40000000000003,338" d="M 347.40000000000003 280 L 347.40000000000003 338" class="a-dashed" data-animate="edge" style="--step:10" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
         <path data-edge-from="final_feature_pr" data-edge-to="gate3_merge_dev" data-edge-label="vérifié" data-edge-key="3" data-edge-id="final-pr-to-gate3" data-composition-routing="workflow-v2-auto" data-edge-role="" data-composition-points="888.2,212;888.2,154" d="M 888.2 212 L 888.2 154" class="a-security" data-animate="edge" style="--step:5" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
         <path data-edge-from="gate3_merge_dev" data-edge-to="gate4_release" data-edge-label="promouvoir" data-edge-key="4" data-edge-id="gate3-to-gate4" data-composition-routing="workflow-v2-auto" data-edge-role="" data-composition-points="954.2,120;1020.2,120" d="M 954.2 120 L 1020.2 120" class="a-emphasis" data-animate="edge" style="--step:6" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
         <path data-edge-from="ui_impeccable_gate" data-edge-to="needs_human" data-edge-label="&gt;3 essais" data-edge-key="5" data-edge-id="impeccable-to-escalation" data-composition-routing="workflow-v2-auto" data-edge-role="error" data-composition-points="699.8,406;699.8,464" d="M 699.8 406 L 699.8 464" class="a-security" data-animate="edge" style="--step:12" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
         <path data-edge-from="ui_impeccable_gate" data-edge-to="review_squash" data-edge-label="check UI" data-edge-key="6" data-edge-id="impeccable-to-review" data-edge-role="" data-composition-points="699.8,338;699.8,280" d="M 699.8 338 L 699.8 280" class="a-dashed" data-animate="edge" style="--step:12" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
-        <path data-edge-from="opt_commands" data-edge-to="ui_design_gate" data-edge-label="prototype" data-edge-key="7" data-edge-id="opt-to-ui-design" data-composition-routing="workflow-v2-auto" data-edge-role="branch" data-composition-points="293.40000000000003,498;347.40000000000003,498;347.40000000000003,406" d="M 293.40000000000003 498 L 339.40000000000003 498 Q 347.40000000000003 498 347.40000000000003 490 L 347.40000000000003 406" class="a-dashed" data-animate="edge" style="--step:12" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
-        <path data-edge-from="gate1_plan" data-edge-to="gen_blueprint" data-edge-label="clarifié" data-edge-key="8" data-edge-id="plan-to-blueprint" data-composition-routing="workflow-v2-auto" data-edge-role="" data-composition-points="161.40000000000003,120;20,120;20,246;281.40000000000003,246" d="M 161.40000000000003 120 L 28 120 Q 20 120 20 128 L 20 238 Q 20 246 28 246 L 281.40000000000003 246" class="a-emphasis" data-animate="edge" style="--step:0" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="review_squash" data-edge-to="final_feature_pr" data-edge-label="DAG clos" data-edge-key="9" data-edge-id="review-to-final-pr" data-composition-routing="workflow-v2-auto" data-edge-role="" data-composition-points="765.8,246;822.2,246" d="M 765.8 246 L 822.2 246" class="a-emphasis" data-animate="edge" style="--step:4" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="tdd_sandbox" data-edge-to="review_squash" data-edge-label="tests ok" data-edge-key="10" data-edge-id="tdd-to-review" data-composition-routing="workflow-v2-auto" data-edge-role="" data-composition-points="577.4000000000001,246;633.8,246" d="M 577.4000000000001 246 L 633.8 246" class="a-default" data-animate="edge" style="--step:3" stroke-width="1.4" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="opt_commands" data-edge-to="ui_design_gate" data-edge-label="pilotage" data-edge-key="7" data-edge-id="opt-to-ui-design" data-composition-routing="workflow-v2-auto" data-edge-role="branch" data-composition-points="293.40000000000003,498;347.40000000000003,498;347.40000000000003,406" d="M 293.40000000000003 498 L 339.40000000000003 498 Q 347.40000000000003 498 347.40000000000003 490 L 347.40000000000003 406" class="a-dashed" data-animate="edge" style="--step:12" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="gate1_plan" data-edge-to="gen_blueprint" data-edge-label="to-spec" data-edge-key="8" data-edge-id="plan-to-blueprint" data-composition-routing="workflow-v2-auto" data-edge-role="" data-composition-points="161.40000000000003,120;20,120;20,246;281.40000000000003,246" d="M 161.40000000000003 120 L 28 120 Q 20 120 20 128 L 20 238 Q 20 246 28 246 L 281.40000000000003 246" class="a-emphasis" data-animate="edge" style="--step:0" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="review_squash" data-edge-to="final_feature_pr" data-edge-label="convergé" data-edge-key="9" data-edge-id="review-to-final-pr" data-composition-routing="workflow-v2-auto" data-edge-role="" data-composition-points="765.8,246;822.2,246" d="M 765.8 246 L 822.2 246" class="a-emphasis" data-animate="edge" style="--step:4" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="tdd_sandbox" data-edge-to="review_squash" data-edge-label="CI async" data-edge-key="10" data-edge-id="tdd-to-review" data-composition-routing="workflow-v2-auto" data-edge-role="" data-composition-points="577.4000000000001,246;633.8,246" d="M 577.4000000000001 246 L 633.8 246" class="a-default" data-animate="edge" style="--step:3" stroke-width="1.4" marker-end="url(#arrowhead)"/>
         <path data-edge-from="ui_design_gate" data-edge-to="ui_impeccable_gate" data-edge-label="tokens" data-edge-key="11" data-edge-id="ui-design-to-impeccable" data-composition-routing="workflow-v2-auto" data-edge-role="" data-composition-points="413.40000000000003,372;633.8,372" d="M 413.40000000000003 372 L 633.8 372" class="a-dashed" data-animate="edge" style="--step:12" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
 
         <!-- Nodes -->
-        <g id="node-gate1_plan" data-node-id="gate1_plan" data-node-label="Jalon 1: /epure plan" tabindex="0" role="button" aria-label="Focus Jalon 1: /epure plan, issue + Grill, Mainteneur — 4 Portes Humaines Obligatoires › 1. Grill &amp; Épure" aria-pressed="false" data-node-kind="security" data-node-sublabel="issue + Grill" data-node-tag="porte humaine" data-node-context="Mainteneur — 4 Portes Humaines Obligatoires › 1. Grill &amp; Épure">
-          <title>Jalon 1: /epure plan · issue + Grill · Mainteneur — 4 Portes Humaines Obligatoires › 1. Grill &amp; Épure · porte humaine</title>
+        <g id="node-gate1_plan" data-node-id="gate1_plan" data-node-label="Jalon 1: /epure plan" tabindex="0" role="button" aria-label="Focus Jalon 1: /epure plan, Grill -&gt; to-spec, Mainteneur — 4 Portes Humaines Obligatoires › 1. Grill, Spec &amp; DAG" aria-pressed="false" data-node-kind="security" data-node-sublabel="Grill -&gt; to-spec" data-node-tag="porte humaine" data-node-context="Mainteneur — 4 Portes Humaines Obligatoires › 1. Grill, Spec &amp; DAG">
+          <title>Jalon 1: /epure plan · Grill -&gt; to-spec · Mainteneur — 4 Portes Humaines Obligatoires › 1. Grill, Spec &amp; DAG · porte humaine</title>
           <rect x="161.40000000000003" y="86" width="132" height="68" rx="8" class="c-mask"/>
           <rect x="161.40000000000003" y="86" width="132" height="68" rx="8" class="c-security" data-animate="node" style="--step:0" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(167.40000000000003 92) scale(0.6875)">
@@ -5302,12 +5302,12 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
             <path d="m5.8 8 1.5 1.5 3-3"/>
           </g>
           <text data-node-label="" data-detail-anchor="" x="227.40000000000003" y="117.4" class="t-primary" font-size="10.3" font-weight="600" text-anchor="middle">Jalon 1: /epure plan</text>
-          <text data-detail="context" x="227.40000000000003" y="132.1" class="t-muted" font-size="8" text-anchor="middle">issue + Grill</text>
+          <text data-detail="context" x="227.40000000000003" y="132.1" class="t-muted" font-size="8" text-anchor="middle">Grill -&gt; to-spec</text>
         <text data-detail="fine" x="227.40000000000003" y="144.9" class="t-security" font-size="7" text-anchor="middle">porte humaine</text>
         </g>
 
-        <g id="node-gate2_approve" data-node-id="gate2_approve" data-node-label="Jalon 2: Approuver" tabindex="0" role="button" aria-label="Focus Jalon 2: Approuver, signe spec_sha, Mainteneur — 4 Portes Humaines Obligatoires › 2. Mandat &amp; TDD" aria-pressed="false" data-node-kind="security" data-node-sublabel="signe spec_sha" data-node-tag="porte humaine" data-node-context="Mainteneur — 4 Portes Humaines Obligatoires › 2. Mandat &amp; TDD">
-          <title>Jalon 2: Approuver · signe spec_sha · Mainteneur — 4 Portes Humaines Obligatoires › 2. Mandat &amp; TDD · porte humaine</title>
+        <g id="node-gate2_approve" data-node-id="gate2_approve" data-node-label="Jalon 2: Approuver" tabindex="0" role="button" aria-label="Focus Jalon 2: Approuver, plan/* -&gt; feature/*, Mainteneur — 4 Portes Humaines Obligatoires › 2. Mandat &amp; TDD 3-Stages" aria-pressed="false" data-node-kind="security" data-node-sublabel="plan/* -&gt; feature/*" data-node-tag="verrou spec_sha" data-node-context="Mainteneur — 4 Portes Humaines Obligatoires › 2. Mandat &amp; TDD 3-Stages">
+          <title>Jalon 2: Approuver · plan/* -&gt; feature/* · Mainteneur — 4 Portes Humaines Obligatoires › 2. Mandat &amp; TDD 3-Stages · verrou spec_sha</title>
           <rect x="445.40000000000003" y="86" width="132" height="68" rx="8" class="c-mask"/>
           <rect x="445.40000000000003" y="86" width="132" height="68" rx="8" class="c-security" data-animate="node" style="--step:2" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(451.40000000000003 92) scale(0.6875)">
@@ -5315,12 +5315,12 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
             <path d="m5.8 8 1.5 1.5 3-3"/>
           </g>
           <text data-node-label="" data-detail-anchor="" x="511.40000000000003" y="118.2" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Jalon 2: Approuver</text>
-          <text data-detail="context" x="511.40000000000003" y="133.1" class="t-muted" font-size="8" text-anchor="middle">signe spec_sha</text>
-        <text data-detail="fine" x="511.40000000000003" y="145.9" class="t-security" font-size="7" text-anchor="middle">porte humaine</text>
+          <text data-detail="context" x="511.40000000000003" y="133.1" class="t-muted" font-size="8" text-anchor="middle">plan/* -&gt; feature/*</text>
+        <text data-detail="fine" x="511.40000000000003" y="145.9" class="t-security" font-size="7" text-anchor="middle">verrou spec_sha</text>
         </g>
 
-        <g id="node-gate3_merge_dev" data-node-id="gate3_merge_dev" data-node-label="Jalon 3: Merge dev" tabindex="0" role="button" aria-label="Focus Jalon 3: Merge dev, merge PR humain, Mainteneur — 4 Portes Humaines Obligatoires › 3. Merge &amp; Release" aria-pressed="false" data-node-kind="security" data-node-sublabel="merge PR humain" data-node-tag="porte humaine" data-node-context="Mainteneur — 4 Portes Humaines Obligatoires › 3. Merge &amp; Release">
-          <title>Jalon 3: Merge dev · merge PR humain · Mainteneur — 4 Portes Humaines Obligatoires › 3. Merge &amp; Release · porte humaine</title>
+        <g id="node-gate3_merge_dev" data-node-id="gate3_merge_dev" data-node-label="Jalon 3: Merge dev" tabindex="0" role="button" aria-label="Focus Jalon 3: Merge dev, merge PR humain, Mainteneur — 4 Portes Humaines Obligatoires › 3. Convergence &amp; Release" aria-pressed="false" data-node-kind="security" data-node-sublabel="merge PR humain" data-node-tag="porte humaine" data-node-context="Mainteneur — 4 Portes Humaines Obligatoires › 3. Convergence &amp; Release">
+          <title>Jalon 3: Merge dev · merge PR humain · Mainteneur — 4 Portes Humaines Obligatoires › 3. Convergence &amp; Release · porte humaine</title>
           <rect x="822.2" y="86" width="132" height="68" rx="8" class="c-mask"/>
           <rect x="822.2" y="86" width="132" height="68" rx="8" class="c-security" data-animate="node" style="--step:6" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(828.2 92) scale(0.6875)">
@@ -5332,8 +5332,8 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <text data-detail="fine" x="888.2" y="145.9" class="t-security" font-size="7" text-anchor="middle">porte humaine</text>
         </g>
 
-        <g id="node-gate4_release" data-node-id="gate4_release" data-node-label="Jalon 4: Release" tabindex="0" role="button" aria-label="Focus Jalon 4: Release, dev -&gt; main, Mainteneur — 4 Portes Humaines Obligatoires › 3. Merge &amp; Release" aria-pressed="false" data-node-kind="security" data-node-sublabel="dev -&gt; main" data-node-tag="porte humaine" data-node-context="Mainteneur — 4 Portes Humaines Obligatoires › 3. Merge &amp; Release">
-          <title>Jalon 4: Release · dev -&gt; main · Mainteneur — 4 Portes Humaines Obligatoires › 3. Merge &amp; Release · porte humaine</title>
+        <g id="node-gate4_release" data-node-id="gate4_release" data-node-label="Jalon 4: Release" tabindex="0" role="button" aria-label="Focus Jalon 4: Release, dev -&gt; main, Mainteneur — 4 Portes Humaines Obligatoires › 3. Convergence &amp; Release" aria-pressed="false" data-node-kind="security" data-node-sublabel="dev -&gt; main" data-node-tag="porte humaine" data-node-context="Mainteneur — 4 Portes Humaines Obligatoires › 3. Convergence &amp; Release">
+          <title>Jalon 4: Release · dev -&gt; main · Mainteneur — 4 Portes Humaines Obligatoires › 3. Convergence &amp; Release · porte humaine</title>
           <rect x="1020.2" y="86" width="132" height="68" rx="8" class="c-mask"/>
           <rect x="1020.2" y="86" width="132" height="68" rx="8" class="c-security" data-animate="node" style="--step:7" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(1026.2 92) scale(0.6875)">
@@ -5345,44 +5345,44 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <text data-detail="fine" x="1086.2" y="142" class="t-security" font-size="7" text-anchor="middle">porte humaine</text>
         </g>
 
-        <g id="node-gen_blueprint" data-node-id="gen_blueprint" data-node-label="Plan &amp; Tickets" tabindex="0" role="button" aria-label="Focus Plan &amp; Tickets, ADR + Spec + DAG, Orchestrateur EPURE — Pipeline Obligatoire › 1. Grill &amp; Épure" aria-pressed="false" data-node-kind="backend" data-node-sublabel="ADR + Spec + DAG" data-node-tag="auto requis" data-node-context="Orchestrateur EPURE — Pipeline Obligatoire › 1. Grill &amp; Épure">
-          <title>Plan &amp; Tickets · ADR + Spec + DAG · Orchestrateur EPURE — Pipeline Obligatoire › 1. Grill &amp; Épure · auto requis</title>
+        <g id="node-gen_blueprint" data-node-id="gen_blueprint" data-node-label="Spec &amp; Tickets" tabindex="0" role="button" aria-label="Focus Spec &amp; Tickets, sub_issues + blocked_by, Orchestrateur EPURE — Pipeline Obligatoire › 1. Grill, Spec &amp; DAG" aria-pressed="false" data-node-kind="backend" data-node-sublabel="sub_issues + blocked_by" data-node-tag="to-tickets" data-node-context="Orchestrateur EPURE — Pipeline Obligatoire › 1. Grill, Spec &amp; DAG">
+          <title>Spec &amp; Tickets · sub_issues + blocked_by · Orchestrateur EPURE — Pipeline Obligatoire › 1. Grill, Spec &amp; DAG · to-tickets</title>
           <rect x="281.40000000000003" y="212" width="132" height="68" rx="8" class="c-mask"/>
           <rect x="281.40000000000003" y="212" width="132" height="68" rx="8" class="c-backend" data-animate="node" style="--step:1" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(287.40000000000003 218) scale(0.6875)">
             <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="347.40000000000003" y="233" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Plan &amp; Tickets</text>
-          <text data-detail="context" x="347.40000000000003" y="250" class="t-muted" font-size="8" text-anchor="middle">ADR + Spec + DAG</text>
-        <text data-detail="fine" x="347.40000000000003" y="268" class="t-backend" font-size="7" text-anchor="middle">auto requis</text>
+          <text data-node-label="" data-detail-anchor="" x="347.40000000000003" y="233" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Spec &amp; Tickets</text>
+          <text data-detail="context" x="347.40000000000003" y="250" class="t-muted" font-size="8" text-anchor="middle">sub_issues + blocked_by</text>
+        <text data-detail="fine" x="347.40000000000003" y="268" class="t-backend" font-size="7" text-anchor="middle">to-tickets</text>
         </g>
 
-        <g id="node-tdd_sandbox" data-node-id="tdd_sandbox" data-node-label="TDD Sandbox" tabindex="0" role="button" aria-label="Focus TDD Sandbox, tsc + vitest, Orchestrateur EPURE — Pipeline Obligatoire › 2. Mandat &amp; TDD" aria-pressed="false" data-node-kind="backend" data-node-sublabel="tsc + vitest" data-node-tag="auto requis" data-node-context="Orchestrateur EPURE — Pipeline Obligatoire › 2. Mandat &amp; TDD">
-          <title>TDD Sandbox · tsc + vitest · Orchestrateur EPURE — Pipeline Obligatoire › 2. Mandat &amp; TDD · auto requis</title>
+        <g id="node-tdd_sandbox" data-node-id="tdd_sandbox" data-node-label="Sandbox 2-Phases" tabindex="0" role="button" aria-label="Focus Sandbox 2-Phases, bwrap/landrun + rtk, Orchestrateur EPURE — Pipeline Obligatoire › 2. Mandat &amp; TDD 3-Stages" aria-pressed="false" data-node-kind="backend" data-node-sublabel="bwrap/landrun + rtk" data-node-tag="pause CI async" data-node-context="Orchestrateur EPURE — Pipeline Obligatoire › 2. Mandat &amp; TDD 3-Stages">
+          <title>Sandbox 2-Phases · bwrap/landrun + rtk · Orchestrateur EPURE — Pipeline Obligatoire › 2. Mandat &amp; TDD 3-Stages · pause CI async</title>
           <rect x="445.40000000000003" y="212" width="132" height="68" rx="8" class="c-mask"/>
           <rect x="445.40000000000003" y="212" width="132" height="68" rx="8" class="c-backend" data-animate="node" style="--step:3" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(451.40000000000003 218) scale(0.6875)">
             <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="511.40000000000003" y="233" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">TDD Sandbox</text>
-          <text data-detail="context" x="511.40000000000003" y="250" class="t-muted" font-size="8" text-anchor="middle">tsc + vitest</text>
-        <text data-detail="fine" x="511.40000000000003" y="268" class="t-backend" font-size="7" text-anchor="middle">auto requis</text>
+          <text data-node-label="" data-detail-anchor="" x="517.2" y="233" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Sandbox 2-Phases</text>
+          <text data-detail="context" x="511.40000000000003" y="250" class="t-muted" font-size="8" text-anchor="middle">bwrap/landrun + rtk</text>
+        <text data-detail="fine" x="511.40000000000003" y="268" class="t-backend" font-size="7" text-anchor="middle">pause CI async</text>
         </g>
 
-        <g id="node-review_squash" data-node-id="review_squash" data-node-label="Revue Multi-Agents" tabindex="0" role="button" aria-label="Focus Revue Multi-Agents, squash task/*, Orchestrateur EPURE — Pipeline Obligatoire › 2. Mandat &amp; TDD" aria-pressed="false" data-node-kind="backend" data-node-sublabel="squash task/*" data-node-tag="auto requis" data-node-context="Orchestrateur EPURE — Pipeline Obligatoire › 2. Mandat &amp; TDD">
-          <title>Revue Multi-Agents · squash task/* · Orchestrateur EPURE — Pipeline Obligatoire › 2. Mandat &amp; TDD · auto requis</title>
+        <g id="node-review_squash" data-node-id="review_squash" data-node-label="Stage 3 &amp; Audit" tabindex="0" role="button" aria-label="Focus Stage 3 &amp; Audit, squash + Convergence, Orchestrateur EPURE — Pipeline Obligatoire › 2. Mandat &amp; TDD 3-Stages" aria-pressed="false" data-node-kind="backend" data-node-sublabel="squash + Convergence" data-node-tag="Phase 2 si écart" data-node-context="Orchestrateur EPURE — Pipeline Obligatoire › 2. Mandat &amp; TDD 3-Stages">
+          <title>Stage 3 &amp; Audit · squash + Convergence · Orchestrateur EPURE — Pipeline Obligatoire › 2. Mandat &amp; TDD 3-Stages · Phase 2 si écart</title>
           <rect x="633.8" y="212" width="132" height="68" rx="8" class="c-mask"/>
           <rect x="633.8" y="212" width="132" height="68" rx="8" class="c-backend" data-animate="node" style="--step:4" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(639.8 218) scale(0.6875)">
             <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="699.8" y="244.2" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Revue Multi-Agents</text>
-          <text data-detail="context" x="699.8" y="259.1" class="t-muted" font-size="8" text-anchor="middle">squash task/*</text>
-        <text data-detail="fine" x="699.8" y="271.9" class="t-backend" font-size="7" text-anchor="middle">auto requis</text>
+          <text data-node-label="" data-detail-anchor="" x="702.3" y="233" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Stage 3 &amp; Audit</text>
+          <text data-detail="context" x="699.8" y="250" class="t-muted" font-size="8" text-anchor="middle">squash + Convergence</text>
+        <text data-detail="fine" x="699.8" y="268" class="t-backend" font-size="7" text-anchor="middle">Phase 2 si écart</text>
         </g>
 
-        <g id="node-final_feature_pr" data-node-id="final_feature_pr" data-node-label="PR de Synthèse" tabindex="0" role="button" aria-label="Focus PR de Synthèse, feature/* -&gt; dev, Orchestrateur EPURE — Pipeline Obligatoire › 3. Merge &amp; Release" aria-pressed="false" data-node-kind="backend" data-node-sublabel="feature/* -&gt; dev" data-node-tag="auto requis" data-node-context="Orchestrateur EPURE — Pipeline Obligatoire › 3. Merge &amp; Release">
-          <title>PR de Synthèse · feature/* -&gt; dev · Orchestrateur EPURE — Pipeline Obligatoire › 3. Merge &amp; Release · auto requis</title>
+        <g id="node-final_feature_pr" data-node-id="final_feature_pr" data-node-label="PR de Synthèse" tabindex="0" role="button" aria-label="Focus PR de Synthèse, feature/* -&gt; dev, Orchestrateur EPURE — Pipeline Obligatoire › 3. Convergence &amp; Release" aria-pressed="false" data-node-kind="backend" data-node-sublabel="feature/* -&gt; dev" data-node-tag="auto requis" data-node-context="Orchestrateur EPURE — Pipeline Obligatoire › 3. Convergence &amp; Release">
+          <title>PR de Synthèse · feature/* -&gt; dev · Orchestrateur EPURE — Pipeline Obligatoire › 3. Convergence &amp; Release · auto requis</title>
           <rect x="822.2" y="212" width="132" height="68" rx="8" class="c-mask"/>
           <rect x="822.2" y="212" width="132" height="68" rx="8" class="c-backend" data-animate="node" style="--step:5" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(828.2 218) scale(0.6875)">
@@ -5393,8 +5393,8 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <text data-detail="fine" x="888.2" y="268" class="t-backend" font-size="7" text-anchor="middle">auto requis</text>
         </g>
 
-        <g id="node-ui_design_gate" data-node-id="ui_design_gate" data-node-label="Porte DESIGN.md" tabindex="0" role="button" aria-label="Focus Porte DESIGN.md, user-advocate, Porte Conditionnelle UI &amp; Preview › 1. Grill &amp; Épure" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="user-advocate" data-node-tag="si UI" data-node-context="Porte Conditionnelle UI &amp; Preview › 1. Grill &amp; Épure">
-          <title>Porte DESIGN.md · user-advocate · Porte Conditionnelle UI &amp; Preview › 1. Grill &amp; Épure · si UI</title>
+        <g id="node-ui_design_gate" data-node-id="ui_design_gate" data-node-label="Porte DESIGN.md" tabindex="0" role="button" aria-label="Focus Porte DESIGN.md, user-advocate, Porte Conditionnelle UI &amp; Preview › 1. Grill, Spec &amp; DAG" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="user-advocate" data-node-tag="si UI" data-node-context="Porte Conditionnelle UI &amp; Preview › 1. Grill, Spec &amp; DAG">
+          <title>Porte DESIGN.md · user-advocate · Porte Conditionnelle UI &amp; Preview › 1. Grill, Spec &amp; DAG · si UI</title>
           <rect x="281.40000000000003" y="338" width="132" height="68" rx="8" class="c-mask"/>
           <rect x="281.40000000000003" y="338" width="132" height="68" rx="8" class="c-frontend" data-animate="node" style="--step:12" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(287.40000000000003 344) scale(0.6875)">
@@ -5408,8 +5408,8 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <text data-detail="fine" x="347.40000000000003" y="394" class="t-frontend" font-size="7" text-anchor="middle">si UI</text>
         </g>
 
-        <g id="node-ui_impeccable_gate" data-node-id="ui_impeccable_gate" data-node-label="Porte Impeccable" tabindex="0" role="button" aria-label="Focus Porte Impeccable, WCAG AA + tokens, Porte Conditionnelle UI &amp; Preview › 2. Mandat &amp; TDD" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="WCAG AA + tokens" data-node-tag="si UI" data-node-context="Porte Conditionnelle UI &amp; Preview › 2. Mandat &amp; TDD">
-          <title>Porte Impeccable · WCAG AA + tokens · Porte Conditionnelle UI &amp; Preview › 2. Mandat &amp; TDD · si UI</title>
+        <g id="node-ui_impeccable_gate" data-node-id="ui_impeccable_gate" data-node-label="Porte Impeccable" tabindex="0" role="button" aria-label="Focus Porte Impeccable, WCAG AA + tokens, Porte Conditionnelle UI &amp; Preview › 2. Mandat &amp; TDD 3-Stages" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="WCAG AA + tokens" data-node-tag="si UI" data-node-context="Porte Conditionnelle UI &amp; Preview › 2. Mandat &amp; TDD 3-Stages">
+          <title>Porte Impeccable · WCAG AA + tokens · Porte Conditionnelle UI &amp; Preview › 2. Mandat &amp; TDD 3-Stages · si UI</title>
           <rect x="633.8" y="338" width="132" height="68" rx="8" class="c-mask"/>
           <rect x="633.8" y="338" width="132" height="68" rx="8" class="c-frontend" data-animate="node" style="--step:12" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(639.8 344) scale(0.6875)">
@@ -5423,21 +5423,21 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <text data-detail="fine" x="699.8" y="394" class="t-frontend" font-size="7" text-anchor="middle">si UI</text>
         </g>
 
-        <g id="node-opt_commands" data-node-id="opt_commands" data-node-label="Commandes Option." tabindex="0" role="button" aria-label="Focus Commandes Option., /prototype, status, Contrôles Facultatifs &amp; Escalade Humaine › 1. Grill &amp; Épure" aria-pressed="false" data-node-kind="external" data-node-sublabel="/prototype, status" data-node-tag="facultatif" data-node-context="Contrôles Facultatifs &amp; Escalade Humaine › 1. Grill &amp; Épure">
-          <title>Commandes Option. · /prototype, status · Contrôles Facultatifs &amp; Escalade Humaine › 1. Grill &amp; Épure · facultatif</title>
+        <g id="node-opt_commands" data-node-id="opt_commands" data-node-label="Commandes Pilotage" tabindex="0" role="button" aria-label="Focus Commandes Pilotage, continue, sync, cancel, Contrôles de Pilotage &amp; Escalade Humaine › 1. Grill, Spec &amp; DAG" aria-pressed="false" data-node-kind="external" data-node-sublabel="continue, sync, cancel" data-node-tag="to-spec / status" data-node-context="Contrôles de Pilotage &amp; Escalade Humaine › 1. Grill, Spec &amp; DAG">
+          <title>Commandes Pilotage · continue, sync, cancel · Contrôles de Pilotage &amp; Escalade Humaine › 1. Grill, Spec &amp; DAG · to-spec / status</title>
           <rect x="161.40000000000003" y="464" width="132" height="68" rx="8" class="c-mask"/>
           <rect x="161.40000000000003" y="464" width="132" height="68" rx="8" class="c-external" data-animate="node" style="--step:12" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(167.40000000000003 470) scale(0.6875)">
             <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
             <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="227.40000000000003" y="496.2" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Commandes Option.</text>
-          <text data-detail="context" x="227.40000000000003" y="511.1" class="t-muted" font-size="8" text-anchor="middle">/prototype, status</text>
-        <text data-detail="fine" x="227.40000000000003" y="523.9" class="t-external" font-size="7" text-anchor="middle">facultatif</text>
+          <text data-node-label="" data-detail-anchor="" x="227.40000000000003" y="496.2" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Commandes Pilotage</text>
+          <text data-detail="context" x="227.40000000000003" y="511.1" class="t-muted" font-size="8" text-anchor="middle">continue, sync, cancel</text>
+        <text data-detail="fine" x="227.40000000000003" y="523.9" class="t-external" font-size="7" text-anchor="middle">to-spec / status</text>
         </g>
 
-        <g id="node-needs_human" data-node-id="needs_human" data-node-label="Escalade Humaine" tabindex="0" role="button" aria-label="Focus Escalade Humaine, &gt;3 essais / sensible, Contrôles Facultatifs &amp; Escalade Humaine › 2. Mandat &amp; TDD" aria-pressed="false" data-node-kind="security" data-node-sublabel="&gt;3 essais / sensible" data-node-tag="conditionnel" data-node-context="Contrôles Facultatifs &amp; Escalade Humaine › 2. Mandat &amp; TDD">
-          <title>Escalade Humaine · &gt;3 essais / sensible · Contrôles Facultatifs &amp; Escalade Humaine › 2. Mandat &amp; TDD · conditionnel</title>
+        <g id="node-needs_human" data-node-id="needs_human" data-node-label="Escalade Humaine" tabindex="0" role="button" aria-label="Focus Escalade Humaine, suspendu -&gt; continue, Contrôles de Pilotage &amp; Escalade Humaine › 2. Mandat &amp; TDD 3-Stages" aria-pressed="false" data-node-kind="security" data-node-sublabel="suspendu -&gt; continue" data-node-tag="conditionnel" data-node-context="Contrôles de Pilotage &amp; Escalade Humaine › 2. Mandat &amp; TDD 3-Stages">
+          <title>Escalade Humaine · suspendu -&gt; continue · Contrôles de Pilotage &amp; Escalade Humaine › 2. Mandat &amp; TDD 3-Stages · conditionnel</title>
           <rect x="633.8" y="464" width="132" height="68" rx="8" class="c-mask"/>
           <rect x="633.8" y="464" width="132" height="68" rx="8" class="c-security" data-animate="node" style="--step:12" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(639.8 470) scale(0.6875)">
@@ -5445,18 +5445,18 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
             <path d="m5.8 8 1.5 1.5 3-3"/>
           </g>
           <text data-node-label="" data-detail-anchor="" x="705.5999999999999" y="485" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Escalade Humaine</text>
-          <text data-detail="context" x="699.8" y="502" class="t-muted" font-size="8" text-anchor="middle">&gt;3 essais / sensible</text>
+          <text data-detail="context" x="699.8" y="502" class="t-muted" font-size="8" text-anchor="middle">suspendu -&gt; continue</text>
         <text data-detail="fine" x="699.8" y="520" class="t-security" font-size="7" text-anchor="middle">conditionnel</text>
         </g>
 
         <!-- Edge labels -->
-        <g data-detail="context" data-edge-from="gate2_approve" data-edge-to="tdd_sandbox" data-edge-label="approuvé" data-edge-key="0" data-edge-id="approve-to-tdd">
-          <rect x="487.20000000000005" y="173" width="48.4" height="14" rx="3" class="c-mask"/>
-          <text x="511.40000000000003" y="183" class="t-edge-emphasis" font-size="8" text-anchor="middle">approuvé</text>
+        <g data-detail="context" data-edge-from="gate2_approve" data-edge-to="tdd_sandbox" data-edge-label="plan-&gt;feature" data-edge-key="0" data-edge-id="approve-to-tdd">
+          <rect x="475.20000000000005" y="173" width="72.4" height="14" rx="3" class="c-mask"/>
+          <text x="511.40000000000003" y="183" class="t-edge-emphasis" font-size="8" text-anchor="middle">plan-&gt;feature</text>
         </g>
-        <g data-detail="context" data-edge-from="gen_blueprint" data-edge-to="gate2_approve" data-edge-label="prêt" data-edge-key="1" data-edge-id="blueprint-to-approve">
-          <rect x="381.40000000000003" y="100" width="30" height="14" rx="3" class="c-mask"/>
-          <text x="396.40000000000003" y="110" class="t-edge-security" font-size="8" text-anchor="middle">prêt</text>
+        <g data-detail="context" data-edge-from="gen_blueprint" data-edge-to="gate2_approve" data-edge-label="to-tickets" data-edge-key="1" data-edge-id="blueprint-to-approve">
+          <rect x="367.40000000000003" y="100" width="58" height="14" rx="3" class="c-mask"/>
+          <text x="396.40000000000003" y="110" class="t-edge-security" font-size="8" text-anchor="middle">to-tickets</text>
         </g>
         <g data-detail="context" data-edge-from="gen_blueprint" data-edge-to="ui_design_gate" data-edge-label="si UI" data-edge-key="2" data-edge-id="blueprint-to-ui-design">
           <rect x="330.40000000000003" y="299" width="34" height="14" rx="3" class="c-mask"/>
@@ -5478,21 +5478,21 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <rect x="675.5999999999999" y="299" width="48.4" height="14" rx="3" class="c-mask"/>
           <text x="699.8" y="309" class="t-edge-dashed" font-size="8" text-anchor="middle">check UI</text>
         </g>
-        <g data-detail="context" data-edge-from="opt_commands" data-edge-to="ui_design_gate" data-edge-label="prototype" data-edge-key="7" data-edge-id="opt-to-ui-design">
-          <rect x="293.8" y="478" width="53.199999999999996" height="14" rx="3" class="c-mask"/>
-          <text x="320.40000000000003" y="488" class="t-edge-dashed" font-size="8" text-anchor="middle">prototype</text>
+        <g data-detail="context" data-edge-from="opt_commands" data-edge-to="ui_design_gate" data-edge-label="pilotage" data-edge-key="7" data-edge-id="opt-to-ui-design">
+          <rect x="296.20000000000005" y="478" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="320.40000000000003" y="488" class="t-edge-dashed" font-size="8" text-anchor="middle">pilotage</text>
         </g>
-        <g data-detail="context" data-edge-from="gate1_plan" data-edge-to="gen_blueprint" data-edge-label="clarifié" data-edge-key="8" data-edge-id="plan-to-blueprint">
-          <rect x="126.50000000000001" y="226" width="48.4" height="14" rx="3" class="c-mask"/>
-          <text x="150.70000000000002" y="236" class="t-edge-emphasis" font-size="8" text-anchor="middle">clarifié</text>
+        <g data-detail="context" data-edge-from="gate1_plan" data-edge-to="gen_blueprint" data-edge-label="to-spec" data-edge-key="8" data-edge-id="plan-to-blueprint">
+          <rect x="128.9" y="226" width="43.6" height="14" rx="3" class="c-mask"/>
+          <text x="150.70000000000002" y="236" class="t-edge-emphasis" font-size="8" text-anchor="middle">to-spec</text>
         </g>
-        <g data-detail="context" data-edge-from="review_squash" data-edge-to="final_feature_pr" data-edge-label="DAG clos" data-edge-key="9" data-edge-id="review-to-final-pr">
+        <g data-detail="context" data-edge-from="review_squash" data-edge-to="final_feature_pr" data-edge-label="convergé" data-edge-key="9" data-edge-id="review-to-final-pr">
           <rect x="769.8" y="226" width="48.4" height="14" rx="3" class="c-mask"/>
-          <text x="794" y="236" class="t-edge-emphasis" font-size="8" text-anchor="middle">DAG clos</text>
+          <text x="794" y="236" class="t-edge-emphasis" font-size="8" text-anchor="middle">convergé</text>
         </g>
-        <g data-detail="context" data-edge-from="tdd_sandbox" data-edge-to="review_squash" data-edge-label="tests ok" data-edge-key="10" data-edge-id="tdd-to-review">
+        <g data-detail="context" data-edge-from="tdd_sandbox" data-edge-to="review_squash" data-edge-label="CI async" data-edge-key="10" data-edge-id="tdd-to-review">
           <rect x="581.4" y="226" width="48.4" height="14" rx="3" class="c-mask"/>
-          <text x="605.6" y="236" class="t-muted" font-size="8" text-anchor="middle">tests ok</text>
+          <text x="605.6" y="236" class="t-muted" font-size="8" text-anchor="middle">CI async</text>
         </g>
         <g data-detail="context" data-edge-from="ui_design_gate" data-edge-to="ui_impeccable_gate" data-edge-label="tokens" data-edge-key="11" data-edge-id="ui-design-to-impeccable">
           <rect x="504.20000000000005" y="352" width="38.8" height="14" rx="3" class="c-mask"/>
@@ -5514,9 +5514,9 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
             <rect x="289" y="572" width="14" height="9" rx="2" class="c-security" stroke-width="1"/>
             <text x="311" y="580" class="t-muted" font-size="7.5" font-weight="500">Porte Humaine / Gouvernance</text>
           </g>
-          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="Contrôle Facultatif" data-legend-x="465" data-legend-baseline="580" data-legend-width="132">
+          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="Contrôle &amp; Pilotage" data-legend-x="465" data-legend-baseline="580" data-legend-width="132">
             <rect x="465" y="572" width="14" height="9" rx="2" class="c-external" stroke-width="1"/>
-            <text x="487" y="580" class="t-muted" font-size="7.5" font-weight="500">Contrôle Facultatif</text>
+            <text x="487" y="580" class="t-muted" font-size="7.5" font-weight="500">Contrôle &amp; Pilotage</text>
           </g>
         </g>
       </svg>
@@ -5702,34 +5702,34 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <h3>1. Portes Humaines Obligatoires (4)</h3>
         </div>
         <ul>
-          <li>Jalon 1 : /epure plan &amp; réponses au Grill par un contributeur write+</li>
-          <li>Jalon 2 : /epure approve signe le mandat immuable spec_sha</li>
+          <li>Jalon 1 : /epure plan -&gt; réponses Grill -&gt; /epure to-spec -&gt; /epure to-tickets</li>
+          <li>Jalon 2 : /epure approve fusionne plan/* -&gt; feature/* directement et signe spec_sha</li>
           <li>Jalon 3 : Squash-merge humain de feature/* -&gt; dev (Agent App interdit)</li>
-          <li>Jalon 4 : Workflow manuel release-promote (fast-forward dev -&gt; main)</li>
+          <li>Jalon 4 : Dispatch manuel release.yml (fast-forward dev -&gt; main dans env: release)</li>
         </ul>
       </div>
 
       <div class="card">
         <div class="card-header">
           <div class="card-dot cyan"></div>
-          <h3>2. Étapes Automatisées Obligatoires</h3>
+          <h3>2. Pipeline Automatisé Obligatoire</h3>
         </div>
         <ul>
-          <li>Génération GLOSSARY.md, ADRs, Spec &amp; DAG de tickets sur plan/*</li>
-          <li>Boucle TDD en sandbox sans secret (tsc + vitest) sur task/*</li>
-          <li>Revue multi-agents depuis dev + squash sémantique IA vers feature/*</li>
+          <li>Génère GLOSSARY.md, ADRs &amp; Spec sur plan/* + sub_issues &amp; blocked_by natifs GitHub</li>
+          <li>TDD en sandbox noyau 2-phases (bwrap/landrun + rtk) + attente CI événementielle</li>
+          <li>Stage 3 revue dev + squash sémantique IA + EpicConvergenceAudit avant PR feature/* -&gt; dev</li>
         </ul>
       </div>
 
       <div class="card">
         <div class="card-header">
           <div class="card-dot emerald"></div>
-          <h3>3. Étapes Facultatives &amp; Conditionnelles</h3>
+          <h3>3. Pilotage, Sync &amp; Reprise d&#39;Escalade</h3>
         </div>
         <ul>
-          <li>Conditionnel UI : DESIGN.md, user-advocate &amp; impeccable-gate si UI présente</li>
-          <li>Facultatif : détour /prototype, preview Pages isolée, /epure to-spec, status, cancel</li>
-          <li>Escalade : needs-human sur chemin sensible ou après 3 échecs de correction</li>
+          <li>Conditionnel UI : DESIGN.md, user-advocate &amp; impeccable-gate si fichiers UI touchés</li>
+          <li>Commandes : /epure continue (reprise DAG/CI suspendu), /epure sync (merge 3-voies dev), status, cancel</li>
+          <li>Escalade : passe en état suspendu needs-human après &gt;3 essais ou chemin sensible</li>
         </ul>
       </div>
     </div>

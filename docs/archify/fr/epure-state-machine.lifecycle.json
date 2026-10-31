@@ -3,7 +3,7 @@
   "diagram_type": "lifecycle",
   "meta": {
     "title": "Machine à États d'une Issue EPURE (Ref Git CAS : refs/epure/state/<issue>)",
-    "subtitle": "Transitions atomiques Compare-And-Swap, curseur de commentaires en lot et reprise idempotente",
+    "subtitle": "Phases pilotées par commandes, sous-états CI asynchrones, EpicConvergenceAudit Phase 2 et reprise /epure continue",
     "legend": {
       "entries": {
         "start": { "label": "état initial" },
@@ -11,7 +11,7 @@
         "waiting": { "label": "en attente" },
         "decision": { "label": "décision" },
         "success": { "label": "succès" },
-        "failure": { "label": "escalade / échec" },
+        "failure": { "label": "suspendu / escalade" },
         "neutral": { "label": "annulé" }
       }
     },
@@ -21,8 +21,8 @@
   },
   "mainPath": [
     "grilling",
-    "blueprint_dag",
-    "awaiting_approval",
+    "spec",
+    "tickets",
     "implementation",
     "completed"
   ],
@@ -36,27 +36,27 @@
       "step": "01"
     },
     {
-      "id": "blueprint_dag",
+      "id": "spec",
       "type": "decision",
-      "label": "Spec & DAG",
-      "sublabel": "plan/* + tickets",
-      "tag": "spec + tickets",
+      "label": "Brouillon Spec",
+      "sublabel": "/epure to-spec sur plan/*",
+      "tag": "GLOSSARY + ADR + spec",
       "step": "02"
     },
     {
-      "id": "awaiting_approval",
+      "id": "tickets",
       "type": "waiting",
-      "label": "Attente Approbation",
-      "sublabel": "validation humaine",
-      "tag": "jalon 2",
+      "label": "DAG de Tickets",
+      "sublabel": "/epure to-tickets",
+      "tag": "sub_issues + blocked_by",
       "step": "03"
     },
     {
       "id": "implementation",
       "type": "active",
       "label": "Implémentation",
-      "sublabel": "boucle TDD + revue",
-      "tag": "spec_sha signé",
+      "sublabel": "plan/* -> feature/* + CI",
+      "tag": "spec_sha + sync + Phase 2",
       "step": "04"
     },
     {
@@ -70,9 +70,9 @@
     {
       "id": "failed",
       "type": "failure",
-      "label": "Escalade Humaine",
-      "sublabel": ">3 essais ou sensible",
-      "tag": "needs-human"
+      "label": "Suspendu / Escalade",
+      "sublabel": "escalade needs-human",
+      "tag": "/epure continue"
     },
     {
       "id": "cancelled",
@@ -83,40 +83,40 @@
     }
   ],
   "transitions": [
-    { "id": "grill-to-blueprint", "from": "grilling", "to": "blueprint_dag", "label": "clarifié" },
-    { "id": "blueprint-to-grill", "from": "blueprint_dag", "to": "grilling", "label": "autre tour" },
-    { "id": "blueprint-to-awaiting", "from": "blueprint_dag", "to": "awaiting_approval", "label": "DAG prêt" },
-    { "id": "awaiting-to-impl", "from": "awaiting_approval", "to": "implementation", "label": "approuvé", "variant": "security" },
-    { "id": "impl-to-completed", "from": "implementation", "to": "completed", "label": "DAG mergé", "variant": "emphasis" },
-    { "id": "impl-to-failed", "from": "implementation", "to": "failed", "label": ">3 essais", "variant": "security" },
-    { "id": "failed-to-impl", "from": "failed", "to": "implementation", "label": "re-approve", "variant": "emphasis" },
-    { "id": "awaiting-to-cancelled", "from": "awaiting_approval", "to": "cancelled", "label": "annuler" }
+    { "id": "grill-to-spec", "from": "grilling", "to": "spec", "label": "to-spec" },
+    { "id": "spec-to-grill", "from": "spec", "to": "grilling", "label": "affiner" },
+    { "id": "spec-to-tickets", "from": "spec", "to": "tickets", "label": "to-tickets" },
+    { "id": "tickets-to-impl", "from": "tickets", "to": "implementation", "label": "approve", "variant": "security" },
+    { "id": "impl-to-completed", "from": "implementation", "to": "completed", "label": "audit ok", "variant": "emphasis" },
+    { "id": "impl-to-failed", "from": "implementation", "to": "failed", "label": "suspendre", "variant": "security" },
+    { "id": "failed-to-impl", "from": "failed", "to": "implementation", "label": "continue", "variant": "emphasis" },
+    { "id": "tickets-to-cancelled", "from": "tickets", "to": "cancelled", "label": "annuler" }
   ],
   "cards": [
     {
       "dot": "cyan",
-      "title": "Persistance CAS Hors-Branches",
+      "title": "Phases Pilotées par Commandes & Ref CAS",
       "items": [
-        "État stocké dans refs/epure/state/<issue> par git update-ref atomique",
-        "Zéro pollution de commits d'état machine sur les branches dev et main",
-        "Synchronisé avec un tableau de bord Markdown en haut de l'issue GitHub"
+        "État stocké dans refs/epure/state/<issue> par git update-ref atomique CAS",
+        "/epure plan + réponses implicites -> /epure to-spec (GLOSSARY.md + ADR + docs/specs/* sur plan/*)",
+        "/epure to-tickets matérialise les relations natives GitHub sub_issues et blocked_by"
       ]
     },
     {
       "dot": "amber",
-      "title": "Curseur de Lot & Grill Implicite",
+      "title": "Approbation, Sous-États CI Async & Convergence",
       "items": [
-        "last_processed_comment_id traite tous les commentaires humains dans l'ordre",
-        "Toute réponse humaine en phase grilling est acceptée sans commande slash",
-        "Les commandes facultatives /epure to-spec et to-tickets forcent la transition"
+        "/epure approve intègre plan/* -> feature/* directement et verrouille spec_sha",
+        "Suit les sous-états implementing, waiting_ticket_ci et waiting_feature_ci",
+        "Supporte /epure sync (merge 3-voies dev) et la Phase 2 d'EpicConvergenceAudit"
       ]
     },
     {
       "dot": "emerald",
-      "title": "Reprise Idempotente",
+      "title": "Reprise après Suspension & Annulation",
       "items": [
-        "Reposter /epure approve après un échec précharge les fichiers déjà mergés sur feature/*",
-        "Les tickets déjà fermés du DAG sont automatiquement ignorés à la reprise",
+        "Une escalade ou >3 échecs place l'issue en état failed (suspended / needs-human)",
+        "/epure continue reprend de manière idempotente au ticket ou check CI actif",
         "/epure cancel fige l'exécution tout en préservant les branches et traces d'audit"
       ]
     }

@@ -59,18 +59,18 @@ A core principle of EPURE is transparency about **who decides** and **what runs 
 No agent can ever bypass these four decision points. They require an explicit action from a repository contributor with `write` or `admin` permission:
 
 1. **Gate 1 — Initiate & Answer the Grill (`/epure plan`)**: A maintainer triggers `/epure plan` on a GitHub Issue and answers the clarifying questions until the design frontier is settled.
-2. **Gate 2 — Sign the Implementation Mandate (`/epure approve`)**: After reviewing the generated spec and ticket DAG on `plan/<issue>-<slug>`, a maintainer comments `/epure approve`. This merges `plan/* -> dev`, locks `spec_sha` in `refs/epure/state/<issue>`, and opens `feature/<issue>-<slug>`.
-3. **Gate 3 — Human Integration Merge (`feature/* -> dev`)**: Once all tickets in the DAG are implemented, reviewed, and squashed into `feature/*`, EPURE opens the final synthesis PR `feature/* -> dev`. The `epure-dev-governance` ruleset **blocks** the Agent App from merging application code into `dev`: a human maintainer must click **Squash and merge**.
+2. **Gate 2 — Sign the Implementation Mandate (`/epure approve`)**: After reviewing the generated spec and ticket DAG on `plan/<issue>-<slug>`, a maintainer comments `/epure approve`. This directly integrates the `plan/*` artifacts into `feature/<issue>-<slug>` (with additive `GLOSSARY.md` merging and monotonic ADR renumbering, without an intermediate `plan/* -> dev` PR per ADR-0031), locks `spec_sha` in `refs/epure/state/<issue>`, and begins executing the ticket DAG.
+3. **Gate 3 — Human Integration Merge (`feature/* -> dev`)**: Once all tickets in the DAG are implemented, reviewed, and squashed into `feature/*` (and verified by `EpicConvergenceAudit`), EPURE opens the final synthesis PR `feature/* -> dev`. The `epure-dev-governance` ruleset **blocks** the Agent App from merging application code into `dev`: a human maintainer must click **Squash and merge**.
 4. **Gate 4 — Human Release Promotion (`dev -> main`)**: Promoting `dev` to `main` and publishing a `vX.Y.Z` tag requires a human to trigger the `release-promote.yml` workflow (`workflow_dispatch`).
 
 ### 2. <span class="epure-badge epure-badge--auto">Mandatory Automated Steps</span>
 
 Once a human gate is crossed, EPURE executes these steps deterministically on every feature:
 
-- **Blueprint & Ticket DAG Generation**: Commits `GLOSSARY.md`, `docs/adr/`, and `docs/specs/<slug>.md` on `plan/<issue>-<slug>`, and creates GitHub Issues for each atomic task with `blocked_by` dependencies and the `ready-for-agent` label.
-- **Secretless Sandbox TDD Loop**: For each unblocked ticket, implements tests and production code inside an isolated environment stripped of `LLM_API_KEY` and GitHub App private keys.
-- **Trusted `dev` Multi-Agent Review & AI Semantic Squash**: Runs up to 4 domain-specialized reviewers (loaded strictly from `dev`) plus `spec-parity-reviewer`. On approval (`0 must_fix`), synthesizes a Conventional Commit title/body (`Refs #<ticket>`) and squash-merges `task/* -> feature/*`.
-- **Final Synthesis PR Review**: Audits the consolidated diff on `feature/* -> dev` with `Closes #<issue>` and `Closes #<ticket>` trailer links.
+- **Blueprint, Goldfish Spec Audit & Ticket DAG Generation**: Runs the zero-context Goldfish specification audit (`runGoldfishSpecAudit`), commits `GLOSSARY.md`, `docs/adr/`, and `docs/specs/<slug>.md` (with `EpicGoalContract`) on `plan/<issue>-<slug>`, and creates GitHub Issues for each atomic task with native `sub_issues` and `blocked_by` dependencies and the `ready-for-agent` label.
+- **Secretless Kernel Sandbox TDD Loop**: For each unblocked ticket, applies incremental mutations (`write_repo_file`, `patch_repo_file`, `delete_repo_file`) and runs Stage 1 verification inside an isolated 2-phase Linux kernel sandbox (`landrun` / `bubblewrap`) stripped of `LLM_API_KEY` and GitHub App private keys.
+- **Event-Driven External CI, Trusted `dev` Multi-Agent Review & AI Semantic Squash**: Exits immediately while external CI runs (`waiting_ticket_ci`), resumes on `check_suite.completed` / `workflow_run.completed`, runs up to 4 domain-specialized reviewers (loaded strictly from `dev`) plus `spec-parity-reviewer`, and squash-merges `task/* -> feature/*` with a synthesized Conventional Commit title/body (`Refs #<ticket>`).
+- **Zero-Context `EpicConvergenceAudit` & Final Synthesis PR Review**: Runs `runEpicConvergenceAudit` on `feature/*` to ensure all `required_entrypoints` are wired and no `forbidden_stubs` remain (spawning Phase 2 convergence tickets if needed), then opens and audits the consolidated synthesis PR `feature/* -> dev` with `Closes #<issue>` and `Closes #<ticket>` trailer links.
 
 ### 3. <span class="epure-badge epure-badge--optional">Optional or Conditional Steps</span>
 
@@ -79,10 +79,12 @@ These steps run only when triggered by the nature of the change or by an explici
 - **Conditional UI & Impeccable Gate (automatic when UI exists)**: When the feature or diff touches frontend/UI files (`.vue`, `.tsx`, `.jsx`, `.css`, `.html`), EPURE automatically generates `DESIGN.md`, runs `user-advocate` in `design-gate` mode before `/epure approve`, and enforces `user-advocate` (`implementation-review`) + `impeccable-gate` as blocking checks on every PR. Pure backend/CLI changes skip these steps automatically.
 - **Optional Exploratory Prototype (`/prototype` & Isolated Pages Preview)**: When a layout or state interaction cannot be settled in prose during the Grill, a maintainer can request a throwaway prototype on `prototype/*`. Static GitHub Pages preview is **disabled by default** (`enable_pages_preview: false`) and requires explicit opt-in.
 - **Optional Granular Slash Commands**:
-  - `/epure to-spec`: Force immediate transition from Grill to specification generation.
-  - `/epure to-tickets`: Force ticket DAG creation from an existing specification.
+  - `/epure to-spec`: Validate the Grill frontier (or force early transition) to generate the specification on `plan/*`.
+  - `/epure to-tickets`: Validate the specification on `plan/*` and generate the native GitHub ticket DAG (`sub_issues` + `blocked_by`).
+  - `/epure continue`: Resume orchestration after a `needs-human` pause, manual fix, or external CI completion (`waiting_ticket_ci` / `waiting_feature_ci`).
+  - `/epure sync` (alias `/epure rebase`): Synchronize `dev -> feature/*` (and `feature/* -> task/*`) with 3-way conflict resolution and Stage 1 sandbox verification.
   - `/epure status`: Refresh and post the current orchestration state and ticket table.
-  - `/epure cancel`: Immediately halt orchestration and mark the mandate `cancelled` in `refs/epure/state/<issue>`.
+  - `/epure cancel` (alias `/epure stop`): Immediately halt orchestration and mark the mandate `cancelled` in `refs/epure/state/<issue>`.
 - **Conditional Human Escalation (`needs-human`)**: Triggered automatically if a `task/*` branch touches sensitive paths (`.github/workflows/**`, `.cursor/agents/**`, `CODEOWNERS`) without an approved exception, or if a ticket still fails after `max_code_fix_attempts = 3` remediation rounds.
 
 ---
@@ -108,7 +110,7 @@ URL: https://giskard-ai.github.io/epure/installation
 
 The recommended way to initialize or reconfigure a repository with EPURE is to invoke the **`/setup-repo` agent skill** (`.agents/skills/setup-repo/SKILL.md`) directly inside your coding agent (Cursor, Claude Code, Pi, or Codex).
 
-The `/setup-repo` skill orchestrates the entire bootstrap end-to-end: it inspects your repository's actual architecture, walks you through the interactive wizard (`setup-github-apps-wizard.sh`) to register your two GitHub Apps, runs the deterministic CLI (`dist/cli/setup-repo.mjs`) in `--dry-run` simulation mode before `--apply`, and **dynamically designs your multi-agent reviewer roster (`.cursor/agents/*.md`)**.
+The `/setup-repo` skill orchestrates the entire bootstrap end-to-end: it inspects your repository's actual architecture, walks you through the interactive wizard (`setup-github-apps-wizard.sh`) to register your two GitHub Apps and isolated GitHub Environments (`<llm-env>` and `release`), runs the deterministic CLI (`dist/cli/setup-repo.mjs`) in `--dry-run` simulation mode before `--apply`, and **dynamically designs your multi-agent reviewer roster (`.cursor/agents/*.md`)**.
 
 ---
 
@@ -120,7 +122,7 @@ Before bootstrapping a repository with EPURE, ensure your local environment has:
 - **Node.js 24 LTS** (`>=24.0.0`)
 - **GitHub CLI (`gh`)** authenticated against your target GitHub account or organization (`gh auth status`)
 - **Git** (`>=2.38`)
-- **An LLM API Key** (`LLM_API_KEY` — defaults to Google Gemini `gemini-3.8-flash` with `thinking_level: HIGH`)
+- **An LLM API Key** (`LLM_API_KEY` or custom provider key configured in `.github/agents.yml`)
 
 ---
 
@@ -138,30 +140,41 @@ The agent executes a guided **4-step workflow** with explicit human confirmation
 
 Before writing any file, the agent inspects the target repository (`package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, `Makefile`, `src/` directory layout, UI presence, existing `GLOSSARY.md`) to determine:
 
-- The language and build stack to configure `.github/workflows/ci.yml`, Renovate, and `standards-reviewer.md`.
+- The language and build stack to configure `.github/workflows/ci.yml`, `verification.targets`, `renovate.json`, `.github/zizmor.yml`, and `standards-reviewer.md`.
 - Whether the repository includes a frontend/UI surface (which determines whether the **Impeccable** gate and `frontend-reviewer`, `accessibility-reviewer`, and `design-reviewer` are included).
 - Which domain subsystems warrant creating **custom specialist reviewers** in `.cursor/agents/<domain>-reviewer.md`.
 
-### Step 2: Provision the Two GitHub Apps & 5 Secrets (Wizard)
+### Step 2: Provision the Two GitHub Apps & Environment-Scoped Secrets (Wizard)
 
-To enforce strict privilege separation (Q82, Q91), EPURE never uses a single all-powerful Personal Access Token. Instead, every repository or organization uses **two distinct GitHub Apps**:
+To enforce strict privilege separation (Q82, Q91) and Zizmor-compliant zero secret exposure to unprivileged PR workflows, EPURE never uses a single all-powerful Personal Access Token or global repository secrets. Instead, every repository uses **two distinct GitHub Apps** and **two isolated GitHub Environments** (`<llm-env>` and `release`):
 
 1. **Agent App (`<owner>-epure-agent`)**: Used by the orchestrator for day-to-day automation (`plan/*`, `task/*`, `feature/*`, Issues, PRs, and Check Runs). It is **never** a Bypass Actor on `dev` or `main`.
-2. **Release App (`<owner>-epure-release`)**: Used exclusively by `release-promote.yml` when a human triggers a fast-forward release from `dev` to `main`. It is the **sole Bypass Actor** on `main` and `v*` tags.
+2. **Release App (`<owner>-epure-release`)**: Used exclusively by `release-promote.yml` / `release.yml` when a human triggers a fast-forward release from `dev` to `main`. It is the **sole Bypass Actor** on `main` and `v*` tags.
 
-If the apps are not yet registered, the `/setup-repo` skill launches the interactive wizard (which uses the GitHub App Manifest flow and stores secrets via `gh secret set` without ever exposing PEM private keys to the LLM):
+Launch the interactive wizard, which supports **Approach 2** (1-click local GitHub App Manifest Flow) with automatic **Fallback Approach 1** (manual step-by-step guided registration) and injects secrets into their dedicated GitHub Environments via `gh secret set --env` without ever exposing PEM private keys to the LLM:
 
 ```bash
-bash scripts/wizards/setup-github-apps-wizard.sh --repo my-org/craft-calculator
+bash scripts/wizards/setup-github-apps-wizard.sh \
+  --repo my-org/craft-calculator \
+  --llm-env <llm-env>
 ```
 
-| Secret Name | Purpose |
-| --- | --- |
-| `LLM_API_KEY` | API key for the LLM proxy sidecar (kept out of the code execution sandbox). |
-| `EPURE_AGENT_APP_ID` | Numeric App ID of `<owner>-epure-agent`. |
-| `EPURE_AGENT_APP_PRIVATE_KEY` | PEM private key of `<owner>-epure-agent` (used to mint short-lived installation tokens). |
-| `EPURE_RELEASE_APP_ID` | Numeric App ID of `<owner>-epure-release`. |
-| `EPURE_RELEASE_APP_PRIVATE_KEY` | PEM private key of `<owner>-epure-release` (used only by `release-promote.yml`). |
+> **Configurable & LLM-Agnostic `<llm-env>`**: The agent environment name (`<llm-env>`) can be chosen freely (for example `epure-agent`, `llm`, `openai`, `anthropic`, or `gemini`) and matches `environment: <llm-env>` on the `orchestrate-command` job in `.github/workflows/epure-issue-command.yml`.
+
+| Secret Name | GitHub Environment Scope | Purpose |
+| --- | --- | --- |
+| `LLM_API_KEY` | `--env <llm-env>` | API key for the LLM client / proxy sidecar (kept out of `authorize-command` and the code execution sandbox). |
+| `EPURE_AGENT_APP_ID` | `--env <llm-env>` | Numeric App ID of `<owner>-epure-agent`. |
+| `EPURE_AGENT_APP_PRIVATE_KEY` | `--env <llm-env>` | PEM private key of `<owner>-epure-agent` (used to mint short-lived installation tokens). |
+| `EPURE_RELEASE_APP_ID` | `--env release` | Numeric App ID of `<owner>-epure-release` (bound to the human-approved `release` environment). |
+| `EPURE_RELEASE_APP_PRIVATE_KEY` | `--env release` | PEM private key of `<owner>-epure-release` (used only by `release.yml` / `release-promote.yml`). |
+
+Verify the environment-scoped secrets with `gh`:
+
+```bash
+gh secret list -R my-org/craft-calculator --env <llm-env>
+gh secret list -R my-org/craft-calculator --env release
+```
 
 ### Step 3: Non-Destructive Simulation (`--dry-run`)
 
@@ -190,6 +203,14 @@ node dist/cli/setup-repo.mjs \
   --apply-github-settings
 ```
 
+Then commit and push the generated files (`.github/`, `.cursor/agents/`, and `renovate.json`) to `dev`:
+
+```bash
+git add .github/ .cursor/agents/ renovate.json
+git commit -m "chore(epure): bootstrap repository governance and workflows"
+git push origin dev
+```
+
 ---
 
 ## What the `/setup-repo` Skill Configures
@@ -199,9 +220,9 @@ node dist/cli/setup-repo.mjs \
    - Sets **`dev` as the default branch** of the repository so Pull Requests target `dev` by default and `Closes #<issue>` trailers resolve automatically when landing on `dev`.
 2. **Canonical Triage Labels**:
    - Creates or updates the 5 canonical labels (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`) plus orchestration labels (`needs-human`, `approved-sensitive-change`).
-3. **Declarative Configuration & Thin Caller Workflows**:
-   - Generates `.github/agents.yml` pinned to the latest immutable 40-character commit SHA of `Giskard-AI/epure`.
-   - Installs `.github/workflows/epure-issue-command.yml`, `.github/workflows/epure-check.yml`, `.github/workflows/pr-title.yml`, `.github/workflows/ci.yml` (tailored to the detected stack), and `.github/workflows/release.yml`.
+3. **Declarative Configuration, Hardened Supply-Chain & Thin Caller Workflows**:
+   - Generates `.github/agents.yml` (flat canonical schema with auto-discovered `verification.targets`), `.github/zizmor.yml` (static workflow security configuration), and `renovate.json` (with 3-to-14-day quarantine cooldowns).
+   - Installs `.github/workflows/epure-issue-command.yml`, `.github/workflows/epure-check.yml`, `.github/workflows/pr-title.yml`, `.github/workflows/ci.yml` (tailored to the detected stack), and `.github/workflows/release.yml`, all pinned to the 40-character commit SHA of `Giskard-AI/epure`.
 4. **Dynamic Multi-Agent Reviewer Roster (`.cursor/agents/*.md`)**:
    - The agent running `/setup-repo` **creates, designs, and adds the appropriate `.cursor/agents/<role>-reviewer.md` files as needed** based on the repository's actual elements (further refined during `/epure plan`):
      - **Always-On Core (Cross-Cutting & Persona)**: `architecture-reviewer`, `security-reviewer`, `spec-parity-reviewer`, `standards-reviewer` (adapted to the detected language: TypeScript, Python, Rust, or Go), and `user-advocate`.
@@ -274,23 +295,27 @@ Because Issue #16 is in the `grilling` phase, **you do not need to type another 
 
 ---
 
-## Step 2: Blueprint, `DESIGN.md`, Spec & Ticket DAG
+## Step 2: Blueprint, Goldfish Spec Audit & Native Ticket Graph (`/epure to-spec` & `/epure to-tickets`)
 
 <span class="epure-badge epure-badge--auto">Mandatory Automated Step</span> + <span class="epure-badge epure-badge--optional">Conditional UI Gate</span>
 
-Once your reply settles all open questions on the design frontier, EPURE posts a **Settled Decisions Summary** and pauses in `grilling` (`awaiting_human_approval`). After you validate the frontier with **`/epure to-spec`** (to generate and review the spec on `plan/*`) and **`/epure to-tickets`** (to decompose the spec into tickets):
+Once your reply settles all open questions on the design frontier, EPURE posts a **Settled Decisions Summary** and pauses in `grilling` (`awaiting_human_approval`).
 
-1. **Creates branch `plan/16-markov-craft-calculator`** from `dev`.
-2. **Commits the domain and specification artifacts**:
-   - `GLOSSARY.md` (defining *Transition Matrix*, *Absorbing State*, *Expected Craft Cost*).
-   - `docs/adr/0001-exact-markov-solver-and-spa.md`.
-   - `DESIGN.md` (automatically generated because Issue #16 includes a UI surface, defining dark/light tokens, WCAG AA contrast, and responsive breakpoints).
-   - `docs/specs/16-markov-craft-calculator.md` (complete specification enriched by `user-advocate` in **`design-gate`** mode with persona UX acceptance criteria).
-3. **Creates the Dependency-Ordered Ticket DAG**:
-   - **Issue #25**: *Core absorbing Markov solver & unit tests* (`ready-for-agent`, `blocked_by: []`)
-   - **Issue #26**: *Preset price editor & versioned localStorage hook* (`ready-for-agent`, `blocked_by: [#25]`)
-   - **Issue #27**: *Responsive simulator UI & Impeccable accessibility verification* (`ready-for-agent`, `blocked_by: [#25, #26]`)
-4. **Opens PR `plan/16-markov-craft-calculator -> dev`** and pauses in state **`awaiting_approval`**.
+1. **Generate & Audit the Specification (`/epure to-spec`)**:
+   - Creates branch **`plan/16-markov-craft-calculator`** from `dev`.
+   - Runs a zero-context **Goldfish Specification Audit** (`runGoldfishSpecAudit`) to verify self-containment, YAGNI discipline, and implementation readiness without Grill conversation bias, automatically amending any gaps.
+   - Commits the domain and specification artifacts onto `plan/16-markov-craft-calculator`:
+     - `GLOSSARY.md` (defining *Transition Matrix*, *Absorbing State*, *Expected Craft Cost*).
+     - `docs/adr/0001-exact-markov-solver-and-spa.md`.
+     - `DESIGN.md` (automatically generated because Issue #16 includes a UI surface, defining dark/light tokens, WCAG AA contrast, and responsive breakpoints).
+     - `docs/specs/16-markov-craft-calculator.md` (complete specification including the `EpicGoalContract` entrypoints and `user-advocate` **`design-gate`** persona UX acceptance criteria).
+   - Pauses in phase `spec` (`awaiting_human_approval`) so you can review or revise the spec via plain-text comments on `plan/16-markov-craft-calculator` (no intermediate `plan/* -> dev` PR is opened).
+2. **Generate the Native GitHub Ticket DAG (`/epure to-tickets`)**:
+   - Decomposes the validated specification into an acyclic dependency-ordered Ticket DAG on GitHub and wires native GitHub **`sub_issues`** and **`dependencies/blocked_by`** links:
+     - **Issue #25**: *Core absorbing Markov solver & unit tests* (`ready-for-agent`, `blocked_by: []`)
+     - **Issue #26**: *Preset price editor & versioned localStorage hook* (`ready-for-agent`, `blocked_by: [#25]`)
+     - **Issue #27**: *Responsive simulator UI & Impeccable accessibility verification* (`ready-for-agent`, `blocked_by: [#25, #26]`)
+   - Pauses in phase `tickets` (`awaiting_human_approval`) awaiting `/epure approve`.
 
 ---
 
@@ -298,49 +323,51 @@ Once your reply settles all open questions on the design frontier, EPURE posts a
 
 <span class="epure-badge epure-badge--human">Mandatory Human Gate 2</span>
 
-After reviewing the specification and ticket breakdown on the `plan/*` PR, the maintainer comments on Issue #16:
+After reviewing the specification on `plan/16-markov-craft-calculator` and the ticket breakdown, the maintainer comments on Issue #16:
 
 ```text
 /epure approve
 ```
 
-### What `/epure approve` Locks In
+### What `/epure approve` Locks In (ADR-0031, ADR-0032)
 
-- Squash-merges the documentation-only PR `plan/16-markov-craft-calculator -> dev`.
+- Creates the integration branch **`feature/16-markov-craft-calculator`** from `dev` and **directly integrates the `plan/16-markov-craft-calculator` artifacts** into `feature/16-markov-craft-calculator` (with additive `GLOSSARY.md` merging and monotonic ADR renumbering if `dev` advanced, without opening a `plan/* -> dev` PR).
 - Records the signed mandate in `refs/epure/state/16` (`spec_sha`, `approved_by`, `approved_at`, `status: "active"`).
-- Creates the integration branch **`feature/16-markov-craft-calculator`** from `dev`.
 
 ---
 
-## Step 4: Secretless TDD & Multi-Agent PR Reviews (`task/* -> feature/*`)
+## Step 4: Incremental Tools, 3-Stage Verification & Event-Driven CI (`task/* -> feature/*`)
 
 <span class="epure-badge epure-badge--auto">Mandatory Automated Step</span> + <span class="epure-badge epure-badge--optional">Conditional UI Gate</span>
 
 EPURE now executes the ticket DAG in topological order (`#25`, then `#26`, then `#27`):
 
-1. **Secretless Sandbox TDD**:
+1. **Incremental File Mutation & Stage 1 Kernel Sandbox**:
    - Creates `task/25-markov-solver` from `feature/16-markov-craft-calculator`.
-   - Runs `npm test` and `npm run build` inside the isolated sandbox (`LLM_API_KEY` and GitHub App private keys are stripped from the child environment).
+   - Applies code and test changes via incremental workspace tools (`write_repo_file`, `patch_repo_file`, `delete_repo_file`) staged inside `StagedTicketImplementationBuffer` and verified by `validateTicketIntegrityGuard`.
+   - Runs **Stage 1 Verification** inside the 2-phase Ubuntu 26.04 Linux kernel sandbox (`landrun` `https_only` install, offline `bwrap --unshare-net` typecheck/lint/test/build with stateless `rtk` output condensation, completely stripped of `LLM_API_KEY` and GitHub App private keys).
    - Opens **PR #28** (`task/25-markov-solver -> feature/16-markov-craft-calculator`).
-2. **Independent Multi-Agent Review (from trusted `dev`)**:
+2. **Stage 2 Event-Driven External CI (`waiting_ticket_ci`)**:
+   - Persists `subphase: "waiting_ticket_ci"` in `refs/epure/state/16` and exits `0` immediately so no runner sits idle while GitHub Actions runs external CI on PR #28.
+   - Automatically wakes up when `check_suite.completed` / `workflow_run.completed` fires on `task/25-markov-solver`.
+3. **Stage 3 Multi-Agent Review (from trusted `dev`) & AI Semantic Squash**:
    - Loads `.cursor/agents/*.md` strictly from `dev` (never from `task/25-*`).
    - Selects up to 4 relevant reviewers (e.g., `domain-backend-reviewer`, `standards-reviewer`, `security-reviewer`) plus `spec-parity-reviewer`.
    - For **Ticket #27** (which touches `.tsx` and `.css` files), automatically includes `frontend-reviewer`, `accessibility-reviewer`, `design-reviewer`, `user-advocate` (`implementation-review`), and the **`impeccable-gate`** check.
-   - If a reviewer emits a `must_fix`, EPURE runs a targeted remediation round (up to `max_code_fix_attempts = 3`) and re-runs only the failed reviewers + `spec-parity-reviewer`.
-3. **AI Semantic Squash Merge**:
-   - Just before merging each `task/*` PR into `feature/16-markov-craft-calculator`, EPURE synthesizes a clean Conventional Commit title and body (`feat(solver): implement exact absorbing Markov chain solver (#28)` with `Refs #25`) and performs an autonomous squash-merge via the `epure-feature-governance` ruleset.
+   - If external CI or a reviewer emits a `must_fix`, EPURE runs a targeted remediation round (up to `max_code_fix_attempts = 3`).
+   - Once green, EPURE synthesizes a Conventional Commit title and body (`feat(solver): implement exact absorbing Markov chain solver (#28)` with `Refs #25`) and performs an autonomous squash-merge via the `epure-feature-governance` ruleset.
 
 ---
 
-## Step 5: Final Synthesis PR & Human Merge into `dev`
+## Step 5: Zero-Context `EpicConvergenceAudit`, Final Synthesis PR & Human Merge into `dev`
 
 <span class="epure-badge epure-badge--auto">Mandatory Automated Step</span> -> <span class="epure-badge epure-badge--human">Mandatory Human Gate 3</span>
 
 Once tickets `#25`, `#26`, and `#27` are merged into `feature/16-markov-craft-calculator`:
 
-1. EPURE opens the final synthesis **PR #47** (`feature/16-markov-craft-calculator -> dev`) with `Closes #16`, `Closes #25`, `Closes #26`, `Closes #27`.
-2. Runs the full synthesis multi-agent review and `impeccable-gate` on the consolidated diff.
-3. Updates the PR title and body with a synthesized Conventional Commit summary.
+1. **Zero-Context `EpicConvergenceAudit` (`runEpicConvergenceAudit`)**: Before opening the final PR, an isolated Goldfish session audits `feature/16-markov-craft-calculator` against the specification's `EpicGoalContract` to verify that all `required_entrypoints` are wired end-to-end and no `forbidden_stubs` remain (automatically spawning Phase 2 convergence tickets if any entrypoint was left unwired).
+2. EPURE opens the final synthesis **PR #47** (`feature/16-markov-craft-calculator -> dev`) with `Closes #16`, `Closes #25`, `Closes #26`, `Closes #27`.
+3. Runs the full synthesis multi-agent review, `impeccable-gate`, and event-driven external CI (`waiting_feature_ci`) on the consolidated diff, updating the PR title and body with a synthesized Conventional Commit summary.
 4. **Human Gate 3**: Because `epure-dev-governance` forbids the Agent App from merging code into `dev`, the human maintainer reviews PR #47 and clicks **Squash and merge**. GitHub automatically closes Issues `#16`, `#25`, `#26`, and `#27`.
 
 ---
@@ -377,11 +404,11 @@ All `/epure` commands are posted as comments on a GitHub Issue. Every command is
 | --- | --- | --- | --- |
 | `/epure plan` | <span class="epure-badge epure-badge--human">Mandatory Human Gate 1</span> | `grilling` | Initializes `refs/epure/state/<issue>`, inspects the repository via read-only exploration tools (`list_repo_files`, `read_repo_file`, `search_in_repo_file`), and starts the structured architectural Grill interview. |
 | *(Any human comment during Grill)* | <span class="epure-badge epure-badge--human">Mandatory Human Gate 1</span> | `grilling` | Implicit Grill continuity (Q84): processes human answers via the batch cursor (`last_processed_comment_id`). If follow-up questions remain (`frontier_resolved: false`), posts the next Grill round. Once all ambiguities are settled (`frontier_resolved: true`), posts a **Settled Decisions Summary** and pauses in `grilling` (`awaiting_human_approval`) so the human validates the decision frontier before `/epure to-spec`. |
-| `/epure to-spec` | <span class="epure-badge epure-badge--human">Human Frontier Validation</span> | `spec` | Validates the Grill decision frontier (or forces an early transition) and generates `GLOSSARY.md`, ADRs, `DESIGN.md`, and `docs/specs/<slug>.md` on `plan/*`, then pauses in `spec` (`awaiting_human_approval`) for human review. Free-form comments during `spec` revise the specification on `plan/*`. |
-| `/epure to-tickets` | <span class="epure-badge epure-badge--human">Human Spec Validation</span> | `tickets` | Validates the specification on `plan/*` and decomposes it into an acyclic dependency-ordered GitHub Issue DAG (`blocked_by`, `ready-for-agent`), pausing in `tickets` (`awaiting_human_approval`) before `/epure approve`. |
-| `/epure approve` | <span class="epure-badge epure-badge--human">Mandatory Human Gate 2</span> | `implementation` | Integrates the approved `plan/*` artifacts (`GLOSSARY.md` additive merge, ADR collision renumbering, `docs/specs/<slug>.md`, `DESIGN.md`) directly into `feature/<issue>-<slug>` without an intermediate `plan/* -> dev` PR (ADR-0031), locks the signed `spec_sha` mandate in `refs/epure/state/<issue>`, and executes the ticket DAG (`task/* -> feature/*`). |
+| `/epure to-spec` | <span class="epure-badge epure-badge--human">Human Frontier Validation</span> | `spec` | Validates the Grill decision frontier (or forces an early transition), runs the zero-context **Goldfish Specification Audit** (`runGoldfishSpecAudit`), and generates `GLOSSARY.md`, ADRs, `DESIGN.md`, and `docs/specs/<slug>.md` (including `EpicGoalContract`) on `plan/*`, then pauses in `spec` (`awaiting_human_approval`) for human review. Free-form comments during `spec` revise the specification on `plan/*`. |
+| `/epure to-tickets` | <span class="epure-badge epure-badge--human">Human Spec Validation</span> | `tickets` | Validates the specification on `plan/*` and decomposes it into an acyclic dependency-ordered GitHub Issue DAG (`blocked_by`, `ready-for-agent`), wiring native GitHub relational graph links (`sub_issues` + `dependencies/blocked_by`) and pausing in `tickets` (`awaiting_human_approval`) before `/epure approve`. |
+| `/epure approve` | <span class="epure-badge epure-badge--human">Mandatory Human Gate 2</span> | `implementation` | Integrates the approved `plan/*` artifacts (`GLOSSARY.md` additive merge, monotonic & semantic ADR collision reconciliation, `docs/specs/<slug>.md`, `DESIGN.md`) directly into `feature/<issue>-<slug>` without an intermediate `plan/* -> dev` PR (ADR-0031, ADR-0032), locks the signed `spec_sha` mandate in `refs/epure/state/<issue>`, and executes the ticket DAG (`task/* -> feature/*`). |
 | `/epure continue` | <span class="epure-badge epure-badge--optional">Lifecycle Continuation</span> | `implementation` | Resumes orchestration after a `needs-human` suspension, after resolving a 3-way conflict, or after external CI (`waiting_ticket_ci` / `waiting_feature_ci`) completes (ADR-0031). |
-| `/epure sync` (alias `/epure rebase`) | <span class="epure-badge epure-badge--optional">Git Branch Sync</span> | `implementation` | Synchronizes `dev -> feature/<issue>-<slug>` (and cascades `feature/* -> active_task_branch`) with additive `GLOSSARY.md` merging, 3-way LLM conflict resolution, and **Stage 1 Sandbox** verification before committing (ADR-0031). |
+| `/epure sync` (alias `/epure rebase`) | <span class="epure-badge epure-badge--optional">Git Branch Sync</span> | `implementation` | Synchronizes `dev -> feature/<issue>-<slug>` (and cascades `feature/* -> active_task_branch`) with additive `GLOSSARY.md` merging, monotonic ADR reconciliation, 3-way LLM conflict resolution, and **Stage 1 Sandbox** verification before committing (ADR-0031, ADR-0032). |
 | `/epure status` | <span class="epure-badge epure-badge--optional">Optional Override</span> | *(Read-only)* | Reads `refs/epure/state/<issue>` and posts a fresh summary of the current phase, locked `spec_sha`, and per-ticket progress without mutating code. |
 | `/epure cancel` (alias `/epure stop`) | <span class="epure-badge epure-badge--optional">Optional Override</span> | `cancelled` | Marks the mandate as `cancelled` in `refs/epure/state/<issue>`, stops any new ticket execution, and preserves existing branches and audit logs. |
 
@@ -389,7 +416,35 @@ All `/epure` commands are posted as comments on a GitHub Issue. Every command is
 
 ---
 
-## 2. Repository Bootstrap Agent Skill (`/setup-repo` — Recommended)
+## 2. End-to-End GitHub Actions & Custom Actions Pipeline (`epure-ci-actions-flow`)
+
+<ArchifyDiagram
+  slug="epure-ci-actions-flow"
+  locale="en"
+  title="EPURE GitHub Actions, Custom Actions & Event-Driven CI Pipeline"
+  caption="End-to-end event pipeline connecting issue_comment, check_suite/workflow_run continuation, pull_request gates, and release workflow_dispatch across secretless and environment-scoped jobs."
+/>
+
+### How Commands & CI Events Flow Through `epure-issue-command.yml`
+
+1. **Job 1 — Secretless Authorization Gate (`authorize-command` using `actions/authorize-command`)**:
+   - Triggered on `issue_comment.created` using only `GITHUB_TOKEN` (`contents: read`, `issues: write`) and **zero agent or LLM secrets**.
+   - Verifies that the commenter is a human with effective `write` or `admin` permission via `GET /repos/{owner}/{repo}/collaborators/{username}/permission`.
+   - With `allow_implicit_planning_reply: "true"`, free-text human comments without a slash prefix are automatically routed as `reply` commands whenever the issue is in the `grilling` or `spec` phase.
+2. **Job 2 — Isolated Agent Orchestration (`orchestrate-command` using `actions/orchestrate-issue`)**:
+   - Runs on `ubuntu-26.04` inside the dedicated GitHub Environment (`environment: <llm-env>`, e.g., `epure-agent`, `llm`, `openai`, `anthropic`, or `gemini`) **only after** `authorize-command` succeeds (or upon an authorized CI continuation event).
+   - Receives the environment-scoped secrets (`EPURE_AGENT_APP_ID`, `EPURE_AGENT_APP_PRIVATE_KEY`, and `LLM_API_KEY` or provider key) and provisions the kernel sandbox tools (`bubblewrap`, `landrun`, `rtk`).
+   - On `/epure to-tickets`, creates the child GitHub Issues and wires native GitHub relational graph links (`sub_issues` parent-child hierarchy + `dependencies/blocked_by` task edges).
+3. **Automatic Event-Driven CI Continuation (`check_suite.completed` / `workflow_run.completed`)**:
+   - When `async_ci_continuation: "true"` is enabled, opening a `task/* -> feature/*` PR (`waiting_ticket_ci`) or `feature/* -> dev` PR (`waiting_feature_ci`) records the active PR/SHA in `refs/epure/state/<issue>` and immediately exits `0` to free the GitHub Actions runner.
+   - When external CI finishes on `task/*` or `feature/*`, the `check_suite.completed` or `workflow_run.completed` event wakes `orchestrate-command` with `command: "continue"`, `trigger_head_sha`, and `trigger_branch` to run Stage 3 multi-agent review, AI semantic squash, or unified auto-remediation.
+4. **Pull Request Gates & Controlled Release Promotion**:
+   - On `pull_request` events (`dev`, `main`, `feature/**`), `epure-check.yml` (`actions/epure-contract`), `pr-title.yml`, and `ci.yml` execute with `contents: read` and zero privileged secrets.
+   - On human `workflow_dispatch`, `release.yml` runs inside the protected `environment: release` (`EPURE_RELEASE_APP_ID`, `EPURE_RELEASE_APP_PRIVATE_KEY`) via `actions/verify-app-role` to fast-forward `dev -> main`.
+
+---
+
+## 3. Repository Bootstrap Agent Skill (`/setup-repo` — Recommended)
 
 The **`.agents/skills/setup-repo/SKILL.md`** skill is the **preferred way** to onboard or reconfigure an EPURE consumer repository from Cursor, Claude Code, Pi, or Codex:
 
@@ -402,11 +457,11 @@ The **`.agents/skills/setup-repo/SKILL.md`** skill is the **preferred way** to o
 1. **Project Discovery**: Inspects the repository stack (`package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, `Makefile`), `src/` module layout, and whether a user interface is present.
 2. **Dry-Run Simulation (`--dry-run`)**: Runs `dist/cli/setup-repo.mjs --dry-run` and presents the full plan to the human maintainer before writing anything.
 3. **Dynamic `.cursor/agents/*.md` Roster Design**: Creates, designs, and tailors specialist reviewers according to the project's actual elements (always-on core `architecture-reviewer`, `security-reviewer`, `spec-parity-reviewer`, `standards-reviewer`, `user-advocate` + tailored domain/UI specialists with `paths:` routing).
-4. **Idempotent Application (`--apply --apply-github-settings`)**: Writes `.github/agents.yml`, SHA-pinned caller workflows, configures squash-only merges, and provisions the 3 Repository Rulesets.
+4. **Idempotent Application (`--apply --apply-github-settings`)**: Writes `.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`, SHA-pinned caller workflows, configures squash-only merges, and provisions the 3 Repository Rulesets.
 
 ---
 
-## 3. Underlying Bootstrap CLI (`dist/cli/setup-repo.mjs`)
+## 4. Underlying Bootstrap CLI (`dist/cli/setup-repo.mjs`)
 
 Invoked automatically by the `/setup-repo` skill (or runnable directly from a terminal):
 
@@ -414,37 +469,43 @@ Invoked automatically by the `/setup-repo` skill (or runnable directly from a te
 node dist/cli/setup-repo.mjs \
   --repo <owner>/<name> \
   --target-dir <path> \
+  [--pinned-sha <40-char-sha>] \
   [--dry-run | --apply] \
   [--apply-github-settings] \
   [--no-frontend-reviewers] \
   [--domain-reviewers <slug1,slug2>] \
   [--agent-app-id <id>] \
   [--release-app-id <id>] \
-  [--require-pr-approvals <N>]
+  [--require-pr-approvals <N>] \
+  [--json]
 ```
 
 | Flag | Default | Description |
 | --- | --- | --- |
 | `--repo <owner/name>` | *(Required)* | Target GitHub repository slug (e.g., `my-org/craft-calculator`). |
-| `--target-dir <path>` | Current directory | Local checkout path where `.github/agents.yml`, workflows, and `.cursor/agents/*.md` are written. |
+| `--target-dir <path>` (aliases `--dir`, `--repo-root`) | Current directory | Local checkout path where `.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`, workflows, and `.cursor/agents/*.md` are written. |
+| `--pinned-sha <sha>` | Latest EPURE SHA | Immutable 40-character Git commit SHA of `Giskard-AI/epure` used to pin generated caller workflows. |
 | `--dry-run` | `true` (if `--apply` omitted) | Prints the complete bootstrap plan without modifying local files or calling write APIs. |
-| `--apply` | `false` | Writes configuration files, caller workflows, and base `.cursor/agents/*.md` files. |
+| `--apply` | `false` | Writes configuration files (`.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`), caller workflows, and base `.cursor/agents/*.md` files. |
 | `--apply-github-settings` | `false` | Applies squash-only repository settings and the 3 Repository Rulesets via the GitHub REST API. |
 | `--no-frontend-reviewers` | `false` | Omits `frontend-reviewer`, `accessibility-reviewer`, and `design-reviewer` for headless repositories. |
 | `--domain-reviewers <csv>` | None | Scaffolds additional `.cursor/agents/<slug>-reviewer.md` specialist files for domain subsystems. |
 | `--agent-app-id <id>` | Optional | Numeric GitHub App ID of `<owner>-epure-agent` added as PR Bypass Actor on `epure-feature-governance` (`feature/*`). |
 | `--release-app-id <id>` | Optional | Numeric GitHub App ID of `<owner>-epure-release` added as sole Bypass Actor on `epure-release-immutability` (`main` and `v*`). |
 | `--require-pr-approvals <N>` | `0` | Number of human PR review approvals required on `dev` (`0` for solo-maintainer compatibility; `>=1` for teams). |
+| `--json` | `false` | Emits the full structured `SetupRepoResult` JSON payload to stdout instead of the Markdown summary. |
 
 ---
 
-## 4. Interactive GitHub Apps Wizard (`setup-github-apps-wizard.sh`)
+## 5. Interactive GitHub Apps Wizard (`setup-github-apps-wizard.sh`)
 
 ```bash
-bash scripts/wizards/setup-github-apps-wizard.sh --repo <owner>/<name>
+bash scripts/wizards/setup-github-apps-wizard.sh \
+  --repo <owner>/<name> \
+  --llm-env <env-name>
 ```
 
-Guides a human maintainer through registering the two GitHub Apps (`<owner>-epure-agent` and `<owner>-epure-release`) via the GitHub App Manifest flow and uploading the 5 required repository secrets (`LLM_API_KEY`, `EPURE_AGENT_APP_ID`, `EPURE_AGENT_APP_PRIVATE_KEY`, `EPURE_RELEASE_APP_ID`, `EPURE_RELEASE_APP_PRIVATE_KEY`).
+Guides a human maintainer through registering the two GitHub Apps (`<owner>-epure-agent` and `<owner>-epure-release`) via **Approach 2** (1-click local GitHub App Manifest flow) or **Fallback Approach 1** (manual step-by-step guided registration), creates the isolated GitHub Environments (`<llm-env>` — configurable and LLM-agnostic, e.g., `epure-agent`, `llm`, `openai`, `anthropic`, `gemini` — and `release`), and uploads the 5 secrets to their respective environments (`EPURE_AGENT_APP_ID`, `EPURE_AGENT_APP_PRIVATE_KEY`, and `LLM_API_KEY` in `--env <llm-env>`; `EPURE_RELEASE_APP_ID` and `EPURE_RELEASE_APP_PRIVATE_KEY` in `--env release`).
 
 ---
 ## [EN] Configuration (.github/agents.yml & renovate.json)
@@ -452,174 +513,155 @@ URL: https://giskard-ai.github.io/epure/configuration
 
 # Configuration Reference (`.github/agents.yml`)
 
-EPURE centralizes all orchestration, LLM, governance, and UI gate settings in a single versioned declarative file: **`.github/agents.yml`**.
+EPURE centralizes all orchestration, LLM routing, polyglot verification, web exploration, and non-weakenable security invariants in a single versioned declarative file: **`.github/agents.yml`**.
 
 ---
 
-## Complete Canonical Example
+## Complete Canonical Flat Schema (`serializeAgentsConfigYaml` / `parseAgentsYaml`)
 
-Below is a complete `.github/agents.yml` file with all supported keys and their defaults (Q78, Q91–Q96):
+Below is the canonical flat `.github/agents.yml` file generated by `setup-repo` (`src/bootstrap/setup-repo.ts`) with all supported keys and their defaults (Q78, Q91–Q96, ADR-0028–ADR-0033):
 
 ```yaml
-# .github/agents.yml — Declarative EPURE Configuration
-schema_version: 1
-
-epure:
-  # Immutable 40-character SHA of Giskard-AI/epure
-  pinned_sha: "7f9f5aafa90acb68c5374cf00833881c0467cf67"
-
-branches:
-  # Active integration branch (set as the repository's default branch)
-  default_integration: "dev"
-  # Immutable production release branch (fast-forward only from dev)
-  release: "main"
-
-llm:
-  provider: "google-gemini"
-  # Primary reasoning & coding model
-  model: "gemini-3.8-flash"
-  thinking_level: "HIGH"
-  # Lightweight zero-temperature model for AI semantic squash commit messages
-  squash_summary_model: "gemini-3.8-flash"
-  squash_summary_temperature: 0.0
-
-# Per-phase model routing (<provider>/<model> or bare model identifier, ADR-0029)
+# EPURE Consumer Repository Configuration (.github/agents.yml)
+# Generated by setup-repo — security boundaries are enforced by shared workflows (ADR-0010, ADR-0023).
+harness: pi
 models:
-  planning: "anthropic/claude-sonnet-4-20250514"
-  implementation: "openai/gpt-5.4"
-  review: "google/gemini-3.8-flash"
-
-# Optional custom provider endpoints & secret-free environment variable references (ADR-0029)
+  planning: anthropic/claude-sonnet-4-20250514
+  implementation: openai/gpt-5.4
+  review: google/gemini-3.8-flash
 providers:
   azure-prod:
-    provider: "azure"
-    api_key: "os.environ/AZURE_OPENAI_API_KEY"
-    base_url: "os.environ/AZURE_OPENAI_ENDPOINT"
-    api_version: "2024-10-21"
+    provider: azure
+    api_key: os.environ/AZURE_OPENAI_API_KEY
+    base_url: os.environ/AZURE_OPENAI_ENDPOINT
+    api_version: 2024-10-21
   foundry-deepseek:
-    provider: "azure_ai"
-    api_key: "os.environ/AZURE_AI_API_KEY"
-    base_url: "https://my-foundry.services.ai.azure.com"
-
-orchestration:
-  # Out-of-branch atomic CAS state prefix
-  state_ref_prefix: "refs/epure/state/"
-  # Maximum automated TDD / review remediation loops per ticket before escalating to needs-human
-  max_code_fix_attempts: 3
-  # Per-HTTP-request transient LLM retry ceiling (5xx, 408, network/timeout; HTTP 429 rate-limits wait without consuming this quota)
-  max_transient_api_retries: 4
-  transient_retry_backoff_seconds: [5, 15, 45, 120]
-  # Unitary HTTP request timeout for LLM calls (15 minutes = 900 seconds)
-  llm_request_timeout_seconds: 900
-  # GitHub Actions orchestrator job wall-clock timeout in minutes
-  job_timeout_minutes: 60
-  # Maximum parallel domain/transverse reviewers selected per PR diff (excluding spec-parity-reviewer)
-  max_parallel_reviewers: 4
-  # Enforce secretless sandbox execution (fails closed if secrets cannot be stripped)
-  secretless_sandbox: true
-
-review_roster:
-  # Always load reviewer definitions from the trusted base branch (never from untrusted PR head)
-  trusted_branch: "dev"
-  directory: ".cursor/agents"
-  # Mandatory reviewer on every PR
-  always_include:
-    - "spec-parity-reviewer"
-  # Available specialist & transverse agents
-  available:
-    - "domain-backend-reviewer"
-    - "frontend-reviewer"
-    - "infra-reviewer"
-    - "architecture-reviewer"
-    - "security-reviewer"
-    - "standards-reviewer"
-    - "accessibility-reviewer"
-    - "design-reviewer"
-    - "user-advocate"
-
-ui_governance:
-  # Automatically activates DESIGN.md, user-advocate, and impeccable-gate when UI files are present
-  impeccable_enabled: true
-  design_system_path: "DESIGN.md"
-  # Opt-in static GitHub Pages preview for /prototype branches (disabled by default, Q70)
-  enable_pages_preview: false
-  preview_retention_days: 14
-
-sensitive_paths:
-  # Modifying any of these paths on a task/* branch blocks auto-merge unless labeled approved-sensitive-change
-  - ".github/workflows/**"
-  - ".github/agents.yml"
-  - ".cursor/agents/**"
-  - "CODEOWNERS"
+    provider: azure_ai
+    api_key: os.environ/AZURE_AI_API_KEY
+    base_url: https://my-foundry.services.ai.azure.com
+merge_policy: strict
+task_auto_merge_enabled: true
+max_code_fix_attempts: 3
+max_epic_phases: 2
+max_transient_api_retries: 4
+transient_retry_backoff_seconds: [5, 15, 45, 120]
+llm_request_timeout_seconds: 900
+job_timeout_minutes: 60
+review_timeout_minutes: 30
+max_concurrent_tasks_per_feature: 3
+trace_retention_days: 30
+preview_retention_days: 14
+github_pages_previews: false
+verification:
+  wait_for_external_ci: true
+  external_ci_timeout_minutes: 15
+  grace_window_seconds: 45
+  targets:
+    - name: root
+      working_directory: .
+      kind: node
+      path_patterns: ["**"]
+      install_command: "npm ci --ignore-scripts"
+      typecheck_command: "npm run typecheck"
+      lint_command: "npm run lint"
+      test_command: "npm test"
+      build_command: "npm run build"
+web_tools:
+  enabled: true
+  phases: ["plan", "spec", "implementation"]
+  max_requests_per_turn: 4
+  max_requests_per_run: 12
+  max_bytes_per_response: 16384
+  max_fetch_bytes: 16384
+  timeout_ms: 10000
+security_invariants:
+  require_write_permission: true
+  sandbox_isolation: true
+  allow_agent_release: false
+  auto_merge_dev: false
+  auto_merge_main: false
 ```
+
+---
+
+## Configurable & LLM-Agnostic GitHub Environment (`<llm-env>`)
+
+In `.github/workflows/epure-issue-command.yml`, the `orchestrate-command` job runs inside a dedicated GitHub Environment (`environment: <llm-env>`) **only after** the secretless `authorize-command` job verifies effective `write` or `admin` permission:
+
+- **Free & Provider-Agnostic Naming**: The `<llm-env>` environment name is completely configurable via `setup-github-apps-wizard.sh --llm-env <env-name>` and agnostic of the underlying LLM provider (for example: `epure-agent`, `llm`, `openai`, `anthropic`, or `gemini`).
+- **Zizmor-Compliant Secret Isolation**: `EPURE_AGENT_APP_ID`, `EPURE_AGENT_APP_PRIVATE_KEY`, and `LLM_API_KEY` (or custom provider secret referenced via `os.environ/VAR_NAME`) are scoped strictly to `--env <llm-env>`, while `EPURE_RELEASE_APP_ID` and `EPURE_RELEASE_APP_PRIVATE_KEY` are scoped to the human-approved `--env release` environment. Public pull request workflows and `authorize-command` never have access to any secret.
 
 ---
 
 ## Section-by-Section Reference
 
-### `branches`
+### Root Execution, Retry & Governance Keys
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `default_integration` | `string` | `"dev"` | Default branch of the repository where human-reviewed `feature/* -> dev` PRs land (approved `plan/*` artifacts integrate directly into `feature/*` per ADR-0031). |
-| `release` | `string` | `"main"` | Immutable release branch updated exclusively by `release-promote.yml` via fast-forward from `dev`. |
-
-### `llm`, `models` & `providers` (Multi-Provider Routing — ADR-0029)
-
-EPURE includes a zero-dependency multi-provider `LLMClient` inspired by `giskard-llm` that supports **Google Gemini** (`google/` or `gemini/`), **OpenAI** (`openai/`), **Azure OpenAI** (`azure/`), **Azure AI Foundry** (`azure_ai/`), and **Anthropic** (`anthropic/`).
-
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `models.planning` | `string` | `"claude-sonnet-4-20250514"` (or `"gemini-3.8-flash"` fallback) | Model used for `/grill-with-docs` interviews and specification/DAG generation (`<provider>/<model>` or bare model). |
-| `models.implementation` | `string` | `"claude-sonnet-4-20250514"` (or `"gemini-3.8-flash"` fallback) | Model used for TDD code generation and Stage 1/2/3 auto-remediation loops. |
-| `models.review` | `string` | `"gpt-4.1"` (or `"gemini-3.8-flash"` fallback) | Model used for the multi-agent PR review roster, `user-advocate` design-gate, and zero-temperature squash commit synthesis. |
-| `providers.<alias>.provider` | `"google" \| "openai" \| "azure" \| "azure_ai" \| "anthropic"` | *(Optional)* | Underlying protocol family for a custom provider alias referenced in `models.*` (`<alias>/<model>`). |
-| `providers.<alias>.api_key` | `string` | `os.environ/<VAR>` | Secret-free environment variable reference (`os.environ/VAR_NAME`) resolved at runtime from `process.env`. Never commit literal API keys in `.github/agents.yml`. |
-| `providers.<alias>.base_url` | `string` | Provider default | Custom base URL or `os.environ/VAR_NAME` (for `azure_ai`, trailing `/models` suffixes on `*.services.ai.azure.com` are stripped automatically). |
-| `providers.<alias>.api_version` | `string` | `"2024-10-21"` | Azure OpenAI deployment API version (`?api-version=...`). |
-| `providers.<alias>.default_headers` | `Record<string, string>` | `{}` | Optional custom HTTP headers attached to every request for this provider alias. |
-
-#### API Key Resolution Order
-
-For each phase call, `LLMClient` resolves the API key deterministically without silent cross-provider fallback (ADR-0012, ADR-0029):
-1. `providers[alias].api_key` (resolving `os.environ/VAR_NAME` from `process.env`).
-2. Standard provider environment variable (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `AZURE_API_KEY` / `AZURE_OPENAI_API_KEY`, `AZURE_AI_API_KEY`).
-3. Explicit `LLM_API_KEY` passed to the orchestrator action.
-
-### `orchestration`
-
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `state_ref_prefix` | `string` | `"refs/epure/state/"` | Git reference namespace used for atomic Compare-And-Swap state persistence (Q76). |
-| `max_code_fix_attempts` | `integer` | `3` | Maximum number of automated remediation rounds on a `task/*` or `feature/*` PR before adding `needs-human` and stopping (Q78). |
-| `max_transient_api_retries` | `integer` | `4` | Per-HTTP-request retry ceiling for transient LLM errors (`5xx`, `408`, timeout, or 1x malformed JSON retry). `HTTP 429` rate limits honor `Retry-After` (or `[15, 30, 60, 120]s`, max `300s`, up to 10 waits) without consuming this budget. |
+| `harness` | `"pi" \| "codex"` | `"pi"` | Agent execution adapter harness used for sandboxed runs. |
+| `merge_policy` | `"strict" \| "relaxed"` | `"strict"` | Stale-base policy for `task/* -> feature/*` integration (`strict` requires up-to-date base; `relaxed` allows clean 3-way merge when approved diff is unchanged). |
+| `task_auto_merge_enabled` | `boolean` | `false` (`true` when CI & branch protections exist) | Enables autonomous squash-merge of validated `task/* -> feature/*` PRs; forced to `false` (`AUTO_MERGE_DISABLED_MISSING_PROTECTIONS`) if required CI or branch protections are missing. |
+| `max_code_fix_attempts` | `integer` | `3` | Maximum number of automated remediation rounds (Stage 1 sandbox, external CI, or multi-agent review) per ticket before escalating to `needs-human` (Q78). |
+| `max_epic_phases` | `integer` (`1..3`) | `2` | Maximum number of epic execution phases when `runEpicConvergenceAudit` detects unwired entrypoints (`[Phase 2 - Ticket N]`, ADR-0032). |
+| `max_transient_api_retries` | `integer` | `4` | Per-HTTP-request retry ceiling for transient LLM errors (`5xx`, `408`, network timeout). `HTTP 429` rate limits honor `Retry-After` (up to 10 waits) without consuming this quota. |
 | `transient_retry_backoff_seconds` | `[int, int, int, int]` | `[5, 15, 45, 120]` | Exponential backoff schedule in seconds between transient HTTP retries. |
 | `llm_request_timeout_seconds` | `integer` | `900` | Unitary HTTP request timeout in seconds (`15 minutes`) for each LLM API call. |
 | `job_timeout_minutes` | `integer` | `60` | Wall-clock timeout in minutes for `orchestrate-command` in `.github/workflows/epure-issue-command.yml` (Q78). |
-| `max_parallel_reviewers` | `integer` | `4` | Ceiling on domain/transverse reviewers selected per PR diff so review latency and signal-to-noise remain optimal (Q92). |
-| `secretless_sandbox` | `boolean` | `true` | Strips `LLM_API_KEY` and GitHub App private keys from all child build/test processes; fails closed if isolation is unavailable (Q74). |
-| `web_tools.enabled` | `boolean` | `true` | Enables zero-API-key read-only public Web exploration tools (`web_search`, `web_fetch`) constrained to `https://` port `443` with strict Anti-SSRF filtering and `<untrusted_web_content>` wrapping (ADR-0031). |
-| `web_tools.phases` | `string[]` | `["plan", "spec", "implementation"]` | Lifecycle phases allowed to invoke `web_search` and `web_fetch` (excluded from `review` by default). |
-| `web_tools.max_requests_per_turn` | `integer` | `4` | Maximum Web tool requests permitted within a single LLM turn. |
-| `web_tools.max_fetch_bytes` | `integer` | `16384` | Maximum UTF-8 byte budget returned per `web_fetch` call after HTML stripping. |
+| `review_timeout_minutes` | `integer` | `30` | Timeout in minutes for multi-agent PR review jobs (with up to `max_parallel_reviewers = 4` specialist/transverse reviewers selected per PR diff alongside `spec-parity-reviewer`). |
+| `max_concurrent_tasks_per_feature` | `integer` | `3` | Maximum number of unblocked `task/*` tickets executed concurrently per `feature/*` branch. |
+| `trace_retention_days` | `integer` | `30` | Retention period in days for minimized audit trajectories (`iFixAi`). |
+| `preview_retention_days` | `integer` | `14` | Number of days before hosted `/prototype` previews are automatically purged (Q71). |
+| `github_pages_previews` | `boolean` | `false` | Opt-in flag (legacy alias `enable_pages_preview: false`) to publish static `/prototype` previews to an isolated GitHub Pages origin; requires `github_pages_human_consent: true` and `preview_separate_origin: true` (Q70, Q73). |
 
-### `ui_governance`
+### `models` & `providers` (Multi-Provider Routing — ADR-0029)
+
+EPURE includes a zero-dependency multi-provider `LLMClient` supporting **Google Gemini** (`google/` or `gemini/`), **OpenAI** (`openai/`), **Azure OpenAI** (`azure/`), **Azure AI Foundry** (`azure_ai/`), and **Anthropic** (`anthropic/`).
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `impeccable_enabled` | `boolean` | `true` | Enables `DESIGN.md` generation, `user-advocate` (`design-gate` and `implementation-review`), and the blocking `impeccable-gate` CI check whenever UI files are touched (Q79, Q96). |
-| `enable_pages_preview` | `boolean` | `false` | Opt-in flag to publish static `/prototype` previews to an isolated GitHub Pages environment (Q70, Q73). |
-| `preview_retention_days` | `integer` | `14` | Number of days before hosted prototype previews are automatically purged (Q71). |
+| `models.planning` | `string` | `"claude-sonnet-4-20250514"` | Model used for `/epure plan` Grill interviews, `runGoldfishSpecAudit`, and `/epure to-spec` / `/epure to-tickets` (`<provider>/<model>` or bare model). |
+| `models.implementation` | `string` | `"claude-sonnet-4-20250514"` | Model used for incremental workspace tool loops (`write_repo_file`, `patch_repo_file`), 3-way conflict resolution, and Stage 1/2/3 auto-remediation. |
+| `models.review` | `string` | `"gpt-4.1"` | Model used for the multi-agent PR review roster, `runEpicConvergenceAudit`, `user-advocate`, and zero-temperature squash commit synthesis. |
+| `providers.<alias>.provider` | `"google" \| "openai" \| "azure" \| "azure_ai" \| "anthropic"` | *(Optional)* | Underlying protocol family for a custom provider alias referenced in `models.*` (`<alias>/<model>`). |
+| `providers.<alias>.api_key` | `string` | `os.environ/<VAR>` | Secret-free environment variable reference (`os.environ/VAR_NAME`) resolved at runtime from `process.env`. Never commit literal API keys in `.github/agents.yml`. |
+| `providers.<alias>.base_url` | `string` | Provider default | Custom base URL or `os.environ/VAR_NAME`. |
+| `providers.<alias>.api_version` | `string` | `"2024-10-21"` | Azure OpenAI deployment API version (`?api-version=...`). |
+| `providers.<alias>.default_headers` | `Record<string, string>` | `{}` | Optional custom HTTP headers attached to every request for this provider alias. |
 
-### `sensitive_paths`
+### `verification` & `verification.targets` (Polyglot Stage 1 & Stage 2 CI — ADR-0028, ADR-0030)
 
-Any modification to `.github/workflows/**`, `.github/agents.yml`, `.cursor/agents/**`, or `CODEOWNERS` on a `task/*` branch triggers a **Sensitive Path Escalation**: EPURE refuses autonomous merge into `feature/*` and applies the `needs-human` label unless a maintainer explicitly adds the `approved-sensitive-change` label (Q81, Q93).
+Always loaded at runtime from the trusted `dev` branch so an untrusted `task/*` branch can never weaken its own test commands:
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `verification.wait_for_external_ci` | `boolean` | `true` | Enables Stage 2 external CI waiting (`waiting_ticket_ci` / `waiting_feature_ci`) on `task/*` and `feature/*` PRs. |
+| `verification.external_ci_timeout_minutes` | `integer` | `15` | Maximum external CI wait ceiling in minutes before timeout classification. |
+| `verification.grace_window_seconds` | `integer` | `45` | Grace window in seconds after PR push to allow GitHub Actions check runs to register before evaluating completion. |
+| `verification.deferred_external_workflows` | `string[]` | `[]` | Optional workflow names deferred from per-ticket `task/*` blocking and enforced only on `feature/* -> dev`. |
+| `verification.targets` | `VerificationTargetSpec[]` | Auto-discovered by `setup-repo` | Per-subproject Stage 1 verification targets (`name`, `working_directory`, `kind`: `node \| python \| rust \| go \| make \| custom`, `path_patterns`, `install_command`, `codegen_command`, `typecheck_command`, `lint_command`, `test_command`, `build_command`) executed inside the 2-phase Ubuntu 26.04 kernel sandbox (`landrun` + `bubblewrap`). |
+
+### `web_tools` (Confined Public Web Exploration — ADR-0031)
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `web_tools.enabled` | `boolean` | `true` | Enables zero-API-key read-only public Web exploration tools (`web_search`, `web_fetch`) constrained to `https://` port `443` with strict Anti-SSRF filtering and `<untrusted_web_content>` wrapping. |
+| `web_tools.phases` | `string[]` | `["plan", "spec", "implementation"]` | Lifecycle phases allowed to invoke `web_search` and `web_fetch` (excluded from `review` by default). |
+| `web_tools.max_requests_per_turn` | `integer` | `4` | Maximum Web tool requests permitted within a single LLM turn. |
+| `web_tools.max_requests_per_run` | `integer` | `12` | Maximum Web tool requests permitted across an entire orchestrator run. |
+| `web_tools.max_bytes_per_response` | `integer` | `16384` | Maximum UTF-8 byte budget returned per tool response. |
+| `web_tools.max_fetch_bytes` | `integer` | `16384` | Maximum UTF-8 byte budget returned per `web_fetch` call after HTML stripping. |
+| `web_tools.timeout_ms` | `integer` | `10000` | Per-request HTTP timeout in milliseconds for Web exploration calls. |
+
+### `security_invariants` & Sensitive Paths
+
+Any attempt in `.github/agents.yml` to weaken `security_invariants` (`require_write_permission: false`, `sandbox_isolation: false`, `allow_agent_release: true`, `auto_merge_dev: true`, `auto_merge_main: true`) is rejected fail-closed with `SECURITY_INVARIANT_VIOLATION`. Furthermore, any modification to `.github/workflows/**`, `.github/agents.yml`, `.cursor/agents/**`, or `CODEOWNERS` on a `task/*` branch triggers a **Sensitive Path Escalation** (`needs-human`) unless a maintainer explicitly adds the `approved-sensitive-change` label (Q81, Q93).
 
 ---
 
-## Supply-Chain & Renovate Security Policy (`renovate.json`)
+## Supply-Chain & Renovate Security Policy (`renovate.json` & `.github/zizmor.yml`)
 
-Every EPURE repository (and `Giskard-AI/epure` itself) ships a hardened **`renovate.json`** generated by `/setup-repo` (Q46–Q48):
+Every EPURE repository ships a hardened **`renovate.json`** and **`.github/zizmor.yml`** generated by `/setup-repo` (Q46–Q48):
 
 - **Quarantine Cooldown (No Day-1 Merges)**: Enforces `minimumReleaseAge: "3 days"` globally (`"7 days"` for minor updates and GitHub Actions/Docker images, `"14 days"` for major npm updates) coupled with `internalChecksFilter: "strict"` and `prCreation: "not-pending"` so newly published or compromised packages are quarantined before any PR is opened.
 - **Maximum Safe Automation**: Groups minor, patch, pin, and digest updates into single weekly PRs (`npm-minor-and-patch`, `github-actions`, `docker`), pins exact versions (`rangeStrategy: "pin"`, `helpers:pinGitHubActionDigests`, `docker:pinDigests`), runs monthly `lockFileMaintenance`, and automatically rebases behind `dev` (`rebaseWhen: "behind-base-branch"`).
@@ -634,6 +676,8 @@ URL: https://giskard-ai.github.io/epure/architecture
 
 EPURE is built from the ground up around **Defense-in-Depth**, **Least Privilege**, and **Out-of-Branch Deterministic State**. Every automation boundary is enforced both by GitHub Repository Rulesets and by local runtime sandboxing.
 
+> **Interactive Event & Custom Actions Pipeline Diagram**: See the [`epure-ci-actions-flow` diagram in Commands Reference](./commands#2-end-to-end-github-actions-custom-actions-pipeline-epure-ci-actions-flow) for the complete mapping of GitHub events (`issue_comment`, `check_suite`, `workflow_run`, `pull_request`, `workflow_dispatch`), secretless `authorize-command`, environment-scoped `orchestrate-command` (`environment: <llm-env>`), and `release` promotion.
+
 ---
 
 ## 1. Security & Trust Boundaries Architecture
@@ -647,14 +691,14 @@ EPURE is built from the ground up around **Defense-in-Depth**, **Least Privilege
 
 ### Key Architectural Invariants
 
-1. **Dual GitHub App Separation (`<owner>-epure-agent` vs. `<owner>-epure-release`, Q82 & Q91)**:
-   - The **Agent App** mints short-lived RS256 installation tokens scoped to day-to-day orchestration (`plan/*`, `task/*`, `feature/*`). It is a Bypass Actor **only** on `epure-feature-governance` (`refs/heads/feature/*`), allowing autonomous integration of verified atomic tasks while physically blocking it from merging application code into `dev` or pushing to `main`.
-   - The **Release App** is invoked exclusively by `release-promote.yml` under human `workflow_dispatch`. It is the sole Bypass Actor on `epure-release-immutability` (`refs/heads/main` and `refs/tags/v*`).
+1. **Dual GitHub App Separation & Environment-Scoped Secrets (`<owner>-epure-agent` vs. `<owner>-epure-release`, Q82 & Q91)**:
+   - The **Agent App** mints short-lived RS256 installation tokens scoped to day-to-day orchestration (`plan/*`, `task/*`, `feature/*`). Its credentials (`EPURE_AGENT_APP_ID`, `EPURE_AGENT_APP_PRIVATE_KEY`) and `LLM_API_KEY` are scoped to the dedicated agent GitHub Environment (`<llm-env>`) and never exposed to `authorize-command` or public PR workflows. It is a Bypass Actor **only** on `epure-feature-governance` (`refs/heads/feature/*`), allowing autonomous integration of verified atomic tasks while physically blocking it from merging application code into `dev` or pushing to `main`.
+   - The **Release App** is invoked exclusively by `release-promote.yml` / `release.yml` under human `workflow_dispatch` inside the protected `release` GitHub Environment (`EPURE_RELEASE_APP_ID`, `EPURE_RELEASE_APP_PRIVATE_KEY`). It is the sole Bypass Actor on `epure-release-immutability` (`refs/heads/main` and `refs/tags/v*`).
 2. **Secretless Sandbox Execution (Q74)**:
    - When EPURE runs `npm test`, `npm run build`, or `pytest` on a `task/*` branch, the child process environment is scrubbed of `LLM_API_KEY`, `EPURE_AGENT_APP_PRIVATE_KEY`, and `EPURE_RELEASE_APP_PRIVATE_KEY`.
    - A malicious or compromised test script cannot exfiltrate credentials. If sandbox isolation fails, EPURE aborts **fail-closed**.
 3. **Out-of-Branch CAS State (`refs/epure/state/<issue>`, Q76)**:
-   - State transitions (`last_processed_comment_id`, signed `spec_sha`, retry counters, ticket status table) are stored as JSON blobs inside `refs/epure/state/<issue-number>` updated via atomic `git update-ref` Compare-And-Swap.
+   - State transitions (`last_processed_comment_id`, signed `spec_sha`, retry counters, ticket status table, and active CI continuation subphases) are stored as JSON blobs inside `refs/epure/state/<issue-number>` updated via atomic `git update-ref` Compare-And-Swap.
    - `dev` and `main` remain 100% free of machine-state commit noise.
 
 ---
@@ -698,11 +742,43 @@ EPURE is built from the ground up around **Defense-in-Depth**, **Least Privilege
    - Zero-dependency TypeScript `LLMClient` routing `<provider>/<model>` identifiers across **Google Gemini** (`google/`, `gemini/`), **OpenAI** (`openai/`), **Azure OpenAI** (`azure/`), **Azure AI Foundry** (`azure_ai/`), and **Anthropic** (`anthropic/`), with `os.environ/VAR_NAME` lazy resolution from `.github/agents.yml`.
    - Enforces ADR-0012 fail-fast resilience: HTTP `401`/`403` (`AuthenticationError`) and `402` (`QuotaExhaustedError`) immediately halt without silent fallback, while transient `408`/`429`/`5xx` errors apply bounded exponential backoff.
 2. **Native Schema-Enforced Structured Outputs (`ResponseSchemaSpec<T>`) & 2-Phase Gemini Tool Loop**:
-   - All 11 structured LLM calls (`GrillRoundEvaluation`, `GeneratedPlanningBundle`, `GeneratedTicketImplementation`, multi-agent reviewer findings, `user-advocate`, and squash commit synthesis) send formal JSON Schemas (`responseSchema`, `response_format.json_schema` with recursive `additionalProperties: false`, or `output_config.format`) paired with runtime TypeScript validators in `src/orchestrator/prompts/schemas.ts`.
+   - All structured LLM calls (`GrillRoundEvaluation`, `GeneratedPlanningBundle`, `GeneratedTicketImplementation`, multi-agent reviewer findings, `user-advocate`, and squash commit synthesis) send formal JSON Schemas (`responseSchema`, `response_format.json_schema` with recursive `additionalProperties: false`, or `output_config.format`) paired with runtime TypeScript validators in `src/orchestrator/prompts/schemas.ts`.
    - When Google Gemini calls combine repository exploration tools (`list_repo_files`, `search_in_repo_file`, `read_repo_file`) with a `ResponseSchemaSpec`, **Phase 1** executes tool rounds with `functionDeclarations` (preserving Gemini 3 `thoughtSignature` tokens), and **Phase 2** finalizes with `functionCallingConfig.mode = "NONE"` + `responseMimeType: "application/json"` + `responseSchema`.
 3. **Modular `src/orchestrator/` Architecture & Wired Safety Guards**:
    - `src/orchestrator/issue-orchestrator.ts` acts as a clean coordinator delegating to `github/rest-client.ts`, `workspace/repo-tools.ts`, `prompts/schemas.ts`, `formatting/comments.ts`, and the phase modules `phases/grill-and-plan.ts`, `phases/ticket-execution.ts`, and `phases/feature-integration.ts`.
    - Enforces DAG cycle detection (`validatePlanningArtifactsAndGraph`), proven blocker resolution (`reconcileProvenTicketDependencies`, escalating to `needs-human` on `not_planned` closures), mid-run `/epure cancel` batch cursor checks (`processPendingIssueCommentsBatch`), and commit-SHA review loop guards (`evaluateReviewFeedbackTrigger`).
+
+---
+
+## 4. 3-Stage Verification Pipeline, Ubuntu 26.04 Kernel Sandbox & Event-Driven CI Continuation (ADR-0028, ADR-0030, ADR-0031)
+
+1. **Stage 1 — 2-Phase Linux Kernel Sandbox, Stateless `rtk` Condensation & Per-Ticket Goldfish Isolation**:
+   - Runs on `ubuntu-26.04` (Linux kernel 7.0) inside a persistent local Git clone before any commit is pushed to `task/*`:
+     - **Phase A (`install`, `networkPolicy: "https_only"`)**: Executes dependency installation under `landrun` (Landlock ABI v8), restricting outbound TCP to port `443` and filesystem writes to `workDir`, `/tmp`, and package caches.
+     - **Phase B (`codegen`, `typecheck`, `lint`, `test`, `build`, `networkPolicy: "offline"`)**: Executes completely offline under `bubblewrap` (`bwrap --unshare-net --unshare-pid --unshare-ipc --tmpfs /tmp --die-with-parent`, with automatic fallback to offline `landrun`).
+   - **Stateless `rtk` Output Condensation (`formatAndCondenseStage1CommandOutput`)**: Strips ANSI sequences, progress bars, and noisy test logs in 100% stateless mode (`RTK_TELEMETRY_DISABLED=1`, `RTK_RECALL=0`, `RTK_TEE=0`, no SQLite database) while preserving the raw 4,000-character error tail whenever `exit_code !== 0`.
+   - **3-Way Git Branch Sync (`/epure sync`) & Goldfish Isolation**: Keeps `dev -> feature/* -> task/*` synchronized with 3-way LLM conflict resolution validated by Stage 1, and executes each ticket in a fresh zero-context Goldfish session (`runGoldfishSpecAudit` during `/epure to-spec`).
+2. **Stage 2 — Event-Driven External CI Continuation (`waiting_ticket_ci` / `waiting_feature_ci`)**:
+   - Once Stage 1 passes and the `task/* -> feature/*` or `feature/* -> dev` Pull Request is opened alongside the `ai-review` check, EPURE records `subphase: "waiting_ticket_ci"` (or `"waiting_feature_ci"`), `active_pr_number`, and `active_head_sha` in `refs/epure/state/<issue>` and immediately exits `0` (`async_ci_continuation: true`).
+   - No runner sits idle polling external workflows. When GitHub emits `check_suite.completed` or `workflow_run.completed` (or a human posts `/epure continue`), EPURE resumes from the exact persisted state.
+3. **Stage 3 — Trusted `dev` Multi-Agent Review Roster & AI Semantic Squash**:
+   - Correlates external CI results with the multi-agent specialist review roster loaded from `dev`. If external CI or any reviewer fails, EPURE extracts sanitized failure logs (~12 KB) and executes up to `max_code_fix_attempts = 3` unified remediation rounds before AI semantic squash-merging `task/* -> feature/*`.
+
+---
+
+## 5. Incremental Workspace Mutation Tools, Inter-Ticket Guard & Multi-Phase Epic Convergence (ADR-0032, ADR-0033)
+
+1. **Transactional Incremental Workspace Mutation (`StagedTicketImplementationBuffer`)**:
+   - During ticket implementation and remediation tool loops, the model mutates files incrementally via `write_repo_file`, `patch_repo_file`, and `delete_repo_file` inside an in-memory transactional buffer (`StagedTicketImplementationBuffer`), isolated from `feature/*` until `validateWorkspaceFileOperations`, `validateTicketIntegrityGuard`, and Stage 1 sandbox checks succeed.
+   - **Chunked File-by-File Fallback (`ChunkedTicketImplementationFallback`)**: If a multi-file ticket hits `MAX_TOKENS` output truncation, EPURE automatically decomposes the remaining `filesToTouch` entries into file-by-file sub-calls (preserving already staged mutations in the buffer and rolling back atomically if any sub-call fails).
+   - **Zero-Truncation Context Catalog (`CompactWorkspaceFilesContext`)**: Injects full, untruncated file contents only for files modified by the ticket or listed in `filesToTouch`, and exposes the rest of the repository as a compact `path (N lines)` index inspectable on demand via `read_repo_file` and `search_in_repo_file`.
+2. **Native GitHub Relational Graph, Inter-Ticket Integrity Guard & Semantic ADR Reconciliation**:
+   - `/epure to-tickets` wires native GitHub `sub_issues` and `dependencies/blocked_by` relationships alongside the Markdown tasklist on the tracking issue.
+   - `validateTicketIntegrityGuard` blocks any ticket from deleting or emptying pre-existing test files, truncating >30% of lines/exports on out-of-scope files, or downgrading manifest `build`/`test`/`lint`/`typecheck` scripts into no-op commands.
+   - `renumberCollidingAdrs` and `reconcileAdrsWithLlm` deduplicate ADR slugs across concurrent branches, renumber colliding `docs/adr/NNNN-*.md` files monotonically, and align cross-references in specs and `GLOSSARY.md`.
+3. **Zero-Context `EpicConvergenceAudit` & Multi-Phase Remediation (`max_epic_phases`)**:
+   - Before opening the final `feature/* -> dev` PR, an isolated zero-context session (`runEpicConvergenceAudit`) verifies the feature branch against the specification's `EpicGoalContract` (`required_entrypoints`, absence of `forbidden_stubs`, and `end_to_end_verification_criteria`).
+   - If unwired modules or stubs are detected (`verdict: "INCOMPLETE"`) and `epic_phase < max_epic_phases` (default `2`), EPURE automatically generates, links, and executes bounded **Phase 2 convergence tickets** (`[Phase 2 - Ticket N]`) before opening the final PR; otherwise it escalates with `epic_convergence_exhausted` (`needs-human`).
 
 ---
 ## [EN] How-To: Onboard a Repository
@@ -710,37 +786,45 @@ URL: https://giskard-ai.github.io/epure/guides/how-to-onboard-repo
 
 # How-To: Onboard a Repository with the `/setup-repo` Skill
 
-This guide shows how to take a brand-new or existing GitHub repository (such as `my-org/craft-calculator`) and onboard it by invoking **the `/setup-repo` agent skill** (`.agents/skills/setup-repo/SKILL.md`)—the preferred way to configure EPURE's 2 GitHub Apps, 5 secrets, `.github/agents.yml`, dynamic `.cursor/agents/*.md` reviewer roster, and 3 Repository Rulesets.
+This guide shows how to take a brand-new or existing GitHub repository (such as `my-org/craft-calculator`) and onboard it by invoking **the `/setup-repo` agent skill** (`.agents/skills/setup-repo/SKILL.md`)—the preferred way to configure EPURE's 2 GitHub Apps, environment-scoped secrets (`<llm-env>` and `release`), `.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`, dynamic `.cursor/agents/*.md` reviewer roster, and 3 Repository Rulesets.
 
 ---
 
-## 1. Create the Two GitHub Apps & Repository Secrets
+## 1. Create the Two GitHub Apps & Environment-Scoped Secrets
 
-EPURE separates day-to-day agent privileges from production release privileges using two GitHub Apps:
+EPURE separates day-to-day agent privileges from production release privileges using two GitHub Apps and scopes all secrets to dedicated GitHub Environments (Zizmor-compliant zero global secret exposure):
 
 - **`<owner>-epure-agent`**: Permissions `contents: write`, `issues: write`, `pull_requests: write`, `checks: write`.
 - **`<owner>-epure-release`**: Permissions `contents: write`, `metadata: read`.
 
-Run the interactive wizard (or let the `/setup-repo` skill prompt you to run it):
+Run the interactive wizard (supports **Approach 2** 1-click GitHub App Manifest Flow and **Fallback Approach 1** manual guided mode), specifying your target repository and chosen agent environment name (`--llm-env <env-name>`, e.g. `epure-agent`, `llm`, `openai`, `anthropic`, or `gemini`):
 
 ```bash
-bash scripts/wizards/setup-github-apps-wizard.sh --repo my-org/craft-calculator
+bash scripts/wizards/setup-github-apps-wizard.sh \
+  --repo my-org/craft-calculator \
+  --llm-env <llm-env>
 ```
 
-Verify that all 5 secrets are registered on your target repository:
+Verify that the secrets are registered in their respective GitHub Environments:
 
 ```bash
-gh secret list -R my-org/craft-calculator
+gh secret list -R my-org/craft-calculator --env <llm-env>
+gh secret list -R my-org/craft-calculator --env release
 ```
 
-Expected output:
+Expected output for `--env <llm-env>`:
 
 ```text
 EPURE_AGENT_APP_ID
 EPURE_AGENT_APP_PRIVATE_KEY
+LLM_API_KEY
+```
+
+Expected output for `--env release`:
+
+```text
 EPURE_RELEASE_APP_ID
 EPURE_RELEASE_APP_PRIVATE_KEY
-LLM_API_KEY
 ```
 
 ---
@@ -766,8 +850,8 @@ node dist/cli/setup-repo.mjs \
 
 Check that the dry-run report presented by the agent lists:
 
-- Creation of `.github/agents.yml` pinned to the 40-character SHA of `Giskard-AI/epure`.
-- Creation of `.github/workflows/epure-issue-command.yml`, `epure-check.yml`, `pr-title.yml`, `ci.yml`, and `release.yml`.
+- Creation of `.github/agents.yml` (flat canonical schema with auto-discovered `verification.targets`), `.github/zizmor.yml`, and `renovate.json`.
+- Creation of `.github/workflows/epure-issue-command.yml`, `epure-check.yml`, `pr-title.yml`, `ci.yml`, and `release.yml` pinned to the 40-character SHA of `Giskard-AI/epure`.
 - Dynamic initialization of the `.cursor/agents/*.md` reviewer roster designed by the agent for your stack and sub-domains (always-on core `architecture-reviewer`, `security-reviewer`, `spec-parity-reviewer`, `standards-reviewer`, `user-advocate` + tailored domain/UI specialists, yielding 10 agents for the `craft-calculator` web app example).
 - Creation of the 3 Repository Rulesets (`epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`).
 
@@ -787,12 +871,12 @@ node dist/cli/setup-repo.mjs \
   --apply-github-settings
 ```
 
-Then commit and push the generated files to `dev`:
+Then commit and push the generated files (`.github/`, `.cursor/agents/`, and `renovate.json`) to `dev`:
 
 ```bash
 cd /path/to/craft-calculator
 git checkout dev
-git add .github/ .cursor/agents/
+git add .github/ .cursor/agents/ renovate.json
 git commit -m "chore(epure): bootstrap repository governance and workflows"
 git push origin dev
 ```
@@ -832,34 +916,40 @@ This guide provides a practical checklist for steering a feature or complex bugf
 
 Once the Grill decision frontier is resolved (`frontier_resolved: true`), EPURE posts a **Settled Decisions Summary** and pauses in `grilling` (`awaiting_human_approval`).
 
-1. **Generate the Specification (`/epure to-spec`)**: Comment `/epure to-spec` to commit `GLOSSARY.md`, `docs/adr/NNNN-*.md`, `DESIGN.md` (if UI is involved), and `docs/specs/<slug>.md` onto `plan/<issue>-<slug>`. The issue transitions to `spec` (`awaiting_human_approval`).
+1. **Generate the Specification (`/epure to-spec`)**: Comment `/epure to-spec` to run the zero-context **Goldfish Specification Audit** (`runGoldfishSpecAudit`) and commit `GLOSSARY.md`, `docs/adr/NNNN-*.md`, `DESIGN.md` (if UI is involved), and `docs/specs/<slug>.md` (including `EpicGoalContract`) onto `plan/<issue>-<slug>`. The issue transitions to `spec` (`awaiting_human_approval`).
 2. **Revise or Validate the Specification**:
    - Inspect `GLOSSARY.md`, `docs/adr/`, and `docs/specs/<slug>.md` on `plan/<issue>-<slug>`.
    - To request adjustments to the specification before creating tickets, **reply directly in a comment** (without a slash command).
-3. **Generate the Ticket DAG (`/epure to-tickets`)**: Once the specification is approved, comment `/epure to-tickets`. EPURE decomposes the spec into an acyclic dependency-ordered GitHub Issue DAG (`blocked_by`, `ready-for-agent`) and pauses in `tickets` (`awaiting_human_approval`) awaiting `/epure approve`.
+3. **Generate the Ticket DAG (`/epure to-tickets`)**: Once the specification is approved, comment `/epure to-tickets`. EPURE decomposes the spec into an acyclic dependency-ordered GitHub Issue DAG (`blocked_by`, `ready-for-agent`), wires native GitHub `sub_issues` and `dependencies/blocked_by` graph links, and pauses in `tickets` (`awaiting_human_approval`) awaiting `/epure approve`.
 
 ---
 
-## 3. Approving & Monitoring Execution (`/epure approve` & `/epure status`)
+## 3. Approving, Event-Driven CI Continuation & Branch Sync (`/epure approve`, `/epure status` & `/epure sync`)
 
-Post `/epure approve` on the tracking issue.
+Post `/epure approve` on the tracking issue to directly integrate the `plan/*` artifacts into `feature/<issue>-<slug>`, lock `spec_sha`, and start executing the ticket DAG.
 
-- To inspect live progress at any time without opening the Actions tab, comment `/epure status` or check the **EPURE Status Dashboard** pinned at the top of the issue body.
-- Inside the GitHub Actions run logs, expand the structured `::group::` sections to inspect:
-  - Secretless TDD test/build output per ticket.
-  - Read-only tool calls (`read_file`, `search_code`) made by each specialist reviewer.
-  - Per-reviewer verdicts (`approved` vs. `changes_requested`).
+- **Event-Driven External CI Waiting (`waiting_ticket_ci` / `waiting_feature_ci`)**:
+  - Whenever EPURE opens a `task/* -> feature/*` PR (`waiting_ticket_ci`) or the final `feature/* -> dev` PR (`waiting_feature_ci`), the orchestrator records the active PR and `head_sha` in `refs/epure/state/<issue>` and immediately exits `0` to release the GitHub Actions runner (`async_ci_continuation: true`).
+  - As soon as external CI workflows complete (`check_suite.completed` or `workflow_run.completed`), EPURE automatically wakes up to run Stage 3 multi-agent review, AI semantic squash, or unified auto-remediation. You can also manually nudge continuation at any time by commenting **`/epure continue`**.
+- **Synchronizing with `dev` (`/epure sync` / `/epure rebase`)**:
+  - If other PRs land on `dev` while your feature is in progress, comment **`/epure sync`** (or `/epure rebase`). EPURE merges `dev -> feature/<issue>-<slug>` (and cascades `feature/* -> active_task_branch`) with additive `GLOSSARY.md` merging, monotonic ADR renumbering, 3-way LLM conflict resolution, and mandatory **Stage 1 Kernel Sandbox** verification before committing.
+- **Inspecting Live Progress (`/epure status`)**:
+  - Comment `/epure status` or check the **EPURE Status Dashboard** pinned at the top of the issue body.
+  - Inside the GitHub Actions run logs, expand the structured `::group::` sections to inspect Stage 1 kernel sandbox test/build output, read-only reviewer tool calls (`read_file`, `search_code`), and per-reviewer verdicts (`approved` vs. `changes_requested`).
 
 ---
 
-## 4. Handling `needs-human` Escalations & Idempotent Resumption
+## 4. Handling `needs-human` Escalations, `/epure continue` & Phase 2 Convergence Tickets
 
-EPURE pauses and applies the `needs-human` label in two situations:
+EPURE pauses and applies the `needs-human` label (`status: "suspended"`) when human judgment is required:
 
 1. **Sensitive Path Modification**: A `task/*` branch modified `.github/workflows/**`, `.github/agents.yml`, `.cursor/agents/**`, or `CODEOWNERS`.
-   - *Resolution*: Inspect the diff. If legitimate, add the `approved-sensitive-change` label to the PR and comment `/epure approve` on the tracking issue.
-2. **Remediation Cap Reached (`max_code_fix_attempts = 3`)**: A ticket failed tests or reviewer `must_fix` checks 3 times in a row.
-   - *Resolution*: Push a manual fix commit to the `task/*` or `feature/*` branch (or clarify the spec), then comment `/epure approve` again on the tracking issue. EPURE's **idempotent resumption** automatically skips all already-closed tickets and resumes from the remaining work.
+   - *Resolution*: Inspect the diff. If legitimate, add the `approved-sensitive-change` label to the PR and comment **`/epure continue`** (or `/epure approve`) on the tracking issue.
+2. **Remediation Cap Reached (`max_code_fix_attempts = 3`)**: A ticket failed Stage 1 tests, external CI, or reviewer `must_fix` checks 3 times in a row.
+   - *Resolution*: Push a manual fix commit to the `task/*` or `feature/*` branch (or post a clarifying comment), then comment **`/epure continue`** on the tracking issue. EPURE removes `needs-human`, restores `status: "active"`, skips all already-closed tickets, and resumes from the current milestone.
+3. **Zero-Context `EpicConvergenceAudit` & Automatic Phase 2 Tickets (`max_epic_phases`)**:
+   - After all Phase 1 tickets are squashed into `feature/*`, EPURE runs a zero-context **`EpicConvergenceAudit`** (`runEpicConvergenceAudit`) against the specification's `EpicGoalContract`.
+   - If the audit finds unwired `required_entrypoints` or lingering `forbidden_stubs` (`verdict: "INCOMPLETE"`) and `epic_phase < max_epic_phases` (default `2`), EPURE automatically creates, links, and executes bounded **`[Phase 2 - Ticket N]`** convergence tickets before opening the final `feature/* -> dev` PR. If gaps still remain after `max_epic_phases`, EPURE escalates to `needs-human` (`epic_convergence_exhausted`), where you can push a fix and comment **`/epure continue`**.
 
 ---
 ## [EN] How-To: Customize Reviewers & Impeccable Gate
@@ -1074,18 +1164,18 @@ Un principe fondateur d'EPURE est la clarté absolue sur **qui décide** et **ce
 Aucun agent ne peut contourner ces quatre points de décision. Ils exigent l'intervention explicite d'un contributeur disposant des droits `write` ou `admin` sur le dépôt :
 
 1. **Jalon 1 — Lancement & Réponses au Grill (`/epure plan`)** : un mainteneur déclenche `/epure plan` sur une issue GitHub et répond aux questions de cadrage jusqu'à ce que toutes les ambiguïtés soient levées.
-2. **Jalon 2 — Signature du Mandat d'Implémentation (`/epure approve`)** : après relecture de la spécification et du DAG de tickets générés sur `plan/<issue>-<slug>`, le mainteneur poste `/epure approve`. Cette commande fusionne `plan/* -> dev`, scelle le `spec_sha` dans `refs/epure/state/<issue>` et ouvre la branche d'intégration `feature/<issue>-<slug>`.
-3. **Jalon 3 — Merge Humain d'Intégration (`feature/* -> dev`)** : lorsque tous les tickets du DAG sont implémentés, audités et squashés dans `feature/*`, EPURE ouvre la PR finale de synthèse `feature/* -> dev`. Le ruleset `epure-dev-governance` **interdit** matériellement à l'Agent App de fusionner du code applicatif dans `dev` : un humain doit cliquer sur **Squash and merge**.
+2. **Jalon 2 — Signature du Mandat d'Implémentation (`/epure approve`)** : après relecture de la spécification et du DAG de tickets générés sur `plan/<issue>-<slug>`, le mainteneur poste `/epure approve`. Cette commande intègre directement les artefacts de `plan/*` dans la branche d'intégration `feature/<issue>-<slug>` (avec fusion additive de `GLOSSARY.md` et renumérotation monotone des ADRs, sans PR intermédiaire `plan/* -> dev` selon ADR-0031), scelle le `spec_sha` dans `refs/epure/state/<issue>` et lance l'exécution du DAG de tickets.
+3. **Jalon 3 — Merge Humain d'Intégration (`feature/* -> dev`)** : lorsque tous les tickets du DAG sont implémentés, audités et squashés dans `feature/*` (et validés par `EpicConvergenceAudit`), EPURE ouvre la PR finale de synthèse `feature/* -> dev`. Le ruleset `epure-dev-governance` **interdit** matériellement à l'Agent App de fusionner du code applicatif dans `dev` : un humain doit cliquer sur **Squash and merge**.
 4. **Jalon 4 — Promotion Humaine de Release (`dev -> main`)** : la promotion de `dev` vers `main` et la publication du tag `vX.Y.Z` exigent le déclenchement manuel (`workflow_dispatch`) du workflow `release-promote.yml` par un mainteneur.
 
 ### 2. <span class="epure-badge epure-badge--auto">Étapes Automatisées Obligatoires</span>
 
 Dès qu'un jalon humain est franchi, l'orchestrateur EPURE exécute de manière déterministe :
 
-- **Génération de l'Épure & du DAG de Tickets** : commit de `GLOSSARY.md`, `docs/adr/` et `docs/specs/<slug>.md` sur `plan/<issue>-<slug>`, puis création des issues GitHub atomiques avec leurs dépendances `blocked_by` et le label `ready-for-agent`.
-- **Boucle TDD en Sandbox Sans Secret** : pour chaque ticket débloqué, écriture des tests et du code dans un environnement isolé dépourvu de `LLM_API_KEY` et des clés privées PEM des GitHub Apps.
-- **Revue Multi-Agents depuis `dev` & Squash Sémantique IA** : exécution parallèle de jusqu'à 4 reviewers spécialisés (chargés exclusivement depuis la branche de confiance `dev`) + `spec-parity-reviewer`. En cas de succès (`0 must_fix`), synthèse d'un titre et corps Conventional Commit (`Refs #<ticket>`) et squash-merge automatique `task/* -> feature/*`.
-- **Revue de Synthèse Finale** : audit complet du diff consolidé sur la PR `feature/* -> dev` avec génération des liens de fermeture `Closes #<issue>` et `Closes #<ticket>`.
+- **Génération de l'Épure, Audit Goldfish de la Spec & DAG de Tickets** : exécution de l'audit de spécification Goldfish zéro-contexte (`runGoldfishSpecAudit`), commit de `GLOSSARY.md`, `docs/adr/` et `docs/specs/<slug>.md` (incluant `EpicGoalContract`) sur `plan/<issue>-<slug>`, puis création des issues GitHub atomiques avec leurs relations natives `sub_issues` et `blocked_by` et le label `ready-for-agent`.
+- **Boucle TDD en Sandbox Noyau Sans Secret** : pour chaque ticket débloqué, application des mutations incrémentales (`write_repo_file`, `patch_repo_file`, `delete_repo_file`) et vérification Stage 1 dans une sandbox noyau Linux en 2 phases (`landrun` / `bubblewrap`) dépourvue de `LLM_API_KEY` et des clés privées PEM des GitHub Apps.
+- **CI Externe Événementielle, Revue Multi-Agents depuis `dev` & Squash Sémantique IA** : libération immédiate du runner pendant la CI externe (`waiting_ticket_ci`), réveil sur `check_suite.completed` / `workflow_run.completed`, exécution parallèle de jusqu'à 4 reviewers spécialisés (chargés exclusivement depuis `dev`) + `spec-parity-reviewer`, puis synthèse d'un titre/corps Conventional Commit (`Refs #<ticket>`) et squash-merge automatique `task/* -> feature/*`.
+- **Audit de Convergence Zéro-Contexte (`EpicConvergenceAudit`) & Revue de Synthèse Finale** : exécution de `runEpicConvergenceAudit` sur `feature/*` pour vérifier le câblage effectif des `required_entrypoints` et l'absence de `forbidden_stubs` (avec création automatique de tickets de Phase 2 si nécessaire), puis ouverture et audit complet de la PR finale `feature/* -> dev` avec les liens `Closes #<issue>` et `Closes #<ticket>`.
 
 ### 3. <span class="epure-badge epure-badge--optional">Étapes Facultatives ou Conditionnelles</span>
 
@@ -1094,10 +1184,12 @@ Ces opérations ne s'activent que selon la nature du changement ou sur demande e
 - **Porte Conditionnelle UI & Impeccable (automatique si surface UI)** : dès que la fonctionnalité ou le diff touche des fichiers d'interface (`.vue`, `.tsx`, `.jsx`, `.css`, `.html`), EPURE génère automatiquement `DESIGN.md`, exécute `user-advocate` en mode `design-gate` avant `/epure approve`, puis impose `user-advocate` (`implementation-review`) et `impeccable-gate` comme checks bloquants sur chaque PR. Les projets ou tickets purement backend/CLI ignorent automatiquement cette étape.
 - **Détour Exploratoire `/prototype` & Preview Pages Isolée (facultatif)** : lorsqu'un comportement visuel ou une machine d'état ne peut être tranché par le texte pendant le Grill, un mainteneur peut demander un prototype jetable sur `prototype/*`. La prévisualisation statique GitHub Pages est **désactivée par défaut** (`enable_pages_preview: false`) et nécessite un consentement explicite.
 - **Commandes Slash de Pilotage Granulaire (facultatives)** :
-  - `/epure to-spec` : force le passage immédiat du Grill à la rédaction de la spécification.
-  - `/epure to-tickets` : force la génération immédiate du DAG de tickets à partir de la spec existante.
+  - `/epure to-spec` : valide la frontière du Grill (ou force le passage anticipé) pour générer la spécification sur `plan/*`.
+  - `/epure to-tickets` : valide la spécification sur `plan/*` et génère le DAG natif de tickets GitHub (`sub_issues` + `blocked_by`).
+  - `/epure continue` : reprend l'orchestration après une pause `needs-human`, un correctif manuel ou la fin d'une CI externe (`waiting_ticket_ci` / `waiting_feature_ci`).
+  - `/epure sync` (alias `/epure rebase`) : synchronise `dev -> feature/*` (et `feature/* -> task/*`) avec résolution de conflits 3-way et validation Sandbox Stage 1.
   - `/epure status` : rafraîchit et affiche l'état d'orchestration et la table d'avancement des tickets.
-  - `/epure cancel` : interrompt immédiatement l'orchestration et marque le mandat `cancelled` dans `refs/epure/state/<issue>`.
+  - `/epure cancel` (alias `/epure stop`) : interrompt immédiatement l'orchestration et marque le mandat `cancelled` dans `refs/epure/state/<issue>`.
 - **Escalade Humaine Conditionnelle (`needs-human`)** : déclenchée automatiquement si une branche `task/*` modifie un chemin sensible (`.github/workflows/**`, `.cursor/agents/**`, `CODEOWNERS`) sans exception approuvée, ou si un ticket échoue encore après `max_code_fix_attempts = 3` tours d'auto-remédiation.
 
 ---
@@ -1123,7 +1215,7 @@ URL: https://giskard-ai.github.io/epure/fr/installation
 
 La façon recommandée d'initialiser ou de reconfigurer un dépôt avec EPURE est d'invoquer le **skill d'agent `/setup-repo`** (`.agents/skills/setup-repo/SKILL.md`) directement depuis votre agent de développement (Cursor, Claude Code, Pi ou Codex).
 
-Le skill `/setup-repo` orchestre l'ensemble du bootstrap de bout en bout : il analyse l'architecture réelle de votre dépôt, vous guide avec l'assistant interactif (`setup-github-apps-wizard.sh`) pour enregistrer vos deux GitHub Apps, exécute la CLI déterministe (`dist/cli/setup-repo.mjs`) en mode simulation (`--dry-run`) puis application (`--apply`), et **conçoit sur mesure votre roster de reviewers multi-agents (`.cursor/agents/*.md`)**.
+Le skill `/setup-repo` orchestre l'ensemble du bootstrap de bout en bout : il analyse l'architecture réelle de votre dépôt, vous guide avec l'assistant interactif (`setup-github-apps-wizard.sh`) pour enregistrer vos deux GitHub Apps et vos environnements GitHub isolés (`<llm-env>` et `release`), exécute la CLI déterministe (`dist/cli/setup-repo.mjs`) en mode simulation (`--dry-run`) puis application (`--apply`), et **conçoit sur mesure votre roster de reviewers multi-agents (`.cursor/agents/*.md`)**.
 
 ---
 
@@ -1135,7 +1227,7 @@ Avant d'initialiser un dépôt avec EPURE, vérifiez que votre poste dispose de 
 - **Node.js 24 LTS** (`>=24.0.0`)
 - **GitHub CLI (`gh`)** authentifiée sur votre compte ou organisation cible (`gh auth status`)
 - **Git** (`>=2.38`)
-- **Une clé API LLM** (`LLM_API_KEY` — configurée par défaut pour Google Gemini `gemini-3.8-flash` avec `thinking_level: HIGH`)
+- **Une clé API LLM** (`LLM_API_KEY` ou variable fournisseur configurée dans `.github/agents.yml`)
 
 ---
 
@@ -1153,30 +1245,41 @@ L'agent exécute alors un flux guidé en **4 étapes** avec confirmation humaine
 
 Avant d'écrire le moindre fichier, l'agent inspecte le dépôt cible (`package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, `Makefile`, arborescence `src/`, présence d'une interface utilisateur, `GLOSSARY.md` existant) afin de déterminer :
 
-- La stack technique pour générer la CI (`.github/workflows/ci.yml`), Renovate et le reviewer de standards (`standards-reviewer.md`).
+- La stack technique pour générer la CI (`.github/workflows/ci.yml`), `verification.targets`, `renovate.json`, `.github/zizmor.yml` et le reviewer de standards (`standards-reviewer.md`).
 - La présence ou non d'une surface UI/Frontend (qui conditionne l'activation de la porte **Impeccable** et des reviewers `frontend-reviewer`, `accessibility-reviewer` et `design-reviewer`).
 - Les sous-systèmes métier nécessitant la création de **reviewers spécialisés dédiés** dans `.cursor/agents/<domaine>-reviewer.md`.
 
-### Étape 2 : Provisionnement des Deux GitHub Apps & des 5 Secrets (Wizard)
+### Étape 2 : Provisionnement des Deux GitHub Apps & des Secrets Cloisonnés par Environnement (Wizard)
 
-Pour garantir une séparation stricte des privilèges (Q82, Q91), EPURE n'utilise jamais de jeton personnel (PAT) omnipotent. Chaque dépôt ou organisation utilise **deux GitHub Apps distinctes** :
+Pour garantir une séparation stricte des privilèges (Q82, Q91) et zéro exposition de secrets aux workflows publics de Pull Request (conformité Zizmor), EPURE n'utilise jamais de jeton personnel (PAT) omnipotent ni de secrets globaux du dépôt. Chaque dépôt utilise **deux GitHub Apps distinctes** et **deux environnements GitHub isolés** (`<llm-env>` et `release`) :
 
 1. **Agent App (`<owner>-epure-agent`)** : utilisée par l'orchestrateur pour l'automatisation quotidienne (`plan/*`, `task/*`, `feature/*`, Issues, PRs et Check Runs). Elle ne figure **jamais** parmi les Bypass Actors de `dev` ou `main`.
-2. **Release App (`<owner>-epure-release`)** : utilisée exclusivement par `release-promote.yml` lorsqu'un humain déclenche une promotion fast-forward de `dev` vers `main`. C'est le **seul Bypass Actor** autorisé sur `main` et les tags `v*`.
+2. **Release App (`<owner>-epure-release`)** : utilisée exclusivement par `release-promote.yml` / `release.yml` lorsqu'un humain déclenche une promotion fast-forward de `dev` vers `main`. C'est le **seul Bypass Actor** autorisé sur `main` et les tags `v*`.
 
-Si les applications ne sont pas encore créées, le skill `/setup-repo` lance l'assistant interactif (qui utilise le flux GitHub App Manifest et injecte les secrets via `gh secret set` sans jamais exposer vos clés privées PEM au modèle LLM) :
+Lancez l'assistant interactif, qui propose l'**Approche 2** (flux local GitHub App Manifest en 1 clic) avec repli automatique sur l'**Approche 1** (enregistrement manuel guidé étape par étape) et injecte les secrets dans leurs environnements GitHub dédiés via `gh secret set --env` sans jamais exposer vos clés privées PEM au modèle LLM :
 
 ```bash
-bash scripts/wizards/setup-github-apps-wizard.sh --repo my-org/craft-calculator
+bash scripts/wizards/setup-github-apps-wizard.sh \
+  --repo my-org/craft-calculator \
+  --llm-env <llm-env>
 ```
 
-| Nom du Secret | Rôle |
-| --- | --- |
-| `LLM_API_KEY` | Clé API utilisée uniquement par le sidecar proxy LLM (absente de la sandbox d'exécution du code). |
-| `EPURE_AGENT_APP_ID` | Identifiant numérique de l'application `<owner>-epure-agent`. |
-| `EPURE_AGENT_APP_PRIVATE_KEY` | Clé privée PEM de `<owner>-epure-agent` (sert à signer des jetons d'installation éphémères). |
-| `EPURE_RELEASE_APP_ID` | Identifiant numérique de l'application `<owner>-epure-release`. |
-| `EPURE_RELEASE_APP_PRIVATE_KEY` | Clé privée PEM de `<owner>-epure-release` (utilisée uniquement par `release-promote.yml`). |
+> **Environnement `<llm-env>` libre et agnostique du LLM** : le nom de l'environnement d'agent (`<llm-env>`) peut être choisi librement (p. ex. `epure-agent`, `llm`, `openai`, `anthropic` ou `gemini`) et correspond au champ `environment: <llm-env>` du job `orchestrate-command` dans `.github/workflows/epure-issue-command.yml`.
+
+| Nom du Secret | Environnement GitHub Cible | Rôle |
+| --- | --- | --- |
+| `LLM_API_KEY` | `--env <llm-env>` | Clé API utilisée uniquement par le client/proxy LLM (inaccessible à `authorize-command` et absente de la sandbox d'exécution du code). |
+| `EPURE_AGENT_APP_ID` | `--env <llm-env>` | Identifiant numérique de l'application `<owner>-epure-agent`. |
+| `EPURE_AGENT_APP_PRIVATE_KEY` | `--env <llm-env>` | Clé privée PEM de `<owner>-epure-agent` (sert à signer des jetons d'installation éphémères). |
+| `EPURE_RELEASE_APP_ID` | `--env release` | Identifiant numérique de l'application `<owner>-epure-release` (associé à l'environnement protégé `release`). |
+| `EPURE_RELEASE_APP_PRIVATE_KEY` | `--env release` | Clé privée PEM de `<owner>-epure-release` (utilisée uniquement par `release.yml` / `release-promote.yml`). |
+
+Vérifiez le cloisonnement des secrets par environnement via `gh` :
+
+```bash
+gh secret list -R my-org/craft-calculator --env <llm-env>
+gh secret list -R my-org/craft-calculator --env release
+```
 
 ### Étape 3 : Simulation Non-Destructive (`--dry-run`)
 
@@ -1205,6 +1308,14 @@ node dist/cli/setup-repo.mjs \
   --apply-github-settings
 ```
 
+Commitez et poussez ensuite les fichiers générés (`.github/`, `.cursor/agents/` et `renovate.json`) sur `dev` :
+
+```bash
+git add .github/ .cursor/agents/ renovate.json
+git commit -m "chore(epure): bootstrap repository governance and workflows"
+git push origin dev
+```
+
 ---
 
 ## Ce que Configure le Skill `/setup-repo`
@@ -1214,9 +1325,9 @@ node dist/cli/setup-repo.mjs \
    - Définit **`dev` comme branche par défaut** du dépôt afin que toutes les PRs ciblent `dev` et que les mots-clés `Closes #<issue>` ferment automatiquement les issues lors du merge sur `dev`.
 2. **Labels Canoniques de Triage** :
    - Crée ou met à jour les 5 labels canoniques (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`) ainsi que les labels d'orchestration (`needs-human`, `approved-sensitive-change`).
-3. **Configuration Déclarative & Workflows Appelants** :
-   - Génère `.github/agents.yml` épinglé sur le SHA de commit de 40 caractères d'EPURE (`Giskard-AI/epure`).
-   - Installe `.github/workflows/epure-issue-command.yml`, `.github/workflows/epure-check.yml`, `.github/workflows/pr-title.yml`, `.github/workflows/ci.yml` (adapté à la stack détectée) et `.github/workflows/release.yml`.
+3. **Configuration Déclarative, Supply-Chain Durcie & Workflows Appelants** :
+   - Génère `.github/agents.yml` (schéma canonique plat avec découverte automatique de `verification.targets`), `.github/zizmor.yml` (configuration d'analyse statique de sécurité des workflows) et `renovate.json` (avec quarantaines de 3 à 14 jours).
+   - Installe `.github/workflows/epure-issue-command.yml`, `.github/workflows/epure-check.yml`, `.github/workflows/pr-title.yml`, `.github/workflows/ci.yml` (adapté à la stack détectée) et `.github/workflows/release.yml`, tous épinglés sur le SHA de 40 caractères d'EPURE (`Giskard-AI/epure`).
 4. **Roster Dynamique de Reviewers Multi-Agents (`.cursor/agents/*.md`)** :
    - L'agent qui exécute `/setup-repo` **crée, conçoit et ajoute au besoin les fichiers `.cursor/agents/<role>-reviewer.md`** en fonction des éléments réels du dépôt (et `/epure plan` les enrichit ensuite à chaque nouvelle fonctionnalité) :
      - **Socle transverse permanent** : `architecture-reviewer`, `security-reviewer`, `spec-parity-reviewer`, `standards-reviewer` (adapté au langage détecté : TypeScript, Python, Rust ou Go) et `user-advocate`.
@@ -1289,23 +1400,27 @@ Tant que l'Issue #16 est en phase `grilling`, **vous n'avez pas besoin de répé
 
 ---
 
-## Étape 2 : Épure, `DESIGN.md`, Spec & DAG de Tickets
+## Étape 2 : Épure, Audit Goldfish de la Spec & Graphe Natif de Tickets (`/epure to-spec` & `/epure to-tickets`)
 
 <span class="epure-badge epure-badge--auto">Étape Automatisée Obligatoire</span> + <span class="epure-badge epure-badge--optional">Porte Conditionnelle UI</span>
 
-Dès que vos réponses lèvent toutes les ambiguïtés du Grill, EPURE publie la **Synthèse des Décisions** et attend votre validation (`grilling` / `awaiting_human_approval`). Après validation de la frontière via **`/epure to-spec`** (génération et relecture de la spécification sur `plan/*`) puis **`/epure to-tickets`** (découpage en tickets) :
+Dès que vos réponses lèvent toutes les ambiguïtés du Grill, EPURE publie la **Synthèse des Décisions** et attend votre validation (`grilling` / `awaiting_human_approval`).
 
-1. **Crée la branche `plan/16-markov-craft-calculator`** depuis `dev`.
-2. **Versionne les artefacts du domaine et de spécification** :
-   - `GLOSSARY.md` (définissant *Matrice de Transition*, *État Absorbant*, *Coût Espéré*).
-   - `docs/adr/0001-exact-markov-solver-and-spa.md`.
-   - `DESIGN.md` (généré automatiquement car l'Issue #16 comporte une interface utilisateur, définissant les tokens clair/sombre, le contraste WCAG AA et les points de rupture responsive).
-   - `docs/specs/16-markov-craft-calculator.md` (spécification complète enrichie par `user-advocate` en mode **`design-gate`** avec les critères d'acceptation UX par persona).
-3. **Crée le Graphe Orienté Acyclique (DAG) de Tickets** :
-   - **Issue #25** : *Solveur exact de chaîne de Markov absorbante & tests unitaires* (`ready-for-agent`, `blocked_by: []`)
-   - **Issue #26** : *Éditeur de prix et hook localStorage versionné* (`ready-for-agent`, `blocked_by: [#25]`)
-   - **Issue #27** : *Interface responsive du simulateur & validation d'accessibilité Impeccable* (`ready-for-agent`, `blocked_by: [#25, #26]`)
-4. **Ouvre la PR `plan/16-markov-craft-calculator -> dev`** et se met en attente sur l'état **`awaiting_approval`**.
+1. **Générer & Auditer la Spécification (`/epure to-spec`)** :
+   - Crée la branche **`plan/16-markov-craft-calculator`** depuis `dev`.
+   - Exécute l'**Audit de Spécification Goldfish zéro-contexte** (`runGoldfishSpecAudit`) pour vérifier l'auto-suffisance documentaire, la sobriété YAGNI et la complétude d'implémentation sans le biais de l'historique du Grill, puis corrige automatiquement les lacunes détectées.
+   - Versionne les artefacts du domaine et de spécification sur `plan/16-markov-craft-calculator` :
+     - `GLOSSARY.md` (définissant *Matrice de Transition*, *État Absorbant*, *Coût Espéré*).
+     - `docs/adr/0001-exact-markov-solver-and-spa.md`.
+     - `DESIGN.md` (généré automatiquement car l'Issue #16 comporte une interface utilisateur, définissant les tokens clair/sombre, le contraste WCAG AA et les points de rupture responsive).
+     - `docs/specs/16-markov-craft-calculator.md` (spécification complète incluant les points d'entrée `EpicGoalContract` et les critères UX par persona de `user-advocate` en mode **`design-gate`**).
+   - Passe en phase `spec` (`awaiting_human_approval`) pour vous permettre de relire ou d'ajuster la spécification par simple commentaire libre sur `plan/16-markov-craft-calculator` (aucune PR intermédiaire `plan/* -> dev` n'est ouverte).
+2. **Générer le Graphe Relationnel Natif de Tickets (`/epure to-tickets`)** :
+   - Découpe la spécification validée en un DAG acyclique de tickets sur GitHub et câble nativement les relations **`sub_issues`** et **`dependencies/blocked_by`** :
+     - **Issue #25** : *Solveur exact de chaîne de Markov absorbante & tests unitaires* (`ready-for-agent`, `blocked_by: []`)
+     - **Issue #26** : *Éditeur de prix et hook localStorage versionné* (`ready-for-agent`, `blocked_by: [#25]`)
+     - **Issue #27** : *Interface responsive du simulateur & validation d'accessibilité Impeccable* (`ready-for-agent`, `blocked_by: [#25, #26]`)
+   - Passe en phase `tickets` (`awaiting_human_approval`) en attente de `/epure approve`.
 
 ---
 
@@ -1313,49 +1428,51 @@ Dès que vos réponses lèvent toutes les ambiguïtés du Grill, EPURE publie la
 
 <span class="epure-badge epure-badge--human">Jalon Humain Obligatoire 2</span>
 
-Après relecture de la spécification et du découpage en tickets sur la PR `plan/*`, le mainteneur commente sur l'Issue #16 :
+Après relecture de la spécification sur `plan/16-markov-craft-calculator` et du découpage en tickets, le mainteneur commente sur l'Issue #16 :
 
 ```text
 /epure approve
 ```
 
-### Ce que verrouille `/epure approve`
+### Ce que verrouille `/epure approve` (ADR-0031, ADR-0032)
 
-- Fusionne en squash la PR purement documentaire `plan/16-markov-craft-calculator -> dev`.
+- Crée la branche d'intégration **`feature/16-markov-craft-calculator`** depuis `dev` et **intègre directement les artefacts de `plan/16-markov-craft-calculator`** dans `feature/16-markov-craft-calculator` (avec fusion additive de `GLOSSARY.md` et renumérotation monotone des ADRs si `dev` a avancé, sans ouvrir de PR `plan/* -> dev`).
 - Enregistre le mandat signé dans `refs/epure/state/16` (`spec_sha`, `approved_by`, `approved_at`, `status: "active"`).
-- Crée la branche d'intégration **`feature/16-markov-craft-calculator`** depuis `dev`.
 
 ---
 
-## Étape 4 : TDD Sans Secret & Revue Multi-Agents (`task/* -> feature/*`)
+## Étape 4 : Outils Incrémentaux, Vérification en 3 Étapes & CI Événementielle (`task/* -> feature/*`)
 
 <span class="epure-badge epure-badge--auto">Étape Automatisée Obligatoire</span> + <span class="epure-badge epure-badge--optional">Porte Conditionnelle UI</span>
 
 EPURE exécute alors les tickets du DAG dans l'ordre topologique (`#25`, puis `#26`, puis `#27`) :
 
-1. **Boucle TDD en Sandbox Sans Secret** :
+1. **Mutation Incrémentale & Sandbox Noyau Stage 1** :
    - Crée `task/25-markov-solver` depuis `feature/16-markov-craft-calculator`.
-   - Exécute `npm test` et `npm run build` dans la sandbox isolée (`LLM_API_KEY` et les clés privées PEM des GitHub Apps sont purgées de l'environnement enfant).
+   - Applique les créations et modifications chirurgicales via les outils incrémentaux (`write_repo_file`, `patch_repo_file`, `delete_repo_file`) dans le tampon transactionnel `StagedTicketImplementationBuffer` sous le contrôle de `validateTicketIntegrityGuard`.
+   - Exécute la **Vérification Stage 1** dans le sandbox noyau Linux Ubuntu 26.04 en 2 phases (`landrun` `https_only` pour l'installation, `bwrap --unshare-net` hors-ligne pour typecheck/lint/test/build avec condensation sans état `rtk`, totalement purgé de `LLM_API_KEY` et des clés privées PEM des GitHub Apps).
    - Ouvre la **PR #28** (`task/25-markov-solver -> feature/16-markov-craft-calculator`).
-2. **Revue Multi-Agents Indépendante (chargée depuis `dev`)** :
+2. **Stage 2 — Attente CI Externe Événementielle (`waiting_ticket_ci`)** :
+   - Persiste `subphase: "waiting_ticket_ci"` dans `refs/epure/state/16` et termine immédiatement (`exit 0`) afin de libérer le runner pendant que GitHub Actions exécute la CI externe sur la PR #28.
+   - Se réveille automatiquement à la réception de l'événement `check_suite.completed` / `workflow_run.completed` sur `task/25-markov-solver`.
+3. **Stage 3 — Revue Multi-Agents (chargée depuis `dev`) & Squash Sémantique IA** :
    - Charge `.cursor/agents/*.md` exclusivement depuis la branche de confiance `dev` (jamais depuis `task/25-*`).
    - Sélectionne jusqu'à 4 reviewers pertinents (ex. `domain-backend-reviewer`, `standards-reviewer`, `security-reviewer`) + `spec-parity-reviewer`.
    - Pour le **Ticket #27** (qui touche des fichiers `.tsx` et `.css`), active automatiquement `frontend-reviewer`, `accessibility-reviewer`, `design-reviewer`, `user-advocate` (`implementation-review`) et le check **`impeccable-gate`**.
-   - Si un reviewer émet un `must_fix`, EPURE lance un tour d'auto-remédiation ciblé (jusqu'à `max_code_fix_attempts = 3`) et ne relance que les reviewers en échec + `spec-parity-reviewer`.
-3. **Squash Sémantique par IA** :
-   - Juste avant chaque fusion `task/* -> feature/*`, EPURE synthétise un titre et un corps Conventional Commit (`feat(solver): implement exact absorbing Markov chain solver (#28)` avec `Refs #25`) et effectue le squash-merge autonome autorisé par le ruleset `epure-feature-governance`.
+   - Si la CI externe ou un reviewer émet un `must_fix`, EPURE lance un tour d'auto-remédiation ciblé (jusqu'à `max_code_fix_attempts = 3`).
+   - Une fois tous les contrôles au vert, EPURE synthétise un titre et un corps Conventional Commit (`feat(solver): implement exact absorbing Markov chain solver (#28)` avec `Refs #25`) et effectue le squash-merge autonome autorisé par le ruleset `epure-feature-governance`.
 
 ---
 
-## Étape 5 : PR Finale de Synthèse & Merge Humain sur `dev`
+## Étape 5 : Audit de Convergence `EpicConvergenceAudit`, PR Finale de Synthèse & Merge Humain sur `dev`
 
 <span class="epure-badge epure-badge--auto">Étape Automatisée Obligatoire</span> -> <span class="epure-badge epure-badge--human">Jalon Humain Obligatoire 3</span>
 
 Une fois les tickets `#25`, `#26` et `#27` fusionnés dans `feature/16-markov-craft-calculator` :
 
-1. EPURE ouvre la **PR #47** finale de synthèse (`feature/16-markov-craft-calculator -> dev`) avec les trailers `Closes #16`, `Closes #25`, `Closes #26`, `Closes #27`.
-2. Exécute la revue multi-agents de synthèse complète ainsi que `impeccable-gate` sur le diff consolidé.
-3. Met à jour le titre et la description de la PR #47 avec un résumé Conventional Commit synthétisé.
+1. **Audit de Convergence Zéro-Contexte (`runEpicConvergenceAudit`)** : avant d'ouvrir la PR finale, une session Goldfish isolée audite `feature/16-markov-craft-calculator` face à l'`EpicGoalContract` de la spécification pour vérifier que tous les `required_entrypoints` sont câblés de bout en bout et qu'aucun `forbidden_stubs` ne subsiste (en générant automatiquement des tickets correctifs de Phase 2 si un point d'entrée a été oublié).
+2. EPURE ouvre la **PR #47** finale de synthèse (`feature/16-markov-craft-calculator -> dev`) avec les trailers `Closes #16`, `Closes #25`, `Closes #26`, `Closes #27`.
+3. Exécute la revue multi-agents de synthèse complète, `impeccable-gate` et la continuation CI externe (`waiting_feature_ci`) sur le diff consolidé, puis met à jour le titre et la description de la PR #47 avec un résumé Conventional Commit synthétisé.
 4. **Jalon Humain 3** : comme `epure-dev-governance` interdit à l'Agent App de fusionner du code applicatif dans `dev`, le mainteneur humain relit la PR #47 et clique sur **Squash and merge**. GitHub ferme alors automatiquement les Issues `#16`, `#25`, `#26` et `#27`.
 
 ---
@@ -1392,11 +1509,11 @@ Toutes les commandes `/epure` se postent sous forme de commentaires sur une Issu
 | --- | --- | --- | --- |
 | `/epure plan` | <span class="epure-badge epure-badge--human">Jalon Humain Obligatoire 1</span> | `grilling` | Initialise `refs/epure/state/<issue>`, inspecte les fichiers du dépôt via les outils d'exploration (`list_repo_files`, `read_repo_file`, `search_in_repo_file`) et démarre l'entretien d'architecture structuré (Grill). |
 | *(Tout commentaire humain pendant le Grill)* | <span class="epure-badge epure-badge--human">Jalon Humain Obligatoire 1</span> | `grilling` | Continuité implicite du Grill (Q84) : traite les réponses humaines via `last_processed_comment_id`. S'il reste des points ouverts (`frontier_resolved: false`), publie le round suivant. Dès que la frontière est résolue (`frontier_resolved: true`), publie une **Synthèse des Décisions** et attend la validation humaine (`/epure to-spec`) avant de générer la spec et les tickets. |
-| `/epure to-spec` | <span class="epure-badge epure-badge--human">Validation Humaine de la Frontière</span> | `spec` | Valide la frontière de cadrage du Grill (ou force la fin du cadrage) et génère `GLOSSARY.md`, les ADRs, `DESIGN.md` et `docs/specs/<slug>.md` sur `plan/*`, puis passe en phase `spec` (`awaiting_human_approval`). Tout commentaire libre en phase `spec` révise la spécification sur `plan/*`. |
-| `/epure to-tickets` | <span class="epure-badge epure-badge--human">Validation Humaine de la Spécification</span> | `tickets` | Valide la spécification sur `plan/*` et la découpe en un graphe orienté acyclique (DAG) de sous-issues GitHub (`blocked_by`, `ready-for-agent`), puis passe en phase `tickets` (`awaiting_human_approval`) avant `/epure approve`. |
-| `/epure approve` | <span class="epure-badge epure-badge--human">Jalon Humain Obligatoire 2</span> | `implementation` | Intègre directement les artefacts de `plan/*` (`GLOSSARY.md` en fusion additive, renumérotation des ADRs en collision, `docs/specs/<slug>.md`, `DESIGN.md`) dans `feature/<issue>-<slug>` sans PR intermédiaire `plan/* -> dev` (ADR-0031), scelle le mandat signé `spec_sha` dans `refs/epure/state/<issue>` et exécute le DAG de tickets (`task/* -> feature/*`). |
+| `/epure to-spec` | <span class="epure-badge epure-badge--human">Validation Humaine de la Frontière</span> | `spec` | Valide la frontière de cadrage du Grill (ou force la fin du cadrage), exécute l'**Audit de Spécification Goldfish zéro-contexte** (`runGoldfishSpecAudit`), et génère `GLOSSARY.md`, les ADRs, `DESIGN.md` et `docs/specs/<slug>.md` (incluant `EpicGoalContract`) sur `plan/*`, puis passe en phase `spec` (`awaiting_human_approval`). Tout commentaire libre en phase `spec` révise la spécification sur `plan/*`. |
+| `/epure to-tickets` | <span class="epure-badge epure-badge--human">Validation Humaine de la Spécification</span> | `tickets` | Valide la spécification sur `plan/*` et la découpe en un graphe orienté acyclique (DAG) de sous-issues GitHub (`blocked_by`, `ready-for-agent`), câble le graphe relationnel GitHub natif (`sub_issues` + `dependencies/blocked_by`) et passe en phase `tickets` (`awaiting_human_approval`) avant `/epure approve`. |
+| `/epure approve` | <span class="epure-badge epure-badge--human">Jalon Humain Obligatoire 2</span> | `implementation` | Intègre directement les artefacts de `plan/*` (`GLOSSARY.md` en fusion additive, réconciliation monotone et sémantique des ADRs en collision, `docs/specs/<slug>.md`, `DESIGN.md`) dans `feature/<issue>-<slug>` sans PR intermédiaire `plan/* -> dev` (ADR-0031, ADR-0032), scelle le mandat signé `spec_sha` dans `refs/epure/state/<issue>` et exécute le DAG de tickets (`task/* -> feature/*`). |
 | `/epure continue` | <span class="epure-badge epure-badge--optional">Reprise d'Exécution</span> | `implementation` | Reprend l'orchestration après la résolution d'une suspension `needs-human`, d'un conflit Git 3-way ou à l'issue de la CI externe (`waiting_ticket_ci` / `waiting_feature_ci`, ADR-0031). |
-| `/epure sync` (alias `/epure rebase`) | <span class="epure-badge epure-badge--optional">Synchronisation Git</span> | `implementation` | Synchronise `dev -> feature/<issue>-<slug>` (et propage `feature/* -> active_task_branch`) avec fusion additive de `GLOSSARY.md`, résolution 3-way assistée par LLM et validation **Sandbox Stage 1** avant commit (ADR-0031). |
+| `/epure sync` (alias `/epure rebase`) | <span class="epure-badge epure-badge--optional">Synchronisation Git</span> | `implementation` | Synchronise `dev -> feature/<issue>-<slug>` (et propage `feature/* -> active_task_branch`) avec fusion additive de `GLOSSARY.md`, réconciliation monotone des ADRs, résolution 3-way assistée par LLM et validation **Sandbox Stage 1** avant commit (ADR-0031, ADR-0032). |
 | `/epure status` | <span class="epure-badge epure-badge--optional">Commande Facultative</span> | *(Lecture seule)* | Lit `refs/epure/state/<issue>` et publie un rapport à jour de la phase courante, du `spec_sha` verrouillé et de l'état de chaque ticket sans modifier le code. |
 | `/epure cancel` (alias `/epure stop`) | <span class="epure-badge epure-badge--optional">Commande Facultative</span> | `cancelled` | Marque le mandat comme `cancelled` dans `refs/epure/state/<issue>`, bloque toute nouvelle exécution de ticket et conserve les branches et traces d'audit existantes. |
 
@@ -1404,7 +1521,35 @@ Toutes les commandes `/epure` se postent sous forme de commentaires sur une Issu
 
 ---
 
-## 2. Skill d'Agent de Bootstrap (`/setup-repo` — Recommandé)
+## 2. Pipeline Événementiel GitHub Actions & Custom Actions (`epure-ci-actions-flow`)
+
+<ArchifyDiagram
+  slug="epure-ci-actions-flow"
+  locale="fr"
+  title="Pipeline Événementiel GitHub Actions, Custom Actions & CI d'EPURE"
+  caption="Pipeline complet reliant issue_comment, la continuation CI check_suite/workflow_run, les portes de Pull Request et la promotion de release entre jobs sans secret et environnements cloisonnés."
+/>
+
+### Fonctionnement Détaillé du Pipeline `epure-issue-command.yml`
+
+1. **Job 1 — Contrôle d'Autorisation Préalable Sans Secret (`authorize-command` via `actions/authorize-command`)** :
+   - Déclenché sur `issue_comment.created` avec uniquement `GITHUB_TOKEN` (`contents: read`, `issues: write`) et **aucun secret d'agent ou de LLM**.
+   - Vérifie que l'auteur du commentaire est un humain disposant de la permission effective `write` ou `admin` via `GET /repos/{owner}/{repo}/collaborators/{username}/permission`.
+   - Grâce à `allow_implicit_planning_reply: "true"`, tout commentaire humain en texte libre (sans commande slash) posté pendant les phases `grilling` ou `spec` est automatiquement routé comme une commande `reply`.
+2. **Job 2 — Orchestration Isolée sous Environnement d'Agent (`orchestrate-command` via `actions/orchestrate-issue`)** :
+   - S'exécute sur `ubuntu-26.04` dans l'environnement GitHub dédié (`environment: <llm-env>`, p. ex. `epure-agent`, `llm`, `openai`, `anthropic` ou `gemini`) **uniquement après** validation par `authorize-command` (ou lors d'un événement de continuation CI autorisé).
+   - Reçoit les secrets cloisonnés dans l'environnement (`EPURE_AGENT_APP_ID`, `EPURE_AGENT_APP_PRIVATE_KEY` et `LLM_API_KEY` ou clé fournisseur) et installe l'outillage de sandbox noyau (`bubblewrap`, `landrun`, `rtk`).
+   - Lors de `/epure to-tickets`, crée les sous-issues GitHub et câble nativement le graphe relationnel GitHub (`sub_issues` parent-enfant + `dependencies/blocked_by`).
+3. **Réveil Événementiel Automatique de la CI (`check_suite.completed` / `workflow_run.completed`)** :
+   - Avec `async_ci_continuation: "true"`, dès l'ouverture d'une PR `task/* -> feature/*` (`waiting_ticket_ci`) ou `feature/* -> dev` (`waiting_feature_ci`), l'orchestrateur persiste la PR et le `head_sha` dans `refs/epure/state/<issue>` et termine immédiatement (`exit 0`) pour libérer le runner GitHub Actions.
+   - Dès que la CI externe se termine sur `task/*` ou `feature/*`, l'événement `check_suite.completed` ou `workflow_run.completed` réveille `orchestrate-command` avec `command: "continue"`, `trigger_head_sha` et `trigger_branch` afin d'exécuter la revue multi-agents Stage 3, le squash sémantique IA ou un round d'auto-remédiation unifié.
+4. **Portes de Contrat PR & Promotion de Release Protégée** :
+   - Sur `pull_request` (`dev`, `main`, `feature/**`), `epure-check.yml` (`actions/epure-contract`), `pr-title.yml` et `ci.yml` s'exécutent en `contents: read` sans aucun secret privilégié.
+   - Sur `workflow_dispatch` humain, `release.yml` s'exécute dans l'environnement protégé `environment: release` (`EPURE_RELEASE_APP_ID`, `EPURE_RELEASE_APP_PRIVATE_KEY`) via `actions/verify-app-role` pour promouvoir `dev -> main` en fast-forward.
+
+---
+
+## 3. Skill d'Agent de Bootstrap (`/setup-repo` — Recommandé)
 
 Le skill **`.agents/skills/setup-repo/SKILL.md`** est la **façon privilégiée** d'initialiser ou de mettre à jour un dépôt consommateur EPURE depuis Cursor, Claude Code, Pi ou Codex :
 
@@ -1417,11 +1562,11 @@ Le skill **`.agents/skills/setup-repo/SKILL.md`** est la **façon privilégiée*
 1. **Analyse du projet** : inspecte la stack (`package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, `Makefile`), la structure des modules `src/` et la présence ou non d'une interface utilisateur.
 2. **Simulation (`--dry-run`)** : exécute `dist/cli/setup-repo.mjs --dry-run` et présente le plan complet au mainteneur avant toute écriture.
 3. **Conception dynamique du roster `.cursor/agents/*.md`** : crée, conçoit et adapte les reviewers spécialisés en fonction des composants réels du projet (socle transverse `architecture-reviewer`, `security-reviewer`, `spec-parity-reviewer`, `standards-reviewer`, `user-advocate` + spécialistes métier/UI sur mesure avec routage `paths:`).
-4. **Application idempotente (`--apply --apply-github-settings`)** : écrit `.github/agents.yml`, les workflows appelants épinglés par SHA, configure le dépôt en squash-only et installe les 3 Repository Rulesets.
+4. **Application idempotente (`--apply --apply-github-settings`)** : écrit `.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`, les workflows appelants épinglés par SHA, configure le dépôt en squash-only et installe les 3 Repository Rulesets.
 
 ---
 
-## 3. CLI Sous-Jacente de Bootstrap (`dist/cli/setup-repo.mjs`)
+## 4. CLI Sous-Jacente de Bootstrap (`dist/cli/setup-repo.mjs`)
 
 Invoquée automatiquement par le skill `/setup-repo` (ou exécutable manuellement en ligne de commande) :
 
@@ -1429,37 +1574,43 @@ Invoquée automatiquement par le skill `/setup-repo` (ou exécutable manuellemen
 node dist/cli/setup-repo.mjs \
   --repo <owner>/<name> \
   --target-dir <chemin> \
+  [--pinned-sha <sha-40-caracteres>] \
   [--dry-run | --apply] \
   [--apply-github-settings] \
   [--no-frontend-reviewers] \
   [--domain-reviewers <slug1,slug2>] \
   [--agent-app-id <id>] \
   [--release-app-id <id>] \
-  [--require-pr-approvals <N>]
+  [--require-pr-approvals <N>] \
+  [--json]
 ```
 
 | Option | Valeur par défaut | Description |
 | --- | --- | --- |
 | `--repo <owner/name>` | *(Obligatoire)* | Identifiant du dépôt GitHub cible (ex. `my-org/craft-calculator`). |
-| `--target-dir <chemin>` | Répertoire courant | Chemin local où sont écrits `.github/agents.yml`, les workflows et `.cursor/agents/*.md`. |
+| `--target-dir <chemin>` (alias `--dir`, `--repo-root`) | Répertoire courant | Chemin local où sont écrits `.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`, les workflows et `.cursor/agents/*.md`. |
+| `--pinned-sha <sha>` | Dernier SHA EPURE | SHA Git immuable de 40 caractères de `Giskard-AI/epure` utilisé pour épingler les workflows appelants générés. |
 | `--dry-run` | `true` (si `--apply` omis) | Affiche le plan complet de bootstrap sans modifier aucun fichier ni appeler d'API d'écriture. |
-| `--apply` | `false` | Écrit les fichiers de configuration, les workflows appelants et le socle `.cursor/agents/*.md`. |
+| `--apply` | `false` | Écrit les fichiers de configuration (`.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`), les workflows appelants et le socle `.cursor/agents/*.md`. |
 | `--apply-github-settings` | `false` | Applique le mode squash-only et les 3 Repository Rulesets via l'API REST GitHub. |
 | `--no-frontend-reviewers` | `false` | Omet `frontend-reviewer`, `accessibility-reviewer` et `design-reviewer` pour les dépôts sans UI. |
 | `--domain-reviewers <csv>` | Aucun | Génère des fichiers `.cursor/agents/<slug>-reviewer.md` supplémentaires pour les sous-domaines métier. |
 | `--agent-app-id <id>` | Optionnel | ID numérique de `<owner>-epure-agent` ajouté en Bypass Actor PR sur `epure-feature-governance` (`feature/*`). |
 | `--release-app-id <id>` | Optionnel | ID numérique de `<owner>-epure-release` ajouté comme unique Bypass Actor sur `epure-release-immutability` (`main` et `v*`). |
 | `--require-pr-approvals <N>` | `0` | Nombre d'approbations humaines requises sur `dev` (`0` pour compatibilité mainteneur solo ; `>=1` en équipe). |
+| `--json` | `false` | Affiche le résultat structuré complet `SetupRepoResult` au format JSON sur la sortie standard au lieu du résumé Markdown. |
 
 ---
 
-## 4. Assistant Interactif GitHub Apps (`setup-github-apps-wizard.sh`)
+## 5. Assistant Interactif GitHub Apps (`setup-github-apps-wizard.sh`)
 
 ```bash
-bash scripts/wizards/setup-github-apps-wizard.sh --repo <owner>/<name>
+bash scripts/wizards/setup-github-apps-wizard.sh \
+  --repo <owner>/<name> \
+  --llm-env <nom-env>
 ```
 
-Accompagne pas à pas un mainteneur humain dans la création des deux GitHub Apps (`<owner>-epure-agent` et `<owner>-epure-release`) via le flux GitHub App Manifest et configure automatiquement les 5 secrets du dépôt (`LLM_API_KEY`, `EPURE_AGENT_APP_ID`, `EPURE_AGENT_APP_PRIVATE_KEY`, `EPURE_RELEASE_APP_ID`, `EPURE_RELEASE_APP_PRIVATE_KEY`).
+Accompagne pas à pas un mainteneur humain dans la création des deux GitHub Apps (`<owner>-epure-agent` et `<owner>-epure-release`) via l'**Approche 2** (flux local GitHub App Manifest en 1 clic) ou l'**Approche 1 de repli** (enregistrement manuel guidé étape par étape), crée les environnements GitHub isolés (`<llm-env>` — libre et agnostique du fournisseur LLM, p. ex. `epure-agent`, `llm`, `openai`, `anthropic`, `gemini` — ainsi que `release`), et configure les 5 secrets dans leurs environnements respectifs (`EPURE_AGENT_APP_ID`, `EPURE_AGENT_APP_PRIVATE_KEY` et `LLM_API_KEY` dans `--env <llm-env>` ; `EPURE_RELEASE_APP_ID` et `EPURE_RELEASE_APP_PRIVATE_KEY` dans `--env release`).
 
 ---
 ## [FR] Configuration (.github/agents.yml & renovate.json)
@@ -1467,174 +1618,155 @@ URL: https://giskard-ai.github.io/epure/fr/configuration
 
 # Référence de Configuration (`.github/agents.yml`)
 
-EPURE centralise l'ensemble des paramètres d'orchestration, du modèle LLM, de la gouvernance de revue et de la porte UI dans un unique fichier déclaratif versionné à la racine du dépôt : **`.github/agents.yml`**.
+EPURE centralise l'ensemble des paramètres d'orchestration, du routage LLM, de la vérification polyglotte, de l'exploration Web et des invariants de sécurité non abaissables dans un unique fichier déclaratif versionné à la racine du dépôt : **`.github/agents.yml`**.
 
 ---
 
-## Exemple Canonique Complet
+## Schéma Canonique Plat Complet (`serializeAgentsConfigYaml` / `parseAgentsYaml`)
 
-Voici un fichier `.github/agents.yml` complet avec toutes les clés prises en charge et leurs valeurs par défaut (Q78, Q91–Q96) :
+Voici le fichier `.github/agents.yml` canonique plat généré par `setup-repo` (`src/bootstrap/setup-repo.ts`) avec toutes les clés prises en charge et leurs valeurs par défaut (Q78, Q91–Q96, ADR-0028–ADR-0033) :
 
 ```yaml
-# .github/agents.yml — Configuration Déclarative EPURE
-schema_version: 1
-
-epure:
-  # SHA immuable de 40 caractères de Giskard-AI/epure
-  pinned_sha: "7f9f5aafa90acb68c5374cf00833881c0467cf67"
-
-branches:
-  # Branche d'intégration active (définie comme branche par défaut du dépôt)
-  default_integration: "dev"
-  # Branche de release immuable (mise à jour par fast-forward exclusif depuis dev)
-  release: "main"
-
-llm:
-  provider: "google-gemini"
-  # Modèle principal de raisonnement, TDD et revue
-  model: "gemini-3.8-flash"
-  thinking_level: "HIGH"
-  # Modèle à température nulle pour la synthèse du message de squash sémantique
-  squash_summary_model: "gemini-3.8-flash"
-  squash_summary_temperature: 0.0
-
-# Routage de modèle par phase (<fournisseur>/<modèle> ou identifiant court, ADR-0029)
+# EPURE Consumer Repository Configuration (.github/agents.yml)
+# Generated by setup-repo — security boundaries are enforced by shared workflows (ADR-0010, ADR-0023).
+harness: pi
 models:
-  planning: "anthropic/claude-sonnet-4-20250514"
-  implementation: "openai/gpt-5.4"
-  review: "google/gemini-3.8-flash"
-
-# Endpoints de fournisseurs personnalisés & références os.environ/VAR_NAME sans secret en clair (ADR-0029)
+  planning: anthropic/claude-sonnet-4-20250514
+  implementation: openai/gpt-5.4
+  review: google/gemini-3.8-flash
 providers:
   azure-prod:
-    provider: "azure"
-    api_key: "os.environ/AZURE_OPENAI_API_KEY"
-    base_url: "os.environ/AZURE_OPENAI_ENDPOINT"
-    api_version: "2024-10-21"
+    provider: azure
+    api_key: os.environ/AZURE_OPENAI_API_KEY
+    base_url: os.environ/AZURE_OPENAI_ENDPOINT
+    api_version: 2024-10-21
   foundry-deepseek:
-    provider: "azure_ai"
-    api_key: "os.environ/AZURE_AI_API_KEY"
-    base_url: "https://my-foundry.services.ai.azure.com"
-
-orchestration:
-  # Préfixe des références Git atomiques hors-branches (CAS)
-  state_ref_prefix: "refs/epure/state/"
-  # Nombre maximal de tours d'auto-remédiation par ticket avant escalade needs-human
-  max_code_fix_attempts: 3
-  # Plafond de reprises par requête HTTP unitaire sur erreur transitoire (5xx, 408, timeout ; les 429 attendent Retry-After sans consommer ce quota)
-  max_transient_api_retries: 4
-  transient_retry_backoff_seconds: [5, 15, 45, 120]
-  # Timeout HTTP par requête unitaire vers le fournisseur LLM (15 minutes = 900 secondes)
-  llm_request_timeout_seconds: 900
-  # Timeout global du job GitHub Actions d'orchestration en minutes
-  job_timeout_minutes: 60
-  # Plafond de reviewers spécialisés/transverses sélectionnés par diff (hors spec-parity-reviewer)
-  max_parallel_reviewers: 4
-  # Exécution en sandbox sans secret (arrêt fail-closed si l'isolation échoue)
-  secretless_sandbox: true
-
-review_roster:
-  # Charge toujours les prompts des reviewers depuis la branche de confiance (jamais depuis la PR)
-  trusted_branch: "dev"
-  directory: ".cursor/agents"
-  # Reviewer systématiquement inclus sur chaque PR
-  always_include:
-    - "spec-parity-reviewer"
-  # Spécialistes et agents transverses disponibles
-  available:
-    - "domain-backend-reviewer"
-    - "frontend-reviewer"
-    - "infra-reviewer"
-    - "architecture-reviewer"
-    - "security-reviewer"
-    - "standards-reviewer"
-    - "accessibility-reviewer"
-    - "design-reviewer"
-    - "user-advocate"
-
-ui_governance:
-  # Active automatiquement DESIGN.md, user-advocate et impeccable-gate dès qu'une surface UI est touchée
-  impeccable_enabled: true
-  design_system_path: "DESIGN.md"
-  # Preview GitHub Pages statique sur consentement pour les branches /prototype (désactivée par défaut, Q70)
-  enable_pages_preview: false
-  preview_retention_days: 14
-
-sensitive_paths:
-  # Toute modification de ces chemins sur task/* bloque l'auto-merge sauf label approved-sensitive-change
-  - ".github/workflows/**"
-  - ".github/agents.yml"
-  - ".cursor/agents/**"
-  - "CODEOWNERS"
+    provider: azure_ai
+    api_key: os.environ/AZURE_AI_API_KEY
+    base_url: https://my-foundry.services.ai.azure.com
+merge_policy: strict
+task_auto_merge_enabled: true
+max_code_fix_attempts: 3
+max_epic_phases: 2
+max_transient_api_retries: 4
+transient_retry_backoff_seconds: [5, 15, 45, 120]
+llm_request_timeout_seconds: 900
+job_timeout_minutes: 60
+review_timeout_minutes: 30
+max_concurrent_tasks_per_feature: 3
+trace_retention_days: 30
+preview_retention_days: 14
+github_pages_previews: false
+verification:
+  wait_for_external_ci: true
+  external_ci_timeout_minutes: 15
+  grace_window_seconds: 45
+  targets:
+    - name: root
+      working_directory: .
+      kind: node
+      path_patterns: ["**"]
+      install_command: "npm ci --ignore-scripts"
+      typecheck_command: "npm run typecheck"
+      lint_command: "npm run lint"
+      test_command: "npm test"
+      build_command: "npm run build"
+web_tools:
+  enabled: true
+  phases: ["plan", "spec", "implementation"]
+  max_requests_per_turn: 4
+  max_requests_per_run: 12
+  max_bytes_per_response: 16384
+  max_fetch_bytes: 16384
+  timeout_ms: 10000
+security_invariants:
+  require_write_permission: true
+  sandbox_isolation: true
+  allow_agent_release: false
+  auto_merge_dev: false
+  auto_merge_main: false
 ```
+
+---
+
+## Environnement GitHub d'Agent Configurable et Agnostique du LLM (`<llm-env>`)
+
+Dans `.github/workflows/epure-issue-command.yml`, le job `orchestrate-command` s'exécute au sein d'un environnement GitHub dédié (`environment: <llm-env>`) **uniquement après** que le job sans secret `authorize-command` a validé la permission effective `write` ou `admin` :
+
+- **Nommage libre et agnostique du fournisseur** : le nom de l'environnement `<llm-env>` est entièrement configurable via `setup-github-apps-wizard.sh --llm-env <nom-env>` et agnostique du fournisseur LLM utilisé (par exemple : `epure-agent`, `llm`, `openai`, `anthropic` ou `gemini`).
+- **Cloisonnement des secrets conforme Zizmor** : `EPURE_AGENT_APP_ID`, `EPURE_AGENT_APP_PRIVATE_KEY` et `LLM_API_KEY` (ou la variable fournisseur référencée par `os.environ/VAR_NAME`) sont attachés exclusivement à `--env <llm-env>`, tandis que `EPURE_RELEASE_APP_ID` et `EPURE_RELEASE_APP_PRIVATE_KEY` sont attachés à l'environnement `--env release` avec approbation humaine obligatoire. Les workflows publics de Pull Request et `authorize-command` n'ont accès à aucun secret.
 
 ---
 
 ## Détail des Sections
 
-### `branches`
+### Clés Racines d'Exécution, de Reprise & de Gouvernance
 
 | Clé | Type | Défaut | Description |
 | --- | --- | --- | --- |
-| `default_integration` | `string` | `"dev"` | Branche par défaut du dépôt où atterrissent les PRs applicatives `feature/* -> dev` validées par un humain (les artefacts documentaires `plan/*` s'intègrent directement dans `feature/*` selon ADR-0031). |
-| `release` | `string` | `"main"` | Branche de production immuable mise à jour exclusivement par `release-promote.yml` en fast-forward depuis `dev`. |
-
-### `llm`, `models` & `providers` (Routage Multi-Fournisseurs — ADR-0029)
-
-EPURE intègre un client `LLMClient` multi-fournisseurs sans dépendance externe inspiré de `giskard-llm`, compatible avec **Google Gemini** (`google/` ou `gemini/`), **OpenAI** (`openai/`), **Azure OpenAI** (`azure/`), **Azure AI Foundry** (`azure_ai/`) et **Anthropic** (`anthropic/`).
-
-| Clé | Type | Défaut | Description |
-| --- | --- | --- | --- |
-| `models.planning` | `string` | `"claude-sonnet-4-20250514"` (ou repli `"gemini-3.8-flash"`) | Modèle utilisé pour l'entretien `/grill-with-docs` et la génération de la spécification et du DAG de tickets (`<fournisseur>/<modèle>` ou nom court). |
-| `models.implementation` | `string` | `"claude-sonnet-4-20250514"` (ou repli `"gemini-3.8-flash"`) | Modèle utilisé pour l'implémentation TDD et les boucles d'auto-remédiation Stage 1/2/3. |
-| `models.review` | `string` | `"gpt-4.1"` (ou repli `"gemini-3.8-flash"`) | Modèle utilisé pour le roster de revue multi-agents, le `design-gate` `user-advocate` et la synthèse du message de squash à température `0.0`. |
-| `providers.<alias>.provider` | `"google" \| "openai" \| "azure" \| "azure_ai" \| "anthropic"` | *(Optionnel)* | Famille de protocole associée à un alias personnalisé référencé dans `models.*` (`<alias>/<modèle>`). |
-| `providers.<alias>.api_key` | `string` | `os.environ/<VAR>` | Référence de variable d'environnement (`os.environ/VAR_NAME`) résolue à l'exécution depuis `process.env`. Ne commitez jamais de clé API en clair dans `.github/agents.yml`. |
-| `providers.<alias>.base_url` | `string` | Défaut du fournisseur | URL de base personnalisée ou `os.environ/VAR_NAME` (pour `azure_ai`, tout suffixe `/models` sur `*.services.ai.azure.com` est normalisé automatiquement). |
-| `providers.<alias>.api_version` | `string` | `"2024-10-21"` | Version d'API du déploiement Azure OpenAI (`?api-version=...`). |
-| `providers.<alias>.default_headers` | `Record<string, string>` | `{}` | En-têtes HTTP additionnels transmis à chaque requête vers cet alias. |
-
-#### Ordre de Résolution des Clés API
-
-Pour chaque appel LLM, `LLMClient` résout la clé API de manière déterministe et sans bascule silencieuse vers un autre fournisseur en cas d'erreur `401`/`402`/`403` (ADR-0012, ADR-0029) :
-1. `providers[alias].api_key` (avec résolution de `os.environ/VAR_NAME` dans `process.env`).
-2. Variable d'environnement standard du fournisseur (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `AZURE_API_KEY` / `AZURE_OPENAI_API_KEY`, `AZURE_AI_API_KEY`).
-3. Clé `LLM_API_KEY` passée à l'action d'orchestration.
-
-### `orchestration`
-
-| Clé | Type | Défaut | Description |
-| --- | --- | --- | --- |
-| `state_ref_prefix` | `string` | `"refs/epure/state/"` | Espace de noms des références Git utilisé pour la persistance d'état Compare-And-Swap (Q76). |
-| `max_code_fix_attempts` | `integer` | `3` | Nombre maximal de tours de correction automatique sur une PR `task/*` ou `feature/*` avant l'ajout du label `needs-human` (Q78). |
-| `max_transient_api_retries` | `integer` | `4` | Plafond de reprises par requête HTTP unitaire en cas d'erreur transitoire (`5xx`, `408`, timeout ou 1 relance sur JSON tronqué). Les limitations de débit `HTTP 429` attendent `Retry-After` (ou `[15, 30, 60, 120]s`, max `300s`, jusqu'à 10 attentes) sans consommer ce compteur. |
+| `harness` | `"pi" \| "codex"` | `"pi"` | Adaptateur de moteur d'agent utilisé pour les exécutions en sandbox. |
+| `merge_policy` | `"strict" \| "relaxed"` | `"strict"` | Politique de base obsolète pour l'intégration `task/* -> feature/*` (`strict` exige une base à jour ; `relaxed` tolère une fusion 3-way propre si le diff approuvé est inchangé). |
+| `task_auto_merge_enabled` | `boolean` | `false` (`true` si CI & protections actives) | Active le squash-merge autonome des PRs `task/* -> feature/*` validées ; forcé à `false` (`AUTO_MERGE_DISABLED_MISSING_PROTECTIONS`) si la CI requise ou les protections de branches sont absentes. |
+| `max_code_fix_attempts` | `integer` | `3` | Nombre maximal de tours de correction automatique (Sandbox Stage 1, CI externe ou revue multi-agents) par ticket avant escalade `needs-human` (Q78). |
+| `max_epic_phases` | `integer` (`1..3`) | `2` | Nombre maximal de phases d'exécution de la fonctionnalité lorsque `runEpicConvergenceAudit` détecte des points d'entrée non câblés (`[Phase 2 - Ticket N]`, ADR-0032). |
+| `max_transient_api_retries` | `integer` | `4` | Plafond de reprises par requête HTTP unitaire en cas d'erreur transitoire (`5xx`, `408`, timeout réseau). Les limitations de débit `HTTP 429` attendent `Retry-After` (jusqu'à 10 attentes) sans consommer ce quota. |
 | `transient_retry_backoff_seconds` | `[int, int, int, int]` | `[5, 15, 45, 120]` | Paliers de backoff exponentiel en secondes entre deux reprises HTTP transitoires. |
 | `llm_request_timeout_seconds` | `integer` | `900` | Délai d'expiration HTTP unitaire en secondes (`15 minutes`) pour chaque appel au fournisseur LLM. |
 | `job_timeout_minutes` | `integer` | `60` | Délai d'expiration global en minutes du job `orchestrate-command` dans `.github/workflows/epure-issue-command.yml` (Q78). |
-| `max_parallel_reviewers` | `integer` | `4` | Plafond de reviewers métier/transverses sélectionnés par diff pour maîtriser la latence et la pertinence (Q92). |
-| `secretless_sandbox` | `boolean` | `true` | Purge `LLM_API_KEY` et les clés privées PEM des GitHub Apps de tous les sous-processus de test/build ; échoue en mode *fail-closed* si l'isolation est impossible (Q74). |
-| `web_tools.enabled` | `boolean` | `true` | Active les outils d'exploration Web publics sans clé API (`web_search`, `web_fetch`) restreints à `https://` sur le port `443` avec filtrage anti-SSRF strict et balisage `<untrusted_web_content>` (ADR-0031). |
-| `web_tools.phases` | `string[]` | `["plan", "spec", "implementation"]` | Phases autorisées à invoquer `web_search` et `web_fetch` (exclu de `review` par défaut). |
-| `web_tools.max_requests_per_turn` | `integer` | `4` | Nombre maximal d'appels Web autorisés au cours d'un même tour LLM. |
-| `web_tools.max_fetch_bytes` | `integer` | `16384` | Volume maximal en octets UTF-8 retourné par appel `web_fetch` après nettoyage HTML. |
+| `review_timeout_minutes` | `integer` | `30` | Délai d'expiration en minutes des jobs de revue multi-agents (avec un plafond `max_parallel_reviewers = 4` reviewers spécialisés/transverses sélectionnés par diff en plus de `spec-parity-reviewer`). |
+| `max_concurrent_tasks_per_feature` | `integer` | `3` | Nombre maximal de tickets `task/*` débloqués exécutables en parallèle pour une même branche `feature/*`. |
+| `trace_retention_days` | `integer` | `30` | Durée de conservation en jours des trajectoires d'audit minimisées (`iFixAi`). |
+| `preview_retention_days` | `integer` | `14` | Durée de conservation en jours avant purge automatique des previews `/prototype` hébergées (Q71). |
+| `github_pages_previews` | `boolean` | `false` | Option sur consentement (alias historique `enable_pages_preview: false`) pour publier des previews statiques `/prototype` sur une origine GitHub Pages isolée ; exige `github_pages_human_consent: true` et `preview_separate_origin: true` (Q70, Q73). |
 
-### `ui_governance`
+### `models` & `providers` (Routage Multi-Fournisseurs — ADR-0029)
+
+EPURE intègre un client `LLMClient` multi-fournisseurs sans dépendance externe compatible avec **Google Gemini** (`google/` ou `gemini/`), **OpenAI** (`openai/`), **Azure OpenAI** (`azure/`), **Azure AI Foundry** (`azure_ai/`) et **Anthropic** (`anthropic/`).
 
 | Clé | Type | Défaut | Description |
 | --- | --- | --- | --- |
-| `impeccable_enabled` | `boolean` | `true` | Active la génération de `DESIGN.md`, l'agent `user-advocate` (`design-gate` et `implementation-review`) et le check CI bloquant `impeccable-gate` dès que des fichiers UI sont modifiés (Q79, Q96). |
-| `enable_pages_preview` | `boolean` | `false` | Option sur consentement explicite pour publier des previews statiques `/prototype` sur un environnement GitHub Pages isolé (Q70, Q73). |
-| `preview_retention_days` | `integer` | `14` | Durée de conservation en jours avant purge automatique des previews hébergées (Q71). |
+| `models.planning` | `string` | `"claude-sonnet-4-20250514"` | Modèle utilisé pour l'entretien `/epure plan`, `runGoldfishSpecAudit` et `/epure to-spec` / `/epure to-tickets` (`<fournisseur>/<modèle>` ou nom court). |
+| `models.implementation` | `string` | `"claude-sonnet-4-20250514"` | Modèle utilisé pour la boucle d'outils incrémentaux (`write_repo_file`, `patch_repo_file`), la résolution de conflits 3-way et les boucles d'auto-remédiation Stage 1/2/3. |
+| `models.review` | `string` | `"gpt-4.1"` | Modèle utilisé pour le roster de revue multi-agents, `runEpicConvergenceAudit`, `user-advocate` et la synthèse du message de squash à température `0.0`. |
+| `providers.<alias>.provider` | `"google" \| "openai" \| "azure" \| "azure_ai" \| "anthropic"` | *(Optionnel)* | Famille de protocole associée à un alias personnalisé référencé dans `models.*` (`<alias>/<modèle>`). |
+| `providers.<alias>.api_key` | `string` | `os.environ/<VAR>` | Référence de variable d'environnement (`os.environ/VAR_NAME`) résolue à l'exécution depuis `process.env`. Ne commitez jamais de clé API en clair dans `.github/agents.yml`. |
+| `providers.<alias>.base_url` | `string` | Défaut du fournisseur | URL de base personnalisée ou `os.environ/VAR_NAME`. |
+| `providers.<alias>.api_version` | `string` | `"2024-10-21"` | Version d'API du déploiement Azure OpenAI (`?api-version=...`). |
+| `providers.<alias>.default_headers` | `Record<string, string>` | `{}` | En-têtes HTTP additionnels transmis à chaque requête vers cet alias. |
 
-### `sensitive_paths`
+### `verification` & `verification.targets` (Vérification Polyglotte Stage 1 & CI Stage 2 — ADR-0028, ADR-0030)
 
-Toute modification de `.github/workflows/**`, `.github/agents.yml`, `.cursor/agents/**` ou `CODEOWNERS` sur une branche `task/*` déclenche une **Escalade sur Chemin Sensible** : EPURE refuse le merge autonome dans `feature/*` et pose le label `needs-human` tant qu'un mainteneur n'a pas explicitement accordé le label `approved-sensitive-change` (Q81, Q93).
+Toujours chargé à l'exécution depuis la branche de confiance `dev` afin qu'une branche `task/*` ne puisse jamais affaiblir ses propres commandes de test :
+
+| Clé | Type | Défaut | Description |
+| --- | --- | --- | --- |
+| `verification.wait_for_external_ci` | `boolean` | `true` | Active l'attente événementielle de la CI externe Stage 2 (`waiting_ticket_ci` / `waiting_feature_ci`) sur les PRs `task/*` et `feature/*`. |
+| `verification.external_ci_timeout_minutes` | `integer` | `15` | Délai maximal d'attente de la CI externe en minutes. |
+| `verification.grace_window_seconds` | `integer` | `45` | Fenêtre d'amorçage en secondes après un push PR permettant aux workflows GitHub Actions de s'enregistrer avant d'évaluer leur complétude. |
+| `verification.deferred_external_workflows` | `string[]` | `[]` | Workflows externes lourds optionnels différés des sous-tickets `task/*` et requis uniquement sur la PR finale `feature/* -> dev`. |
+| `verification.targets` | `VerificationTargetSpec[]` | Découvert automatiquement par `setup-repo` | Cibles de vérification Stage 1 par sous-projet (`name`, `working_directory`, `kind`: `node \| python \| rust \| go \| make \| custom`, `path_patterns`, `install_command`, `codegen_command`, `typecheck_command`, `lint_command`, `test_command`, `build_command`) exécutées dans la sandbox noyau Ubuntu 26.04 en 2 phases (`landrun` + `bubblewrap`). |
+
+### `web_tools` (Exploration Web Publique Confinée — ADR-0031)
+
+| Clé | Type | Défaut | Description |
+| --- | --- | --- | --- |
+| `web_tools.enabled` | `boolean` | `true` | Active les outils d'exploration Web publics sans clé API (`web_search`, `web_fetch`) restreints à `https://` sur le port `443` avec filtrage anti-SSRF strict et balisage `<untrusted_web_content>`. |
+| `web_tools.phases` | `string[]` | `["plan", "spec", "implementation"]` | Phases autorisées à invoquer `web_search` et `web_fetch` (exclu de `review` par défaut). |
+| `web_tools.max_requests_per_turn` | `integer` | `4` | Nombre maximal d'appels Web autorisés au cours d'un même tour LLM. |
+| `web_tools.max_requests_per_run` | `integer` | `12` | Nombre maximal d'appels Web autorisés sur l'ensemble d'un run d'orchestration. |
+| `web_tools.max_bytes_per_response` | `integer` | `16384` | Volume maximal en octets UTF-8 retourné par réponse d'outil. |
+| `web_tools.max_fetch_bytes` | `integer` | `16384` | Volume maximal en octets UTF-8 retourné par appel `web_fetch` après nettoyage HTML. |
+| `web_tools.timeout_ms` | `integer` | `10000` | Délai d'expiration HTTP en millisecondes par requête d'exploration Web. |
+
+### `security_invariants` & Chemins Sensibles
+
+Toute tentative dans `.github/agents.yml` d'abaisser `security_invariants` (`require_write_permission: false`, `sandbox_isolation: false`, `allow_agent_release: true`, `auto_merge_dev: true`, `auto_merge_main: true`) est rejetée en mode *fail-closed* avec l'erreur `SECURITY_INVARIANT_VIOLATION`. De plus, toute modification de `.github/workflows/**`, `.github/agents.yml`, `.cursor/agents/**` ou `CODEOWNERS` sur une branche `task/*` déclenche une **Escalade sur Chemin Sensible** (`needs-human`) tant qu'un mainteneur n'a pas explicitement accordé le label `approved-sensitive-change` (Q81, Q93).
 
 ---
 
-## Politique Supply-Chain & Sécurité Renovate (`renovate.json`)
+## Politique Supply-Chain & Sécurité Renovate (`renovate.json` & `.github/zizmor.yml`)
 
-Chaque dépôt EPURE (ainsi que `Giskard-AI/epure` lui-même) embarque un fichier **`renovate.json`** durci généré par `/setup-repo` (Q46–Q48) :
+Chaque dépôt EPURE embarque un fichier **`renovate.json`** et **`.github/zizmor.yml`** durcis générés par `/setup-repo` (Q46–Q48) :
 
 - **Quarantaine Anti-Jour-1 (`minimumReleaseAge`)** : Applique un délai minimal de `3 days` par défaut (`7 days` pour les mises à jour mineures et les GitHub Actions / images Docker, `14 days` pour les mises à jour majeures npm) associé à `internalChecksFilter: "strict"` et `prCreation: "not-pending"`. Aucune version fraîchement publiée ou compromise le jour 1 ne déclenche de PR avant la fin de la quarantaine.
 - **Automatisation Maximale maîtrisée** : Regroupe les mises à jour `minor`, `patch`, `pin` et `digest` dans des PRs hebdomadaires consolidées (`npm-minor-and-patch`, `github-actions`, `docker`), épingle toutes les versions (`rangeStrategy: "pin"`, `helpers:pinGitHubActionDigests`, `docker:pinDigests`), assure la maintenance mensuelle du lockfile (`lockFileMaintenance`) et rebase automatiquement sur `dev` (`rebaseWhen: "behind-base-branch"`).
@@ -1649,6 +1781,8 @@ URL: https://giskard-ai.github.io/epure/fr/architecture
 
 EPURE a été conçu dès l'origine autour de trois principes d'ingénierie : **Défense en Profondeur**, **Moindre Privilège** et **État Déterministe Hors-Branches**. Chaque frontière d'automatisation est garantie à la fois par les GitHub Repository Rulesets et par l'isolation d'exécution locale.
 
+> **Schéma Interactif du Pipeline Événementiel & Custom Actions** : Consultez le [diagramme `epure-ci-actions-flow` dans la Référence des Commandes](./commands#2-pipeline-evenementiel-github-actions-custom-actions-epure-ci-actions-flow) pour visualiser l'enchaînement complet des événements GitHub (`issue_comment`, `check_suite`, `workflow_run`, `pull_request`, `workflow_dispatch`), du contrôle sans secret `authorize-command`, du job isolé `orchestrate-command` (`environment: <llm-env>`) et de la promotion `release`.
+
 ---
 
 ## 1. Architecture de Sécurité & Frontières de Confiance
@@ -1662,14 +1796,14 @@ EPURE a été conçu dès l'origine autour de trois principes d'ingénierie : **
 
 ### Invariants Architecturaux Clés
 
-1. **Séparation à Deux GitHub Apps (`<owner>-epure-agent` vs `<owner>-epure-release`, Q82 & Q91)** :
-   - L'**Agent App** émet des jetons d'installation RS256 éphémères dédiés à l'orchestration quotidienne (`plan/*`, `task/*`, `feature/*`). Elle n'est Bypass Actor **que** sur le ruleset `epure-feature-governance` (`refs/heads/feature/*`), ce qui lui permet de fusionner en autonomie les tâches atomiques validées tout en lui interdisant matériellement de fusionner du code applicatif dans `dev` ou de pousser sur `main`.
-   - La **Release App** est invoquée exclusivement par `release-promote.yml` sur déclenchement humain (`workflow_dispatch`). C'est le seul Bypass Actor autorisé sur `epure-release-immutability` (`refs/heads/main` et `refs/tags/v*`).
+1. **Séparation à Deux GitHub Apps & Secrets Cloisonnés par Environnement (`<owner>-epure-agent` vs `<owner>-epure-release`, Q82 & Q91)** :
+   - L'**Agent App** émet des jetons d'installation RS256 éphémères dédiés à l'orchestration quotidienne (`plan/*`, `task/*`, `feature/*`). Ses identifiants (`EPURE_AGENT_APP_ID`, `EPURE_AGENT_APP_PRIVATE_KEY`) et `LLM_API_KEY` sont isolés dans l'environnement GitHub d'agent (`<llm-env>`) et ne sont jamais exposés à `authorize-command` ni aux workflows publics de Pull Request. Elle n'est Bypass Actor **que** sur le ruleset `epure-feature-governance` (`refs/heads/feature/*`), ce qui lui permet de fusionner en autonomie les tâches atomiques validées tout en lui interdisant matériellement de fusionner du code applicatif dans `dev` ou de pousser sur `main`.
+   - La **Release App** est invoquée exclusivement par `release-promote.yml` / `release.yml` sur déclenchement humain (`workflow_dispatch`) au sein de l'environnement GitHub protégé `release` (`EPURE_RELEASE_APP_ID`, `EPURE_RELEASE_APP_PRIVATE_KEY`). C'est le seul Bypass Actor autorisé sur `epure-release-immutability` (`refs/heads/main` et `refs/tags/v*`).
 2. **Exécution en Sandbox Sans Secret (Q74)** :
    - Lorsqu'EPURE exécute `npm test`, `npm run build` ou `pytest` sur une branche `task/*`, l'environnement des sous-processus est intégralement purgé de `LLM_API_KEY`, `EPURE_AGENT_APP_PRIVATE_KEY` et `EPURE_RELEASE_APP_PRIVATE_KEY`.
    - Un test ou une dépendance compromise ne peut exfiltrer aucun secret. Si l'isolation de la sandbox ne peut être garantie, EPURE s'arrête immédiatement en mode **fail-closed**.
 3. **État Atomique Hors-Branches (`refs/epure/state/<issue>`, Q76)** :
-   - Les transitions d'état (`last_processed_comment_id`, `spec_sha` signé, compteurs de tentatives, table des tickets) sont stockées sous forme d'objets Git dans `refs/epure/state/<issue-number>` mis à jour par Compare-And-Swap (`git update-ref`).
+   - Les transitions d'état (`last_processed_comment_id`, `spec_sha` signé, compteurs de tentatives, table des tickets et sous-phases de continuation CI) sont stockées sous forme d'objets Git dans `refs/epure/state/<issue-number>` mis à jour par Compare-And-Swap (`git update-ref`).
    - Les branches `dev` et `main` restent 100 % exemptes de commits techniques d'état machine.
 
 ---
@@ -1713,11 +1847,43 @@ EPURE a été conçu dès l'origine autour de trois principes d'ingénierie : **
    - Client TypeScript `LLMClient` sans dépendance externe routant les identifiants `<fournisseur>/<modèle>` vers **Google Gemini** (`google/`, `gemini/`), **OpenAI** (`openai/`), **Azure OpenAI** (`azure/`), **Azure AI Foundry** (`azure_ai/`) et **Anthropic** (`anthropic/`), avec résolution différée `os.environ/VAR_NAME` depuis `.github/agents.yml`.
    - Respect strict de l'ADR-0012 : les erreurs HTTP `401`/`403` (`AuthenticationError`) et `402` (`QuotaExhaustedError`) interrompent immédiatement l'exécution sans bascule silencieuse, tandis que les erreurs transitoires (`408`, `429`, `5xx`) appliquent un backoff exponentiel borné.
 2. **Sorties Structurées par Schéma (`ResponseSchemaSpec<T>`) & Boucle d'Outils Gemini en 2 Phases** :
-   - Les 11 appels LLM structurés du système (`GrillRoundEvaluation`, `GeneratedPlanningBundle`, `GeneratedTicketImplementation`, constats des reviewers, `user-advocate` et synthèse de squash) transmettent un JSON Schema natif (`responseSchema`, `response_format.json_schema` avec fermeture récursive `additionalProperties: false`, ou `output_config.format`) couplé aux validateurs TypeScript de `src/orchestrator/prompts/schemas.ts`.
+   - Les appels LLM structurés du système (`GrillRoundEvaluation`, `GeneratedPlanningBundle`, `GeneratedTicketImplementation`, constats des reviewers, `user-advocate` et synthèse de squash) transmettent un JSON Schema natif (`responseSchema`, `response_format.json_schema` avec fermeture récursive `additionalProperties: false`, ou `output_config.format`) couplé aux validateurs TypeScript de `src/orchestrator/prompts/schemas.ts`.
    - Sur Google Gemini, lorsqu'un appel combine les outils d'exploration (`list_repo_files`, `search_in_repo_file`, `read_repo_file`) et un schéma JSON, la **Phase 1** exécute les tours d'outils avec `functionDeclarations` (en préservant les `thoughtSignature` Gemini 3), puis la **Phase 2** verrouille `functionCallingConfig.mode = "NONE"` avec `responseMimeType: "application/json"` et `responseSchema`.
 3. **Architecture Modulaire `src/orchestrator/` & Garde-fous Branchés** :
    - `src/orchestrator/issue-orchestrator.ts` orchestre les sous-modules spécialisés `github/rest-client.ts`, `workspace/repo-tools.ts`, `prompts/schemas.ts`, `formatting/comments.ts` ainsi que les 3 phases `phases/grill-and-plan.ts`, `phases/ticket-execution.ts` et `phases/feature-integration.ts`.
    - Branche directement la détection de cycles du DAG (`validatePlanningArtifactsAndGraph`), le déblocage sur dépendance prouvée (`reconcileProvenTicketDependencies`, escaladant en `needs-human` si un ticket bloquant est fermé en `not_planned`), la détection d'annulation `/epure cancel` inter-tickets (`processPendingIssueCommentsBatch`) et la garde anti-boucle de revue par SHA (`evaluateReviewFeedbackTrigger`).
+
+---
+
+## 4. Pipeline de Vérification en 3 Étapes, Sandbox Noyau Ubuntu 26.04 & Continuation CI Événementielle (ADR-0028, ADR-0030, ADR-0031)
+
+1. **Stage 1 — Sandbox Noyau Linux en 2 Phases, Condensation `rtk` Sans État & Isolation Goldfish par Ticket** :
+   - S'exécute sur `ubuntu-26.04` (noyau Linux 7.0) dans un clone Git local persistant avant toute publication sur `task/*` :
+     - **Phase A (`install`, `networkPolicy: "https_only"`)** : exécute l'installation des dépendances sous `landrun` (Landlock ABI v8) en restreignant le trafic TCP sortant au seul port `443` et les écritures à `workDir`, `/tmp` et aux caches de paquets.
+     - **Phase B (`codegen`, `typecheck`, `lint`, `test`, `build`, `networkPolicy: "offline"`)** : exécute les vérifications totalement hors-ligne sous `bubblewrap` (`bwrap --unshare-net --unshare-pid --unshare-ipc --tmpfs /tmp --die-with-parent`, avec repli automatique sur `landrun` hors-ligne).
+   - **Condensation sans état `rtk` (`formatAndCondenseStage1CommandOutput`)** : filtre les séquences ANSI, barres de progression et journaux verbeux en mode 100 % sans état (`RTK_TELEMETRY_DISABLED=1`, `RTK_RECALL=0`, `RTK_TEE=0`, aucune base SQLite) tout en conservant les 4 000 derniers caractères bruts de la pile d'erreur dès que `exit_code !== 0`.
+   - **Synchronisation Git 3-way (`/epure sync`) & Isolation Goldfish** : maintient `dev -> feature/* -> task/*` synchronisés avec résolution 3-way assistée par LLM et validée par le Stage 1, et exécute chaque ticket dans une session Goldfish isolée sans mémoire des tickets précédents (`runGoldfishSpecAudit` lors de `/epure to-spec`).
+2. **Stage 2 — Continuation Événementielle de la CI Externe (`waiting_ticket_ci` / `waiting_feature_ci`)** :
+   - Dès que le Stage 1 réussit et que la Pull Request `task/* -> feature/*` ou `feature/* -> dev` est ouverte avec son check `ai-review`, EPURE persiste `subphase: "waiting_ticket_ci"` (ou `"waiting_feature_ci"`), `active_pr_number` et `active_head_sha` dans `refs/epure/state/<issue>`, puis termine immédiatement le job avec le code `0` (`async_ci_continuation: true`).
+   - Aucun runner GitHub Actions ne reste bloqué en attente passive. Lorsque GitHub émet `check_suite.completed` ou `workflow_run.completed` (ou qu'un mainteneur poste `/epure continue`), EPURE reprend exactement à l'état persisté.
+3. **Stage 3 — Roster de Revue Multi-Agents depuis `dev` & Squash Sémantique IA** :
+   - Corrèle le résultat des workflows CI externes avec le panel de reviewers spécialisés chargé depuis `dev`. En cas d'échec CI ou de constat `must_fix`, EPURE extrait les journaux d'erreur assainis (~12 Ko) et exécute jusqu'à `max_code_fix_attempts = 3` rondes de remédiation unifiées avant de fusionner `task/* -> feature/*` par squash sémantique IA.
+
+---
+
+## 5. Outils de Mutation Incrémentale, Garde d'Intégrité Inter-Tickets & Convergence Multi-Phases (ADR-0032, ADR-0033)
+
+1. **Mutation Incrémentale Transactionnelle (`StagedTicketImplementationBuffer`)** :
+   - Pendant l'implémentation et la remédiation d'un ticket, le modèle modifie les fichiers de manière incrémentale via `write_repo_file`, `patch_repo_file` et `delete_repo_file` dans un tampon transactionnel en mémoire (`StagedTicketImplementationBuffer`), isolé de `feature/*` tant que `validateWorkspaceFileOperations`, `validateTicketIntegrityGuard` et le Sandbox Stage 1 n'ont pas validé l'ensemble.
+   - **Repli Segmenté Fichier par Fichier (`ChunkedTicketImplementationFallback`)** : si un ticket multi-fichiers rencontre une troncature `MAX_TOKENS`, EPURE décompose automatiquement les entrées `filesToTouch` restantes en sous-appels fichier par fichier (en conservant les mutations déjà validées dans le tampon et en annulant tout le tampon sans commit partiel si un sous-appel échoue).
+   - **Catalogue Compact de Contexte (`CompactWorkspaceFilesContext`)** : injecte le contenu complet (sans aucune troncature au milieu d'un fichier) uniquement pour les fichiers modifiés par le ticket ou listés dans `filesToTouch`, et expose le reste du dépôt sous forme d'un index `chemin (N lignes)` consultable à la demande via `read_repo_file` et `search_in_repo_file`.
+2. **Graphe Relationnel GitHub Natif, Garde d'Intégrité Inter-Tickets & Réconciliation Sémantique des ADRs** :
+   - `/epure to-tickets` câble nativement les liens `sub_issues` et `dependencies/blocked_by` dans GitHub en complément de la Tasklist Markdown de l'issue de pilotage.
+   - `validateTicketIntegrityGuard` interdit à tout ticket de supprimer ou vider des fichiers de test existants, de tronquer plus de 30 % des lignes/symboles d'un fichier hors périmètre, ou de dégrader les scripts `build`/`test`/`lint`/`typecheck` des manifestes en commandes factices.
+   - `renumberCollidingAdrs` et `reconcileAdrsWithLlm` dédupliquent les ADRs par slug entre branches concurrentes, renumérotent de façon monotone les fichiers `docs/adr/NNNN-*.md` en collision et alignent les références croisées dans les spécifications et `GLOSSARY.md`.
+3. **Audit de Convergence Zéro-Contexte (`EpicConvergenceAudit`) & Remédiation Multi-Phases (`max_epic_phases`)** :
+   - Avant d'ouvrir la PR finale `feature/* -> dev`, une session isolée zéro-contexte (`runEpicConvergenceAudit`) vérifie la branche de fonctionnalité face à l'`EpicGoalContract` de la spécification (`required_entrypoints`, absence de `forbidden_stubs` et `end_to_end_verification_criteria`).
+   - Si des points d'entrée non câblés ou des simulacres sont détectés (`verdict: "INCOMPLETE"`) et que `epic_phase < max_epic_phases` (`2` par défaut), EPURE génère, chaîne et exécute automatiquement des **tickets de convergence de Phase 2** (`[Phase 2 - Ticket N]`) avant d'ouvrir la PR finale ; au-delà du plafond, il escalade en `epic_convergence_exhausted` (`needs-human`).
 
 ---
 ## [FR] Guide : Onboarder un Dépôt
@@ -1725,37 +1891,45 @@ URL: https://giskard-ai.github.io/epure/fr/guides/how-to-onboard-repo
 
 # Guide : Onboarder un Dépôt avec le Skill `/setup-repo`
 
-Ce guide explique comment configurer un dépôt GitHub neuf ou existant (tel que `my-org/craft-calculator`) en invoquant **le skill d'agent `/setup-repo`** (`.agents/skills/setup-repo/SKILL.md`), qui est la façon privilégiée d'installer EPURE, ses 2 GitHub Apps, ses 5 secrets, `.github/agents.yml`, son roster dynamique `.cursor/agents/*.md` et ses 3 Repository Rulesets.
+Ce guide explique comment configurer un dépôt GitHub neuf ou existant (tel que `my-org/craft-calculator`) en invoquant **le skill d'agent `/setup-repo`** (`.agents/skills/setup-repo/SKILL.md`), qui est la façon privilégiée d'installer EPURE, ses 2 GitHub Apps, ses secrets cloisonnés par environnement (`<llm-env>` et `release`), `.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`, son roster dynamique `.cursor/agents/*.md` et ses 3 Repository Rulesets.
 
 ---
 
-## 1. Créer les Deux GitHub Apps & les Secrets du Dépôt
+## 1. Créer les Deux GitHub Apps & les Secrets Cloisonnés par Environnement
 
-EPURE sépare les privilèges d'orchestration quotidienne des privilèges de mise en production grâce à deux GitHub Apps :
+EPURE sépare les privilèges d'orchestration quotidienne des privilèges de mise en production grâce à deux GitHub Apps et cloisonne tous les secrets dans des environnements GitHub dédiés (conformité Zizmor sans secret global exposé) :
 
 - **`<owner>-epure-agent`** : permissions `contents: write`, `issues: write`, `pull_requests: write`, `checks: write`.
 - **`<owner>-epure-release`** : permissions `contents: write`, `metadata: read`.
 
-Exécutez l'assistant interactif (ou laissez le skill `/setup-repo` vous inviter à le lancer) :
+Exécutez l'assistant interactif (qui propose l'**Approche 2** GitHub App Manifest en 1 clic et l'**Approche 1 de repli** manuelle guidée) en indiquant le dépôt cible et le nom choisi pour l'environnement d'agent (`--llm-env <nom-env>`, p. ex. `epure-agent`, `llm`, `openai`, `anthropic` ou `gemini`) :
 
 ```bash
-bash scripts/wizards/setup-github-apps-wizard.sh --repo my-org/craft-calculator
+bash scripts/wizards/setup-github-apps-wizard.sh \
+  --repo my-org/craft-calculator \
+  --llm-env <llm-env>
 ```
 
-Vérifiez que les 5 secrets sont bien enregistrés sur le dépôt cible :
+Vérifiez que les secrets sont bien enregistrés dans leurs environnements GitHub respectifs :
 
 ```bash
-gh secret list -R my-org/craft-calculator
+gh secret list -R my-org/craft-calculator --env <llm-env>
+gh secret list -R my-org/craft-calculator --env release
 ```
 
-Sortie attendue :
+Sortie attendue pour `--env <llm-env>` :
 
 ```text
 EPURE_AGENT_APP_ID
 EPURE_AGENT_APP_PRIVATE_KEY
+LLM_API_KEY
+```
+
+Sortie attendue pour `--env release` :
+
+```text
 EPURE_RELEASE_APP_ID
 EPURE_RELEASE_APP_PRIVATE_KEY
-LLM_API_KEY
 ```
 
 ---
@@ -1781,8 +1955,8 @@ node dist/cli/setup-repo.mjs \
 
 Vérifiez que le rapport de simulation présenté par l'agent mentionne :
 
-- La création de `.github/agents.yml` épinglé sur le SHA de 40 caractères de `Giskard-AI/epure`.
-- La création de `.github/workflows/epure-issue-command.yml`, `epure-check.yml`, `pr-title.yml`, `ci.yml` et `release.yml`.
+- La création de `.github/agents.yml` (schéma canonique plat avec découverte automatique de `verification.targets`), `.github/zizmor.yml` et `renovate.json`.
+- La création de `.github/workflows/epure-issue-command.yml`, `epure-check.yml`, `pr-title.yml`, `ci.yml` et `release.yml` épinglés sur le SHA de 40 caractères de `Giskard-AI/epure`.
 - L'initialisation dynamique du roster de reviewers `.cursor/agents/*.md` conçu par l'agent selon la stack et les sous-domaines du projet (socle transverse `architecture-reviewer`, `security-reviewer`, `spec-parity-reviewer`, `standards-reviewer`, `user-advocate` + spécialistes métier/UI sur mesure, soit 10 agents dans l'exemple `craft-calculator`).
 - La configuration des 3 Repository Rulesets (`epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`).
 
@@ -1802,12 +1976,12 @@ node dist/cli/setup-repo.mjs \
   --apply-github-settings
 ```
 
-Commitez et poussez ensuite les fichiers générés sur la branche par défaut `dev` :
+Commitez et poussez ensuite les fichiers générés (`.github/`, `.cursor/agents/` et `renovate.json`) sur la branche par défaut `dev` :
 
 ```bash
 cd /chemin/vers/craft-calculator
 git checkout dev
-git add .github/ .cursor/agents/
+git add .github/ .cursor/agents/ renovate.json
 git commit -m "chore(epure): bootstrap repository governance and workflows"
 git push origin dev
 ```
@@ -1847,34 +2021,40 @@ Ce guide fournit la marche à suivre opérationnelle pour piloter une fonctionna
 
 Dès que la frontière de décisions du Grill est résolue (`frontier_resolved: true`), EPURE publie la **Synthèse des Décisions** et attend votre validation (`grilling` / `awaiting_human_approval`).
 
-1. **Générer la Spécification (`/epure to-spec`)** : commentez `/epure to-spec` pour générer et commiter `GLOSSARY.md`, `docs/adr/NNNN-*.md`, `DESIGN.md` (si une UI est concernée) et `docs/specs/<slug>.md` sur `plan/<issue>-<slug>`. L'issue passe en phase `spec` (`awaiting_human_approval`).
+1. **Générer la Spécification (`/epure to-spec`)** : commentez `/epure to-spec` pour exécuter l'**Audit de Spécification Goldfish zéro-contexte** (`runGoldfishSpecAudit`) et commiter `GLOSSARY.md`, `docs/adr/NNNN-*.md`, `DESIGN.md` (si une UI est concernée) et `docs/specs/<slug>.md` (incluant `EpicGoalContract`) sur `plan/<issue>-<slug>`. L'issue passe en phase `spec` (`awaiting_human_approval`).
 2. **Réviser ou Valider la Spécification** :
    - Inspectez `GLOSSARY.md`, `docs/adr/` et `docs/specs/<slug>.md` sur `plan/<issue>-<slug>`.
    - Pour demander un ajustement ou une précision sur la spécification avant la création des tickets, **répondez directement en commentaire** (sans commande slash).
-3. **Générer le Graphe de Tickets (`/epure to-tickets`)** : une fois la spécification validée, commentez `/epure to-tickets`. EPURE découpe la spécification en un graphe acyclique (DAG) de sous-issues GitHub (`blocked_by`, `ready-for-agent`) et passe en phase `tickets` (`awaiting_human_approval`) en attente de `/epure approve`.
+3. **Générer le Graphe de Tickets (`/epure to-tickets`)** : une fois la spécification validée, commentez `/epure to-tickets`. EPURE découpe la spécification en un graphe acyclique (DAG) de sous-issues GitHub (`blocked_by`, `ready-for-agent`), câble nativement les relations GitHub `sub_issues` et `dependencies/blocked_by`, et passe en phase `tickets` (`awaiting_human_approval`) en attente de `/epure approve`.
 
 ---
 
-## 3. Approuver & Suivre l'Exécution (`/epure approve` & `/epure status`)
+## 3. Approuver, Continuation CI Événementielle & Synchronisation (`/epure approve`, `/epure status` & `/epure sync`)
 
-Postez `/epure approve` sur l'issue de pilotage.
+Postez `/epure approve` sur l'issue de pilotage pour intégrer directement les artefacts de `plan/*` dans `feature/<issue>-<slug>`, sceller `spec_sha` et démarrer l'exécution du DAG de tickets.
 
-- Pour consulter l'avancement à tout moment sans ouvrir l'onglet Actions, commentez `/epure status` ou consultez le **Tableau de Bord EPURE** épinglé en haut du corps de l'issue.
-- Dans les journaux GitHub Actions du job, dépliez les groupes structurés `::group::` pour inspecter :
-  - La sortie des tests et du build TDD dans la sandbox sans secret pour chaque ticket.
-  - Les appels d'outils en lecture seule (`read_file`, `search_code`) effectués par chaque reviewer spécialisé.
-  - Le verdict détaillé de chaque reviewer (`approved` vs `changes_requested`).
+- **Attente Événementielle de la CI Externe (`waiting_ticket_ci` / `waiting_feature_ci`)** :
+  - À chaque ouverture d'une PR `task/* -> feature/*` (`waiting_ticket_ci`) ou de la PR finale `feature/* -> dev` (`waiting_feature_ci`), l'orchestrateur enregistre la PR et le `head_sha` actifs dans `refs/epure/state/<issue>` et termine immédiatement le job (`exit 0`) pour libérer le runner GitHub Actions (`async_ci_continuation: true`).
+  - Dès que les workflows CI externes se terminent (`check_suite.completed` ou `workflow_run.completed`), EPURE se réveille automatiquement pour exécuter la revue multi-agents Stage 3, le squash sémantique IA ou un round d'auto-remédiation. Vous pouvez également relancer manuellement la continuation à tout moment en commentant **`/epure continue`**.
+- **Synchroniser avec `dev` (`/epure sync` / `/epure rebase`)** :
+  - Si d'autres PRs sont fusionnées sur `dev` pendant le développement de votre fonctionnalité, commentez **`/epure sync`** (ou `/epure rebase`). EPURE synchronise `dev -> feature/<issue>-<slug>` (et propage `feature/* -> active_task_branch`) avec fusion additive de `GLOSSARY.md`, renumérotation monotone des ADRs, résolution de conflits 3-way assistée par LLM et validation obligatoire dans le **Sandbox Noyau Stage 1** avant commit.
+- **Suivre l'Avancement (`/epure status`)** :
+  - Commentez `/epure status` ou consultez le **Tableau de Bord EPURE** épinglé en haut du corps de l'issue.
+  - Dans les journaux GitHub Actions du job, dépliez les groupes structurés `::group::` pour inspecter la sortie des tests/builds du Sandbox Stage 1, les appels d'outils en lecture seule (`read_file`, `search_code`) et le verdict de chaque reviewer (`approved` vs `changes_requested`).
 
 ---
 
-## 4. Gérer une Escalade `needs-human` & la Reprise Idempotente
+## 4. Gérer une Escalade `needs-human`, `/epure continue` & les Tickets de Convergence Phase 2
 
-EPURE interrompt l'automatisation et pose le label `needs-human` dans deux cas :
+EPURE interrompt l'automatisation et pose le label `needs-human` (`status: "suspended"`) lorsqu'une décision humaine est requise :
 
 1. **Modification d'un Chemin Sensible** : une branche `task/*` a modifié `.github/workflows/**`, `.github/agents.yml`, `.cursor/agents/**` ou `CODEOWNERS`.
-   - *Résolution* : inspectez le diff. Si la modification est légitime, ajoutez le label `approved-sensitive-change` sur la PR puis commentez `/epure approve` sur l'issue de pilotage.
-2. **Plafond d'Auto-Remédiation Atteint (`max_code_fix_attempts = 3`)** : un ticket a échoué aux tests ou aux constats `must_fix` 3 fois consécutives.
-   - *Résolution* : poussez un commit de correction sur la branche `task/*` ou `feature/*` (ou clarifiez la spec), puis repostez `/epure approve` sur l'issue de pilotage. La **reprise idempotente** d'EPURE ignore automatiquement les tickets déjà fermés et reprend exactement au point d'arrêt.
+   - *Résolution* : inspectez le diff. Si la modification est légitime, ajoutez le label `approved-sensitive-change` sur la PR puis commentez **`/epure continue`** (ou `/epure approve`) sur l'issue de pilotage.
+2. **Plafond d'Auto-Remédiation Atteint (`max_code_fix_attempts = 3`)** : un ticket a échoué aux tests Stage 1, à la CI externe ou aux constats `must_fix` 3 fois consécutives.
+   - *Résolution* : poussez un commit de correction sur la branche `task/*` ou `feature/*` (ou publiez une précision en commentaire), puis commentez **`/epure continue`** sur l'issue de pilotage. EPURE retire le label `needs-human`, restaure `status: "active"`, ignore les tickets déjà fermés et reprend exactement au dernier jalon validé.
+3. **Audit de Convergence Zéro-Contexte (`EpicConvergenceAudit`) & Tickets Automatiques de Phase 2 (`max_epic_phases`)** :
+   - Une fois tous les tickets de Phase 1 fusionnés dans `feature/*`, EPURE exécute un **`EpicConvergenceAudit` zéro-contexte** (`runEpicConvergenceAudit`) face à l'`EpicGoalContract` de la spécification.
+   - Si l'audit détecte des `required_entrypoints` non câblés ou des `forbidden_stubs` résiduels (`verdict: "INCOMPLETE"`) et que `epic_phase < max_epic_phases` (`2` par défaut), EPURE génère, chaîne et exécute automatiquement des tickets correctifs **`[Phase 2 - Ticket N]`** avant d'ouvrir la PR finale `feature/* -> dev`. Si un écart subsiste après `max_epic_phases`, EPURE escalade en `needs-human` (`epic_convergence_exhausted`), d'où vous pouvez pousser un correctif et commenter **`/epure continue`**.
 
 ---
 ## [FR] Guide : Personnaliser le Roster & Impeccable

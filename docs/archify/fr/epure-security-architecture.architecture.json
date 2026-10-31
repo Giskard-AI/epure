@@ -3,14 +3,14 @@
   "diagram_type": "architecture",
   "meta": {
     "title": "Architecture de Sécurité & Frontières de Confiance d'EPURE",
-    "subtitle": "Séparation à 2 GitHub Apps, Sandbox Sans Secret, État Git CAS Hors-Branches et Défense Prompt-Injection",
+    "subtitle": "2 GitHub Apps, Sandbox Noyau 2-Phases, LLMClient Multi-Provider, Outils Web Anti-SSRF & Isolation d'Environnements",
     "legend": {
       "entries": {
         "external": { "label": "Événement Externe" },
         "security": { "label": "Contrôle & Identité" },
         "backend": { "label": "Orchestration & Sandbox" },
         "database": { "label": "État Git CAS" },
-        "cloud": { "label": "Sidecar Proxy LLM" }
+        "cloud": { "label": "LLMClient Multi-Provider" }
       }
     },
     "visual_preset": "blueprint",
@@ -48,9 +48,9 @@
     {
       "id": "command_gate",
       "type": "security",
-      "label": "Porte Permissions",
-      "sublabel": "vérif write / admin",
-      "tag": "fail-closed",
+      "label": "Job 1: Porte Auth",
+      "sublabel": "authorize-command",
+      "tag": "0 secret App/LLM",
       "row": 0,
       "col": 1
     },
@@ -58,7 +58,7 @@
       "id": "orchestrator",
       "type": "backend",
       "label": "Orchestrateur",
-      "sublabel": "Grill, DAG & TDD",
+      "sublabel": "Job 2: env <llm-env>",
       "tag": "verrou issue-N",
       "row": 1,
       "col": 1
@@ -75,9 +75,9 @@
     {
       "id": "llm_sidecar",
       "type": "cloud",
-      "label": "Sidecar LLM",
-      "sublabel": "Gemini 3.8 HIGH",
-      "tag": "détient clé API",
+      "label": "LLM Multi-Provider",
+      "sublabel": "Gemini/OpenAI/Anthropic",
+      "tag": "env: <llm-env>",
       "row": 0,
       "col": 2
     },
@@ -85,7 +85,7 @@
       "id": "trusted_reviewers",
       "type": "security",
       "label": "Roster dev",
-      "sublabel": "balises XML diff",
+      "sublabel": "gardes XML diff/web",
       "tag": "OWASP LLM01",
       "row": 1,
       "col": 2
@@ -102,9 +102,9 @@
     {
       "id": "secretless_sandbox",
       "type": "backend",
-      "label": "Sandbox Code",
-      "sublabel": "tsc + vitest run",
-      "tag": "0 secret env",
+      "label": "Sandbox 2-Phases",
+      "sublabel": "bwrap/landrun + rtk",
+      "tag": "--unshare-net",
       "row": 1,
       "col": 3
     },
@@ -113,7 +113,7 @@
       "type": "security",
       "label": "Release App",
       "sublabel": "dev -> main + vX.Y.Z",
-      "tag": "seul bypass",
+      "tag": "env: release",
       "row": 2,
       "col": 3
     }
@@ -121,7 +121,7 @@
   "boundaries": [
     {
       "kind": "region",
-      "label": "Plan de Contrôle de Confiance EPURE",
+      "label": "Plan de Contrôle de Confiance EPURE (env: <llm-env>)",
       "wraps": [
         "command_gate",
         "orchestrator",
@@ -133,7 +133,7 @@
     },
     {
       "kind": "security-group",
-      "label": "Sandbox Isolée (0 Secret)",
+      "label": "Sandbox Noyau 2-Phases (0 Secret)",
       "wraps": ["secretless_sandbox"]
     }
   ],
@@ -151,29 +151,29 @@
   "cards": [
     {
       "dot": "rose",
-      "title": "Séparation de Privilèges à 2 GitHub Apps",
+      "title": "Séparation 2 Apps & Cloisonnement GitHub Environments",
       "items": [
-        "L'Agent App (<owner>-epure-agent) n'écrit que sur plan/*, task/* et feature/*",
-        "Interdiction matérielle d'auto-merge applicatif sur dev ou de push sur main",
-        "La Release App (<owner>-epure-release) est le seul Bypass Actor sur main et v*"
+        "Job 1 authorize-command tourne avec 0 secret ; Job 2 s'exécute dans l'environnement isolé <llm-env>",
+        "L'Agent App n'écrit que sur plan/*, task/* et feature/* (auto-merge sur dev et push sur main interdits)",
+        "La Release App tourne exclusivement dans environment: release comme seul Bypass Actor sur main et v*"
       ]
     },
     {
       "dot": "cyan",
-      "title": "Sandbox Sans Secret & Proxy LLM",
+      "title": "Sandbox Noyau Ubuntu 26.04 2-Phases & LLM Multi-Provider",
       "items": [
-        "Les sous-processus de test/build tournent sans LLM_API_KEY ni clés PEM",
-        "Politique fail-closed : arrêt immédiat si l'isolation des secrets fait défaut",
-        "Audit déterministe de trajectoire iFixAi avant chaque opération privilégiée"
+        "LLMClient Multi-Provider supporte Gemini, OpenAI, Azure OpenAI et Anthropic avec purge des clés",
+        "Phase A installation (réseau contrôlé, 0 secret) -> Phase B tests sous bwrap/landrun --unshare-net + rtk",
+        "Montages en lecture seule protégeant .git, .github et .cursor à l'intérieur de la sandbox"
       ]
     },
     {
       "dot": "emerald",
-      "title": "Immunité Prompt-Injection (OWASP LLM01)",
+      "title": "Défense Prompt-Injection & Outils Web Anti-SSRF",
       "items": [
-        "Prompts des reviewers (.cursor/agents/*.md) chargés exclusivement depuis dev",
-        "Diffs et commentaires non fiables encapsulés dans <untrusted_pr_diff>",
-        "Toute modification de .cursor/agents/** ou workflows bloque l'auto-merge"
+        "Prompts des reviewers (.cursor/agents/*.md) chargés depuis dev ; diffs isolés dans <untrusted_pr_diff>",
+        "Outils lecture seule web_search & web_fetch bloquant les IP RFC1918/loopback/link-local/metadata (anti-SSRF)",
+        "Contenus web nettoyés et encapsulés dans des balises XML <untrusted_web_content>"
       ]
     }
   ]

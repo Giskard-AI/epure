@@ -3,7 +3,7 @@
   "diagram_type": "workflow",
   "meta": {
     "title": "EPURE Global Issue & PR Flow (Human Gates, Mandatory & Conditional Steps)",
-    "subtitle": "Four Mandatory Human Validation Gates, Mandatory Automated Pipeline, and Optional/Conditional Controls (Q101)",
+    "subtitle": "Command-driven phases (/epure plan -> to-spec -> to-tickets -> approve), 2-phase sandbox, async CI & EpicConvergenceAudit",
     "locale": "en",
     "visual_preset": "blueprint",
     "quality_profile": "showcase",
@@ -16,9 +16,9 @@
     { "id": "optional_escalation", "label": "Optional Controls & Human Escalation", "variant": "exception" }
   ],
   "phases": [
-    { "id": "clarify_phase", "label": "1. Grill & Blueprint", "fromCol": 0, "toCol": 1 },
-    { "id": "approve_exec", "label": "2. Mandate & TDD Loop", "fromCol": 2, "toCol": 3, "variant": "emphasis" },
-    { "id": "integrate_release", "label": "3. Merge & Release", "fromCol": 4, "toCol": 5, "variant": "dashed" }
+    { "id": "clarify_phase", "label": "1. Grill, Spec & DAG", "fromCol": 0, "toCol": 1 },
+    { "id": "approve_exec", "label": "2. Approve & 3-Stage TDD", "fromCol": 2, "toCol": 3, "variant": "emphasis" },
+    { "id": "integrate_release", "label": "3. Convergence & Release", "fromCol": 4, "toCol": 5, "variant": "dashed" }
   ],
   "mainPath": [
     "gate1_plan",
@@ -37,7 +37,7 @@
       "col": 0,
       "type": "security",
       "label": "Gate 1: /epure plan",
-      "sublabel": "issue + Grill",
+      "sublabel": "Grill -> to-spec",
       "tag": "human gate",
       "width": 132
     },
@@ -47,8 +47,8 @@
       "col": 2,
       "type": "security",
       "label": "Gate 2: Approve",
-      "sublabel": "signs spec_sha",
-      "tag": "human gate",
+      "sublabel": "plan/* -> feature/*",
+      "tag": "locks spec_sha",
       "width": 132
     },
     {
@@ -76,9 +76,9 @@
       "lane": "auto_mandatory",
       "col": 1,
       "type": "backend",
-      "label": "Plan & Tickets",
-      "sublabel": "ADR + Spec + DAG",
-      "tag": "auto step",
+      "label": "Spec & Tickets",
+      "sublabel": "sub_issues + blocked_by",
+      "tag": "to-tickets",
       "width": 132
     },
     {
@@ -86,9 +86,9 @@
       "lane": "auto_mandatory",
       "col": 2,
       "type": "backend",
-      "label": "Secretless TDD",
-      "sublabel": "tsc + vitest",
-      "tag": "auto step",
+      "label": "2-Phase Sandbox",
+      "sublabel": "bwrap/landrun + rtk",
+      "tag": "async CI wait",
       "width": 132
     },
     {
@@ -96,9 +96,9 @@
       "lane": "auto_mandatory",
       "col": 3,
       "type": "backend",
-      "label": "Agent Review",
-      "sublabel": "squash task/*",
-      "tag": "auto step",
+      "label": "Stage 3 & Audit",
+      "sublabel": "squash + Convergence",
+      "tag": "Phase 2 if gap",
       "width": 132
     },
     {
@@ -136,9 +136,9 @@
       "lane": "optional_escalation",
       "col": 0,
       "type": "external",
-      "label": "Optional Controls",
-      "sublabel": "/prototype, status",
-      "tag": "optional",
+      "label": "Control Commands",
+      "sublabel": "continue, sync, cancel",
+      "tag": "to-spec / status",
       "width": 132
     },
     {
@@ -147,23 +147,23 @@
       "col": 3,
       "type": "security",
       "label": "Needs Human",
-      "sublabel": ">3 tries / risky",
+      "sublabel": "suspended -> continue",
       "tag": "escalation",
       "width": 132
     }
   ],
   "edges": [
-    { "id": "plan-to-blueprint", "from": "gate1_plan", "to": "gen_blueprint", "label": "settled", "variant": "emphasis" },
-    { "id": "blueprint-to-approve", "from": "gen_blueprint", "to": "gate2_approve", "label": "ready", "variant": "security", "fromSide": "top", "toSide": "left" },
-    { "id": "approve-to-tdd", "from": "gate2_approve", "to": "tdd_sandbox", "label": "approved", "variant": "emphasis" },
-    { "id": "tdd-to-review", "from": "tdd_sandbox", "to": "review_squash", "label": "green", "variant": "default" },
-    { "id": "review-to-final-pr", "from": "review_squash", "to": "final_feature_pr", "label": "DAG done", "variant": "emphasis" },
+    { "id": "plan-to-blueprint", "from": "gate1_plan", "to": "gen_blueprint", "label": "to-spec", "variant": "emphasis" },
+    { "id": "blueprint-to-approve", "from": "gen_blueprint", "to": "gate2_approve", "label": "to-tickets", "variant": "security", "fromSide": "top", "toSide": "left" },
+    { "id": "approve-to-tdd", "from": "gate2_approve", "to": "tdd_sandbox", "label": "plan->feature", "variant": "emphasis" },
+    { "id": "tdd-to-review", "from": "tdd_sandbox", "to": "review_squash", "label": "async CI", "variant": "default" },
+    { "id": "review-to-final-pr", "from": "review_squash", "to": "final_feature_pr", "label": "converged", "variant": "emphasis" },
     { "id": "final-pr-to-gate3", "from": "final_feature_pr", "to": "gate3_merge_dev", "label": "verified", "variant": "security" },
     { "id": "gate3-to-gate4", "from": "gate3_merge_dev", "to": "gate4_release", "label": "promote", "variant": "emphasis" },
     { "id": "blueprint-to-ui-design", "from": "gen_blueprint", "to": "ui_design_gate", "label": "if UI", "variant": "dashed", "role": "branch" },
     { "id": "ui-design-to-impeccable", "from": "ui_design_gate", "to": "ui_impeccable_gate", "label": "tokens", "variant": "dashed" },
     { "id": "impeccable-to-review", "from": "ui_impeccable_gate", "to": "review_squash", "label": "UI check", "variant": "dashed", "fromSide": "top", "toSide": "bottom" },
-    { "id": "opt-to-ui-design", "from": "opt_commands", "to": "ui_design_gate", "label": "prototype", "variant": "dashed", "role": "branch" },
+    { "id": "opt-to-ui-design", "from": "opt_commands", "to": "ui_design_gate", "label": "controls", "variant": "dashed", "role": "branch" },
     { "id": "impeccable-to-escalation", "from": "ui_impeccable_gate", "to": "needs_human", "label": ">3 tries", "variant": "security", "role": "error" }
   ],
   "cards": [
@@ -171,28 +171,28 @@
       "dot": "amber",
       "title": "1. Mandatory Human Gates (4)",
       "items": [
-        "Gate 1: /epure plan & Grill answers by a write+ contributor",
-        "Gate 2: /epure approve signs the immutable spec_sha mandate",
+        "Gate 1: /epure plan -> Grill replies -> /epure to-spec -> /epure to-tickets",
+        "Gate 2: /epure approve merges plan/* -> feature/* directly and signs spec_sha",
         "Gate 3: Human squash-merge of feature/* -> dev (Agent App blocked)",
-        "Gate 4: Manual release-promote workflow (dev -> main fast-forward)"
+        "Gate 4: Manual release.yml dispatch (dev -> main fast-forward in env: release)"
       ]
     },
     {
       "dot": "cyan",
-      "title": "2. Mandatory Automated Steps",
+      "title": "2. Mandatory Automated Pipeline",
       "items": [
-        "Generate GLOSSARY.md, ADRs, Spec & DAG tickets on plan/*",
-        "Secretless sandbox TDD (tsc + vitest) on task/* branches",
-        "Trusted dev multi-agent review + AI semantic squash into feature/*"
+        "Generates GLOSSARY.md, ADRs & Spec on plan/* + native GitHub sub_issues & blocked_by",
+        "2-phase kernel sandbox TDD (bwrap/landrun + rtk) + event-driven async CI wait",
+        "Stage 3 dev review + AI semantic squash + EpicConvergenceAudit before feature/* -> dev PR"
       ]
     },
     {
       "dot": "emerald",
-      "title": "3. Optional & Conditional Steps",
+      "title": "3. Controls, Sync & Escalation Recovery",
       "items": [
-        "Conditional UI: DESIGN.md, user-advocate & impeccable-gate when UI exists",
-        "Optional: /prototype detour, isolated Pages preview, /epure to-spec, status, cancel",
-        "Conditional escalation: needs-human on sensitive paths or >3 fix attempts"
+        "Conditional UI: DESIGN.md, user-advocate & impeccable-gate when UI files change",
+        "Commands: /epure continue (resume suspended DAG/CI), /epure sync (3-way dev sync), status, cancel",
+        "Escalation: enters suspended needs-human after >3 fix tries or sensitive edits"
       ]
     }
   ]

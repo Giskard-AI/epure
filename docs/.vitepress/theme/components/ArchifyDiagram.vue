@@ -2,13 +2,16 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useData, withBase } from "vitepress";
 
+export type ArchifyDiagramSlug =
+  | "epure-issue-flow"
+  | "epure-state-machine"
+  | "epure-security-architecture"
+  | "epure-review-pipeline"
+  | "epure-ci-actions-flow";
+
 const props = withDefaults(
   defineProps<{
-    slug:
-      | "epure-issue-flow"
-      | "epure-state-machine"
-      | "epure-security-architecture"
-      | "epure-review-pipeline";
+    slug: ArchifyDiagramSlug;
     locale?: "en" | "fr";
     title: string;
     caption?: string;
