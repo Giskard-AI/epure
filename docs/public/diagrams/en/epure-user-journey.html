@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="generator" content="archify 3.2.0">
   <meta name="archify-reader-contract" content="declared-wide-v1">
-  <title>EPURE User Journey: Driving an Issue from Idea to Merged PR Diagram</title>
+  <title>EPURE User Journey: All Your Actions Aligned in Column 1 (Top to Bottom) Diagram</title>
   <script>
     // Resolve the theme before first paint so light-preference users don't
     // see a dark flash. The toolbar script below re-applies with UI state.
@@ -5194,9 +5194,9 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
            data-preset-badge-blueprint="BLUEPRINT / REV 01"
            data-preset-badge-editorial="EDITORIAL / FIELD NOTE">
         <div class="pulse-dot"></div>
-        <h1>EPURE User Journey: Driving an Issue from Idea to Merged PR</h1>
+        <h1>EPURE User Journey: All Your Actions Aligned in Column 1 (Top to Bottom)</h1>
       </div>
-      <p class="subtitle">1. What I do -&gt; 2. What EPURE runs behind the scenes -&gt; 3. When I act again -&gt; 4. Autofix loops, sync &amp; recovery</p>
+      <p class="subtitle">Col 1: Your actions (plan, edits, to-spec, to-tickets, approve, steering, merge) -&gt; Col 2-4: EPURE automation, loops, autofix &amp; feedback</p>
     </div>
 
 
@@ -5204,9 +5204,9 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
     <!-- Main Diagram -->
     <div class="diagram-container" data-detail-level="read"
          data-preset-badge-editorial-plate="ARCHIFY / PLATE 04">
-      <svg viewBox="0 0 995 660" data-reader-fit="width-first" data-layout-contract="readable-v2" role="img" lang="en" aria-labelledby="archify-diagram-title archify-diagram-description" data-animation="trace" data-preset="blueprint" data-quality-profile="showcase" data-node-ui="">
-        <title id="archify-diagram-title">EPURE User Journey: Driving an Issue from Idea to Merged PR</title>
-        <desc id="archify-diagram-description">1. What I do -&gt; 2. What EPURE runs behind the scenes -&gt; 3. When I act again -&gt; 4. Autofix loops, sync &amp; recovery</desc>
+      <svg viewBox="0 0 1220 786" data-layout-contract="readable-v2" role="img" lang="en" aria-labelledby="archify-diagram-title archify-diagram-description" data-animation="trace" data-preset="blueprint" data-quality-profile="showcase" data-node-ui="">
+        <title id="archify-diagram-title">EPURE User Journey: All Your Actions Aligned in Column 1 (Top to Bottom)</title>
+        <desc id="archify-diagram-description">Col 1: Your actions (plan, edits, to-spec, to-tickets, approve, steering, merge) -&gt; Col 2-4: EPURE automation, loops, autofix &amp; feedback</desc>
         <!-- Definitions -->
         <defs>
           <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
@@ -5251,233 +5251,427 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <rect width="100%" height="100%" fill="url(#grid)" />
 
         <!-- Swimlanes -->
-        <rect data-graph-role="structural-frame" data-composition-frame-kind="lane" data-composition-frame-id="lane-0" x="40" y="52" width="939" height="106" rx="10" class="c-lane" stroke-width="1"/>
-        <text x="54" y="74" class="t-muted" font-size="10" font-weight="600">01 / 1. What I Do (My Actions)</text>
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="lane" data-composition-frame-id="lane-0" x="40" y="52" width="1164" height="106" rx="10" class="c-lane" stroke-width="1"/>
+        <text x="54" y="74" class="t-muted" font-size="10" font-weight="600">01 / 1. Issue Creation &amp; Grill Interview (/epure plan)</text>
 
-        <rect data-graph-role="structural-frame" data-composition-frame-kind="lane" data-composition-frame-id="lane-1" x="40" y="178" width="939" height="106" rx="10" class="c-lane" stroke-width="1"/>
-        <text x="54" y="200" class="t-muted" font-size="10" font-weight="600">02 / 2. What Happens Behind the Scenes (EPURE Auto)</text>
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="lane" data-composition-frame-id="lane-1" x="40" y="178" width="1164" height="106" rx="10" class="c-lane" stroke-width="1"/>
+        <text x="54" y="200" class="t-muted" font-size="10" font-weight="600">02 / 2. Specification, Glossary, ADRs &amp; Edits (/epure to-spec)</text>
 
-        <rect data-graph-role="structural-frame" data-composition-frame-kind="lane" data-composition-frame-id="lane-2" x="40" y="304" width="939" height="106" rx="10" class="c-lane" stroke-width="1"/>
-        <text x="54" y="326" class="t-muted" font-size="10" font-weight="600">03 / 3. When I Act Again (Wait &amp; Feedback)</text>
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="lane" data-composition-frame-id="lane-2" x="40" y="304" width="1164" height="106" rx="10" class="c-lane" stroke-width="1"/>
+        <text x="54" y="326" class="t-muted" font-size="10" font-weight="600">03 / 3. Ticket Breakdown &amp; Approval (/epure to-tickets -&gt; /epure approve)</text>
 
-        <rect data-graph-role="structural-frame" data-composition-frame-kind="lane" data-composition-frame-id="lane-3" x="40" y="430" width="939" height="106" rx="10" class="c-lane" stroke-width="1"/>
-        <rect data-graph-role="structural-frame" data-composition-frame-kind="exception-lane" data-composition-frame-id="lane-3-exception" x="46" y="436" width="927" height="94" rx="8" class="c-security-group" stroke-width="1"/>
-        <text x="54" y="452" class="t-security" font-size="10" font-weight="600">EX / 4. Autofix Loops, Conflicts &amp; Steering</text>
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="lane" data-composition-frame-id="lane-3" x="40" y="430" width="1164" height="106" rx="10" class="c-lane" stroke-width="1"/>
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="exception-lane" data-composition-frame-id="lane-3-exception" x="46" y="436" width="1152" height="94" rx="8" class="c-security-group" stroke-width="1"/>
+        <text x="54" y="452" class="t-security" font-size="10" font-weight="600">EX / 4. Ticket Loop: TDD, Async CI, Autofix (1..3) &amp; Steering (/epure sync | continue)</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="lane" data-composition-frame-id="lane-4" x="40" y="556" width="1164" height="106" rx="10" class="c-lane" stroke-width="1"/>
+        <text x="54" y="578" class="t-muted" font-size="10" font-weight="600">05 / 5. Convergence Audit (Phase 2), Final Merge to dev &amp; Release</text>
 
         <!-- Phase headers -->
-        <path d="M 76 35 H 272" class="a-default phase-rule" stroke-width="1" stroke-linecap="round" fill="none"/>
-        <rect x="96.8" y="27" width="154.4" height="16" rx="8" class="c-mask phase-chip"/>
-        <text x="174" y="38.5" class="t-muted" font-size="8" font-weight="600" text-anchor="middle" letter-spacing=".04em">1. Iterative Grill &amp; Framing</text>
-        <path d="M 394 35 H 590" class="a-emphasis phase-rule" stroke-width="1" stroke-linecap="round" fill="none"/>
-        <rect x="417.2" y="27" width="149.6" height="16" rx="8" class="c-mask phase-chip"/>
-        <text x="492" y="38.5" class="t-backend" font-size="8" font-weight="600" text-anchor="middle" letter-spacing=".04em">2. Spec, Tickets &amp; Approval</text>
-        <path d="M 702.4 35 H 942.4" class="a-dashed phase-rule" stroke-width="1" stroke-linecap="round" fill="none"/>
-        <rect x="718.8" y="27" width="207.2" height="16" rx="8" class="c-mask phase-chip"/>
-        <text x="822.4" y="38.5" class="t-messagebus" font-size="8" font-weight="600" text-anchor="middle" letter-spacing=".04em">3. DAG Execution, Autofix &amp; Final Merge</text>
+        <path d="M 78 35 H 182" class="a-emphasis phase-rule" stroke-width="1" stroke-linecap="round" fill="none"/>
+        <rect x="76" y="27" width="108" height="16" rx="8" class="c-mask phase-chip"/>
+        <text x="130" y="38.5" class="t-backend" font-size="8" font-weight="600" text-anchor="middle" letter-spacing=".04em">1. My Actions (User)</text>
+        <path d="M 280 35 H 548.4" class="a-default phase-rule" stroke-width="1" stroke-linecap="round" fill="none"/>
+        <rect x="317.8" y="27" width="192.79999999999998" height="16" rx="8" class="c-mask phase-chip"/>
+        <text x="414.2" y="38.5" class="t-muted" font-size="8" font-weight="600" text-anchor="middle" letter-spacing=".04em">2. What EPURE Runs Behind the Scenes</text>
+        <path d="M 660 35 H 848" class="a-dashed phase-rule" stroke-width="1" stroke-linecap="round" fill="none"/>
+        <rect x="660" y="27" width="188" height="16" rx="8" class="c-mask phase-chip"/>
+        <text x="754" y="38.5" class="t-messagebus" font-size="8" font-weight="600" text-anchor="middle" letter-spacing=".04em">3. Exchanges, Edits &amp; Autofix Loops</text>
+        <path d="M 892 35 H 1063.2" class="a-default phase-rule" stroke-width="1" stroke-linecap="round" fill="none"/>
+        <rect x="890.8000000000001" y="27" width="173.6" height="16" rx="8" class="c-mask phase-chip"/>
+        <text x="977.6" y="38.5" class="t-muted" font-size="8" font-weight="600" text-anchor="middle" letter-spacing=".04em">4. GitHub Feedback &amp; When to Act</text>
 
         <!-- Workflow groups -->
 
 
         <!-- Edge paths -->
-        <path data-edge-from="approve_mandate" data-edge-to="review_and_audit" data-edge-label="spec_sha" data-edge-key="0" data-edge-id="approve-to-review" data-composition-routing="workflow-v2-auto" data-edge-role="branch" data-composition-points="618,120;740.4,120;740.4,338" d="M 618 120 L 732.4 120 Q 740.4 120 740.4 128 L 740.4 338" class="a-dashed" data-animate="edge" style="--step:6" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
-        <path data-edge-from="dag_and_lock" data-edge-to="ticket_tdd_loop" data-edge-label="approved" data-edge-key="1" data-edge-id="dag-to-tdd" data-composition-routing="workflow-v2-auto" data-edge-role="" data-composition-points="439,280;439,372;486,372" d="M 439 280 L 439 364 Q 439 372 447 372 L 486 372" class="a-emphasis" data-animate="edge" style="--step:2" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="grill_engine" data-edge-to="dag_and_lock" data-edge-label="to-tickets" data-edge-key="2" data-edge-id="grill-to-dag" data-composition-routing="workflow-v2-auto" data-edge-role="" data-composition-points="300,246;366,246" d="M 300 246 L 366 246" class="a-emphasis" data-animate="edge" style="--step:1" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="merge_final_pr" data-edge-to="final_pr_ready" data-edge-label="merge" data-edge-key="3" data-edge-id="merge-to-pr" data-composition-routing="workflow-v2-auto" data-edge-role="branch" data-composition-points="904.4,154;904.4,464" d="M 904.4 154 L 904.4 464" class="a-security" data-animate="edge" style="--step:9" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
-        <path data-edge-from="plan_and_grill" data-edge-to="grill_engine" data-edge-label="starts" data-edge-key="4" data-edge-id="plan-to-grill" data-composition-routing="workflow-v2-auto" data-edge-role="" data-composition-points="48,120;32,120;32,300;234,300;234,280" d="M 48 120 L 40 120 Q 32 120 32 128 L 32 292 Q 32 300 40 300 L 226 300 Q 234 300 234 292 L 234 280" class="a-security" data-animate="edge" style="--step:0" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
-        <path data-edge-from="free_text_loop" data-edge-to="dag_and_lock" data-edge-label="refine" data-edge-key="5" data-edge-id="reply-to-dag" data-composition-routing="workflow-v2-auto" data-edge-role="branch" data-composition-points="300,498;408,498;408,280" d="M 300 498 L 400 498 Q 408 498 408 490 L 408 280" class="a-dashed" data-animate="edge" style="--step:11" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
-        <path data-edge-from="review_and_audit" data-edge-to="autofix_and_sync" data-edge-label="autofix" data-edge-key="6" data-edge-id="review-to-autofix" data-composition-routing="workflow-v2-auto" data-edge-role="" data-composition-points="740.4,406;740.4,464" d="M 740.4 406 L 740.4 464" class="a-dashed" data-animate="edge" style="--step:12" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
-        <path data-edge-from="review_and_audit" data-edge-to="final_pr_ready" data-edge-label="PR -&gt; dev" data-edge-key="7" data-edge-id="review-to-pr" data-composition-routing="workflow-v2-auto" data-edge-role="" data-composition-points="806.4,372;880.4,372;880.4,464" d="M 806.4 372 L 872.4 372 Q 880.4 372 880.4 380 L 880.4 464" class="a-emphasis" data-animate="edge" style="--step:4" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="ticket_tdd_loop" data-edge-to="review_and_audit" data-edge-label="async CI" data-edge-key="8" data-edge-id="tdd-to-review" data-composition-routing="workflow-v2-auto" data-edge-role="" data-composition-points="618,372;674.4,372" d="M 618 372 L 674.4 372" class="a-default" data-animate="edge" style="--step:3" stroke-width="1.4" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="user_plan_grill" data-edge-to="epure_grill_questions" data-edge-label="starts" data-edge-key="0" data-edge-id="r1-c0-c1" data-composition-routing="workflow-v2-auto" data-edge-role="" data-composition-points="184,120;250,120" d="M 184 120 L 250 120" class="a-security" data-animate="edge" style="--step:0" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
+        <path data-edge-from="epure_grill_questions" data-edge-to="grill_ping_pong" data-edge-label="Q1..Qn" data-edge-key="1" data-edge-id="r1-c1-c3" data-composition-routing="workflow-v2-auto" data-edge-role="" data-composition-points="386,120;630,120" d="M 386 120 L 630 120" class="a-dashed" data-animate="edge" style="--step:1" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="grill_ping_pong" data-edge-to="grill_ready_signal" data-edge-label="settled" data-edge-key="2" data-edge-id="r1-c3-c4" data-composition-routing="workflow-v2-auto" data-edge-role="" data-composition-points="766,120;862,120" d="M 766 120 L 862 120" class="a-emphasis" data-animate="edge" style="--step:2" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="user_to_spec" data-edge-to="epure_write_spec" data-edge-label="builds" data-edge-key="3" data-edge-id="r2-c0-c1" data-composition-routing="workflow-v2-auto" data-edge-role="" data-composition-points="184,246;250,246" d="M 184 246 L 250 246" class="a-security" data-animate="edge" style="--step:3" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
+        <path data-edge-from="epure_write_spec" data-edge-to="spec_edit_loop" data-edge-label="edits" data-edge-key="4" data-edge-id="r2-c1-c3" data-composition-routing="workflow-v2-auto" data-edge-role="" data-composition-points="386,246;630,246" d="M 386 246 L 630 246" class="a-dashed" data-animate="edge" style="--step:4" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="spec_edit_loop" data-edge-to="spec_ready_signal" data-edge-label="ready" data-edge-key="5" data-edge-id="r2-c3-c4" data-composition-routing="workflow-v2-auto" data-edge-role="" data-composition-points="766,246;862,246" d="M 766 246 L 862 246" class="a-emphasis" data-animate="edge" style="--step:5" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="user_tickets_approve" data-edge-to="epure_build_dag" data-edge-label="to-tickets" data-edge-key="6" data-edge-id="r3-c0-c1" data-composition-routing="workflow-v2-auto" data-edge-role="" data-composition-points="184,372;250,372" d="M 184 372 L 250 372" class="a-security" data-animate="edge" style="--step:6" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
+        <path data-edge-from="epure_build_dag" data-edge-to="epure_lock_mandate" data-edge-label="approve" data-edge-key="7" data-edge-id="r3-c1-c2" data-composition-routing="workflow-v2-auto" data-edge-role="" data-composition-points="386,372;442.4,372" d="M 386 372 L 442.4 372" class="a-emphasis" data-animate="edge" style="--step:7" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="epure_lock_mandate" data-edge-to="dag_launched_signal" data-edge-label="starts" data-edge-key="8" data-edge-id="r3-c2-c4" data-composition-routing="workflow-v2-auto" data-edge-role="" data-composition-points="578.4,372;862,372" d="M 578.4 372 L 862 372" class="a-emphasis" data-animate="edge" style="--step:8" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="user_steering_ops" data-edge-to="epure_stage1_stage2" data-edge-label="steers" data-edge-key="9" data-edge-id="r4-c0-c1" data-composition-routing="workflow-v2-auto" data-edge-role="" data-composition-points="184,498;250,498" d="M 184 498 L 250 498" class="a-dashed" data-animate="edge" style="--step:9" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="epure_stage1_stage2" data-edge-to="epure_stage3_squash" data-edge-label="CI green" data-edge-key="10" data-edge-id="r4-c1-c2" data-composition-routing="workflow-v2-auto" data-edge-role="" data-composition-points="386,498;442.4,498" d="M 386 498 L 442.4 498" class="a-default" data-animate="edge" style="--step:10" stroke-width="1.4" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="epure_stage3_squash" data-edge-to="autofix_and_sync_loop" data-edge-label="autofix" data-edge-key="11" data-edge-id="r4-c2-c3" data-composition-routing="workflow-v2-auto" data-edge-role="" data-composition-points="578.4,498;630,498" d="M 578.4 498 L 630 498" class="a-dashed" data-animate="edge" style="--step:11" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="autofix_and_sync_loop" data-edge-to="escalation_or_next" data-edge-label="outcome" data-edge-key="12" data-edge-id="r4-c3-c4" data-composition-routing="workflow-v2-auto" data-edge-role="" data-composition-points="766,498;862,498" d="M 766 498 L 862 498" class="a-emphasis" data-animate="edge" style="--step:12" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="user_final_merge" data-edge-to="epure_convergence_audit" data-edge-label="audits" data-edge-key="13" data-edge-id="r5-c0-c2" data-composition-routing="workflow-v2-auto" data-edge-role="" data-composition-points="184,624;442.4,624" d="M 184 624 L 442.4 624" class="a-security" data-animate="edge" style="--step:12" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
+        <path data-edge-from="epure_convergence_audit" data-edge-to="phase2_remediation" data-edge-label="if gap" data-edge-key="14" data-edge-id="r5-c2-c3" data-composition-routing="workflow-v2-auto" data-edge-role="" data-composition-points="578.4,624;630,624" d="M 578.4 624 L 630 624" class="a-dashed" data-animate="edge" style="--step:12" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="phase2_remediation" data-edge-to="final_pr_ready" data-edge-label="converged" data-edge-key="15" data-edge-id="r5-c3-c4" data-composition-routing="workflow-v2-auto" data-edge-role="" data-composition-points="766,624;862,624" d="M 766 624 L 862 624" class="a-emphasis" data-animate="edge" style="--step:12" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
 
         <!-- Nodes -->
-        <g id="node-plan_and_grill" data-node-id="plan_and_grill" data-node-label="1. /epure plan" tabindex="0" role="button" aria-label="Focus 1. /epure plan, Open issue + reply Grill, 1. What I Do (My Actions) › 1. Iterative Grill &amp; Framing" aria-pressed="false" data-node-kind="external" data-node-sublabel="Open issue + reply Grill" data-node-tag="Gate 1: human" data-node-context="1. What I Do (My Actions) › 1. Iterative Grill &amp; Framing">
-          <title>1. /epure plan · Open issue + reply Grill · 1. What I Do (My Actions) › 1. Iterative Grill &amp; Framing · Gate 1: human</title>
-          <rect x="48" y="86" width="132" height="68" rx="8" class="c-mask"/>
-          <rect x="48" y="86" width="132" height="68" rx="8" class="c-external" data-animate="node" style="--step:0" stroke-width="1.5"/>
+        <g id="node-user_plan_grill" data-node-id="user_plan_grill" data-node-label="1. /epure plan" tabindex="0" role="button" aria-label="Focus 1. /epure plan, Open issue + reply Grill, 1. Issue Creation &amp; Grill Interview (/epure plan) › 1. My Actions (User)" aria-pressed="false" data-node-kind="external" data-node-sublabel="Open issue + reply Grill" data-node-tag="User action #1" data-node-context="1. Issue Creation &amp; Grill Interview (/epure plan) › 1. My Actions (User)">
+          <title>1. /epure plan · Open issue + reply Grill · 1. Issue Creation &amp; Grill Interview (/epure plan) › 1. My Actions (User) · User action #1</title>
+          <rect x="48" y="86" width="136" height="68" rx="8" class="c-mask"/>
+          <rect x="48" y="86" width="136" height="68" rx="8" class="c-external" data-animate="node" style="--step:0" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(54 92) scale(0.6875)">
             <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
             <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="114" y="107" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">1. /epure plan</text>
-          <text data-detail="context" x="114" y="124" class="t-muted" font-size="8" text-anchor="middle">Open issue + reply Grill</text>
-        <text data-detail="fine" x="114" y="142" class="t-external" font-size="7" text-anchor="middle">Gate 1: human</text>
+          <text data-node-label="" data-detail-anchor="" x="116" y="107" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">1. /epure plan</text>
+          <text data-detail="context" x="116" y="124" class="t-muted" font-size="8" text-anchor="middle">Open issue + reply Grill</text>
+        <text data-detail="fine" x="116" y="142" class="t-external" font-size="7" text-anchor="middle">User action #1</text>
         </g>
 
-        <g id="node-approve_mandate" data-node-id="approve_mandate" data-node-label="2. /epure approve" tabindex="0" role="button" aria-label="Focus 2. /epure approve, to-spec -&gt; to-tickets, 1. What I Do (My Actions) › 2. Spec, Tickets &amp; Approval" aria-pressed="false" data-node-kind="external" data-node-sublabel="to-spec -&gt; to-tickets" data-node-tag="Gate 2: spec_sha" data-node-context="1. What I Do (My Actions) › 2. Spec, Tickets &amp; Approval">
-          <title>2. /epure approve · to-spec -&gt; to-tickets · 1. What I Do (My Actions) › 2. Spec, Tickets &amp; Approval · Gate 2: spec_sha</title>
-          <rect x="486" y="86" width="132" height="68" rx="8" class="c-mask"/>
-          <rect x="486" y="86" width="132" height="68" rx="8" class="c-external" data-animate="node" style="--step:7" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(492 92) scale(0.6875)">
-            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
-            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
-          </g>
-          <text data-node-label="" data-detail-anchor="" x="552" y="118.2" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">2. /epure approve</text>
-          <text data-detail="context" x="552" y="133.1" class="t-muted" font-size="8" text-anchor="middle">to-spec -&gt; to-tickets</text>
-        <text data-detail="fine" x="552" y="145.9" class="t-external" font-size="7" text-anchor="middle">Gate 2: spec_sha</text>
-        </g>
-
-        <g id="node-merge_final_pr" data-node-id="merge_final_pr" data-node-label="3. Squash &amp; Merge" tabindex="0" role="button" aria-label="Focus 3. Squash &amp; Merge, Merge PR into dev, 1. What I Do (My Actions) › 3. DAG Execution, Autofix &amp; Final Merge" aria-pressed="false" data-node-kind="external" data-node-sublabel="Merge PR into dev" data-node-tag="Gate 3: human" data-node-context="1. What I Do (My Actions) › 3. DAG Execution, Autofix &amp; Final Merge">
-          <title>3. Squash &amp; Merge · Merge PR into dev · 1. What I Do (My Actions) › 3. DAG Execution, Autofix &amp; Final Merge · Gate 3: human</title>
-          <rect x="838.4" y="86" width="132" height="68" rx="8" class="c-mask"/>
-          <rect x="838.4" y="86" width="132" height="68" rx="8" class="c-external" data-animate="node" style="--step:8" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(844.4 92) scale(0.6875)">
-            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
-            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
-          </g>
-          <text data-node-label="" data-detail-anchor="" x="904.4" y="118.2" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">3. Squash &amp; Merge</text>
-          <text data-detail="context" x="904.4" y="133.1" class="t-muted" font-size="8" text-anchor="middle">Merge PR into dev</text>
-        <text data-detail="fine" x="904.4" y="145.9" class="t-external" font-size="7" text-anchor="middle">Gate 3: human</text>
-        </g>
-
-        <g id="node-grill_engine" data-node-id="grill_engine" data-node-label="Grill &amp; Goldfish" tabindex="0" role="button" aria-label="Focus Grill &amp; Goldfish, Q1..Qn + Spec on plan/*, 2. What Happens Behind the Scenes (EPURE Auto) › 1. Iterative Grill &amp; Framing" aria-pressed="false" data-node-kind="backend" data-node-sublabel="Q1..Qn + Spec on plan/*" data-node-tag="GLOSSARY + ADR" data-node-context="2. What Happens Behind the Scenes (EPURE Auto) › 1. Iterative Grill &amp; Framing">
-          <title>Grill &amp; Goldfish · Q1..Qn + Spec on plan/* · 2. What Happens Behind the Scenes (EPURE Auto) › 1. Iterative Grill &amp; Framing · GLOSSARY + ADR</title>
-          <rect x="168" y="212" width="132" height="68" rx="8" class="c-mask"/>
-          <rect x="168" y="212" width="132" height="68" rx="8" class="c-backend" data-animate="node" style="--step:1" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(174 218) scale(0.6875)">
+        <g id="node-epure_grill_questions" data-node-id="epure_grill_questions" data-node-label="Grill Questions" tabindex="0" role="button" aria-label="Focus Grill Questions, Scans repo + posts Q1..Qn, 1. Issue Creation &amp; Grill Interview (/epure plan) › 2. What EPURE Runs Behind the Scenes" aria-pressed="false" data-node-kind="backend" data-node-sublabel="Scans repo + posts Q1..Qn" data-node-tag="phase: grilling" data-node-context="1. Issue Creation &amp; Grill Interview (/epure plan) › 2. What EPURE Runs Behind the Scenes">
+          <title>Grill Questions · Scans repo + posts Q1..Qn · 1. Issue Creation &amp; Grill Interview (/epure plan) › 2. What EPURE Runs Behind the Scenes · phase: grilling</title>
+          <rect x="250" y="86" width="136" height="68" rx="8" class="c-mask"/>
+          <rect x="250" y="86" width="136" height="68" rx="8" class="c-backend" data-animate="node" style="--step:1" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(256 92) scale(0.6875)">
             <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="239.8" y="233" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Grill &amp; Goldfish</text>
-          <text data-detail="context" x="234" y="250" class="t-muted" font-size="8" text-anchor="middle">Q1..Qn + Spec on plan/*</text>
-        <text data-detail="fine" x="234" y="268" class="t-backend" font-size="7" text-anchor="middle">GLOSSARY + ADR</text>
+          <text data-node-label="" data-detail-anchor="" x="318.5" y="107" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Grill Questions</text>
+          <text data-detail="context" x="318" y="124" class="t-muted" font-size="8" text-anchor="middle">Scans repo + posts Q1..Qn</text>
+        <text data-detail="fine" x="318" y="142" class="t-backend" font-size="7" text-anchor="middle">phase: grilling</text>
         </g>
 
-        <g id="node-dag_and_lock" data-node-id="dag_and_lock" data-node-label="Ticket DAG &amp; Lock" tabindex="0" role="button" aria-label="Focus Ticket DAG &amp; Lock, sub_issues + blocked_by, 2. What Happens Behind the Scenes (EPURE Auto) › 2. Spec, Tickets &amp; Approval" aria-pressed="false" data-node-kind="backend" data-node-sublabel="sub_issues + blocked_by" data-node-tag="plan/*-&gt;feature/*" data-node-context="2. What Happens Behind the Scenes (EPURE Auto) › 2. Spec, Tickets &amp; Approval">
-          <title>Ticket DAG &amp; Lock · sub_issues + blocked_by · 2. What Happens Behind the Scenes (EPURE Auto) › 2. Spec, Tickets &amp; Approval · plan/*-&gt;feature/*</title>
-          <rect x="366" y="212" width="132" height="68" rx="8" class="c-mask"/>
-          <rect x="366" y="212" width="132" height="68" rx="8" class="c-backend" data-animate="node" style="--step:2" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(372 218) scale(0.6875)">
-            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+        <g id="node-grill_ping_pong" data-node-id="grill_ping_pong" data-node-label="Grill Exchange Loop" tabindex="0" role="button" aria-label="Focus Grill Exchange Loop, Free-text &lt;-&gt; new rounds, 1. Issue Creation &amp; Grill Interview (/epure plan) › 3. Exchanges, Edits &amp; Autofix Loops" aria-pressed="false" data-node-kind="messagebus" data-node-sublabel="Free-text &lt;-&gt; new rounds" data-node-tag="free iteration" data-node-context="1. Issue Creation &amp; Grill Interview (/epure plan) › 3. Exchanges, Edits &amp; Autofix Loops">
+          <title>Grill Exchange Loop · Free-text &lt;-&gt; new rounds · 1. Issue Creation &amp; Grill Interview (/epure plan) › 3. Exchanges, Edits &amp; Autofix Loops · free iteration</title>
+          <rect x="630" y="86" width="136" height="68" rx="8" class="c-mask"/>
+          <rect x="630" y="86" width="136" height="68" rx="8" class="c-messagebus" data-animate="node" style="--step:2" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="messagebus" class="semantic-sigil s-messagebus" transform="translate(636 92) scale(0.6875)">
+            <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/>
+            <circle cx="5" cy="4.5" r="1" class="sigil-fill"/>
+            <circle cx="10.5" cy="8" r="1" class="sigil-fill"/>
+            <circle cx="7" cy="11.5" r="1" class="sigil-fill"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="432" y="244.2" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Ticket DAG &amp; Lock</text>
-          <text data-detail="context" x="432" y="259.1" class="t-muted" font-size="8" text-anchor="middle">sub_issues + blocked_by</text>
-        <text data-detail="fine" x="432" y="271.9" class="t-backend" font-size="7" text-anchor="middle">plan/*-&gt;feature/*</text>
+          <text data-node-label="" data-detail-anchor="" x="698" y="118.2" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Grill Exchange Loop</text>
+          <text data-detail="context" x="698" y="133.1" class="t-muted" font-size="8" text-anchor="middle">Free-text &lt;-&gt; new rounds</text>
+        <text data-detail="fine" x="698" y="145.9" class="t-messagebus" font-size="7" text-anchor="middle">free iteration</text>
         </g>
 
-        <g id="node-ticket_tdd_loop" data-node-id="ticket_tdd_loop" data-node-label="Stage 1 &amp; 2 Auto" tabindex="0" role="button" aria-label="Focus Stage 1 &amp; 2 Auto, Sandbox + async CI wait, 3. When I Act Again (Wait &amp; Feedback) › 2. Spec, Tickets &amp; Approval" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="Sandbox + async CI wait" data-node-tag="Wait: 0 action" data-node-context="3. When I Act Again (Wait &amp; Feedback) › 2. Spec, Tickets &amp; Approval">
-          <title>Stage 1 &amp; 2 Auto · Sandbox + async CI wait · 3. When I Act Again (Wait &amp; Feedback) › 2. Spec, Tickets &amp; Approval · Wait: 0 action</title>
-          <rect x="486" y="338" width="132" height="68" rx="8" class="c-mask"/>
-          <rect x="486" y="338" width="132" height="68" rx="8" class="c-frontend" data-animate="node" style="--step:3" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(492 344) scale(0.6875)">
+        <g id="node-grill_ready_signal" data-node-id="grill_ready_signal" data-node-label="Grill Settled" tabindex="0" role="button" aria-label="Focus Grill Settled, Ready for /epure to-spec, 1. Issue Creation &amp; Grill Interview (/epure plan) › 4. GitHub Feedback &amp; When to Act" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="Ready for /epure to-spec" data-node-tag="Next: /epure to-spec" data-node-context="1. Issue Creation &amp; Grill Interview (/epure plan) › 4. GitHub Feedback &amp; When to Act">
+          <title>Grill Settled · Ready for /epure to-spec · 1. Issue Creation &amp; Grill Interview (/epure plan) › 4. GitHub Feedback &amp; When to Act · Next: /epure to-spec</title>
+          <rect x="862" y="86" width="136" height="68" rx="8" class="c-mask"/>
+          <rect x="862" y="86" width="136" height="68" rx="8" class="c-frontend" data-animate="node" style="--step:3" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(868 92) scale(0.6875)">
             <rect x="2" y="3" width="12" height="10" rx="2"/>
             <path d="M2 6.5h12"/>
             <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
             <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="557.8" y="359" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Stage 1 &amp; 2 Auto</text>
-          <text data-detail="context" x="552" y="376" class="t-muted" font-size="8" text-anchor="middle">Sandbox + async CI wait</text>
-        <text data-detail="fine" x="552" y="394" class="t-frontend" font-size="7" text-anchor="middle">Wait: 0 action</text>
+          <text data-node-label="" data-detail-anchor="" x="930" y="107" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Grill Settled</text>
+          <text data-detail="context" x="930" y="124" class="t-muted" font-size="8" text-anchor="middle">Ready for /epure to-spec</text>
+        <text data-detail="fine" x="930" y="142" class="t-frontend" font-size="7" text-anchor="middle">Next: /epure to-spec</text>
         </g>
 
-        <g id="node-review_and_audit" data-node-id="review_and_audit" data-node-label="Stage 3 &amp; Audit" tabindex="0" role="button" aria-label="Focus Stage 3 &amp; Audit, Squash + Convergence PR, 3. When I Act Again (Wait &amp; Feedback) › 3. DAG Execution, Autofix &amp; Final Merge" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="Squash + Convergence PR" data-node-tag="Notifies PR ready" data-node-context="3. When I Act Again (Wait &amp; Feedback) › 3. DAG Execution, Autofix &amp; Final Merge">
-          <title>Stage 3 &amp; Audit · Squash + Convergence PR · 3. When I Act Again (Wait &amp; Feedback) › 3. DAG Execution, Autofix &amp; Final Merge · Notifies PR ready</title>
-          <rect x="674.4" y="338" width="132" height="68" rx="8" class="c-mask"/>
-          <rect x="674.4" y="338" width="132" height="68" rx="8" class="c-frontend" data-animate="node" style="--step:4" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(680.4 344) scale(0.6875)">
+        <g id="node-user_to_spec" data-node-id="user_to_spec" data-node-label="2. /epure to-spec" tabindex="0" role="button" aria-label="Focus 2. /epure to-spec, Generate or edit spec, 2. Specification, Glossary, ADRs &amp; Edits (/epure to-spec) › 1. My Actions (User)" aria-pressed="false" data-node-kind="external" data-node-sublabel="Generate or edit spec" data-node-tag="User action #2" data-node-context="2. Specification, Glossary, ADRs &amp; Edits (/epure to-spec) › 1. My Actions (User)">
+          <title>2. /epure to-spec · Generate or edit spec · 2. Specification, Glossary, ADRs &amp; Edits (/epure to-spec) › 1. My Actions (User) · User action #2</title>
+          <rect x="48" y="212" width="136" height="68" rx="8" class="c-mask"/>
+          <rect x="48" y="212" width="136" height="68" rx="8" class="c-external" data-animate="node" style="--step:4" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(54 218) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="123.1" y="233" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">2. /epure to-spec</text>
+          <text data-detail="context" x="116" y="250" class="t-muted" font-size="8" text-anchor="middle">Generate or edit spec</text>
+        <text data-detail="fine" x="116" y="268" class="t-external" font-size="7" text-anchor="middle">User action #2</text>
+        </g>
+
+        <g id="node-epure_write_spec" data-node-id="epure_write_spec" data-node-label="Spec &amp; Goldfish" tabindex="0" role="button" aria-label="Focus Spec &amp; Goldfish, GLOSSARY + ADR + plan/*, 2. Specification, Glossary, ADRs &amp; Edits (/epure to-spec) › 2. What EPURE Runs Behind the Scenes" aria-pressed="false" data-node-kind="backend" data-node-sublabel="GLOSSARY + ADR + plan/*" data-node-tag="zero-context" data-node-context="2. Specification, Glossary, ADRs &amp; Edits (/epure to-spec) › 2. What EPURE Runs Behind the Scenes">
+          <title>Spec &amp; Goldfish · GLOSSARY + ADR + plan/* · 2. Specification, Glossary, ADRs &amp; Edits (/epure to-spec) › 2. What EPURE Runs Behind the Scenes · zero-context</title>
+          <rect x="250" y="212" width="136" height="68" rx="8" class="c-mask"/>
+          <rect x="250" y="212" width="136" height="68" rx="8" class="c-backend" data-animate="node" style="--step:5" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(256 218) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="318.5" y="233" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Spec &amp; Goldfish</text>
+          <text data-detail="context" x="318" y="250" class="t-muted" font-size="8" text-anchor="middle">GLOSSARY + ADR + plan/*</text>
+        <text data-detail="fine" x="318" y="268" class="t-backend" font-size="7" text-anchor="middle">zero-context</text>
+        </g>
+
+        <g id="node-spec_edit_loop" data-node-id="spec_edit_loop" data-node-label="Live Spec Edits" tabindex="0" role="button" aria-label="Focus Live Spec Edits, Comments revise plan/*, 2. Specification, Glossary, ADRs &amp; Edits (/epure to-spec) › 3. Exchanges, Edits &amp; Autofix Loops" aria-pressed="false" data-node-kind="messagebus" data-node-sublabel="Comments revise plan/*" data-node-tag="spec edit loop" data-node-context="2. Specification, Glossary, ADRs &amp; Edits (/epure to-spec) › 3. Exchanges, Edits &amp; Autofix Loops">
+          <title>Live Spec Edits · Comments revise plan/* · 2. Specification, Glossary, ADRs &amp; Edits (/epure to-spec) › 3. Exchanges, Edits &amp; Autofix Loops · spec edit loop</title>
+          <rect x="630" y="212" width="136" height="68" rx="8" class="c-mask"/>
+          <rect x="630" y="212" width="136" height="68" rx="8" class="c-messagebus" data-animate="node" style="--step:6" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="messagebus" class="semantic-sigil s-messagebus" transform="translate(636 218) scale(0.6875)">
+            <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/>
+            <circle cx="5" cy="4.5" r="1" class="sigil-fill"/>
+            <circle cx="10.5" cy="8" r="1" class="sigil-fill"/>
+            <circle cx="7" cy="11.5" r="1" class="sigil-fill"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="698.5" y="233" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Live Spec Edits</text>
+          <text data-detail="context" x="698" y="250" class="t-muted" font-size="8" text-anchor="middle">Comments revise plan/*</text>
+        <text data-detail="fine" x="698" y="268" class="t-messagebus" font-size="7" text-anchor="middle">spec edit loop</text>
+        </g>
+
+        <g id="node-spec_ready_signal" data-node-id="spec_ready_signal" data-node-label="Spec Ready (plan/*)" tabindex="0" role="button" aria-label="Focus Spec Ready (plan/*), Ready for to-tickets, 2. Specification, Glossary, ADRs &amp; Edits (/epure to-spec) › 4. GitHub Feedback &amp; When to Act" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="Ready for to-tickets" data-node-tag="Next: to-tickets" data-node-context="2. Specification, Glossary, ADRs &amp; Edits (/epure to-spec) › 4. GitHub Feedback &amp; When to Act">
+          <title>Spec Ready (plan/*) · Ready for to-tickets · 2. Specification, Glossary, ADRs &amp; Edits (/epure to-spec) › 4. GitHub Feedback &amp; When to Act · Next: to-tickets</title>
+          <rect x="862" y="212" width="136" height="68" rx="8" class="c-mask"/>
+          <rect x="862" y="212" width="136" height="68" rx="8" class="c-frontend" data-animate="node" style="--step:7" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(868 218) scale(0.6875)">
             <rect x="2" y="3" width="12" height="10" rx="2"/>
             <path d="M2 6.5h12"/>
             <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
             <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="742.9" y="359" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Stage 3 &amp; Audit</text>
-          <text data-detail="context" x="740.4" y="376" class="t-muted" font-size="8" text-anchor="middle">Squash + Convergence PR</text>
-        <text data-detail="fine" x="740.4" y="394" class="t-frontend" font-size="7" text-anchor="middle">Notifies PR ready</text>
+          <text data-node-label="" data-detail-anchor="" x="930" y="244.2" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Spec Ready (plan/*)</text>
+          <text data-detail="context" x="930" y="259.1" class="t-muted" font-size="8" text-anchor="middle">Ready for to-tickets</text>
+        <text data-detail="fine" x="930" y="271.9" class="t-frontend" font-size="7" text-anchor="middle">Next: to-tickets</text>
         </g>
 
-        <g id="node-free_text_loop" data-node-id="free_text_loop" data-node-label="Free-Text Replies" tabindex="0" role="button" aria-label="Focus Free-Text Replies, Iterate Grill or Spec, 4. Autofix Loops, Conflicts &amp; Steering › 1. Iterative Grill &amp; Framing" aria-pressed="false" data-node-kind="external" data-node-sublabel="Iterate Grill or Spec" data-node-tag="to-spec / to-tickets" data-node-context="4. Autofix Loops, Conflicts &amp; Steering › 1. Iterative Grill &amp; Framing">
-          <title>Free-Text Replies · Iterate Grill or Spec · 4. Autofix Loops, Conflicts &amp; Steering › 1. Iterative Grill &amp; Framing · to-spec / to-tickets</title>
-          <rect x="168" y="464" width="132" height="68" rx="8" class="c-mask"/>
-          <rect x="168" y="464" width="132" height="68" rx="8" class="c-external" data-animate="node" style="--step:12" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(174 470) scale(0.6875)">
+        <g id="node-user_tickets_approve" data-node-id="user_tickets_approve" data-node-label="3. Tickets &amp; Approve" tabindex="0" role="button" aria-label="Focus 3. Tickets &amp; Approve, to-tickets -&gt; approve, 3. Ticket Breakdown &amp; Approval (/epure to-tickets -&gt; /epure approve) › 1. My Actions (User)" aria-pressed="false" data-node-kind="external" data-node-sublabel="to-tickets -&gt; approve" data-node-tag="User action #3" data-node-context="3. Ticket Breakdown &amp; Approval (/epure to-tickets -&gt; /epure approve) › 1. My Actions (User)">
+          <title>3. Tickets &amp; Approve · to-tickets -&gt; approve · 3. Ticket Breakdown &amp; Approval (/epure to-tickets -&gt; /epure approve) › 1. My Actions (User) · User action #3</title>
+          <rect x="48" y="338" width="136" height="68" rx="8" class="c-mask"/>
+          <rect x="48" y="338" width="136" height="68" rx="8" class="c-external" data-animate="node" style="--step:8" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(54 344) scale(0.6875)">
             <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
             <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="234" y="496.2" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Free-Text Replies</text>
-          <text data-detail="context" x="234" y="511.1" class="t-muted" font-size="8" text-anchor="middle">Iterate Grill or Spec</text>
-        <text data-detail="fine" x="234" y="523.9" class="t-external" font-size="7" text-anchor="middle">to-spec / to-tickets</text>
+          <text data-node-label="" data-detail-anchor="" x="116" y="369.8" class="t-primary" font-size="10.6" font-weight="600" text-anchor="middle">3. Tickets &amp; Approve</text>
+          <text data-detail="context" x="116" y="384.6" class="t-muted" font-size="8" text-anchor="middle">to-tickets -&gt; approve</text>
+        <text data-detail="fine" x="116" y="397.4" class="t-external" font-size="7" text-anchor="middle">User action #3</text>
         </g>
 
-        <g id="node-autofix_and_sync" data-node-id="autofix_and_sync" data-node-label="Autofix 1..3 &amp; Sync" tabindex="0" role="button" aria-label="Focus Autofix 1..3 &amp; Sync, Auto-fix + /epure sync, 4. Autofix Loops, Conflicts &amp; Steering › 3. DAG Execution, Autofix &amp; Final Merge" aria-pressed="false" data-node-kind="security" data-node-sublabel="Auto-fix + /epure sync" data-node-tag="3-way Git merge" data-node-context="4. Autofix Loops, Conflicts &amp; Steering › 3. DAG Execution, Autofix &amp; Final Merge">
-          <title>Autofix 1..3 &amp; Sync · Auto-fix + /epure sync · 4. Autofix Loops, Conflicts &amp; Steering › 3. DAG Execution, Autofix &amp; Final Merge · 3-way Git merge</title>
-          <rect x="674.4" y="464" width="132" height="68" rx="8" class="c-mask"/>
-          <rect x="674.4" y="464" width="132" height="68" rx="8" class="c-security" data-animate="node" style="--step:12" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(680.4 470) scale(0.6875)">
+        <g id="node-epure_build_dag" data-node-id="epure_build_dag" data-node-label="Ticket DAG Graph" tabindex="0" role="button" aria-label="Focus Ticket DAG Graph, sub_issues + blocked_by, 3. Ticket Breakdown &amp; Approval (/epure to-tickets -&gt; /epure approve) › 2. What EPURE Runs Behind the Scenes" aria-pressed="false" data-node-kind="backend" data-node-sublabel="sub_issues + blocked_by" data-node-tag="phase: tickets" data-node-context="3. Ticket Breakdown &amp; Approval (/epure to-tickets -&gt; /epure approve) › 2. What EPURE Runs Behind the Scenes">
+          <title>Ticket DAG Graph · sub_issues + blocked_by · 3. Ticket Breakdown &amp; Approval (/epure to-tickets -&gt; /epure approve) › 2. What EPURE Runs Behind the Scenes · phase: tickets</title>
+          <rect x="250" y="338" width="136" height="68" rx="8" class="c-mask"/>
+          <rect x="250" y="338" width="136" height="68" rx="8" class="c-backend" data-animate="node" style="--step:9" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(256 344) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="321.8" y="359" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Ticket DAG Graph</text>
+          <text data-detail="context" x="318" y="376" class="t-muted" font-size="8" text-anchor="middle">sub_issues + blocked_by</text>
+        <text data-detail="fine" x="318" y="394" class="t-backend" font-size="7" text-anchor="middle">phase: tickets</text>
+        </g>
+
+        <g id="node-epure_lock_mandate" data-node-id="epure_lock_mandate" data-node-label="Mandate &amp; Plan Merge" tabindex="0" role="button" aria-label="Focus Mandate &amp; Plan Merge, plan/*-&gt;feature/* + sha, 3. Ticket Breakdown &amp; Approval (/epure to-tickets -&gt; /epure approve) › 2. What EPURE Runs Behind the Scenes" aria-pressed="false" data-node-kind="security" data-node-sublabel="plan/*-&gt;feature/* + sha" data-node-tag="spec_sha locked" data-node-context="3. Ticket Breakdown &amp; Approval (/epure to-tickets -&gt; /epure approve) › 2. What EPURE Runs Behind the Scenes">
+          <title>Mandate &amp; Plan Merge · plan/*-&gt;feature/* + sha · 3. Ticket Breakdown &amp; Approval (/epure to-tickets -&gt; /epure approve) › 2. What EPURE Runs Behind the Scenes · spec_sha locked</title>
+          <rect x="442.4" y="338" width="136" height="68" rx="8" class="c-mask"/>
+          <rect x="442.4" y="338" width="136" height="68" rx="8" class="c-security" data-animate="node" style="--step:10" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(448.4 344) scale(0.6875)">
             <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
             <path d="m5.8 8 1.5 1.5 3-3"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="740.4" y="496" class="t-primary" font-size="10.8" font-weight="600" text-anchor="middle">Autofix 1..3 &amp; Sync</text>
-          <text data-detail="context" x="740.4" y="510.9" class="t-muted" font-size="8" text-anchor="middle">Auto-fix + /epure sync</text>
-        <text data-detail="fine" x="740.4" y="523.7" class="t-security" font-size="7" text-anchor="middle">3-way Git merge</text>
+          <text data-node-label="" data-detail-anchor="" x="510.4" y="369.8" class="t-primary" font-size="10.6" font-weight="600" text-anchor="middle">Mandate &amp; Plan Merge</text>
+          <text data-detail="context" x="510.4" y="384.6" class="t-muted" font-size="8" text-anchor="middle">plan/*-&gt;feature/* + sha</text>
+        <text data-detail="fine" x="510.4" y="397.4" class="t-security" font-size="7" text-anchor="middle">spec_sha locked</text>
         </g>
 
-        <g id="node-final_pr_ready" data-node-id="final_pr_ready" data-node-label="Resume &amp; Release" tabindex="0" role="button" aria-label="Focus Resume &amp; Release, /epure continue + release, 4. Autofix Loops, Conflicts &amp; Steering › 3. DAG Execution, Autofix &amp; Final Merge" aria-pressed="false" data-node-kind="security" data-node-sublabel="/epure continue + release" data-node-tag="needs-human / main" data-node-context="4. Autofix Loops, Conflicts &amp; Steering › 3. DAG Execution, Autofix &amp; Final Merge">
-          <title>Resume &amp; Release · /epure continue + release · 4. Autofix Loops, Conflicts &amp; Steering › 3. DAG Execution, Autofix &amp; Final Merge · needs-human / main</title>
-          <rect x="838.4" y="464" width="132" height="68" rx="8" class="c-mask"/>
-          <rect x="838.4" y="464" width="132" height="68" rx="8" class="c-security" data-animate="node" style="--step:5" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(844.4 470) scale(0.6875)">
+        <g id="node-dag_launched_signal" data-node-id="dag_launched_signal" data-node-label="DAG Execution Live" tabindex="0" role="button" aria-label="Focus DAG Execution Live, 1st ticket starts auto, 3. Ticket Breakdown &amp; Approval (/epure to-tickets -&gt; /epure approve) › 4. GitHub Feedback &amp; When to Act" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="1st ticket starts auto" data-node-tag="0 action required" data-node-context="3. Ticket Breakdown &amp; Approval (/epure to-tickets -&gt; /epure approve) › 4. GitHub Feedback &amp; When to Act">
+          <title>DAG Execution Live · 1st ticket starts auto · 3. Ticket Breakdown &amp; Approval (/epure to-tickets -&gt; /epure approve) › 4. GitHub Feedback &amp; When to Act · 0 action required</title>
+          <rect x="862" y="338" width="136" height="68" rx="8" class="c-mask"/>
+          <rect x="862" y="338" width="136" height="68" rx="8" class="c-frontend" data-animate="node" style="--step:11" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(868 344) scale(0.6875)">
+            <rect x="2" y="3" width="12" height="10" rx="2"/>
+            <path d="M2 6.5h12"/>
+            <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
+            <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="930" y="370.2" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">DAG Execution Live</text>
+          <text data-detail="context" x="930" y="385.1" class="t-muted" font-size="8" text-anchor="middle">1st ticket starts auto</text>
+        <text data-detail="fine" x="930" y="397.9" class="t-frontend" font-size="7" text-anchor="middle">0 action required</text>
+        </g>
+
+        <g id="node-user_steering_ops" data-node-id="user_steering_ops" data-node-label="4. sync / continue" tabindex="0" role="button" aria-label="Focus 4. sync / continue, If conflict or escalated, 4. Ticket Loop: TDD, Async CI, Autofix (1..3) &amp; Steering (/epure sync | continue) › 1. My Actions (User)" aria-pressed="false" data-node-kind="external" data-node-sublabel="If conflict or escalated" data-node-tag="Optional action" data-node-context="4. Ticket Loop: TDD, Async CI, Autofix (1..3) &amp; Steering (/epure sync | continue) › 1. My Actions (User)">
+          <title>4. sync / continue · If conflict or escalated · 4. Ticket Loop: TDD, Async CI, Autofix (1..3) &amp; Steering (/epure sync | continue) › 1. My Actions (User) · Optional action</title>
+          <rect x="48" y="464" width="136" height="68" rx="8" class="c-mask"/>
+          <rect x="48" y="464" width="136" height="68" rx="8" class="c-external" data-animate="node" style="--step:12" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(54 470) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="116" y="496.2" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">4. sync / continue</text>
+          <text data-detail="context" x="116" y="511.1" class="t-muted" font-size="8" text-anchor="middle">If conflict or escalated</text>
+        <text data-detail="fine" x="116" y="523.9" class="t-external" font-size="7" text-anchor="middle">Optional action</text>
+        </g>
+
+        <g id="node-epure_stage1_stage2" data-node-id="epure_stage1_stage2" data-node-label="Stage 1 &amp; 2 Auto" tabindex="0" role="button" aria-label="Focus Stage 1 &amp; 2 Auto, bwrap + rtk + async CI, 4. Ticket Loop: TDD, Async CI, Autofix (1..3) &amp; Steering (/epure sync | continue) › 2. What EPURE Runs Behind the Scenes" aria-pressed="false" data-node-kind="backend" data-node-sublabel="bwrap + rtk + async CI" data-node-tag="waiting_ticket_ci" data-node-context="4. Ticket Loop: TDD, Async CI, Autofix (1..3) &amp; Steering (/epure sync | continue) › 2. What EPURE Runs Behind the Scenes">
+          <title>Stage 1 &amp; 2 Auto · bwrap + rtk + async CI · 4. Ticket Loop: TDD, Async CI, Autofix (1..3) &amp; Steering (/epure sync | continue) › 2. What EPURE Runs Behind the Scenes · waiting_ticket_ci</title>
+          <rect x="250" y="464" width="136" height="68" rx="8" class="c-mask"/>
+          <rect x="250" y="464" width="136" height="68" rx="8" class="c-backend" data-animate="node" style="--step:12" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(256 470) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="321.8" y="485" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Stage 1 &amp; 2 Auto</text>
+          <text data-detail="context" x="318" y="502" class="t-muted" font-size="8" text-anchor="middle">bwrap + rtk + async CI</text>
+        <text data-detail="fine" x="318" y="520" class="t-backend" font-size="7" text-anchor="middle">waiting_ticket_ci</text>
+        </g>
+
+        <g id="node-epure_stage3_squash" data-node-id="epure_stage3_squash" data-node-label="Stage 3 &amp; AI Squash" tabindex="0" role="button" aria-label="Focus Stage 3 &amp; AI Squash, dev review + task merge, 4. Ticket Loop: TDD, Async CI, Autofix (1..3) &amp; Steering (/epure sync | continue) › 2. What EPURE Runs Behind the Scenes" aria-pressed="false" data-node-kind="backend" data-node-sublabel="dev review + task merge" data-node-tag="next ticket" data-node-context="4. Ticket Loop: TDD, Async CI, Autofix (1..3) &amp; Steering (/epure sync | continue) › 2. What EPURE Runs Behind the Scenes">
+          <title>Stage 3 &amp; AI Squash · dev review + task merge · 4. Ticket Loop: TDD, Async CI, Autofix (1..3) &amp; Steering (/epure sync | continue) › 2. What EPURE Runs Behind the Scenes · next ticket</title>
+          <rect x="442.4" y="464" width="136" height="68" rx="8" class="c-mask"/>
+          <rect x="442.4" y="464" width="136" height="68" rx="8" class="c-backend" data-animate="node" style="--step:12" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(448.4 470) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="510.4" y="496.2" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Stage 3 &amp; AI Squash</text>
+          <text data-detail="context" x="510.4" y="511.1" class="t-muted" font-size="8" text-anchor="middle">dev review + task merge</text>
+        <text data-detail="fine" x="510.4" y="523.9" class="t-backend" font-size="7" text-anchor="middle">next ticket</text>
+        </g>
+
+        <g id="node-autofix_and_sync_loop" data-node-id="autofix_and_sync_loop" data-node-label="Autofix 1..3 &amp; Sync" tabindex="0" role="button" aria-label="Focus Autofix 1..3 &amp; Sync, Auto-fix + 3-way merge, 4. Ticket Loop: TDD, Async CI, Autofix (1..3) &amp; Steering (/epure sync | continue) › 3. Exchanges, Edits &amp; Autofix Loops" aria-pressed="false" data-node-kind="security" data-node-sublabel="Auto-fix + 3-way merge" data-node-tag="up to 3 tries" data-node-context="4. Ticket Loop: TDD, Async CI, Autofix (1..3) &amp; Steering (/epure sync | continue) › 3. Exchanges, Edits &amp; Autofix Loops">
+          <title>Autofix 1..3 &amp; Sync · Auto-fix + 3-way merge · 4. Ticket Loop: TDD, Async CI, Autofix (1..3) &amp; Steering (/epure sync | continue) › 3. Exchanges, Edits &amp; Autofix Loops · up to 3 tries</title>
+          <rect x="630" y="464" width="136" height="68" rx="8" class="c-mask"/>
+          <rect x="630" y="464" width="136" height="68" rx="8" class="c-security" data-animate="node" style="--step:12" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(636 470) scale(0.6875)">
             <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
             <path d="m5.8 8 1.5 1.5 3-3"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="910.1999999999999" y="485" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Resume &amp; Release</text>
-          <text data-detail="context" x="904.4" y="502" class="t-muted" font-size="8" text-anchor="middle">/epure continue + release</text>
-        <text data-detail="fine" x="904.4" y="520" class="t-security" font-size="7" text-anchor="middle">needs-human / main</text>
+          <text data-node-label="" data-detail-anchor="" x="698" y="496.2" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Autofix 1..3 &amp; Sync</text>
+          <text data-detail="context" x="698" y="511.1" class="t-muted" font-size="8" text-anchor="middle">Auto-fix + 3-way merge</text>
+        <text data-detail="fine" x="698" y="523.9" class="t-security" font-size="7" text-anchor="middle">up to 3 tries</text>
+        </g>
+
+        <g id="node-escalation_or_next" data-node-id="escalation_or_next" data-node-label="Next Ticket / Pause" tabindex="0" role="button" aria-label="Focus Next Ticket / Pause, Auto or needs-human, 4. Ticket Loop: TDD, Async CI, Autofix (1..3) &amp; Steering (/epure sync | continue) › 4. GitHub Feedback &amp; When to Act" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="Auto or needs-human" data-node-tag="0 action or continue" data-node-context="4. Ticket Loop: TDD, Async CI, Autofix (1..3) &amp; Steering (/epure sync | continue) › 4. GitHub Feedback &amp; When to Act">
+          <title>Next Ticket / Pause · Auto or needs-human · 4. Ticket Loop: TDD, Async CI, Autofix (1..3) &amp; Steering (/epure sync | continue) › 4. GitHub Feedback &amp; When to Act · 0 action or continue</title>
+          <rect x="862" y="464" width="136" height="68" rx="8" class="c-mask"/>
+          <rect x="862" y="464" width="136" height="68" rx="8" class="c-frontend" data-animate="node" style="--step:12" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(868 470) scale(0.6875)">
+            <rect x="2" y="3" width="12" height="10" rx="2"/>
+            <path d="M2 6.5h12"/>
+            <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
+            <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="930" y="496.2" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Next Ticket / Pause</text>
+          <text data-detail="context" x="930" y="511.1" class="t-muted" font-size="8" text-anchor="middle">Auto or needs-human</text>
+        <text data-detail="fine" x="930" y="523.9" class="t-frontend" font-size="7" text-anchor="middle">0 action or continue</text>
+        </g>
+
+        <g id="node-user_final_merge" data-node-id="user_final_merge" data-node-label="5. Merge &amp; Release" tabindex="0" role="button" aria-label="Focus 5. Merge &amp; Release, PR -&gt; dev then release, 5. Convergence Audit (Phase 2), Final Merge to dev &amp; Release › 1. My Actions (User)" aria-pressed="false" data-node-kind="external" data-node-sublabel="PR -&gt; dev then release" data-node-tag="User action #4" data-node-context="5. Convergence Audit (Phase 2), Final Merge to dev &amp; Release › 1. My Actions (User)">
+          <title>5. Merge &amp; Release · PR -&gt; dev then release · 5. Convergence Audit (Phase 2), Final Merge to dev &amp; Release › 1. My Actions (User) · User action #4</title>
+          <rect x="48" y="590" width="136" height="68" rx="8" class="c-mask"/>
+          <rect x="48" y="590" width="136" height="68" rx="8" class="c-external" data-animate="node" style="--step:12" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(54 596) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="116" y="622.2" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">5. Merge &amp; Release</text>
+          <text data-detail="context" x="116" y="637.1" class="t-muted" font-size="8" text-anchor="middle">PR -&gt; dev then release</text>
+        <text data-detail="fine" x="116" y="649.9" class="t-external" font-size="7" text-anchor="middle">User action #4</text>
+        </g>
+
+        <g id="node-epure_convergence_audit" data-node-id="epure_convergence_audit" data-node-label="EpicConvergenceAudit" tabindex="0" role="button" aria-label="Focus EpicConvergenceAudit, 0-context global wiring, 5. Convergence Audit (Phase 2), Final Merge to dev &amp; Release › 2. What EPURE Runs Behind the Scenes" aria-pressed="false" data-node-kind="backend" data-node-sublabel="0-context global wiring" data-node-tag="opens PR -&gt; dev" data-node-context="5. Convergence Audit (Phase 2), Final Merge to dev &amp; Release › 2. What EPURE Runs Behind the Scenes">
+          <title>EpicConvergenceAudit · 0-context global wiring · 5. Convergence Audit (Phase 2), Final Merge to dev &amp; Release › 2. What EPURE Runs Behind the Scenes · opens PR -&gt; dev</title>
+          <rect x="442.4" y="590" width="136" height="68" rx="8" class="c-mask"/>
+          <rect x="442.4" y="590" width="136" height="68" rx="8" class="c-backend" data-animate="node" style="--step:12" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(448.4 596) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="510.4" y="621.8" class="t-primary" font-size="10.6" font-weight="600" text-anchor="middle">EpicConvergenceAudit</text>
+          <text data-detail="context" x="510.4" y="636.6" class="t-muted" font-size="8" text-anchor="middle">0-context global wiring</text>
+        <text data-detail="fine" x="510.4" y="649.4" class="t-backend" font-size="7" text-anchor="middle">opens PR -&gt; dev</text>
+        </g>
+
+        <g id="node-phase2_remediation" data-node-id="phase2_remediation" data-node-label="Phase 2 (if gap)" tabindex="0" role="button" aria-label="Focus Phase 2 (if gap), Auto remediation tickets, 5. Convergence Audit (Phase 2), Final Merge to dev &amp; Release › 3. Exchanges, Edits &amp; Autofix Loops" aria-pressed="false" data-node-kind="security" data-node-sublabel="Auto remediation tickets" data-node-tag="max_epic_phases: 2" data-node-context="5. Convergence Audit (Phase 2), Final Merge to dev &amp; Release › 3. Exchanges, Edits &amp; Autofix Loops">
+          <title>Phase 2 (if gap) · Auto remediation tickets · 5. Convergence Audit (Phase 2), Final Merge to dev &amp; Release › 3. Exchanges, Edits &amp; Autofix Loops · max_epic_phases: 2</title>
+          <rect x="630" y="590" width="136" height="68" rx="8" class="c-mask"/>
+          <rect x="630" y="590" width="136" height="68" rx="8" class="c-security" data-animate="node" style="--step:12" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(636 596) scale(0.6875)">
+            <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
+            <path d="m5.8 8 1.5 1.5 3-3"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="701.8" y="611" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Phase 2 (if gap)</text>
+          <text data-detail="context" x="698" y="628" class="t-muted" font-size="8" text-anchor="middle">Auto remediation tickets</text>
+        <text data-detail="fine" x="698" y="646" class="t-security" font-size="7" text-anchor="middle">max_epic_phases: 2</text>
+        </g>
+
+        <g id="node-final_pr_ready" data-node-id="final_pr_ready" data-node-label="Final PR -&gt; dev" tabindex="0" role="button" aria-label="Focus Final PR -&gt; dev, All checks green, 5. Convergence Audit (Phase 2), Final Merge to dev &amp; Release › 4. GitHub Feedback &amp; When to Act" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="All checks green" data-node-tag="Next: Merge PR" data-node-context="5. Convergence Audit (Phase 2), Final Merge to dev &amp; Release › 4. GitHub Feedback &amp; When to Act">
+          <title>Final PR -&gt; dev · All checks green · 5. Convergence Audit (Phase 2), Final Merge to dev &amp; Release › 4. GitHub Feedback &amp; When to Act · Next: Merge PR</title>
+          <rect x="862" y="590" width="136" height="68" rx="8" class="c-mask"/>
+          <rect x="862" y="590" width="136" height="68" rx="8" class="c-frontend" data-animate="node" style="--step:12" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(868 596) scale(0.6875)">
+            <rect x="2" y="3" width="12" height="10" rx="2"/>
+            <path d="M2 6.5h12"/>
+            <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
+            <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="930.5" y="611" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Final PR -&gt; dev</text>
+          <text data-detail="context" x="930" y="628" class="t-muted" font-size="8" text-anchor="middle">All checks green</text>
+        <text data-detail="fine" x="930" y="646" class="t-frontend" font-size="7" text-anchor="middle">Next: Merge PR</text>
         </g>
 
         <!-- Edge labels -->
-        <g data-detail="context" data-edge-from="approve_mandate" data-edge-to="review_and_audit" data-edge-label="spec_sha" data-edge-key="0" data-edge-id="approve-to-review">
-          <rect x="655" y="100" width="48.4" height="14" rx="3" class="c-mask"/>
-          <text x="679.2" y="110" class="t-edge-dashed" font-size="8" text-anchor="middle">spec_sha</text>
+        <g data-detail="context" data-edge-from="user_plan_grill" data-edge-to="epure_grill_questions" data-edge-label="starts" data-edge-key="0" data-edge-id="r1-c0-c1">
+          <rect x="197.6" y="100" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="217" y="110" class="t-edge-security" font-size="8" text-anchor="middle">starts</text>
         </g>
-        <g data-detail="context" data-edge-from="dag_and_lock" data-edge-to="ticket_tdd_loop" data-edge-label="approved" data-edge-key="1" data-edge-id="dag-to-tdd">
-          <rect x="438.3" y="352" width="48.4" height="14" rx="3" class="c-mask"/>
-          <text x="462.5" y="362" class="t-edge-emphasis" font-size="8" text-anchor="middle">approved</text>
+        <g data-detail="context" data-edge-from="epure_grill_questions" data-edge-to="grill_ping_pong" data-edge-label="Q1..Qn" data-edge-key="1" data-edge-id="r1-c1-c3">
+          <rect x="488.6" y="100" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="508" y="110" class="t-edge-dashed" font-size="8" text-anchor="middle">Q1..Qn</text>
         </g>
-        <g data-detail="context" data-edge-from="grill_engine" data-edge-to="dag_and_lock" data-edge-label="to-tickets" data-edge-key="2" data-edge-id="grill-to-dag">
-          <rect x="304" y="226" width="58" height="14" rx="3" class="c-mask"/>
-          <text x="333" y="236" class="t-edge-emphasis" font-size="8" text-anchor="middle">to-tickets</text>
+        <g data-detail="context" data-edge-from="grill_ping_pong" data-edge-to="grill_ready_signal" data-edge-label="settled" data-edge-key="2" data-edge-id="r1-c3-c4">
+          <rect x="792.2" y="100" width="43.6" height="14" rx="3" class="c-mask"/>
+          <text x="814" y="110" class="t-edge-emphasis" font-size="8" text-anchor="middle">settled</text>
         </g>
-        <g data-detail="context" data-edge-from="merge_final_pr" data-edge-to="final_pr_ready" data-edge-label="merge" data-edge-key="3" data-edge-id="merge-to-pr">
-          <rect x="887.4" y="299" width="34" height="14" rx="3" class="c-mask"/>
-          <text x="904.4" y="309" class="t-edge-security" font-size="8" text-anchor="middle">merge</text>
+        <g data-detail="context" data-edge-from="user_to_spec" data-edge-to="epure_write_spec" data-edge-label="builds" data-edge-key="3" data-edge-id="r2-c0-c1">
+          <rect x="197.6" y="226" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="217" y="236" class="t-edge-security" font-size="8" text-anchor="middle">builds</text>
         </g>
-        <g data-detail="context" data-edge-from="plan_and_grill" data-edge-to="grill_engine" data-edge-label="starts" data-edge-key="4" data-edge-id="plan-to-grill">
-          <rect x="113.6" y="280" width="38.8" height="14" rx="3" class="c-mask"/>
-          <text x="133" y="290" class="t-edge-security" font-size="8" text-anchor="middle">starts</text>
+        <g data-detail="context" data-edge-from="epure_write_spec" data-edge-to="spec_edit_loop" data-edge-label="edits" data-edge-key="4" data-edge-id="r2-c1-c3">
+          <rect x="491" y="226" width="34" height="14" rx="3" class="c-mask"/>
+          <text x="508" y="236" class="t-edge-dashed" font-size="8" text-anchor="middle">edits</text>
         </g>
-        <g data-detail="context" data-edge-from="free_text_loop" data-edge-to="dag_and_lock" data-edge-label="refine" data-edge-key="5" data-edge-id="reply-to-dag">
-          <rect x="334.6" y="478" width="38.8" height="14" rx="3" class="c-mask"/>
-          <text x="354" y="488" class="t-edge-dashed" font-size="8" text-anchor="middle">refine</text>
+        <g data-detail="context" data-edge-from="spec_edit_loop" data-edge-to="spec_ready_signal" data-edge-label="ready" data-edge-key="5" data-edge-id="r2-c3-c4">
+          <rect x="797" y="226" width="34" height="14" rx="3" class="c-mask"/>
+          <text x="814" y="236" class="t-edge-emphasis" font-size="8" text-anchor="middle">ready</text>
         </g>
-        <g data-detail="context" data-edge-from="review_and_audit" data-edge-to="autofix_and_sync" data-edge-label="autofix" data-edge-key="6" data-edge-id="review-to-autofix">
-          <rect x="718.6" y="425" width="43.6" height="14" rx="3" class="c-mask"/>
-          <text x="740.4" y="435" class="t-edge-dashed" font-size="8" text-anchor="middle">autofix</text>
+        <g data-detail="context" data-edge-from="user_tickets_approve" data-edge-to="epure_build_dag" data-edge-label="to-tickets" data-edge-key="6" data-edge-id="r3-c0-c1">
+          <rect x="188" y="352" width="58" height="14" rx="3" class="c-mask"/>
+          <text x="217" y="362" class="t-edge-security" font-size="8" text-anchor="middle">to-tickets</text>
         </g>
-        <g data-detail="context" data-edge-from="review_and_audit" data-edge-to="final_pr_ready" data-edge-label="PR -&gt; dev" data-edge-key="7" data-edge-id="review-to-pr">
-          <rect x="816.8" y="352" width="53.199999999999996" height="14" rx="3" class="c-mask"/>
-          <text x="843.4" y="362" class="t-edge-emphasis" font-size="8" text-anchor="middle">PR -&gt; dev</text>
+        <g data-detail="context" data-edge-from="epure_build_dag" data-edge-to="epure_lock_mandate" data-edge-label="approve" data-edge-key="7" data-edge-id="r3-c1-c2">
+          <rect x="392.4" y="352" width="43.6" height="14" rx="3" class="c-mask"/>
+          <text x="414.2" y="362" class="t-edge-emphasis" font-size="8" text-anchor="middle">approve</text>
         </g>
-        <g data-detail="context" data-edge-from="ticket_tdd_loop" data-edge-to="review_and_audit" data-edge-label="async CI" data-edge-key="8" data-edge-id="tdd-to-review">
-          <rect x="622" y="352" width="48.4" height="14" rx="3" class="c-mask"/>
-          <text x="646.2" y="362" class="t-muted" font-size="8" text-anchor="middle">async CI</text>
+        <g data-detail="context" data-edge-from="epure_lock_mandate" data-edge-to="dag_launched_signal" data-edge-label="starts" data-edge-key="8" data-edge-id="r3-c2-c4">
+          <rect x="700.8000000000001" y="352" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="720.2" y="362" class="t-edge-emphasis" font-size="8" text-anchor="middle">starts</text>
+        </g>
+        <g data-detail="context" data-edge-from="user_steering_ops" data-edge-to="epure_stage1_stage2" data-edge-label="steers" data-edge-key="9" data-edge-id="r4-c0-c1">
+          <rect x="197.6" y="478" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="217" y="488" class="t-edge-dashed" font-size="8" text-anchor="middle">steers</text>
+        </g>
+        <g data-detail="context" data-edge-from="epure_stage1_stage2" data-edge-to="epure_stage3_squash" data-edge-label="CI green" data-edge-key="10" data-edge-id="r4-c1-c2">
+          <rect x="390" y="478" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="414.2" y="488" class="t-muted" font-size="8" text-anchor="middle">CI green</text>
+        </g>
+        <g data-detail="context" data-edge-from="epure_stage3_squash" data-edge-to="autofix_and_sync_loop" data-edge-label="autofix" data-edge-key="11" data-edge-id="r4-c2-c3">
+          <rect x="582.4000000000001" y="478" width="43.6" height="14" rx="3" class="c-mask"/>
+          <text x="604.2" y="488" class="t-edge-dashed" font-size="8" text-anchor="middle">autofix</text>
+        </g>
+        <g data-detail="context" data-edge-from="autofix_and_sync_loop" data-edge-to="escalation_or_next" data-edge-label="outcome" data-edge-key="12" data-edge-id="r4-c3-c4">
+          <rect x="792.2" y="478" width="43.6" height="14" rx="3" class="c-mask"/>
+          <text x="814" y="488" class="t-edge-emphasis" font-size="8" text-anchor="middle">outcome</text>
+        </g>
+        <g data-detail="context" data-edge-from="user_final_merge" data-edge-to="epure_convergence_audit" data-edge-label="audits" data-edge-key="13" data-edge-id="r5-c0-c2">
+          <rect x="293.8" y="604" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="313.2" y="614" class="t-edge-security" font-size="8" text-anchor="middle">audits</text>
+        </g>
+        <g data-detail="context" data-edge-from="epure_convergence_audit" data-edge-to="phase2_remediation" data-edge-label="if gap" data-edge-key="14" data-edge-id="r5-c2-c3">
+          <rect x="584.8000000000001" y="604" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="604.2" y="614" class="t-edge-dashed" font-size="8" text-anchor="middle">if gap</text>
+        </g>
+        <g data-detail="context" data-edge-from="phase2_remediation" data-edge-to="final_pr_ready" data-edge-label="converged" data-edge-key="15" data-edge-id="r5-c3-c4">
+          <rect x="787.4" y="604" width="53.199999999999996" height="14" rx="3" class="c-mask"/>
+          <text x="814" y="614" class="t-edge-emphasis" font-size="8" text-anchor="middle">converged</text>
         </g>
 
         <!-- Legend -->
         <g data-legend="" data-legend-bridge="">
-          <text x="20" y="560" class="t-primary" font-size="12" font-weight="650">Legend</text>
-          <g data-legend-semantic-kind="frontend" data-legend-kind="frontend" data-legend-label="When I Act Again (Wait)" data-legend-x="20" data-legend-baseline="580" data-legend-width="150">
-            <rect x="20" y="572" width="14" height="9" rx="2" class="c-frontend" stroke-width="1"/>
-            <text x="42" y="580" class="t-muted" font-size="7.5" font-weight="500">When I Act Again (Wait)</text>
+          <text x="20" y="686" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="frontend" data-legend-kind="frontend" data-legend-label="4. GitHub Feedback &amp; Signal" data-legend-x="20" data-legend-baseline="706" data-legend-width="169">
+            <rect x="20" y="698" width="14" height="9" rx="2" class="c-frontend" stroke-width="1"/>
+            <text x="42" y="706" class="t-muted" font-size="7.5" font-weight="500">4. GitHub Feedback &amp; Signal</text>
           </g>
-          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="Behind the Scenes (Auto)" data-legend-x="177" data-legend-baseline="580" data-legend-width="155">
-            <rect x="177" y="572" width="14" height="9" rx="2" class="c-backend" stroke-width="1"/>
-            <text x="199" y="580" class="t-muted" font-size="7.5" font-weight="500">Behind the Scenes (Auto)</text>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="2. Automated by EPURE" data-legend-x="196" data-legend-baseline="706" data-legend-width="141">
+            <rect x="196" y="698" width="14" height="9" rx="2" class="c-backend" stroke-width="1"/>
+            <text x="218" y="706" class="t-muted" font-size="7.5" font-weight="500">2. Automated by EPURE</text>
           </g>
-          <g data-legend-semantic-kind="security" data-legend-kind="security" data-legend-label="Autofix, Sync &amp; Escalation" data-legend-x="339" data-legend-baseline="580" data-legend-width="164">
-            <rect x="339" y="572" width="14" height="9" rx="2" class="c-security" stroke-width="1"/>
-            <text x="361" y="580" class="t-muted" font-size="7.5" font-weight="500">Autofix, Sync &amp; Escalation</text>
+          <g data-legend-semantic-kind="security" data-legend-kind="security" data-legend-label="3. Locks, Autofix &amp; Sync" data-legend-x="344" data-legend-baseline="706" data-legend-width="155">
+            <rect x="344" y="698" width="14" height="9" rx="2" class="c-security" stroke-width="1"/>
+            <text x="366" y="706" class="t-muted" font-size="7.5" font-weight="500">3. Locks, Autofix &amp; Sync</text>
           </g>
-          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="What I Do (Commands)" data-legend-x="510" data-legend-baseline="580" data-legend-width="136">
-            <rect x="510" y="572" width="14" height="9" rx="2" class="c-external" stroke-width="1"/>
-            <text x="532" y="580" class="t-muted" font-size="7.5" font-weight="500">What I Do (Commands)</text>
+          <g data-legend-semantic-kind="messagebus" data-legend-kind="messagebus" data-legend-label="3. Exchanges &amp; Edits" data-legend-x="506" data-legend-baseline="706" data-legend-width="136">
+            <rect x="506" y="698" width="14" height="9" rx="2" class="c-messagebus" stroke-width="1"/>
+            <text x="528" y="706" class="t-muted" font-size="7.5" font-weight="500">3. Exchanges &amp; Edits</text>
+          </g>
+          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="1. My Actions (Column 1)" data-legend-x="649" data-legend-baseline="706" data-legend-width="155">
+            <rect x="649" y="698" width="14" height="9" rx="2" class="c-external" stroke-width="1"/>
+            <text x="671" y="706" class="t-muted" font-size="7.5" font-weight="500">1. My Actions (Column 1)</text>
           </g>
         </g>
       </svg>
@@ -5660,36 +5854,36 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
       <div class="card">
         <div class="card-header">
           <div class="card-dot cyan"></div>
-          <h3>What Do I Do &amp; When Do I Act Again?</h3>
+          <h3>Column 1 — All Your Actions (Top to Bottom)</h3>
         </div>
         <ul>
-          <li>1. Open the issue, post /epure plan, and reply in plain text to Grill rounds until settled</li>
-          <li>2. Run /epure to-spec (reply in plain text to adjust the spec if needed), then /epure to-tickets</li>
-          <li>3. Run /epure approve to sign the mandate, then wait until the final feature/* -&gt; dev PR is ready to Squash &amp; Merge</li>
+          <li>Steps 1 &amp; 2: Post /epure plan, reply to Grill questions, run /epure to-spec, and comment in plain text to edit the spec</li>
+          <li>Steps 3 &amp; 4: Run /epure to-tickets then /epure approve; only step in during Step 4 (/epure sync or /epure continue) on conflict or escalation</li>
+          <li>Step 5: Once all checks on the final feature/* -&gt; dev PR are green, click Squash &amp; Merge then dispatch the release</li>
         </ul>
       </div>
 
       <div class="card">
         <div class="card-header">
           <div class="card-dot emerald"></div>
-          <h3>What Happens Automatically Behind the Scenes?</h3>
+          <h3>Columns 2 &amp; 3 — Automation, Exchanges &amp; Autofix</h3>
         </div>
         <ul>
-          <li>Commits GLOSSARY.md, ADRs &amp; Spec on plan/* with zero-context Goldfish audit, then wires native GitHub sub_issues &amp; blocked_by</li>
-          <li>Directly merges plan/* -&gt; feature/* on approve, locks spec_sha, and executes each ticket in the 2-phase kernel sandbox</li>
-          <li>Suspends at zero runner cost during external CI (waiting_ticket_ci), runs Stage 3 dev review + AI squash, and runs EpicConvergenceAudit (Phase 2)</li>
+          <li>Behind the scenes (Col 2): Zero-context Goldfish audit on plan/*, sub_issues + blocked_by DAG, direct plan/* -&gt; feature/* merge + spec_sha lock</li>
+          <li>Exchanges &amp; Edits (Col 3): Free-text comments during Grill and Spec; during the DAG, automatic Autofix (1..3 tries) on Stage 1, CI, or Review</li>
+          <li>Git Sync &amp; Convergence: /epure sync resolves dev -&gt; feature/* -&gt; task/* conflicts 3-way; EpicConvergenceAudit triggers an automatic Phase 2 if needed</li>
         </ul>
       </div>
 
       <div class="card">
         <div class="card-header">
           <div class="card-dot amber"></div>
-          <h3>How Do Autofix Loops, Conflicts &amp; Steering Work?</h3>
+          <h3>Column 4 — GitHub Feedback &amp; When to Act</h3>
         </div>
         <ul>
-          <li>Automatic Autofix (1..3 tries): if Stage 1 tests, external CI, or reviewers fail, EPURE patches and re-verifies automatically</li>
-          <li>Git Conflict Sync: comment /epure sync (or /epure rebase) to merge dev -&gt; feature/* -&gt; task/* with 3-way resolution</li>
-          <li>Escalation &amp; Control: if paused in needs-human, push a fix or clarify and run /epure continue (plus /epure status or /epure cancel anytime)</li>
+          <li>At every framing milestone (Grill settled, Spec committed, DAG created), EPURE posts a comment naming the exact next command to run</li>
+          <li>During DAG execution (Step 4), 0 action is needed while Autofix (1..3 tries) and event-driven async CI progress</li>
+          <li>If a ticket exceeds 3 attempts or touches a sensitive path, EPURE applies the needs-human label and waits for /epure continue</li>
         </ul>
       </div>
     </div>
