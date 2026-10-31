@@ -468,6 +468,15 @@ _Éviter_ : escalade immédiate `needs-human` dès la première troncature d'un 
 **Catalogue compact de contexte de dépôt (`CompactWorkspaceFilesContext`)** : représentation bornée des fichiers connus du dépôt dans le prompt d'implémentation ou de remédiation, qui injecte intégralement (sans jamais tronquer un fichier en son milieu) uniquement les fichiers déjà modifiés par le ticket ou ciblés par `filesToTouch` dans la limite du budget de prompt, et expose tous les autres fichiers sous forme d'un index `chemin (N lignes)` consultable à la demande via `read_repo_file` et `search_in_repo_file`.
 _Éviter_ : réinjecter l'intégralité de `accumulatedFiles` en texte brut à chaque tour de remédiation ou tronquer arbitrairement un fichier source en son milieu.
 
+## Pipeline événementiel des workflows et cloisonnement des secrets par environnements (v1.7.0)
+
+**Pipeline événementiel des workflows et Custom Actions (`epure-ci-actions-flow`)** : architecture d'orchestration GitHub Actions reliant les événements déclencheurs (`issue_comment`, `check_suite`, `workflow_run`, `pull_request`, `workflow_dispatch`), le contrôle d'autorisation préalable sans secret (`actions/authorize-command`), l'exécution isolée sous environnement GitHub d'agent (`actions/orchestrate-issue` sous `environment: <llm-env>`), les portes de contrat PR (`actions/epure-contract`, `actions/impeccable`) et la promotion de release (`environment: release`).
+_Éviter_ : exposer les secrets d'agent ou de LLM à l'étape d'autorisation initiale ou aux workflows de Pull Request non privilégiés.
+
+**Cloisonnement des secrets par environnements GitHub (environnement d'agent `<llm-env>` et environnement `release`)** : séparation stricte des secrets d'exécution d'agent (`EPURE_AGENT_APP_ID`, `EPURE_AGENT_APP_PRIVATE_KEY`, `LLM_API_KEY` ou variable fournisseur configurée dans `.github/agents.yml`, associés à un environnement GitHub dédié dont le nom est libre et agnostique du fournisseur LLM — p. ex. `epure-agent`, `llm`, `openai`, `anthropic`, `gemini` — requis uniquement après `authorize-command`) et des secrets de promotion stable (`EPURE_RELEASE_APP_ID`, `EPURE_RELEASE_APP_PRIVATE_KEY` associés à l'environnement protégé `release` avec approbation humaine obligatoire), garantissant zéro exposition de secrets aux workflows publics (conformité Zizmor).
+_Éviter_ : stocker les clés privées de GitHub App ou les clés API LLM comme secrets globaux du dépôt accessibles à tous les jobs.
+
+
 
 
 

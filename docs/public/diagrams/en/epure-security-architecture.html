@@ -5196,7 +5196,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <div class="pulse-dot"></div>
         <h1>EPURE Security &amp; Trust Boundaries Architecture</h1>
       </div>
-      <p class="subtitle">Dual GitHub Apps, Secretless Sandbox Execution, Out-of-Branch CAS State, and Prompt-Injection Guards</p>
+      <p class="subtitle">Dual GitHub Apps, 2-Phase Kernel Sandbox, Multi-Provider LLMClient, SSRF-Safe Web Tools &amp; Environment Isolation</p>
     </div>
 
 
@@ -5206,7 +5206,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
          data-preset-badge-editorial-plate="ARCHIFY / PLATE 04">
       <svg viewBox="0 0 1006 544" role="img" lang="en" aria-labelledby="archify-diagram-title archify-diagram-description" data-animation="trace" data-preset="blueprint" data-quality-profile="showcase" data-node-ui="" data-reader-fit="intrinsic-height" data-reader-min-text="7.5" data-reader-primary-text="14">
         <title id="archify-diagram-title">EPURE Security &amp; Trust Boundaries Architecture</title>
-        <desc id="archify-diagram-description">Dual GitHub Apps, Secretless Sandbox Execution, Out-of-Branch CAS State, and Prompt-Injection Guards</desc>
+        <desc id="archify-diagram-description">Dual GitHub Apps, 2-Phase Kernel Sandbox, Multi-Provider LLMClient, SSRF-Safe Web Tools &amp; Environment Isolation</desc>
         <!-- Definitions -->
         <defs>
           <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
@@ -5251,9 +5251,9 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <rect width="100%" height="100%" fill="url(#grid)" />
 
         <!-- Boundaries (behind everything) -->
-        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-composition-frame-label="EPURE Trusted Control Plane" x="274" y="54" width="436" height="422" rx="12" class="c-region" stroke-width="1"/>
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-composition-frame-label="EPURE Trusted Control Plane (env: &lt;llm-env&gt;)" x="274" y="54" width="436" height="422" rx="12" class="c-region" stroke-width="1"/>
 
-        <rect data-graph-role="structural-frame" data-composition-frame-kind="security-group" data-composition-frame-id="1" data-composition-frame-label="Isolated Sandbox (0 Secrets)" x="786" y="210" width="180" height="110" rx="8" class="c-security-group" stroke-width="1"/>
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="security-group" data-composition-frame-id="1" data-composition-frame-label="2-Phase Kernel Sandbox (0 Secrets)" x="786" y="210" width="180" height="110" rx="8" class="c-security-group" stroke-width="1"/>
 
         <!-- Connection paths (before components for correct z-order) -->
         <g data-graph-role="automatic-crossover" style="--step:0">
@@ -5320,33 +5320,33 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <text data-detail="fine" x="108" y="292" class="t-database" font-size="7" text-anchor="middle">spec_sha signed</text>
         </g>
 
-        <g id="node-command_gate" data-node-id="command_gate" data-node-label="Permission Gate" tabindex="0" role="button" aria-label="Focus Permission Gate, write / admin check, EPURE Trusted Control Plane" aria-pressed="false" data-node-kind="security" data-node-sublabel="write / admin check" data-node-tag="fail-closed" data-node-context="EPURE Trusted Control Plane">
-          <title>Permission Gate · write / admin check · EPURE Trusted Control Plane · fail-closed</title>
+        <g id="node-command_gate" data-node-id="command_gate" data-node-label="Job 1: Auth Gate" tabindex="0" role="button" aria-label="Focus Job 1: Auth Gate, authorize-command, EPURE Trusted Control Plane (env: &lt;llm-env&gt;)" aria-pressed="false" data-node-kind="security" data-node-sublabel="authorize-command" data-node-tag="0 App/LLM secrets" data-node-context="EPURE Trusted Control Plane (env: &lt;llm-env&gt;)">
+          <title>Job 1: Auth Gate · authorize-command · EPURE Trusted Control Plane (env: &lt;llm-env&gt;) · 0 App/LLM secrets</title>
           <rect x="304" y="84" width="120" height="60" rx="8" class="c-mask"/>
           <rect x="304" y="84" width="120" height="60" rx="8" class="c-security" data-animate="node" style="--step:1" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(310 90) scale(0.6875)">
             <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
             <path d="m5.8 8 1.5 1.5 3-3"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="364" y="112" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Permission Gate</text>
-        <text data-detail="context" x="364" y="128" class="t-muted" font-size="9" text-anchor="middle">write / admin check</text>
-        <text data-detail="fine" x="364" y="136" class="t-security" font-size="7" text-anchor="middle">fail-closed</text>
+          <text data-node-label="" data-detail-anchor="" x="364" y="112" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Job 1: Auth Gate</text>
+        <text data-detail="context" x="364" y="128" class="t-muted" font-size="9" text-anchor="middle">authorize-command</text>
+        <text data-detail="fine" x="364" y="136" class="t-security" font-size="7" text-anchor="middle">0 App/LLM secrets</text>
         </g>
 
-        <g id="node-orchestrator" data-node-id="orchestrator" data-node-label="Orchestrator" tabindex="0" role="button" aria-label="Focus Orchestrator, Grill, DAG &amp; TDD, EPURE Trusted Control Plane" aria-pressed="false" data-node-kind="backend" data-node-sublabel="Grill, DAG &amp; TDD" data-node-tag="issue-N lock" data-node-context="EPURE Trusted Control Plane">
-          <title>Orchestrator · Grill, DAG &amp; TDD · EPURE Trusted Control Plane · issue-N lock</title>
+        <g id="node-orchestrator" data-node-id="orchestrator" data-node-label="Orchestrator" tabindex="0" role="button" aria-label="Focus Orchestrator, Job 2: env &lt;llm-env&gt;, EPURE Trusted Control Plane (env: &lt;llm-env&gt;)" aria-pressed="false" data-node-kind="backend" data-node-sublabel="Job 2: env &lt;llm-env&gt;" data-node-tag="issue-N lock" data-node-context="EPURE Trusted Control Plane (env: &lt;llm-env&gt;)">
+          <title>Orchestrator · Job 2: env &lt;llm-env&gt; · EPURE Trusted Control Plane (env: &lt;llm-env&gt;) · issue-N lock</title>
           <rect x="304" y="240" width="120" height="60" rx="8" class="c-mask"/>
           <rect x="304" y="240" width="120" height="60" rx="8" class="c-backend" data-animate="node" style="--step:2" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(310 246) scale(0.6875)">
             <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
           </g>
           <text data-node-label="" data-detail-anchor="" x="364" y="268" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Orchestrator</text>
-        <text data-detail="context" x="364" y="284" class="t-muted" font-size="9" text-anchor="middle">Grill, DAG &amp; TDD</text>
+        <text data-detail="context" x="364" y="284" class="t-muted" font-size="9" text-anchor="middle">Job 2: env &lt;llm-env&gt;</text>
         <text data-detail="fine" x="364" y="292" class="t-backend" font-size="7" text-anchor="middle">issue-N lock</text>
         </g>
 
-        <g id="node-ifixai_audit" data-node-id="ifixai_audit" data-node-label="iFixAi Audit" tabindex="0" role="button" aria-label="Focus iFixAi Audit, trajectory gate, EPURE Trusted Control Plane" aria-pressed="false" data-node-kind="security" data-node-sublabel="trajectory gate" data-node-tag="deterministic" data-node-context="EPURE Trusted Control Plane">
-          <title>iFixAi Audit · trajectory gate · EPURE Trusted Control Plane · deterministic</title>
+        <g id="node-ifixai_audit" data-node-id="ifixai_audit" data-node-label="iFixAi Audit" tabindex="0" role="button" aria-label="Focus iFixAi Audit, trajectory gate, EPURE Trusted Control Plane (env: &lt;llm-env&gt;)" aria-pressed="false" data-node-kind="security" data-node-sublabel="trajectory gate" data-node-tag="deterministic" data-node-context="EPURE Trusted Control Plane (env: &lt;llm-env&gt;)">
+          <title>iFixAi Audit · trajectory gate · EPURE Trusted Control Plane (env: &lt;llm-env&gt;) · deterministic</title>
           <rect x="304" y="396" width="120" height="60" rx="8" class="c-mask"/>
           <rect x="304" y="396" width="120" height="60" rx="8" class="c-security" data-animate="node" style="--step:7" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(310 402) scale(0.6875)">
@@ -5358,20 +5358,20 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <text data-detail="fine" x="364" y="448" class="t-security" font-size="7" text-anchor="middle">deterministic</text>
         </g>
 
-        <g id="node-llm_sidecar" data-node-id="llm_sidecar" data-node-label="LLM Sidecar" tabindex="0" role="button" aria-label="Focus LLM Sidecar, Gemini 3.8 HIGH, EPURE Trusted Control Plane" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="Gemini 3.8 HIGH" data-node-tag="holds API key" data-node-context="EPURE Trusted Control Plane">
-          <title>LLM Sidecar · Gemini 3.8 HIGH · EPURE Trusted Control Plane · holds API key</title>
+        <g id="node-llm_sidecar" data-node-id="llm_sidecar" data-node-label="Multi-Provider LLM" tabindex="0" role="button" aria-label="Focus Multi-Provider LLM, Gemini/OpenAI/Anthropic, EPURE Trusted Control Plane (env: &lt;llm-env&gt;)" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="Gemini/OpenAI/Anthropic" data-node-tag="env: &lt;llm-env&gt;" data-node-context="EPURE Trusted Control Plane (env: &lt;llm-env&gt;)">
+          <title>Multi-Provider LLM · Gemini/OpenAI/Anthropic · EPURE Trusted Control Plane (env: &lt;llm-env&gt;) · env: &lt;llm-env&gt;</title>
           <rect x="560" y="84" width="120" height="60" rx="8" class="c-mask"/>
           <rect x="560" y="84" width="120" height="60" rx="8" class="c-cloud" data-animate="node" style="--step:4" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="cloud" class="semantic-sigil s-cloud" transform="translate(566 90) scale(0.6875)">
             <path d="M4.3 12.5h7.3a2.4 2.4 0 0 0 .2-4.8 4 4 0 0 0-7.5-1.3A3.1 3.1 0 0 0 4.3 12.5Z"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="620" y="112" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">LLM Sidecar</text>
-        <text data-detail="context" x="620" y="128" class="t-muted" font-size="9" text-anchor="middle">Gemini 3.8 HIGH</text>
-        <text data-detail="fine" x="620" y="136" class="t-cloud" font-size="7" text-anchor="middle">holds API key</text>
+          <text data-node-label="" data-detail-anchor="" x="620" y="112" class="t-primary" font-size="10.3" font-weight="600" text-anchor="middle">Multi-Provider LLM</text>
+        <text data-detail="context" x="620" y="128" class="t-muted" font-size="8.1" text-anchor="middle">Gemini/OpenAI/Anthropic</text>
+        <text data-detail="fine" x="620" y="136" class="t-cloud" font-size="7" text-anchor="middle">env: &lt;llm-env&gt;</text>
         </g>
 
-        <g id="node-trusted_reviewers" data-node-id="trusted_reviewers" data-node-label="dev Roster" tabindex="0" role="button" aria-label="Focus dev Roster, XML diff guards, EPURE Trusted Control Plane" aria-pressed="false" data-node-kind="security" data-node-sublabel="XML diff guards" data-node-tag="OWASP LLM01" data-node-context="EPURE Trusted Control Plane">
-          <title>dev Roster · XML diff guards · EPURE Trusted Control Plane · OWASP LLM01</title>
+        <g id="node-trusted_reviewers" data-node-id="trusted_reviewers" data-node-label="dev Roster" tabindex="0" role="button" aria-label="Focus dev Roster, XML diff &amp; web guards, EPURE Trusted Control Plane (env: &lt;llm-env&gt;)" aria-pressed="false" data-node-kind="security" data-node-sublabel="XML diff &amp; web guards" data-node-tag="OWASP LLM01" data-node-context="EPURE Trusted Control Plane (env: &lt;llm-env&gt;)">
+          <title>dev Roster · XML diff &amp; web guards · EPURE Trusted Control Plane (env: &lt;llm-env&gt;) · OWASP LLM01</title>
           <rect x="560" y="240" width="120" height="60" rx="8" class="c-mask"/>
           <rect x="560" y="240" width="120" height="60" rx="8" class="c-security" data-animate="node" style="--step:5" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(566 246) scale(0.6875)">
@@ -5379,12 +5379,12 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
             <path d="m5.8 8 1.5 1.5 3-3"/>
           </g>
           <text data-node-label="" data-detail-anchor="" x="620" y="268" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">dev Roster</text>
-        <text data-detail="context" x="620" y="284" class="t-muted" font-size="9" text-anchor="middle">XML diff guards</text>
+        <text data-detail="context" x="620" y="284" class="t-muted" font-size="8.8" text-anchor="middle">XML diff &amp; web guards</text>
         <text data-detail="fine" x="620" y="292" class="t-security" font-size="7" text-anchor="middle">OWASP LLM01</text>
         </g>
 
-        <g id="node-agent_app_pub" data-node-id="agent_app_pub" data-node-label="Agent App" tabindex="0" role="button" aria-label="Focus Agent App, plan / task / feature, EPURE Trusted Control Plane" aria-pressed="false" data-node-kind="security" data-node-sublabel="plan / task / feature" data-node-tag="ephemeral JWT" data-node-context="EPURE Trusted Control Plane">
-          <title>Agent App · plan / task / feature · EPURE Trusted Control Plane · ephemeral JWT</title>
+        <g id="node-agent_app_pub" data-node-id="agent_app_pub" data-node-label="Agent App" tabindex="0" role="button" aria-label="Focus Agent App, plan / task / feature, EPURE Trusted Control Plane (env: &lt;llm-env&gt;)" aria-pressed="false" data-node-kind="security" data-node-sublabel="plan / task / feature" data-node-tag="ephemeral JWT" data-node-context="EPURE Trusted Control Plane (env: &lt;llm-env&gt;)">
+          <title>Agent App · plan / task / feature · EPURE Trusted Control Plane (env: &lt;llm-env&gt;) · ephemeral JWT</title>
           <rect x="560" y="396" width="120" height="60" rx="8" class="c-mask"/>
           <rect x="560" y="396" width="120" height="60" rx="8" class="c-security" data-animate="node" style="--step:8" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(566 402) scale(0.6875)">
@@ -5396,20 +5396,20 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <text data-detail="fine" x="620" y="448" class="t-security" font-size="7" text-anchor="middle">ephemeral JWT</text>
         </g>
 
-        <g id="node-secretless_sandbox" data-node-id="secretless_sandbox" data-node-label="Code Sandbox" tabindex="0" role="button" aria-label="Focus Code Sandbox, tsc + vitest run, Isolated Sandbox (0 Secrets)" aria-pressed="false" data-node-kind="backend" data-node-sublabel="tsc + vitest run" data-node-tag="0 env secrets" data-node-context="Isolated Sandbox (0 Secrets)">
-          <title>Code Sandbox · tsc + vitest run · Isolated Sandbox (0 Secrets) · 0 env secrets</title>
+        <g id="node-secretless_sandbox" data-node-id="secretless_sandbox" data-node-label="2-Phase Sandbox" tabindex="0" role="button" aria-label="Focus 2-Phase Sandbox, bwrap/landrun + rtk, 2-Phase Kernel Sandbox (0 Secrets)" aria-pressed="false" data-node-kind="backend" data-node-sublabel="bwrap/landrun + rtk" data-node-tag="--unshare-net" data-node-context="2-Phase Kernel Sandbox (0 Secrets)">
+          <title>2-Phase Sandbox · bwrap/landrun + rtk · 2-Phase Kernel Sandbox (0 Secrets) · --unshare-net</title>
           <rect x="816" y="240" width="120" height="60" rx="8" class="c-mask"/>
           <rect x="816" y="240" width="120" height="60" rx="8" class="c-backend" data-animate="node" style="--step:6" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(822 246) scale(0.6875)">
             <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="876" y="268" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Code Sandbox</text>
-        <text data-detail="context" x="876" y="284" class="t-muted" font-size="9" text-anchor="middle">tsc + vitest run</text>
-        <text data-detail="fine" x="876" y="292" class="t-backend" font-size="7" text-anchor="middle">0 env secrets</text>
+          <text data-node-label="" data-detail-anchor="" x="876" y="268" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">2-Phase Sandbox</text>
+        <text data-detail="context" x="876" y="284" class="t-muted" font-size="9" text-anchor="middle">bwrap/landrun + rtk</text>
+        <text data-detail="fine" x="876" y="292" class="t-backend" font-size="7" text-anchor="middle">--unshare-net</text>
         </g>
 
-        <g id="node-release_app_pub" data-node-id="release_app_pub" data-node-label="Release App" tabindex="0" role="button" aria-label="Focus Release App, dev -&gt; main + vX.Y.Z, Architecture component" aria-pressed="false" data-node-kind="security" data-node-sublabel="dev -&gt; main + vX.Y.Z" data-node-tag="sole bypass" data-node-context="Architecture component">
-          <title>Release App · dev -&gt; main + vX.Y.Z · Architecture component · sole bypass</title>
+        <g id="node-release_app_pub" data-node-id="release_app_pub" data-node-label="Release App" tabindex="0" role="button" aria-label="Focus Release App, dev -&gt; main + vX.Y.Z, Architecture component" aria-pressed="false" data-node-kind="security" data-node-sublabel="dev -&gt; main + vX.Y.Z" data-node-tag="env: release" data-node-context="Architecture component">
+          <title>Release App · dev -&gt; main + vX.Y.Z · Architecture component · env: release</title>
           <rect x="816" y="396" width="120" height="60" rx="8" class="c-mask"/>
           <rect x="816" y="396" width="120" height="60" rx="8" class="c-security" data-animate="node" style="--step:9" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(822 402) scale(0.6875)">
@@ -5418,7 +5418,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           </g>
           <text data-node-label="" data-detail-anchor="" x="876" y="424" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Release App</text>
         <text data-detail="context" x="876" y="440" class="t-muted" font-size="9" text-anchor="middle">dev -&gt; main + vX.Y.Z</text>
-        <text data-detail="fine" x="876" y="448" class="t-security" font-size="7" text-anchor="middle">sole bypass</text>
+        <text data-detail="fine" x="876" y="448" class="t-security" font-size="7" text-anchor="middle">env: release</text>
         </g>
 
         <!-- Connection labels -->
@@ -5460,14 +5460,14 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         </g>
 
         <!-- Boundary labels (foreground masks keep routes out of titles) -->
-        <g data-graph-role="structural-frame-label" data-composition-frame-id="0" data-composition-frame-kind="region" data-composition-frame-label="EPURE Trusted Control Plane">
-          <rect data-graph-role="structural-frame-label-mask" x="278" y="64" width="155.79999999999998" height="16" rx="3" class="c-mask"/>
-          <text data-boundary-label="" x="282" y="77" class="t-cloud" font-size="9" font-weight="600">EPURE Trusted Control Plane</text>
+        <g data-graph-role="structural-frame-label" data-composition-frame-id="0" data-composition-frame-kind="region" data-composition-frame-label="EPURE Trusted Control Plane (env: &lt;llm-env&gt;)">
+          <rect data-graph-role="structural-frame-label-mask" x="278" y="64" width="247.6" height="16" rx="3" class="c-mask"/>
+          <text data-boundary-label="" x="282" y="77" class="t-cloud" font-size="9" font-weight="600">EPURE Trusted Control Plane (env: &lt;llm-env&gt;)</text>
         </g>
 
-        <g data-graph-role="structural-frame-label" data-composition-frame-id="1" data-composition-frame-kind="security-group" data-composition-frame-label="Isolated Sandbox (0 Secrets)">
-          <rect data-graph-role="structural-frame-label-mask" x="790" y="220" width="161.2" height="16" rx="3" class="c-mask"/>
-          <text data-boundary-label="" x="794" y="233" class="t-security" font-size="9" font-weight="600">Isolated Sandbox (0 Secrets)</text>
+        <g data-graph-role="structural-frame-label" data-composition-frame-id="1" data-composition-frame-kind="security-group" data-composition-frame-label="2-Phase Kernel Sandbox (0 Secrets)">
+          <rect data-graph-role="structural-frame-label-mask" x="790" y="220" width="172" height="16" rx="3" class="c-mask"/>
+          <text data-boundary-label="" x="794" y="231.94117647058823" class="t-security" font-size="7.9411764705882355" font-weight="600">2-Phase Kernel Sandbox (0 Secrets)</text>
         </g>
 
         <!-- Legend -->
@@ -5674,36 +5674,36 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
       <div class="card">
         <div class="card-header">
           <div class="card-dot rose"></div>
-          <h3>Dual-App Privilege Separation</h3>
+          <h3>Dual-App Separation &amp; GitHub Environment Scoping</h3>
         </div>
         <ul>
-          <li>Agent App (&lt;owner&gt;-epure-agent) can only write to plan/*, task/*, and feature/*</li>
-          <li>Agent App is hard-blocked from merging code PRs into dev or pushing to main</li>
-          <li>Release App (&lt;owner&gt;-epure-release) is the sole Bypass Actor on main and v* tags</li>
+          <li>Job 1 authorize-command runs with 0 secrets; Job 2 runs inside isolated GitHub Environment &lt;llm-env&gt;</li>
+          <li>Agent App writes only to plan/*, task/*, and feature/* (blocked from merging to dev or pushing to main)</li>
+          <li>Release App runs exclusively in environment: release as sole Bypass Actor on main and v* tags</li>
         </ul>
       </div>
 
       <div class="card">
         <div class="card-header">
           <div class="card-dot cyan"></div>
-          <h3>Secretless Sandbox &amp; LLM Proxy</h3>
+          <h3>Ubuntu 26.04 2-Phase Kernel Sandbox &amp; Multi-Provider LLM</h3>
         </div>
         <ul>
-          <li>Consumer test/build subprocesses run with LLM_API_KEY and App PEM keys stripped</li>
-          <li>Fail-closed enforcement aborts execution if secret isolation cannot be verified</li>
-          <li>Deterministic iFixAi trajectory audit checks every privileged operation</li>
+          <li>Multi-Provider LLMClient supports Gemini, OpenAI, Azure OpenAI, and Anthropic with credential scrubbing</li>
+          <li>Phase A dependency install (controlled net, 0 secrets) -&gt; Phase B tests in bwrap/landrun --unshare-net + rtk</li>
+          <li>Read-only bind mounts protect .git, .github, and .cursor inside the sandbox</li>
         </ul>
       </div>
 
       <div class="card">
         <div class="card-header">
           <div class="card-dot emerald"></div>
-          <h3>Prompt-Injection Immunity (OWASP LLM01)</h3>
+          <h3>Prompt-Injection Defense &amp; SSRF-Safe Web Tools</h3>
         </div>
         <ul>
-          <li>Reviewer prompts (.cursor/agents/*.md) are loaded exclusively from trusted dev</li>
-          <li>Untrusted PR diffs and comments are isolated inside &lt;untrusted_pr_diff&gt; tags</li>
-          <li>Modifying .cursor/agents/** or workflows on task/* blocks autonomous merge</li>
+          <li>Reviewer prompts (.cursor/agents/*.md) load strictly from dev; diffs wrap in &lt;untrusted_pr_diff&gt;</li>
+          <li>Read-only web_search &amp; web_fetch block RFC1918/loopback/link-local/metadata IPs against SSRF</li>
+          <li>Fetched web pages are sanitized and wrapped inside &lt;untrusted_web_content&gt; XML boundaries</li>
         </ul>
       </div>
     </div>

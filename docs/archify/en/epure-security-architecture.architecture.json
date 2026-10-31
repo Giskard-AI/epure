@@ -3,7 +3,7 @@
   "diagram_type": "architecture",
   "meta": {
     "title": "EPURE Security & Trust Boundaries Architecture",
-    "subtitle": "Dual GitHub Apps, Secretless Sandbox Execution, Out-of-Branch CAS State, and Prompt-Injection Guards",
+    "subtitle": "Dual GitHub Apps, 2-Phase Kernel Sandbox, Multi-Provider LLMClient, SSRF-Safe Web Tools & Environment Isolation",
     "visual_preset": "blueprint",
     "quality_profile": "showcase",
     "output": "docs/public/diagrams/en/epure-security-architecture.html"
@@ -39,9 +39,9 @@
     {
       "id": "command_gate",
       "type": "security",
-      "label": "Permission Gate",
-      "sublabel": "write / admin check",
-      "tag": "fail-closed",
+      "label": "Job 1: Auth Gate",
+      "sublabel": "authorize-command",
+      "tag": "0 App/LLM secrets",
       "row": 0,
       "col": 1
     },
@@ -49,7 +49,7 @@
       "id": "orchestrator",
       "type": "backend",
       "label": "Orchestrator",
-      "sublabel": "Grill, DAG & TDD",
+      "sublabel": "Job 2: env <llm-env>",
       "tag": "issue-N lock",
       "row": 1,
       "col": 1
@@ -66,9 +66,9 @@
     {
       "id": "llm_sidecar",
       "type": "cloud",
-      "label": "LLM Sidecar",
-      "sublabel": "Gemini 3.8 HIGH",
-      "tag": "holds API key",
+      "label": "Multi-Provider LLM",
+      "sublabel": "Gemini/OpenAI/Anthropic",
+      "tag": "env: <llm-env>",
       "row": 0,
       "col": 2
     },
@@ -76,7 +76,7 @@
       "id": "trusted_reviewers",
       "type": "security",
       "label": "dev Roster",
-      "sublabel": "XML diff guards",
+      "sublabel": "XML diff & web guards",
       "tag": "OWASP LLM01",
       "row": 1,
       "col": 2
@@ -93,9 +93,9 @@
     {
       "id": "secretless_sandbox",
       "type": "backend",
-      "label": "Code Sandbox",
-      "sublabel": "tsc + vitest run",
-      "tag": "0 env secrets",
+      "label": "2-Phase Sandbox",
+      "sublabel": "bwrap/landrun + rtk",
+      "tag": "--unshare-net",
       "row": 1,
       "col": 3
     },
@@ -104,7 +104,7 @@
       "type": "security",
       "label": "Release App",
       "sublabel": "dev -> main + vX.Y.Z",
-      "tag": "sole bypass",
+      "tag": "env: release",
       "row": 2,
       "col": 3
     }
@@ -112,7 +112,7 @@
   "boundaries": [
     {
       "kind": "region",
-      "label": "EPURE Trusted Control Plane",
+      "label": "EPURE Trusted Control Plane (env: <llm-env>)",
       "wraps": [
         "command_gate",
         "orchestrator",
@@ -124,7 +124,7 @@
     },
     {
       "kind": "security-group",
-      "label": "Isolated Sandbox (0 Secrets)",
+      "label": "2-Phase Kernel Sandbox (0 Secrets)",
       "wraps": ["secretless_sandbox"]
     }
   ],
@@ -142,29 +142,29 @@
   "cards": [
     {
       "dot": "rose",
-      "title": "Dual-App Privilege Separation",
+      "title": "Dual-App Separation & GitHub Environment Scoping",
       "items": [
-        "Agent App (<owner>-epure-agent) can only write to plan/*, task/*, and feature/*",
-        "Agent App is hard-blocked from merging code PRs into dev or pushing to main",
-        "Release App (<owner>-epure-release) is the sole Bypass Actor on main and v* tags"
+        "Job 1 authorize-command runs with 0 secrets; Job 2 runs inside isolated GitHub Environment <llm-env>",
+        "Agent App writes only to plan/*, task/*, and feature/* (blocked from merging to dev or pushing to main)",
+        "Release App runs exclusively in environment: release as sole Bypass Actor on main and v* tags"
       ]
     },
     {
       "dot": "cyan",
-      "title": "Secretless Sandbox & LLM Proxy",
+      "title": "Ubuntu 26.04 2-Phase Kernel Sandbox & Multi-Provider LLM",
       "items": [
-        "Consumer test/build subprocesses run with LLM_API_KEY and App PEM keys stripped",
-        "Fail-closed enforcement aborts execution if secret isolation cannot be verified",
-        "Deterministic iFixAi trajectory audit checks every privileged operation"
+        "Multi-Provider LLMClient supports Gemini, OpenAI, Azure OpenAI, and Anthropic with credential scrubbing",
+        "Phase A dependency install (controlled net, 0 secrets) -> Phase B tests in bwrap/landrun --unshare-net + rtk",
+        "Read-only bind mounts protect .git, .github, and .cursor inside the sandbox"
       ]
     },
     {
       "dot": "emerald",
-      "title": "Prompt-Injection Immunity (OWASP LLM01)",
+      "title": "Prompt-Injection Defense & SSRF-Safe Web Tools",
       "items": [
-        "Reviewer prompts (.cursor/agents/*.md) are loaded exclusively from trusted dev",
-        "Untrusted PR diffs and comments are isolated inside <untrusted_pr_diff> tags",
-        "Modifying .cursor/agents/** or workflows on task/* blocks autonomous merge"
+        "Reviewer prompts (.cursor/agents/*.md) load strictly from dev; diffs wrap in <untrusted_pr_diff>",
+        "Read-only web_search & web_fetch block RFC1918/loopback/link-local/metadata IPs against SSRF",
+        "Fetched web pages are sanitized and wrapped inside <untrusted_web_content> XML boundaries"
       ]
     }
   ]

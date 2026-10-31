@@ -2,22 +2,22 @@
   "schema_version": 2,
   "diagram_type": "workflow",
   "meta": {
-    "title": "EPURE Multi-Agent PR Review, Impeccable Gate & Semantic Squash Pipeline",
-    "subtitle": "Trusted dev roster (max 4 agents), read-only code inspection tools, Impeccable UI gate, and bounded remediation",
+    "title": "EPURE 3-Stage Verification, Multi-Agent Review & Epic Convergence Pipeline",
+    "subtitle": "Stage 1 kernel sandbox, Stage 2 async CI checks, Stage 3 trusted dev roster & AI squash, plus EpicConvergenceAudit",
     "visual_preset": "blueprint",
     "quality_profile": "showcase",
     "output": "docs/public/diagrams/en/epure-review-pipeline.html"
   },
   "lanes": [
-    { "id": "pr_target", "label": "PR Branch & Rulesets (task/* -> feature/* / dev)" },
-    { "id": "roster_engine", "label": "Multi-Agent Reviewer Roster (from trusted dev)" },
-    { "id": "sandbox_tools", "label": "Read-Only Inspection & Checks" },
-    { "id": "remediation", "label": "Auto-Remediation & Escalation", "variant": "exception" }
+    { "id": "pr_target", "label": "Stage 1 Sandbox, Squash & Synthesis PR" },
+    { "id": "roster_engine", "label": "Stage 2 Async CI & Stage 3 dev Roster" },
+    { "id": "sandbox_tools", "label": "Read-Only Inspection & GitHub Checks" },
+    { "id": "remediation", "label": "Bounded Remediation & Phase 2 Escalation", "variant": "exception" }
   ],
   "phases": [
-    { "id": "select_phase", "label": "1. Select & Isolate", "fromCol": 0, "toCol": 1 },
-    { "id": "inspect_phase", "label": "2. Tool Audit & Gates", "fromCol": 2, "toCol": 3, "variant": "emphasis" },
-    { "id": "merge_phase", "label": "3. Squash or Escalate", "fromCol": 4, "toCol": 5, "variant": "dashed" }
+    { "id": "select_phase", "label": "1. Stage 1 & 2 Checks", "fromCol": 0, "toCol": 1 },
+    { "id": "inspect_phase", "label": "2. Stage 3 Review", "fromCol": 2, "toCol": 3, "variant": "emphasis" },
+    { "id": "merge_phase", "label": "3. Squash & Convergence", "fromCol": 4, "toCol": 5, "variant": "dashed" }
   ],
   "mainPath": [
     "pr_opened",
@@ -33,9 +33,9 @@
       "lane": "pr_target",
       "col": 0,
       "type": "frontend",
-      "label": "PR Opened",
-      "sublabel": "diff + SHA pinned",
-      "tag": "untrusted diff",
+      "label": "Stage 1: Kernel TDD",
+      "sublabel": "bwrap/landrun + rtk",
+      "tag": "write/patch_repo_file",
       "width": 132
     },
     {
@@ -43,9 +43,9 @@
       "lane": "pr_target",
       "col": 4,
       "type": "backend",
-      "label": "AI Squash Title",
-      "sublabel": "Conventional Commit",
-      "tag": "temp 0.0",
+      "label": "Squash & Audit",
+      "sublabel": "EpicConvergenceAudit",
+      "tag": "Phase 2 if gap",
       "width": 132
     },
     {
@@ -54,7 +54,7 @@
       "col": 5,
       "type": "security",
       "label": "Ruleset Merge",
-      "sublabel": "auto task/* or human dev",
+      "sublabel": "feature/* -> dev PR",
       "tag": "squash-only",
       "width": 132
     },
@@ -63,8 +63,8 @@
       "lane": "roster_engine",
       "col": 1,
       "type": "security",
-      "label": "Load dev Roster",
-      "sublabel": "max 4 specialists",
+      "label": "Stage 2 & Roster",
+      "sublabel": "waiting_ticket_ci -> dev",
       "tag": "from dev only",
       "width": 132
     },
@@ -73,7 +73,7 @@
       "lane": "roster_engine",
       "col": 2,
       "type": "backend",
-      "label": "Parallel Review",
+      "label": "Stage 3: Review",
       "sublabel": "spec-parity + domain",
       "tag": "XML wrapped",
       "width": 132
@@ -114,18 +114,18 @@
       "col": 5,
       "type": "security",
       "label": "Needs Human",
-      "sublabel": "after 3 failed fixes",
-      "tag": "escalation",
+      "sublabel": ">3 tries / >1 Phase 2",
+      "tag": "/epure continue",
       "width": 132
     }
   ],
   "edges": [
-    { "id": "pr-to-roster", "from": "pr_opened", "to": "select_roster", "label": "classify diff", "variant": "emphasis" },
+    { "id": "pr-to-roster", "from": "pr_opened", "to": "select_roster", "label": "async CI ok", "variant": "emphasis" },
     { "id": "roster-to-review", "from": "select_roster", "to": "agent_review", "label": "max 4 agents", "variant": "default" },
     { "id": "review-to-tools", "from": "agent_review", "to": "readonly_tools", "label": "inspect repo", "variant": "dashed" },
     { "id": "review-to-checks", "from": "agent_review", "to": "publish_checks", "label": "verdicts", "variant": "emphasis" },
     { "id": "checks-to-squash", "from": "publish_checks", "to": "semantic_squash", "label": "0 must_fix", "variant": "emphasis", "fromSide": "top", "toSide": "left" },
-    { "id": "squash-to-merge", "from": "semantic_squash", "to": "branch_merged", "label": "PATCH + merge", "variant": "security" },
+    { "id": "squash-to-merge", "from": "semantic_squash", "to": "branch_merged", "label": "converged", "variant": "security" },
     { "id": "checks-to-autofix", "from": "publish_checks", "to": "auto_fix", "label": "must_fix found", "variant": "security", "role": "error" },
     { "id": "autofix-to-review", "from": "auto_fix", "to": "agent_review", "label": "re-review", "variant": "dashed", "role": "return" },
     { "id": "autofix-to-escalate", "from": "auto_fix", "to": "escalate_human", "label": ">3 attempts", "variant": "security", "role": "error" }
@@ -133,29 +133,29 @@
   "cards": [
     {
       "dot": "cyan",
-      "title": "Trusted dev Roster & Prompt-Injection Defense",
+      "title": "Stage 1: Incremental Write Tools & 2-Phase Kernel Sandbox",
       "items": [
-        "Reviewer definitions (.cursor/agents/*.md) are loaded strictly from dev",
-        "Diffs and comments are wrapped in <untrusted_pr_diff> XML guards",
-        "Up to 4 specialists selected dynamically + spec-parity-reviewer"
+        "Incremental tools write_repo_file, patch_repo_file, delete_repo_file + chunked fallback",
+        "Inter-ticket integrity guard snapshots untouched files and reverts unauthorized edits",
+        "2-phase kernel sandbox (bwrap/landrun --unshare-net + rtk) strips all secrets during tests"
       ]
     },
     {
       "dot": "emerald",
-      "title": "Read-Only Tooling & Impeccable Gate",
+      "title": "Stage 2: Async PR Checks & Stage 3: Trusted dev Review",
       "items": [
-        "Agents call list_files, read_file, read_line_range, and search_code",
-        "Frontend PRs run user-advocate (implementation-review) and impeccable-gate",
-        "Objective WCAG AA, layout overflow, and DESIGN.md violations block merge"
+        "Opens task/* -> feature/* PR and exits 0 in waiting_ticket_ci while ci.yml, epure-check & impeccable-gate run",
+        "Loads .cursor/agents/*.md strictly from dev (<=4 specialists + spec-parity) with read-only tools",
+        "Rounds 1..3 re-run only failed reviewers; AI Semantic Squash synthesizes Conventional Commit"
       ]
     },
     {
       "dot": "amber",
-      "title": "Targeted Remediation & AI Semantic Squash",
+      "title": "Zero-Context EpicConvergenceAudit & Phase 2 Remediation",
       "items": [
-        "Rounds 2-3 re-run only reviewers that emitted must_fix + spec-parity",
-        "Feature PR fixes route via task/review-fix-* PRs to respect rulesets",
-        "AI synthesizes a clean Conventional Commit title and body before squash"
+        "Audits the combined feature/*..dev diff against docs/specs/* and sub-issue requirements",
+        "If gaps remain, automatically creates up to 3 Phase 2 remediation sub-issues in the DAG",
+        "Escalates to needs-human after >3 fix attempts or >1 remediation phase; resumed via /epure continue"
       ]
     }
   ]

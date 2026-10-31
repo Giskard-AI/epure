@@ -1,0 +1,173 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "EPURE GitHub Actions, 2-Job Auth Split & Async CI Continuation Flow",
+    "subtitle": "Event triggers, 2-job privilege split, 2-phase kernel sandbox, async CI suspension, and EpicConvergenceAudit",
+    "locale": "en",
+    "visual_preset": "blueprint",
+    "quality_profile": "showcase",
+    "output": "docs/public/diagrams/en/epure-ci-actions-flow.html"
+  },
+  "lanes": [
+    { "id": "github_triggers", "label": "GitHub Events & Maintainer Commands" },
+    { "id": "epure_workflows", "label": "EPURE Orchestrator Workflows (2-Job Split)" },
+    { "id": "sandbox_and_ci", "label": "Stage 1 Kernel Sandbox & Stage 2 Async CI" },
+    { "id": "review_and_convergence", "label": "Stage 3 Review, Convergence & Release" }
+  ],
+  "phases": [
+    { "id": "auth_phase", "label": "1. Triggers & 2-Job Auth", "fromCol": 0, "toCol": 1 },
+    { "id": "ci_phase", "label": "2. Sandbox & Async CI", "fromCol": 2, "toCol": 3, "variant": "emphasis" },
+    { "id": "converge_phase", "label": "3. Audit & Release", "fromCol": 4, "toCol": 5, "variant": "dashed" }
+  ],
+  "mainPath": [
+    "cmd_event",
+    "job1_authorize",
+    "job2_orchestrate",
+    "stage1_sandbox",
+    "stage2_ci_checks",
+    "release_workflow"
+  ],
+  "nodes": [
+    {
+      "id": "cmd_event",
+      "lane": "github_triggers",
+      "col": 0,
+      "type": "external",
+      "label": "Issue Commands",
+      "sublabel": "plan, to-spec, approve",
+      "tag": "issue_comment",
+      "width": 132
+    },
+    {
+      "id": "ci_wakeup_event",
+      "lane": "github_triggers",
+      "col": 3,
+      "type": "external",
+      "label": "CI Webhook Wake",
+      "sublabel": "check_suite.completed",
+      "tag": "workflow_run",
+      "width": 132
+    },
+    {
+      "id": "release_dispatch",
+      "lane": "github_triggers",
+      "col": 5,
+      "type": "external",
+      "label": "Release Dispatch",
+      "sublabel": "workflow_dispatch",
+      "tag": "Gate 4: human",
+      "width": 132
+    },
+    {
+      "id": "job1_authorize",
+      "lane": "epure_workflows",
+      "col": 1,
+      "type": "security",
+      "label": "Job 1: Authorize",
+      "sublabel": "authorize-command",
+      "tag": "0 App/LLM secrets",
+      "width": 132
+    },
+    {
+      "id": "job2_orchestrate",
+      "lane": "epure_workflows",
+      "col": 2,
+      "type": "backend",
+      "label": "Job 2: Orchestrate",
+      "sublabel": "orchestrate-issue",
+      "tag": "env: <llm-env>",
+      "width": 132
+    },
+    {
+      "id": "stage1_sandbox",
+      "lane": "sandbox_and_ci",
+      "col": 3,
+      "type": "backend",
+      "label": "Stage 1: Sandbox",
+      "sublabel": "bwrap/landrun + rtk",
+      "tag": "write/patch_repo_file",
+      "width": 132
+    },
+    {
+      "id": "stage2_ci_checks",
+      "lane": "sandbox_and_ci",
+      "col": 4,
+      "type": "security",
+      "label": "Stage 2: Async CI",
+      "sublabel": "waiting_ticket_ci (0)",
+      "tag": "ci + impeccable",
+      "width": 132
+    },
+    {
+      "id": "ops_commands",
+      "lane": "review_and_convergence",
+      "col": 1,
+      "type": "external",
+      "label": "Control Commands",
+      "sublabel": "continue, sync, cancel",
+      "tag": "to-tickets / status",
+      "width": 132
+    },
+    {
+      "id": "stage3_review",
+      "lane": "review_and_convergence",
+      "col": 4,
+      "type": "backend",
+      "label": "Stage 3 & Audit",
+      "sublabel": "dev review + Phase 2",
+      "tag": "EpicConvergenceAudit",
+      "width": 132
+    },
+    {
+      "id": "release_workflow",
+      "lane": "review_and_convergence",
+      "col": 5,
+      "type": "security",
+      "label": "release.yml",
+      "sublabel": "dev -> main + vX.Y.Z",
+      "tag": "env: release",
+      "width": 132
+    }
+  ],
+  "edges": [
+    { "id": "cmd-to-job1", "from": "cmd_event", "to": "job1_authorize", "label": "webhook", "variant": "security" },
+    { "id": "job1-to-job2", "from": "job1_authorize", "to": "job2_orchestrate", "label": "write+ ok", "variant": "emphasis" },
+    { "id": "ops-to-job2", "from": "ops_commands", "to": "job2_orchestrate", "label": "controls", "variant": "dashed", "role": "branch" },
+    { "id": "job2-to-stage1", "from": "job2_orchestrate", "to": "stage1_sandbox", "label": "TDD loop", "variant": "emphasis" },
+    { "id": "stage1-to-stage2", "from": "stage1_sandbox", "to": "stage2_ci_checks", "label": "exit 0", "variant": "default" },
+    { "id": "wakeup-to-stage2", "from": "ci_wakeup_event", "to": "stage2_ci_checks", "label": "completed", "variant": "dashed", "role": "branch" },
+    { "id": "stage2-to-stage3", "from": "stage2_ci_checks", "to": "stage3_review", "label": "checks", "variant": "dashed" },
+    { "id": "stage2-to-release", "from": "stage2_ci_checks", "to": "release_workflow", "label": "PR -> dev", "variant": "emphasis" },
+    { "id": "dispatch-to-release", "from": "release_dispatch", "to": "release_workflow", "label": "promote", "variant": "security", "role": "branch" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "GitHub Event Triggers, Commands & 2-Job Auth Split",
+      "items": [
+        "Triggers: issue_comment, check_suite / workflow_run, pull_request, workflow_dispatch",
+        "Commands: /epure plan, Grill/Spec replies, /epure to-spec, to-tickets, approve, continue, sync, status, cancel",
+        "epure-issue-command.yml splits Job 1 authorize-command (0 secrets) from Job 2 orchestrate-command (env: <llm-env>)"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Stage 1 Kernel Sandbox & Stage 2 Event-Driven CI",
+      "items": [
+        "Stage 1: Ubuntu 26.04 2-phase sandbox (bwrap/landrun --unshare-net + rtk) & write/patch/delete_repo_file",
+        "Stage 2: Opens PR and exits 0 in waiting_ticket_ci / waiting_feature_ci while external checks execute",
+        "Runs ci.yml, epure-check.yml, pr-title.yml & actions/impeccable; woken up by check_suite.completed / workflow_run.completed"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Stage 3 Review, EpicConvergenceAudit & Release",
+      "items": [
+        "Stage 3: Loads trusted dev reviewer roster (<=4 specialists) and executes AI Semantic Squash",
+        "EpicConvergenceAudit checks full feature/*..dev diff against spec and spawns Phase 2 remediation if incomplete",
+        "release.yml runs in isolated environment: release to fast-forward dev -> main and publish vX.Y.Z"
+      ]
+    }
+  ]
+}

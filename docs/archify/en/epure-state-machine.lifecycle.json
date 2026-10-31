@@ -3,15 +3,15 @@
   "diagram_type": "lifecycle",
   "meta": {
     "title": "EPURE Issue State Machine (CAS Git Ref: refs/epure/state/<issue>)",
-    "subtitle": "Atomic Compare-And-Swap state transitions, batch comment cursor, and idempotent resumption",
+    "subtitle": "Command-driven phases, async CI substates, EpicConvergenceAudit Phase 2, and /epure continue resumption",
     "visual_preset": "blueprint",
     "quality_profile": "showcase",
     "output": "docs/public/diagrams/en/epure-state-machine.html"
   },
   "mainPath": [
     "grilling",
-    "blueprint_dag",
-    "awaiting_approval",
+    "spec",
+    "tickets",
     "implementation",
     "completed"
   ],
@@ -25,27 +25,27 @@
       "step": "01"
     },
     {
-      "id": "blueprint_dag",
+      "id": "spec",
       "type": "decision",
-      "label": "Spec & DAG",
-      "sublabel": "plan/* + tickets",
-      "tag": "spec + tickets",
+      "label": "Spec Draft",
+      "sublabel": "/epure to-spec on plan/*",
+      "tag": "GLOSSARY + ADR + spec",
       "step": "02"
     },
     {
-      "id": "awaiting_approval",
+      "id": "tickets",
       "type": "waiting",
-      "label": "Awaiting Approval",
-      "sublabel": "human sign-off",
-      "tag": "gate 2",
+      "label": "Tickets DAG",
+      "sublabel": "/epure to-tickets",
+      "tag": "sub_issues + blocked_by",
       "step": "03"
     },
     {
       "id": "implementation",
       "type": "active",
       "label": "Implementation",
-      "sublabel": "TDD + review loop",
-      "tag": "spec_sha locked",
+      "sublabel": "plan/* -> feature/* + CI",
+      "tag": "spec_sha + sync + Phase 2",
       "step": "04"
     },
     {
@@ -59,9 +59,9 @@
     {
       "id": "failed",
       "type": "failure",
-      "label": "Needs Human",
-      "sublabel": ">3 tries or sensitive",
-      "tag": "escalation"
+      "label": "Suspended / Failed",
+      "sublabel": "needs-human escalation",
+      "tag": "/epure continue"
     },
     {
       "id": "cancelled",
@@ -72,40 +72,40 @@
     }
   ],
   "transitions": [
-    { "id": "grill-to-blueprint", "from": "grilling", "to": "blueprint_dag", "label": "settled" },
-    { "id": "blueprint-to-grill", "from": "blueprint_dag", "to": "grilling", "label": "next round" },
-    { "id": "blueprint-to-awaiting", "from": "blueprint_dag", "to": "awaiting_approval", "label": "DAG ready" },
-    { "id": "awaiting-to-impl", "from": "awaiting_approval", "to": "implementation", "label": "approve", "variant": "security" },
-    { "id": "impl-to-completed", "from": "implementation", "to": "completed", "label": "DAG merged", "variant": "emphasis" },
-    { "id": "impl-to-failed", "from": "implementation", "to": "failed", "label": ">3 tries", "variant": "security" },
-    { "id": "failed-to-impl", "from": "failed", "to": "implementation", "label": "re-approve", "variant": "emphasis" },
-    { "id": "awaiting-to-cancelled", "from": "awaiting_approval", "to": "cancelled", "label": "cancel" }
+    { "id": "grill-to-spec", "from": "grilling", "to": "spec", "label": "to-spec" },
+    { "id": "spec-to-grill", "from": "spec", "to": "grilling", "label": "refine" },
+    { "id": "spec-to-tickets", "from": "spec", "to": "tickets", "label": "to-tickets" },
+    { "id": "tickets-to-impl", "from": "tickets", "to": "implementation", "label": "approve", "variant": "security" },
+    { "id": "impl-to-completed", "from": "implementation", "to": "completed", "label": "audit pass", "variant": "emphasis" },
+    { "id": "impl-to-failed", "from": "implementation", "to": "failed", "label": "suspend", "variant": "security" },
+    { "id": "failed-to-impl", "from": "failed", "to": "implementation", "label": "continue", "variant": "emphasis" },
+    { "id": "tickets-to-cancelled", "from": "tickets", "to": "cancelled", "label": "cancel" }
   ],
   "cards": [
     {
       "dot": "cyan",
-      "title": "Out-of-Branch CAS Persistence",
+      "title": "Command-Driven Phases & CAS Ref",
       "items": [
         "State lives in refs/epure/state/<issue> via atomic git update-ref CAS",
-        "Zero state-machine commit pollution on dev or main branches",
-        "Synchronized with a human-readable Markdown dashboard in the issue body"
+        "/epure plan + implicit replies -> /epure to-spec (GLOSSARY.md + ADR + docs/specs/* on plan/*)",
+        "/epure to-tickets materializes native GitHub sub_issues & blocked_by edges"
       ]
     },
     {
       "dot": "amber",
-      "title": "Batch Cursor & Implicit Grill",
+      "title": "Approve, Async CI Substates & Convergence",
       "items": [
-        "last_processed_comment_id processes queued human replies in strict order",
-        "Any comment during grilling is accepted without repeating a slash command",
-        "Optional /epure to-spec and /epure to-tickets force immediate transitions"
+        "/epure approve integrates plan/* -> feature/* directly and locks spec_sha",
+        "Tracks substates implementing, waiting_ticket_ci, and waiting_feature_ci",
+        "Supports /epure sync (3-way dev merge) and EpicConvergenceAudit Phase 2 remediation"
       ]
     },
     {
       "dot": "emerald",
-      "title": "Idempotent Resumption",
+      "title": "Suspended Recovery & Cancellation",
       "items": [
-        "Re-posting /epure approve after a failure preloads merged files from feature/*",
-        "Already closed tickets in the DAG are automatically skipped",
+        "Escalations or >3 failed attempts enter failed (suspended / needs-human)",
+        "/epure continue resumes idempotently from the active DAG ticket or CI state",
         "/epure cancel halts new runs while preserving branches and audit traces"
       ]
     }

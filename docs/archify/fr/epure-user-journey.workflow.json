@@ -1,0 +1,292 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Parcours Utilisateur EPURE : Toutes vos Actions Alignées en Colonne 1 (Haut en Bas)",
+    "subtitle": "Col 1 : Vos actions (plan, retouches, to-spec, to-tickets, approve, pilotage, merge) -> Col 2-4 : Coulisses EPURE, échanges, autofix & retours",
+    "legend": {
+      "entries": {
+        "external": { "label": "1. Mes Actions (Colonne 1)" },
+        "backend": { "label": "2. Automatisé par EPURE" },
+        "messagebus": { "label": "3. Échanges & Retouches" },
+        "security": { "label": "3. Verrous, Autofix & Sync" },
+        "frontend": { "label": "4. Retour GitHub & Signal" }
+      }
+    },
+    "visual_preset": "blueprint",
+    "quality_profile": "showcase",
+    "output": "docs/public/diagrams/fr/epure-user-journey.html"
+  },
+  "lanes": [
+    { "id": "step1_grill", "label": "1. Création de l'Issue & Entretien Grill (/epure plan)" },
+    { "id": "step2_spec", "label": "2. Spécification, Glossaire, ADRs & Retouches (/epure to-spec)" },
+    { "id": "step3_tickets_approve", "label": "3. Découpage en Tickets & Approbation (/epure to-tickets -> /epure approve)" },
+    { "id": "step4_exec_autofix", "label": "4. Boucle Tickets : TDD, CI Async, Autofix (1..3) & Pilotage (/epure sync | continue)", "variant": "exception" },
+    { "id": "step5_converge_merge", "label": "5. Audit de Convergence (Phase 2), Merge Final sur dev & Release" }
+  ],
+  "phases": [
+    { "id": "col_user_actions", "label": "1. Mes Actions (Utilisateur)", "fromCol": 0, "toCol": 0, "variant": "emphasis" },
+    { "id": "col_epure_auto", "label": "2. Ce qu'EPURE fait derrière (Automatisé)", "fromCol": 1, "toCol": 2 },
+    { "id": "col_loops_autofix", "label": "3. Échanges, Retouches & Autofix", "fromCol": 3, "toCol": 3, "variant": "dashed" },
+    { "id": "col_github_feedback", "label": "4. Retour GitHub & Quand réagir", "fromCol": 4, "toCol": 4 }
+  ],
+  "nodes": [
+    {
+      "id": "user_plan_grill",
+      "lane": "step1_grill",
+      "col": 0,
+      "type": "external",
+      "label": "1. /epure plan",
+      "sublabel": "Issue + réponses Grill",
+      "tag": "Action user #1",
+      "width": 136
+    },
+    {
+      "id": "epure_grill_questions",
+      "lane": "step1_grill",
+      "col": 1,
+      "type": "backend",
+      "label": "Questions du Grill",
+      "sublabel": "Scan repo + poste Q1..Qn",
+      "tag": "phase: grilling",
+      "width": 136
+    },
+    {
+      "id": "grill_ping_pong",
+      "lane": "step1_grill",
+      "col": 3,
+      "type": "messagebus",
+      "label": "Échanges du Grill",
+      "sublabel": "Texte libre <-> rounds",
+      "tag": "itération libre",
+      "width": 136
+    },
+    {
+      "id": "grill_ready_signal",
+      "lane": "step1_grill",
+      "col": 4,
+      "type": "frontend",
+      "label": "Grill Résolu",
+      "sublabel": "Prêt pour /epure to-spec",
+      "tag": "À vous : to-spec",
+      "width": 136
+    },
+    {
+      "id": "user_to_spec",
+      "lane": "step2_spec",
+      "col": 0,
+      "type": "external",
+      "label": "2. /epure to-spec",
+      "sublabel": "Générer ou retoucher",
+      "tag": "Action user #2",
+      "width": 136
+    },
+    {
+      "id": "epure_write_spec",
+      "lane": "step2_spec",
+      "col": 1,
+      "type": "backend",
+      "label": "Spec & Goldfish",
+      "sublabel": "GLOSSARY + ADR + plan/*",
+      "tag": "zéro-contexte",
+      "width": 136
+    },
+    {
+      "id": "spec_edit_loop",
+      "lane": "step2_spec",
+      "col": 3,
+      "type": "messagebus",
+      "label": "Retouches de Spec",
+      "sublabel": "Commenter révise plan/*",
+      "tag": "boucle retouches",
+      "width": 136
+    },
+    {
+      "id": "spec_ready_signal",
+      "lane": "step2_spec",
+      "col": 4,
+      "type": "frontend",
+      "label": "Spec Prête (plan/*)",
+      "sublabel": "Prêt pour to-tickets",
+      "tag": "À vous : to-tickets",
+      "width": 136
+    },
+    {
+      "id": "user_tickets_approve",
+      "lane": "step3_tickets_approve",
+      "col": 0,
+      "type": "external",
+      "label": "3. Tickets & Approve",
+      "sublabel": "to-tickets -> approve",
+      "tag": "Action user #3",
+      "width": 136
+    },
+    {
+      "id": "epure_build_dag",
+      "lane": "step3_tickets_approve",
+      "col": 1,
+      "type": "backend",
+      "label": "Création DAG Tickets",
+      "sublabel": "sub_issues + blocked_by",
+      "tag": "phase: tickets",
+      "width": 136
+    },
+    {
+      "id": "epure_lock_mandate",
+      "lane": "step3_tickets_approve",
+      "col": 2,
+      "type": "security",
+      "label": "Mandat & Fusion Plan",
+      "sublabel": "plan/*->feature/* + sha",
+      "tag": "verrou spec_sha",
+      "width": 136
+    },
+    {
+      "id": "dag_launched_signal",
+      "lane": "step3_tickets_approve",
+      "col": 4,
+      "type": "frontend",
+      "label": "Exécution DAG Lancée",
+      "sublabel": "1er ticket démarre seul",
+      "tag": "0 action requise",
+      "width": 136
+    },
+    {
+      "id": "user_steering_ops",
+      "lane": "step4_exec_autofix",
+      "col": 0,
+      "type": "external",
+      "label": "4. sync / continue",
+      "sublabel": "Si conflit ou escalade",
+      "tag": "Action optionnelle",
+      "width": 136
+    },
+    {
+      "id": "epure_stage1_stage2",
+      "lane": "step4_exec_autofix",
+      "col": 1,
+      "type": "backend",
+      "label": "Stages 1 & 2 Auto",
+      "sublabel": "bwrap + rtk + CI async",
+      "tag": "waiting_ticket_ci",
+      "width": 136
+    },
+    {
+      "id": "epure_stage3_squash",
+      "lane": "step4_exec_autofix",
+      "col": 2,
+      "type": "backend",
+      "label": "Stage 3 & Squash IA",
+      "sublabel": "Revue dev + merge task",
+      "tag": "ticket suivant",
+      "width": 136
+    },
+    {
+      "id": "autofix_and_sync_loop",
+      "lane": "step4_exec_autofix",
+      "col": 3,
+      "type": "security",
+      "label": "Autofix 1..3 & Sync",
+      "sublabel": "Auto-fix + merge 3-voies",
+      "tag": "jusqu'à 3 essais",
+      "width": 136
+    },
+    {
+      "id": "escalation_or_next",
+      "lane": "step4_exec_autofix",
+      "col": 4,
+      "type": "frontend",
+      "label": "Suite DAG / Escalade",
+      "sublabel": "Auto ou needs-human",
+      "tag": "0 action ou continue",
+      "width": 136
+    },
+    {
+      "id": "user_final_merge",
+      "lane": "step5_converge_merge",
+      "col": 0,
+      "type": "external",
+      "label": "5. Merge & Release",
+      "sublabel": "PR -> dev puis release",
+      "tag": "Action user #4",
+      "width": 136
+    },
+    {
+      "id": "epure_convergence_audit",
+      "lane": "step5_converge_merge",
+      "col": 2,
+      "type": "backend",
+      "label": "EpicConvergenceAudit",
+      "sublabel": "Audit global 0-contexte",
+      "tag": "ouvre PR -> dev",
+      "width": 136
+    },
+    {
+      "id": "phase2_remediation",
+      "lane": "step5_converge_merge",
+      "col": 3,
+      "type": "security",
+      "label": "Phase 2 (si écart)",
+      "sublabel": "Tickets correctifs auto",
+      "tag": "max_epic_phases: 2",
+      "width": 136
+    },
+    {
+      "id": "final_pr_ready",
+      "lane": "step5_converge_merge",
+      "col": 4,
+      "type": "frontend",
+      "label": "PR Finale -> dev",
+      "sublabel": "Tous checks verts",
+      "tag": "À vous : Merger PR",
+      "width": 136
+    }
+  ],
+  "edges": [
+    { "id": "r1-c0-c1", "from": "user_plan_grill", "to": "epure_grill_questions", "label": "lance", "variant": "security" },
+    { "id": "r1-c1-c3", "from": "epure_grill_questions", "to": "grill_ping_pong", "label": "Q1..Qn", "variant": "dashed" },
+    { "id": "r1-c3-c4", "from": "grill_ping_pong", "to": "grill_ready_signal", "label": "résolu", "variant": "emphasis" },
+    { "id": "r2-c0-c1", "from": "user_to_spec", "to": "epure_write_spec", "label": "génère", "variant": "security" },
+    { "id": "r2-c1-c3", "from": "epure_write_spec", "to": "spec_edit_loop", "label": "retouche", "variant": "dashed" },
+    { "id": "r2-c3-c4", "from": "spec_edit_loop", "to": "spec_ready_signal", "label": "prête", "variant": "emphasis" },
+    { "id": "r3-c0-c1", "from": "user_tickets_approve", "to": "epure_build_dag", "label": "to-tickets", "variant": "security" },
+    { "id": "r3-c1-c2", "from": "epure_build_dag", "to": "epure_lock_mandate", "label": "approve", "variant": "emphasis" },
+    { "id": "r3-c2-c4", "from": "epure_lock_mandate", "to": "dag_launched_signal", "label": "démarre", "variant": "emphasis" },
+    { "id": "r4-c0-c1", "from": "user_steering_ops", "to": "epure_stage1_stage2", "label": "pilote", "variant": "dashed" },
+    { "id": "r4-c1-c2", "from": "epure_stage1_stage2", "to": "epure_stage3_squash", "label": "CI verte", "variant": "default" },
+    { "id": "r4-c2-c3", "from": "epure_stage3_squash", "to": "autofix_and_sync_loop", "label": "autofix", "variant": "dashed" },
+    { "id": "r4-c3-c4", "from": "autofix_and_sync_loop", "to": "escalation_or_next", "label": "résultat", "variant": "emphasis" },
+    { "id": "r5-c0-c2", "from": "user_final_merge", "to": "epure_convergence_audit", "label": "audit", "variant": "security" },
+    { "id": "r5-c2-c3", "from": "epure_convergence_audit", "to": "phase2_remediation", "label": "si écart", "variant": "dashed" },
+    { "id": "r5-c3-c4", "from": "phase2_remediation", "to": "final_pr_ready", "label": "convergé", "variant": "emphasis" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Colonne 1 — Toutes vos actions (de haut en bas)",
+      "items": [
+        "Étape 1 & 2 : Poster /epure plan, répondre aux questions Grill, lancer /epure to-spec et commenter librement pour retoucher la spec",
+        "Étape 3 & 4 : Lancer /epure to-tickets puis /epure approve ; n'intervenir en Étape 4 (/epure sync ou /epure continue) qu'en cas de conflit ou d'escalade",
+        "Étape 5 : Quand tous les checks de la PR finale feature/* -> dev sont verts, cliquer sur Squash & Merge puis lancer la release"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Colonnes 2 & 3 — Automatisation, Échanges & Autofix",
+      "items": [
+        "En coulisses (Col 2) : Audit Goldfish zéro-contexte sur plan/*, DAG sub_issues + blocked_by, merge direct plan/* -> feature/* + verrou spec_sha",
+        "Échanges & Retouches (Col 3) : Commentaires en texte libre pendant Grill et Spec ; pendant le DAG, Autofix automatique (1 à 3 essais) sur Stage 1, CI ou Revue",
+        "Sync Git & Convergence : /epure sync résout les conflits dev -> feature/* -> task/* en 3-voies ; EpicConvergenceAudit lance une Phase 2 auto si besoin"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Colonne 4 — Retours GitHub & Quand réagir",
+      "items": [
+        "À chaque jalon de cadrage (Grill résolu, Spec commitée, DAG créé), EPURE poste un commentaire indiquant exactement la prochaine commande à lancer",
+        "Pendant l'exécution du DAG (Étape 4), 0 action n'est requise tant que l'Autofix (1..3 essais) et la CI asynchrone progressent",
+        "Si un ticket dépasse 3 essais ou touche un chemin sensible, EPURE pose le label needs-human et vous attend sur /epure continue"
+      ]
+    }
+  ]
+}

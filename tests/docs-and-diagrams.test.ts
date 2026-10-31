@@ -74,6 +74,34 @@ const ARCHIFY_DIAGRAM_CASES: readonly ArchifyDiagramCase[] = [
     type: "workflow",
     jsonPath: "docs/archify/fr/epure-review-pipeline.workflow.json",
     htmlPath: "docs/public/diagrams/fr/epure-review-pipeline.html"
+  },
+  {
+    id: "en-epure-ci-actions-flow-workflow",
+    locale: "en",
+    type: "workflow",
+    jsonPath: "docs/archify/en/epure-ci-actions-flow.workflow.json",
+    htmlPath: "docs/public/diagrams/en/epure-ci-actions-flow.html"
+  },
+  {
+    id: "fr-epure-ci-actions-flow-workflow",
+    locale: "fr",
+    type: "workflow",
+    jsonPath: "docs/archify/fr/epure-ci-actions-flow.workflow.json",
+    htmlPath: "docs/public/diagrams/fr/epure-ci-actions-flow.html"
+  },
+  {
+    id: "en-epure-user-journey-workflow",
+    locale: "en",
+    type: "workflow",
+    jsonPath: "docs/archify/en/epure-user-journey.workflow.json",
+    htmlPath: "docs/public/diagrams/en/epure-user-journey.html"
+  },
+  {
+    id: "fr-epure-user-journey-workflow",
+    locale: "fr",
+    type: "workflow",
+    jsonPath: "docs/archify/fr/epure-user-journey.workflow.json",
+    htmlPath: "docs/public/diagrams/fr/epure-user-journey.html"
   }
 ];
 
@@ -118,13 +146,21 @@ const BILINGUAL_PAGE_PAIRS: readonly BilingualPagePairCase[] = [
       "/setup-repo",
       "setup-repo.mjs",
       "EPURE_AGENT_APP_ID",
-      "EPURE_RELEASE_APP_ID"
+      "EPURE_RELEASE_APP_ID",
+      "--llm-env",
+      "--env release",
+      "renovate.json",
+      ".github/zizmor.yml"
     ],
     requiredFrMarkers: [
       "/setup-repo",
       "setup-repo.mjs",
       "EPURE_AGENT_APP_ID",
-      "EPURE_RELEASE_APP_ID"
+      "EPURE_RELEASE_APP_ID",
+      "--llm-env",
+      "--env release",
+      "renovate.json",
+      ".github/zizmor.yml"
     ]
   },
   {
@@ -135,13 +171,19 @@ const BILINGUAL_PAGE_PAIRS: readonly BilingualPagePairCase[] = [
       "craft-calculator",
       "/epure plan",
       "/epure approve",
-      "epure-state-machine"
+      "epure-user-journey",
+      "epure-state-machine",
+      "write_repo_file",
+      "EpicConvergenceAudit"
     ],
     requiredFrMarkers: [
       "craft-calculator",
       "/epure plan",
       "/epure approve",
-      "epure-state-machine"
+      "epure-user-journey",
+      "epure-state-machine",
+      "write_repo_file",
+      "EpicConvergenceAudit"
     ]
   },
   {
@@ -153,16 +195,22 @@ const BILINGUAL_PAGE_PAIRS: readonly BilingualPagePairCase[] = [
       "/epure approve",
       "/epure to-spec",
       "/epure to-tickets",
+      "/epure continue",
+      "/epure sync",
       "/epure status",
-      "/epure cancel"
+      "/epure cancel",
+      "epure-ci-actions-flow"
     ],
     requiredFrMarkers: [
       "/epure plan",
       "/epure approve",
       "/epure to-spec",
       "/epure to-tickets",
+      "/epure continue",
+      "/epure sync",
       "/epure status",
-      "/epure cancel"
+      "/epure cancel",
+      "epure-ci-actions-flow"
     ]
   },
   {
@@ -172,12 +220,16 @@ const BILINGUAL_PAGE_PAIRS: readonly BilingualPagePairCase[] = [
     requiredEnMarkers: [
       ".github/agents.yml",
       "max_code_fix_attempts",
+      "max_epic_phases",
+      "verification",
       "max_parallel_reviewers",
       "enable_pages_preview"
     ],
     requiredFrMarkers: [
       ".github/agents.yml",
       "max_code_fix_attempts",
+      "max_epic_phases",
+      "verification",
       "max_parallel_reviewers",
       "enable_pages_preview"
     ]
@@ -189,11 +241,17 @@ const BILINGUAL_PAGE_PAIRS: readonly BilingualPagePairCase[] = [
     requiredEnMarkers: [
       "epure-security-architecture",
       "epure-review-pipeline",
+      "epure-ci-actions-flow",
+      "write_repo_file",
+      "EpicConvergenceAudit",
       "<untrusted_pr_diff>"
     ],
     requiredFrMarkers: [
       "epure-security-architecture",
       "epure-review-pipeline",
+      "epure-ci-actions-flow",
+      "write_repo_file",
+      "EpicConvergenceAudit",
       "<untrusted_pr_diff>"
     ]
   },
@@ -201,15 +259,45 @@ const BILINGUAL_PAGE_PAIRS: readonly BilingualPagePairCase[] = [
     id: "how-to-onboard-repo-pair",
     enPath: "docs/guides/how-to-onboard-repo.md",
     frPath: "docs/fr/guides/how-to-onboard-repo.md",
-    requiredEnMarkers: ["--dry-run", "--apply", "--require-pr-approvals"],
-    requiredFrMarkers: ["--dry-run", "--apply", "--require-pr-approvals"]
+    requiredEnMarkers: [
+      "--dry-run",
+      "--apply",
+      "--require-pr-approvals",
+      "--llm-env",
+      "--env release",
+      "renovate.json",
+      ".github/zizmor.yml"
+    ],
+    requiredFrMarkers: [
+      "--dry-run",
+      "--apply",
+      "--require-pr-approvals",
+      "--llm-env",
+      "--env release",
+      "renovate.json",
+      ".github/zizmor.yml"
+    ]
   },
   {
     id: "how-to-drive-an-issue-pair",
     enPath: "docs/guides/how-to-drive-an-issue.md",
     frPath: "docs/fr/guides/how-to-drive-an-issue.md",
-    requiredEnMarkers: ["/epure plan", "needs-human", "approved-sensitive-change"],
-    requiredFrMarkers: ["/epure plan", "needs-human", "approved-sensitive-change"]
+    requiredEnMarkers: [
+      "epure-user-journey",
+      "/epure plan",
+      "/epure continue",
+      "/epure sync",
+      "needs-human",
+      "approved-sensitive-change"
+    ],
+    requiredFrMarkers: [
+      "epure-user-journey",
+      "/epure plan",
+      "/epure continue",
+      "/epure sync",
+      "needs-human",
+      "approved-sensitive-change"
+    ]
   },
   {
     id: "how-to-customize-reviewers-pair",
@@ -431,9 +519,46 @@ describe("Bilingual VitePress Documentation, Archify Showcase Diagrams & Impecca
     expect(glossary).toContain("Portes de validation humaine obligatoires (4 jalons, Q101)");
     expect(glossary).toContain("Étapes automatisées obligatoires (Q101)");
     expect(glossary).toContain("Étapes facultatives ou conditionnelles (Q101)");
+    expect(glossary).toContain("epure-ci-actions-flow");
+    expect(glossary).toContain("<llm-env>");
     expect(decisions).toContain("Ronde 24 — Q97 à Q103");
     expect(frGlossaryPage).toContain("<!--@include: ../../../GLOSSARY.md-->");
   });
+
+  it.each([
+    {
+      id: "wizard-bash-syntax-check",
+      args: ["-n", "scripts/wizards/setup-github-apps-wizard.sh"],
+      expectedSubstrings: [] as readonly string[]
+    },
+    {
+      id: "wizard-help-manifest-flow-and-environment-scoping",
+      args: ["scripts/wizards/setup-github-apps-wizard.sh", "--help"],
+      expectedSubstrings: [
+        "--repo <owner>/<repo>",
+        "--llm-env <env-name>",
+        "--manual",
+        "EPURE_AGENT_APP_ID",
+        "EPURE_RELEASE_APP_ID",
+        "--env release"
+      ]
+    }
+  ])(
+    "validates scripts/wizards/setup-github-apps-wizard.sh contract ($id)",
+    ({ args, expectedSubstrings }) => {
+      const wizardPath = resolve(REPO_ROOT, "scripts/wizards/setup-github-apps-wizard.sh");
+      expect(existsSync(wizardPath)).toBe(true);
+
+      const stdout = execFileSync("bash", args, {
+        cwd: REPO_ROOT,
+        encoding: "utf8"
+      });
+
+      for (const expected of expectedSubstrings) {
+        expect(stdout).toContain(expected);
+      }
+    }
+  );
 
   it("evaluates the documentation site and <ArchifyDiagram> against DESIGN.md via evaluateImpeccableFrontendPr with 0 blocking findings (Q103)", () => {
     const findings = auditDocsImpeccableSurface();

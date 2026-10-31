@@ -1,36 +1,44 @@
 # How-To: Onboard a Repository with the `/setup-repo` Skill
 
-This guide shows how to take a brand-new or existing GitHub repository (such as `my-org/craft-calculator`) and onboard it by invoking **the `/setup-repo` agent skill** (`.agents/skills/setup-repo/SKILL.md`)—the preferred way to configure EPURE's 2 GitHub Apps, 5 secrets, `.github/agents.yml`, dynamic `.cursor/agents/*.md` reviewer roster, and 3 Repository Rulesets.
+This guide shows how to take a brand-new or existing GitHub repository (such as `my-org/craft-calculator`) and onboard it by invoking **the `/setup-repo` agent skill** (`.agents/skills/setup-repo/SKILL.md`)—the preferred way to configure EPURE's 2 GitHub Apps, environment-scoped secrets (`<llm-env>` and `release`), `.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`, dynamic `.cursor/agents/*.md` reviewer roster, and 3 Repository Rulesets.
 
 ---
 
-## 1. Create the Two GitHub Apps & Repository Secrets
+## 1. Create the Two GitHub Apps & Environment-Scoped Secrets
 
-EPURE separates day-to-day agent privileges from production release privileges using two GitHub Apps:
+EPURE separates day-to-day agent privileges from production release privileges using two GitHub Apps and scopes all secrets to dedicated GitHub Environments (Zizmor-compliant zero global secret exposure):
 
 - **`<owner>-epure-agent`**: Permissions `contents: write`, `issues: write`, `pull_requests: write`, `checks: write`.
 - **`<owner>-epure-release`**: Permissions `contents: write`, `metadata: read`.
 
-Run the interactive wizard (or let the `/setup-repo` skill prompt you to run it):
+Run the interactive wizard (supports **Approach 2** 1-click GitHub App Manifest Flow and **Fallback Approach 1** manual guided mode), specifying your target repository and chosen agent environment name (`--llm-env <env-name>`, e.g. `epure-agent`, `llm`, `openai`, `anthropic`, or `gemini`):
 
 ```bash
-bash scripts/wizards/setup-github-apps-wizard.sh --repo my-org/craft-calculator
+bash scripts/wizards/setup-github-apps-wizard.sh \
+  --repo my-org/craft-calculator \
+  --llm-env <llm-env>
 ```
 
-Verify that all 5 secrets are registered on your target repository:
+Verify that the secrets are registered in their respective GitHub Environments:
 
 ```bash
-gh secret list -R my-org/craft-calculator
+gh secret list -R my-org/craft-calculator --env <llm-env>
+gh secret list -R my-org/craft-calculator --env release
 ```
 
-Expected output:
+Expected output for `--env <llm-env>`:
 
 ```text
 EPURE_AGENT_APP_ID
 EPURE_AGENT_APP_PRIVATE_KEY
+LLM_API_KEY
+```
+
+Expected output for `--env release`:
+
+```text
 EPURE_RELEASE_APP_ID
 EPURE_RELEASE_APP_PRIVATE_KEY
-LLM_API_KEY
 ```
 
 ---
@@ -56,8 +64,8 @@ node dist/cli/setup-repo.mjs \
 
 Check that the dry-run report presented by the agent lists:
 
-- Creation of `.github/agents.yml` pinned to the 40-character SHA of `Giskard-AI/epure`.
-- Creation of `.github/workflows/epure-issue-command.yml`, `epure-check.yml`, `pr-title.yml`, `ci.yml`, and `release.yml`.
+- Creation of `.github/agents.yml` (flat canonical schema with auto-discovered `verification.targets`), `.github/zizmor.yml`, and `renovate.json`.
+- Creation of `.github/workflows/epure-issue-command.yml`, `epure-check.yml`, `pr-title.yml`, `ci.yml`, and `release.yml` pinned to the 40-character SHA of `Giskard-AI/epure`.
 - Dynamic initialization of the `.cursor/agents/*.md` reviewer roster designed by the agent for your stack and sub-domains (always-on core `architecture-reviewer`, `security-reviewer`, `spec-parity-reviewer`, `standards-reviewer`, `user-advocate` + tailored domain/UI specialists, yielding 10 agents for the `craft-calculator` web app example).
 - Creation of the 3 Repository Rulesets (`epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`).
 
@@ -77,12 +85,12 @@ node dist/cli/setup-repo.mjs \
   --apply-github-settings
 ```
 
-Then commit and push the generated files to `dev`:
+Then commit and push the generated files (`.github/`, `.cursor/agents/`, and `renovate.json`) to `dev`:
 
 ```bash
 cd /path/to/craft-calculator
 git checkout dev
-git add .github/ .cursor/agents/
+git add .github/ .cursor/agents/ renovate.json
 git commit -m "chore(epure): bootstrap repository governance and workflows"
 git push origin dev
 ```
