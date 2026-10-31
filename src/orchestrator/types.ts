@@ -2,6 +2,7 @@ import type { EpureCommandName } from "../auth/issue-command-gate.js";
 import type { AgentsConfig } from "../bootstrap/setup-repo.js";
 import type {
   CheckRunAnnotationRecord,
+  EpicConvergenceEscalationDetails,
   ExternalCheckRunRecord,
   ExternalWorkflowRunRecord,
   NeedsHumanEscalationReason,
@@ -18,7 +19,9 @@ import type {
 } from "../state/git-ref-state.js";
 
 export {
+  ADR_COHERENCE_RECONCILIATION_SCHEMA,
   CONFLICT_RESOLUTION_SCHEMA,
+  EPIC_CONVERGENCE_AUDIT_SCHEMA,
   GENERATED_PLANNING_BUNDLE_SCHEMA,
   GENERATED_SPEC_ARTIFACTS_SCHEMA,
   GENERATED_TICKET_DAG_SCHEMA,
@@ -28,7 +31,13 @@ export {
   REVIEWER_FINDINGS_SCHEMA,
   SQUASH_COMMIT_SCHEMA,
   USER_ADVOCATE_SCHEMA,
+  createGeneratedTicketImplementationSchema,
+  parseOptionalEpicGoalContract,
+  type AdrCoherenceReconciliationPayload,
   type ConflictResolutionPayload,
+  type CreateGeneratedTicketImplementationSchemaOptions,
+  type EpicConvergenceAuditPayload,
+  type EpicGoalContract,
   type GeneratedAdrDocument,
   type GeneratedFileChange,
   type GeneratedFilePatch,
@@ -67,6 +76,7 @@ export interface IssueCommentRecord {
 export type IssueCommentSummary = IssueCommentRecord;
 
 export interface IssueMetadata {
+  readonly id?: number | undefined;
   readonly number: number;
   readonly title: string;
   readonly body: string;
@@ -87,6 +97,7 @@ export interface TrackedTicketCommentMetadata {
   acceptanceCriteria: string[];
   blockedByIssueNumbers: number[];
   filesToTouch: string[];
+  phase?: number | undefined;
 }
 
 export interface CreatedTicketRecord {
@@ -152,7 +163,23 @@ export interface GitHubRestHelper {
     title: string;
     body: string;
     labels: string[];
-  }): Promise<{ number: number; html_url: string }>;
+  }): Promise<{ id?: number | undefined; number: number; html_url: string }>;
+  updateIssue?(
+    issueNumber: number,
+    params: {
+      title?: string | undefined;
+      body?: string | undefined;
+      state?: "open" | "closed" | undefined;
+    }
+  ): Promise<void>;
+  addSubIssue?(
+    parentIssueNumber: number,
+    subIssueDatabaseId: number
+  ): Promise<void>;
+  addIssueBlockedByDependency?(
+    issueNumber: number,
+    blockerDatabaseId: number
+  ): Promise<void>;
   closeIssue(issueNumber: number): Promise<void>;
   getDefaultBranchSha(branch: string): Promise<string | null>;
   listBranchPaths(branch: string): Promise<string[]>;
@@ -162,7 +189,8 @@ export interface GitHubRestHelper {
   ): Promise<string | null>;
   readBranchWorkspaceFiles(
     branch: string,
-    hintText?: string
+    hintText?: string,
+    pinnedPaths?: readonly string[]
   ): Promise<Map<string, string>>;
   readTrustedBaseRosterFiles(branch: string): Promise<Map<string, string>>;
   readDevWorkflowsMap(branch: string): Promise<Map<string, string>>;
@@ -268,7 +296,10 @@ export interface EscalateToNeedsHumanParams {
   sensitivePaths?: ReadonlyArray<string> | undefined;
   traversalPaths?: ReadonlyArray<string> | undefined;
   diagnosticExcerpt?: string | undefined;
+  epicConvergenceDetails?: EpicConvergenceEscalationDetails | undefined;
 }
+
+export type { EpicConvergenceEscalationDetails };
 
 export type EscalateToNeedsHumanFn = (
   params: EscalateToNeedsHumanParams

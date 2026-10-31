@@ -8,7 +8,9 @@ import { wrapUntrustedContent } from "../../security/prompt-injection-guard.js";
 import { callGeminiJson } from "../gemini-client.js";
 import { EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT } from "../prompts/code-discipline.js";
 import {
+  ADR_COHERENCE_RECONCILIATION_SCHEMA,
   CONFLICT_RESOLUTION_SCHEMA,
+  type AdrCoherenceReconciliationPayload,
   type ConflictResolutionPayload
 } from "../prompts/schemas.js";
 import type { EscalateToNeedsHumanFn, GitHubRestHelper } from "../types.js";
@@ -197,6 +199,7 @@ export interface RenumberCollidingAdrsInput {
     readonly path: string;
     readonly content: string;
   }> | undefined;
+  readonly glossaryContent?: string | undefined;
 }
 
 export interface RenumberCollidingAdrsResult {
@@ -210,10 +213,19 @@ export interface RenumberCollidingAdrsResult {
     readonly path: string;
     readonly content: string;
   }>;
+  readonly glossaryContent?: string | undefined;
   readonly deletedAdrPaths: readonly string[];
 }
 
 const ADR_PATH_REGEX = /^docs\/adr\/(\d{4})-(.+)\.md$/;
+
+function normalizeAdrSlug(rawSlug: string): string {
+  return rawSlug
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
 
 function replaceAdrReferencesSinglePass(
   text: string,
@@ -254,37 +266,40 @@ function replaceAdrReferencesSinglePass(
 }
 
 /**
- * Automatically resolves ADR number collisions when `dev` has already allocated `docs/adr/NNNN-*.md`
- * for another concurrent issue, renumbering colliding `plan/*` ADRs above `max(dev, plan)` and updating
- * references in both the ADR content and `docs/specs/*.md` in a single atomic pass.
+ * Automatically resolves ADR number collisions and deduplicates ADRs by slug (`docs/adr/NNNN-<slug>.md`)
+ * when `dev` has already allocated `docs/adr/NNNN-*.md` or when a branch accumulated duplicate ADR numbers
+ * for the same slug (e.g., 0039/0042/0045), updating references in ADR content, `docs/specs/*.md`, and
+ * `GLOSSARY.md` in a single atomic pass (ADR-0032, Q114).
  */
 export function renumberCollidingAdrs(
   input: RenumberCollidingAdrsInput
 ): RenumberCollidingAdrsResult {
   const devAdrsByNumber = new Map<number, string>();
+  const devAdrsBySlug = new Map<
+    string,
+    { num: number; numStr: string; slug: string; path: string }
+  >();
   let maxAdrNumber = 0;
 
   for (const rawPath of input.devPaths) {
     const cleanPath = rawPath.trim().replace(/^\/+/, "");
     const match = ADR_PATH_REGEX.exec(cleanPath);
-    if (match && match[1]) {
+    if (match && match[1] && match[2]) {
       const num = Number.parseInt(match[1], 10);
+      const normSlug = normalizeAdrSlug(match[2]);
       if (Number.isFinite(num)) {
         devAdrsByNumber.set(num, cleanPath);
+        if (!devAdrsBySlug.has(normSlug)) {
+          devAdrsBySlug.set(normSlug, {
+            num,
+            numStr: match[1],
+            slug: match[2],
+            path: cleanPath
+          });
+        }
         if (num > maxAdrNumber) {
           maxAdrNumber = num;
         }
-      }
-    }
-  }
-
-  for (const adr of input.planAdrs) {
-    const cleanPath = adr.path.trim().replace(/^\/+/, "");
-    const match = ADR_PATH_REGEX.exec(cleanPath);
-    if (match && match[1]) {
-      const num = Number.parseInt(match[1], 10);
-      if (Number.isFinite(num) && num > maxAdrNumber) {
-        maxAdrNumber = num;
       }
     }
   }
@@ -293,19 +308,31 @@ export function renumberCollidingAdrs(
     string,
     { oldNumStr: string; newNumStr: string; oldFileName: string; newFileName: string }
   >();
-  const resultingAdrs: Array<{
+  const deletedAdrPathsSet = new Set<string>();
+
+  // First pass: deduplicate planAdrs that share the same normalized slug (keep latest content, canonicalize number)
+  const planBySlug = new Map<
+    string,
+    Array<{
+      cleanPath: string;
+      num: number;
+      numStr: string;
+      slug: string;
+      content: string;
+    }>
+  >();
+  const passthroughAdrs: Array<{
     readonly path: string;
     readonly content: string;
     readonly oldPath: string;
     readonly renumbered: boolean;
   }> = [];
-  const deletedAdrPaths: string[] = [];
 
   for (const adr of input.planAdrs) {
     const cleanPath = adr.path.trim().replace(/^\/+/, "");
     const match = ADR_PATH_REGEX.exec(cleanPath);
     if (!match || !match[1] || !match[2]) {
-      resultingAdrs.push({
+      passthroughAdrs.push({
         path: cleanPath,
         content: adr.content,
         oldPath: cleanPath,
@@ -313,64 +340,238 @@ export function renumberCollidingAdrs(
       });
       continue;
     }
+    const num = Number.parseInt(match[1], 10);
+    const normSlug = normalizeAdrSlug(match[2]);
+    const list = planBySlug.get(normSlug) ?? [];
+    list.push({
+      cleanPath,
+      num,
+      numStr: match[1],
+      slug: match[2],
+      content: adr.content
+    });
+    planBySlug.set(normSlug, list);
+  }
 
-    const oldNum = Number.parseInt(match[1], 10);
-    const slug = match[2];
-    const existingDevPath = devAdrsByNumber.get(oldNum);
-
-    if (existingDevPath && existingDevPath !== cleanPath) {
-      maxAdrNumber = Math.max(maxAdrNumber, oldNum) + 1;
-      const oldNumStr = match[1];
-      const newNumStr = String(maxAdrNumber).padStart(4, "0");
-      const oldFileName = `${oldNumStr}-${slug}.md`;
-      const newFileName = `${newNumStr}-${slug}.md`;
-      const newPath = `docs/adr/${newFileName}`;
-      devAdrsByNumber.set(maxAdrNumber, newPath);
-
-      const singleReplacement = {
-        oldNumStr,
-        newNumStr,
-        oldFileName,
-        newFileName
-      };
-      renumberMap.set(cleanPath, singleReplacement);
-      deletedAdrPaths.push(cleanPath);
-
-      const updatedContent = replaceAdrReferencesSinglePass(adr.content, [
-        singleReplacement
-      ]);
-
-      resultingAdrs.push({
-        path: newPath,
-        content: updatedContent,
-        oldPath: cleanPath,
-        renumbered: true
-      });
-    } else {
-      if (oldNum > maxAdrNumber) {
-        maxAdrNumber = oldNum;
-      }
-      devAdrsByNumber.set(oldNum, cleanPath);
-      resultingAdrs.push({
-        path: cleanPath,
-        content: adr.content,
-        oldPath: cleanPath,
-        renumbered: false
-      });
+  // Only count non-duplicate plan ADRs toward initial maxAdrNumber when their slug is not already on dev
+  for (const [normSlug, entries] of planBySlug.entries()) {
+    if (devAdrsBySlug.has(normSlug)) {
+      continue;
+    }
+    const primary = entries[0]!;
+    if (
+      !devAdrsByNumber.has(primary.num) &&
+      Number.isFinite(primary.num) &&
+      primary.num > maxAdrNumber
+    ) {
+      maxAdrNumber = primary.num;
     }
   }
 
+  const intermediateAdrs: Array<{
+    path: string;
+    content: string;
+    oldPath: string;
+    renumbered: boolean;
+  }> = [...passthroughAdrs];
+
+  for (const [normSlug, entries] of planBySlug.entries()) {
+    entries.sort((a, b) => a.num - b.num);
+    const latestEntry = entries[entries.length - 1]!;
+    const earliestEntry = entries[0]!;
+    const existingDevForSlug = devAdrsBySlug.get(normSlug);
+
+    if (existingDevForSlug) {
+      // Slug already exists on dev: reuse canonical dev number & path, delete any renumbered duplicates
+      const canonicalPath = existingDevForSlug.path;
+      const canonicalFileName = `${existingDevForSlug.numStr}-${existingDevForSlug.slug}.md`;
+      let wasRenumbered = false;
+      for (const entry of entries) {
+        if (entry.cleanPath !== canonicalPath) {
+          wasRenumbered = true;
+          deletedAdrPathsSet.add(entry.cleanPath);
+          renumberMap.set(entry.cleanPath, {
+            oldNumStr: entry.numStr,
+            newNumStr: existingDevForSlug.numStr,
+            oldFileName: `${entry.numStr}-${entry.slug}.md`,
+            newFileName: canonicalFileName
+          });
+        }
+      }
+      intermediateAdrs.push({
+        path: canonicalPath,
+        content: latestEntry.content,
+        oldPath: latestEntry.cleanPath,
+        renumbered: wasRenumbered
+      });
+      continue;
+    }
+
+    // Slug does not exist on dev yet: check if earliestEntry.num collides with a different slug on dev
+    const collidingDevPath = devAdrsByNumber.get(earliestEntry.num);
+    let targetNum = earliestEntry.num;
+    let targetNumStr = earliestEntry.numStr;
+    let targetSlug = earliestEntry.slug;
+    let targetPath = earliestEntry.cleanPath;
+    let renumbered = false;
+
+    if (collidingDevPath && collidingDevPath !== earliestEntry.cleanPath) {
+      maxAdrNumber = Math.max(maxAdrNumber, earliestEntry.num) + 1;
+      targetNum = maxAdrNumber;
+      targetNumStr = String(targetNum).padStart(4, "0");
+      targetSlug = latestEntry.slug;
+      targetPath = `docs/adr/${targetNumStr}-${targetSlug}.md`;
+      renumbered = true;
+    } else if (targetNum > maxAdrNumber) {
+      maxAdrNumber = targetNum;
+    }
+
+    devAdrsByNumber.set(targetNum, targetPath);
+    devAdrsBySlug.set(normSlug, {
+      num: targetNum,
+      numStr: targetNumStr,
+      slug: targetSlug,
+      path: targetPath
+    });
+
+    const targetFileName = `${targetNumStr}-${targetSlug}.md`;
+    for (const entry of entries) {
+      if (entry.cleanPath !== targetPath) {
+        renumbered = true;
+        deletedAdrPathsSet.add(entry.cleanPath);
+        renumberMap.set(entry.cleanPath, {
+          oldNumStr: entry.numStr,
+          newNumStr: targetNumStr,
+          oldFileName: `${entry.numStr}-${entry.slug}.md`,
+          newFileName: targetFileName
+        });
+      }
+    }
+
+    intermediateAdrs.push({
+      path: targetPath,
+      content: latestEntry.content,
+      oldPath: earliestEntry.cleanPath,
+      renumbered
+    });
+  }
+
   const allReplacements = Array.from(renumberMap.values());
+  const resultingAdrs = intermediateAdrs.map((adr) => ({
+    ...adr,
+    content: replaceAdrReferencesSinglePass(adr.content, allReplacements)
+  }));
   const updatedSpecFiles = (input.specFiles ?? []).map((spec) => ({
     path: spec.path.trim().replace(/^\/+/, ""),
     content: replaceAdrReferencesSinglePass(spec.content, allReplacements)
   }));
+  const updatedGlossaryContent =
+    input.glossaryContent !== undefined
+      ? replaceAdrReferencesSinglePass(input.glossaryContent, allReplacements)
+      : undefined;
 
   return {
     adrs: resultingAdrs,
     specFiles: updatedSpecFiles,
-    deletedAdrPaths
+    ...(updatedGlossaryContent !== undefined
+      ? { glossaryContent: updatedGlossaryContent }
+      : {}),
+    deletedAdrPaths: Array.from(deletedAdrPathsSet)
   };
+}
+
+export interface ReconcileAdrsWithLlmInput {
+  readonly devAdrs: ReadonlyArray<{
+    readonly path: string;
+    readonly content: string;
+  }>;
+  readonly featureAdrs: ReadonlyArray<{
+    readonly path: string;
+    readonly content: string;
+  }>;
+  readonly specFiles: ReadonlyArray<{
+    readonly path: string;
+    readonly content: string;
+  }>;
+  readonly glossaryContent?: string | undefined;
+  readonly llmClient?: LLMClient | undefined;
+  readonly llmApiKey?: string | undefined;
+  readonly model?: string | undefined;
+  readonly fetchImpl?: typeof fetch | undefined;
+}
+
+export async function reconcileAdrsWithLlm(
+  input: ReconcileAdrsWithLlmInput
+): Promise<AdrCoherenceReconciliationPayload | null> {
+  if (!input.llmClient && !input.llmApiKey) {
+    return null;
+  }
+  if (input.devAdrs.length === 0 || input.featureAdrs.length === 0) {
+    return null;
+  }
+
+  const systemInstruction = [
+    "Tu es l'architecte EPURE chargé de la réconciliation sémantique et monotone des ADRs (ADR-0032, Q114 & Q118).",
+    "Lorsqu'une branche `feature/*` ou `plan/*` est synchronisée avec `dev` où d'autres ADRs ont été fusionnés concurremment :",
+    "1. Vérifie qu'aucune décision de `featureAdrs` n'est redondante ou contradictoire avec `devAdrs`.",
+    "2. Si un ADR de `featureAdrs` porte sur la même décision architecturale qu'un ADR de `devAdrs` sous un autre slug, fusionne-le dans le chemin canonique de `devAdrs` et ajoute le chemin redondant dans `deleted_adr_paths`.",
+    "3. Assure-toi que tous les liens et références `ADR-NNNN` dans les ADRs, les spécifications (`specFiles`) et `GLOSSARY.md` pointent vers les bons numéros et titres.",
+    "4. Ne renvoie dans `updated_files` que les fichiers (`docs/adr/*.md`, `docs/specs/*.md`, `GLOSSARY.md`) dont le contenu doit être mis à jour.",
+    EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
+  ].join("\n");
+
+  const userPrompt = [
+    "### ADRs déjà présents sur `dev` (contenu intégral) :",
+    ...input.devAdrs.map(
+      (a) =>
+        `#### \`${a.path}\`\n${wrapUntrustedContent("untrusted_workspace_files", a.content)}`
+    ),
+    "",
+    "### ADRs de la fonctionnalité courante (après renumérotation déterministe, contenu intégral) :",
+    ...input.featureAdrs.map(
+      (a) =>
+        `#### \`${a.path}\`\n${wrapUntrustedContent("untrusted_workspace_files", a.content)}`
+    ),
+    "",
+    "### Spécifications de la fonctionnalité (contenu intégral) :",
+    ...input.specFiles.map(
+      (s) =>
+        `#### \`${s.path}\`\n${wrapUntrustedContent("untrusted_workspace_files", s.content)}`
+    ),
+    ...(input.glossaryContent
+      ? [
+          "",
+          "### `GLOSSARY.md` (contenu intégral) :",
+          wrapUntrustedContent(
+            "untrusted_workspace_files",
+            input.glossaryContent
+          )
+        ]
+      : [])
+  ].join("\n");
+
+  try {
+    if (input.llmClient) {
+      return await input.llmClient.completeStructured({
+        model: input.model ?? "gemini-3.8-flash",
+        systemInstruction,
+        userPrompt,
+        responseSchema: ADR_COHERENCE_RECONCILIATION_SCHEMA,
+        temperature: 0.1
+      });
+    }
+    return await callGeminiJson<AdrCoherenceReconciliationPayload>({
+      apiKey: input.llmApiKey ?? "",
+      model: input.model ?? "gemini-3.8-flash",
+      systemInstruction,
+      prompt: userPrompt,
+      temperature: 0.1,
+      responseSchema: ADR_COHERENCE_RECONCILIATION_SCHEMA,
+      fetchImpl: input.fetchImpl
+    });
+  } catch {
+    return null;
+  }
 }
 
 export interface IntegratePlanBranchIntoFeatureResult {
@@ -381,6 +582,69 @@ export interface IntegratePlanBranchIntoFeatureResult {
     readonly newPath: string;
   }>;
   readonly closedLegacyPlanPrNumber?: number | undefined;
+}
+
+async function applyAdrLlmReconciliation(params: {
+  readonly gh: Pick<GitHubRestHelper, "readSingleBranchFile">;
+  readonly baseBranch: string;
+  readonly devAdrPaths: readonly string[];
+  readonly featureAdrs: ReadonlyArray<{ path: string; content: string }>;
+  readonly specFiles: ReadonlyArray<{ path: string; content: string }>;
+  readonly glossaryContent?: string | undefined;
+  readonly filesToMutate: Array<{ path: string; content: string }>;
+  readonly deletedAdrPaths: string[];
+  readonly llmClient?: LLMClient | undefined;
+  readonly llmApiKey?: string | undefined;
+  readonly model?: string | undefined;
+  readonly fetchImpl?: typeof fetch | undefined;
+}): Promise<void> {
+  if (!params.llmClient && !params.llmApiKey) {
+    return;
+  }
+  const devAdrsLoaded: Array<{ path: string; content: string }> = [];
+  for (const dp of params.devAdrPaths) {
+    const c = await params.gh.readSingleBranchFile(params.baseBranch, dp);
+    if (c !== null) {
+      devAdrsLoaded.push({ path: dp, content: c });
+    }
+  }
+  const llmReconciled = await reconcileAdrsWithLlm({
+    devAdrs: devAdrsLoaded,
+    featureAdrs: params.featureAdrs,
+    specFiles: params.specFiles,
+    glossaryContent: params.glossaryContent,
+    llmClient: params.llmClient,
+    llmApiKey: params.llmApiKey,
+    model: params.model,
+    fetchImpl: params.fetchImpl
+  });
+  if (!llmReconciled) {
+    return;
+  }
+  for (const updated of llmReconciled.updated_files) {
+    if (
+      updated.path === "GLOSSARY.md" ||
+      updated.path.startsWith("docs/adr/") ||
+      updated.path.startsWith("docs/specs/")
+    ) {
+      const existingIdx = params.filesToMutate.findIndex(
+        (f) => f.path === updated.path
+      );
+      if (existingIdx >= 0) {
+        params.filesToMutate[existingIdx] = updated;
+      } else {
+        params.filesToMutate.push(updated);
+      }
+    }
+  }
+  for (const delPath of llmReconciled.deleted_adr_paths) {
+    if (
+      delPath.startsWith("docs/adr/") &&
+      !params.deletedAdrPaths.includes(delPath)
+    ) {
+      params.deletedAdrPaths.push(delPath);
+    }
+  }
 }
 
 /**
@@ -395,6 +659,10 @@ export async function integratePlanBranchIntoFeature(params: {
   readonly planBranch: string;
   readonly featureBranch: string;
   readonly baseBranch?: string | undefined;
+  readonly llmClient?: LLMClient | undefined;
+  readonly llmApiKey?: string | undefined;
+  readonly model?: string | undefined;
+  readonly fetchImpl?: typeof fetch | undefined;
 }): Promise<IntegratePlanBranchIntoFeatureResult> {
   const baseBranch = params.baseBranch ?? "dev";
   const featureInitialSha = await params.gh.ensureBranch(
@@ -493,14 +761,54 @@ export async function integratePlanBranchIntoFeature(params: {
   const renumberedResult = renumberCollidingAdrs({
     devPaths,
     planAdrs: planAdrsToProcess,
-    specFiles: specFilesToProcess
+    specFiles: specFilesToProcess,
+    glossaryContent: filesToCommit.find((f) => f.path === "GLOSSARY.md")?.content
   });
+
+  if (renumberedResult.glossaryContent !== undefined) {
+    const idx = filesToCommit.findIndex((f) => f.path === "GLOSSARY.md");
+    if (idx >= 0) {
+      filesToCommit[idx] = {
+        path: "GLOSSARY.md",
+        content: renumberedResult.glossaryContent
+      };
+    }
+  }
 
   for (const adr of renumberedResult.adrs) {
     filesToCommit.push({ path: adr.path, content: adr.content });
   }
   for (const spec of renumberedResult.specFiles) {
     filesToCommit.push({ path: spec.path, content: spec.content });
+  }
+
+  const deletedAdrPaths = [...renumberedResult.deletedAdrPaths];
+  const devAdrPaths = devPaths
+    .map((p) => p.trim().replace(/^\/+/, ""))
+    .filter((p) => ADR_PATH_REGEX.test(p));
+
+  // Semantic cross-ADR LLM reconciliation when collisions/renumbering or concurrent dev ADRs exist (ADR-0032, Q118)
+  if (
+    renumberedResult.adrs.length > 0 &&
+    (renumberedResult.adrs.some((a) => a.renumbered) ||
+      renumberedResult.deletedAdrPaths.length > 0 ||
+      devAdrPaths.length > 0)
+  ) {
+    await applyAdrLlmReconciliation({
+      gh: params.gh,
+      baseBranch,
+      devAdrPaths,
+      featureAdrs: renumberedResult.adrs,
+      specFiles: renumberedResult.specFiles,
+      glossaryContent: filesToCommit.find((f) => f.path === "GLOSSARY.md")
+        ?.content,
+      filesToMutate: filesToCommit,
+      deletedAdrPaths,
+      llmClient: params.llmClient,
+      llmApiKey: params.llmApiKey,
+      model: params.model,
+      fetchImpl: params.fetchImpl
+    });
   }
 
   if (filesToCommit.length === 0) {
@@ -519,9 +827,7 @@ export async function integratePlanBranchIntoFeature(params: {
     fromBranch: baseBranch,
     commitMessage: `docs(plan): integrate approved planning artifacts from ${params.planBranch}`,
     files: filesToCommit,
-    ...(renumberedResult.deletedAdrPaths.length > 0
-      ? { deletedFiles: renumberedResult.deletedAdrPaths }
-      : {})
+    ...(deletedAdrPaths.length > 0 ? { deletedFiles: deletedAdrPaths } : {})
   });
 
   return {
@@ -537,7 +843,16 @@ export async function integratePlanBranchIntoFeature(params: {
 }
 
 export interface SyncBranchWithBaseInput {
-  readonly gh: GitHubRestHelper;
+  readonly gh: Pick<
+    GitHubRestHelper,
+    | "mergeBranches"
+    | "getDefaultBranchSha"
+    | "listBranchPaths"
+    | "readSingleBranchFile"
+    | "commitFilesToBranch"
+    | "compareCommits"
+    | "readBranchWorkspaceFiles"
+  >;
   readonly targetBranch: string;
   readonly baseBranch: string;
   readonly issueNumber: number;
@@ -588,6 +903,108 @@ export async function syncBranchWithBase(
   });
 
   if (mergeRes.status === "up_to_date" || mergeRes.status === "merged") {
+    if (
+      mergeRes.status === "merged" &&
+      typeof input.gh.listBranchPaths === "function" &&
+      typeof input.gh.readSingleBranchFile === "function" &&
+      (input.targetBranch.startsWith("feature/") ||
+        input.targetBranch.startsWith("plan/"))
+    ) {
+      const [basePathsAfterMerge, targetPathsAfterMerge] = await Promise.all([
+        input.gh.listBranchPaths(input.baseBranch),
+        input.gh.listBranchPaths(input.targetBranch)
+      ]);
+      const baseAdrSet = new Set(
+        basePathsAfterMerge
+          .map((p) => p.trim().replace(/^\/+/, ""))
+          .filter((p) => ADR_PATH_REGEX.test(p))
+      );
+      const targetOnlyAdrPaths = targetPathsAfterMerge
+        .map((p) => p.trim().replace(/^\/+/, ""))
+        .filter((p) => ADR_PATH_REGEX.test(p) && !baseAdrSet.has(p));
+
+      if (baseAdrSet.size > 0 && targetOnlyAdrPaths.length > 0) {
+        const planAdrsLoaded: Array<{ path: string; content: string }> = [];
+        for (const p of targetOnlyAdrPaths) {
+          const c = await input.gh.readSingleBranchFile(input.targetBranch, p);
+          if (c !== null) {
+            planAdrsLoaded.push({ path: p, content: c });
+          }
+        }
+        const specPathsOnTarget = targetPathsAfterMerge
+          .map((p) => p.trim().replace(/^\/+/, ""))
+          .filter((p) => /^docs\/specs\/.+\.md$/.test(p));
+        const specFilesLoaded: Array<{ path: string; content: string }> = [];
+        for (const sp of specPathsOnTarget) {
+          const c = await input.gh.readSingleBranchFile(input.targetBranch, sp);
+          if (c !== null) {
+            specFilesLoaded.push({ path: sp, content: c });
+          }
+        }
+        const glossaryOnTarget = await input.gh.readSingleBranchFile(
+          input.targetBranch,
+          "GLOSSARY.md"
+        );
+        const renumberedOnMerge = renumberCollidingAdrs({
+          devPaths: basePathsAfterMerge,
+          planAdrs: planAdrsLoaded,
+          specFiles: specFilesLoaded,
+          ...(glossaryOnTarget !== null
+            ? { glossaryContent: glossaryOnTarget }
+            : {})
+        });
+        const adrFilesToUpdate: Array<{ path: string; content: string }> = [];
+        const adrDeletedPaths = [...renumberedOnMerge.deletedAdrPaths];
+        if (
+          renumberedOnMerge.adrs.some((a) => a.renumbered) ||
+          adrDeletedPaths.length > 0
+        ) {
+          for (const adr of renumberedOnMerge.adrs) {
+            adrFilesToUpdate.push({ path: adr.path, content: adr.content });
+          }
+          for (const spec of renumberedOnMerge.specFiles) {
+            adrFilesToUpdate.push({ path: spec.path, content: spec.content });
+          }
+          if (renumberedOnMerge.glossaryContent !== undefined) {
+            adrFilesToUpdate.push({
+              path: "GLOSSARY.md",
+              content: renumberedOnMerge.glossaryContent
+            });
+          }
+        }
+        await applyAdrLlmReconciliation({
+          gh: input.gh,
+          baseBranch: input.baseBranch,
+          devAdrPaths: Array.from(baseAdrSet),
+          featureAdrs: renumberedOnMerge.adrs,
+          specFiles: renumberedOnMerge.specFiles,
+          glossaryContent:
+            renumberedOnMerge.glossaryContent ??
+            (glossaryOnTarget ?? undefined),
+          filesToMutate: adrFilesToUpdate,
+          deletedAdrPaths: adrDeletedPaths,
+          llmClient: input.llmClient,
+          llmApiKey: input.llmApiKey,
+          model: input.model,
+          fetchImpl: input.fetchImpl
+        });
+        if (adrFilesToUpdate.length > 0 || adrDeletedPaths.length > 0) {
+          const reconciledSha = await input.gh.commitFilesToBranch({
+            branch: input.targetBranch,
+            commitMessage: `docs(adr): reconcile concurrent ADRs from ${input.baseBranch} into ${input.targetBranch}`,
+            files: adrFilesToUpdate,
+            ...(adrDeletedPaths.length > 0
+              ? { deletedFiles: adrDeletedPaths }
+              : {})
+          });
+          return {
+            status: mergeRes.status,
+            headSha: reconciledSha,
+            conflictsResolved: []
+          };
+        }
+      }
+    }
     return {
       status: mergeRes.status,
       headSha: mergeRes.sha,
@@ -739,24 +1156,21 @@ export async function syncBranchWithBase(
       ]);
       fileTriplets.push(
         [
-          `### File: \`${filePath}\``,
+          `### File: \`${filePath}\` (untruncated 3-way versions)`,
           "#### `<base_version>` (common ancestor):",
           wrapUntrustedContent(
             "untrusted_workspace_files",
-            baseContent ?? "",
-            12_000
+            baseContent ?? ""
           ),
           `#### \`<ours_target_branch>\` (\`${input.targetBranch}\`):`,
           wrapUntrustedContent(
             "untrusted_workspace_files",
-            oursContent ?? "",
-            12_000
+            oursContent ?? ""
           ),
           `#### \`<theirs_base_branch>\` (\`${input.baseBranch}\`):`,
           wrapUntrustedContent(
             "untrusted_workspace_files",
-            theirsContent ?? "",
-            12_000
+            theirsContent ?? ""
           )
         ].join("\n")
       );

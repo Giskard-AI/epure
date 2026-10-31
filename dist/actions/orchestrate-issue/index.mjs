@@ -3861,6 +3861,10 @@ function formatNeedsHumanEscalationComment(input) {
     const used = input.codeFixAttemptsUsed ?? 3;
     const max = input.maxCodeFixAttempts ?? 3;
     reasonHeadline = `\`${used}/${max}\` remediation rounds exhausted (\`max_code_fix_attempts = ${max}\`)`;
+  } else if (input.reason === "epic_convergence_exhausted") {
+    const usedPhases = input.epicConvergenceDetails?.epicPhase ?? 2;
+    const maxPhases = input.epicConvergenceDetails?.maxEpicPhases ?? 2;
+    reasonHeadline = `Non-convergence de la fonctionnalit\xE9 apr\xE8s \`${usedPhases}/${maxPhases}\` phases de tickets (\`epic_convergence_exhausted\`, ADR-0032)`;
   } else if (input.reason === "grace_window_timeout") {
     const gw = input.graceWindowSeconds ?? 45;
     reasonHeadline = `${gw}s external CI workflow registration timeout (fail-closed)`;
@@ -3923,6 +3927,25 @@ function formatNeedsHumanEscalationComment(input) {
       lines.push(
         `- **[${f.reviewer}]** (\`${f.path}:${f.line}\`) **${f.title}** \u2014 ${f.rationale}`
       );
+    }
+  }
+  if (input.epicConvergenceDetails) {
+    const details = input.epicConvergenceDetails;
+    lines.push(
+      "",
+      `#### \xC9carts de convergence restants apr\xE8s Phase ${details.epicPhase}/${details.maxEpicPhases} :`
+    );
+    if (details.summary) {
+      lines.push(`- **Synth\xE8se de l'audit Goldfish** : ${details.summary}`);
+    }
+    for (const mod of details.unwiredModules) {
+      lines.push(`- \u{1F50C} **Module non c\xE2bl\xE9** : ${mod}`);
+    }
+    for (const stub of details.stubViolations) {
+      lines.push(`- \u{1F6AB} **Simulacre interdit d\xE9tect\xE9** : ${stub}`);
+    }
+    for (const crit of details.unmetCriteria) {
+      lines.push(`- \u274C **Crit\xE8re de convergence non satisfait** : ${crit}`);
     }
   }
   if (input.diagnosticExcerpt && input.diagnosticExcerpt.trim().length > 0) {
@@ -5513,6 +5536,12 @@ function resolveAgentsConfig(overrides = {}) {
     ...normalizedProviders ? { providers: normalizedProviders } : {},
     merge_policy: overrides.merge_policy ?? DEFAULT_AGENTS_CONFIG.merge_policy,
     max_code_fix_attempts: overrides.max_code_fix_attempts ?? DEFAULT_AGENTS_CONFIG.max_code_fix_attempts,
+    ...overrides.max_epic_phases !== void 0 ? {
+      max_epic_phases: Math.min(
+        3,
+        Math.max(1, Math.floor(overrides.max_epic_phases))
+      )
+    } : {},
     max_transient_api_retries: overrides.max_transient_api_retries ?? DEFAULT_AGENTS_CONFIG.max_transient_api_retries,
     transient_retry_backoff_seconds: overrides.transient_retry_backoff_seconds ?? DEFAULT_AGENTS_CONFIG.transient_retry_backoff_seconds,
     llm_request_timeout_seconds: overrides.llm_request_timeout_seconds !== void 0 && overrides.llm_request_timeout_seconds > 0 ? overrides.llm_request_timeout_seconds : DEFAULT_AGENTS_CONFIG.llm_request_timeout_seconds,
@@ -5602,6 +5631,7 @@ function parseAgentsYaml(yamlContent) {
   let merge_policy;
   let task_auto_merge_enabled;
   let max_code_fix_attempts;
+  let max_epic_phases;
   let max_transient_api_retries;
   let transient_retry_backoff_seconds;
   let llm_request_timeout_seconds;
@@ -5721,6 +5751,8 @@ function parseAgentsYaml(yamlContent) {
         task_auto_merge_enabled = parseBool(val);
       } else if (key === "max_code_fix_attempts") {
         max_code_fix_attempts = parseNum(val);
+      } else if (key === "max_epic_phases") {
+        max_epic_phases = parseNum(val);
       } else if (key === "max_transient_api_retries") {
         max_transient_api_retries = parseNum(val);
       } else if (key === "transient_retry_backoff_seconds") {
@@ -5974,6 +6006,7 @@ function parseAgentsYaml(yamlContent) {
     ...Object.keys(providers).length > 0 ? { providers } : {},
     ...merge_policy ? { merge_policy } : {},
     ...max_code_fix_attempts !== void 0 ? { max_code_fix_attempts } : {},
+    ...max_epic_phases !== void 0 ? { max_epic_phases } : {},
     ...max_transient_api_retries !== void 0 ? { max_transient_api_retries } : {},
     ...transient_retry_backoff_seconds ? { transient_retry_backoff_seconds } : {},
     ...llm_request_timeout_seconds !== void 0 ? { llm_request_timeout_seconds } : {},
@@ -6000,6 +6033,7 @@ function parseAgentsYaml(yamlContent) {
   const resolved = resolveAgentsConfig(overrides);
   return {
     ...resolved.config,
+    max_epic_phases: resolved.config.max_epic_phases ?? 2,
     ...task_auto_merge_enabled !== void 0 ? { task_auto_merge_enabled } : {},
     ...github_pages_human_consent !== void 0 ? { github_pages_human_consent } : {},
     ...preview_separate_origin !== void 0 ? { preview_separate_origin } : {},
@@ -6305,6 +6339,7 @@ function createGitHubRestHelper(params) {
     async getIssue(issueNumber) {
       const { data } = await apiRequest("GET", `/repos/${owner}/${repo}/issues/${issueNumber}`);
       return {
+        ...typeof data?.id === "number" ? { id: data.id } : {},
         number: data?.number ?? issueNumber,
         title: data?.title ?? `Issue #${issueNumber}`,
         body: data?.body ?? "",
@@ -6364,19 +6399,59 @@ function createGitHubRestHelper(params) {
       }
     },
     async createIssue(input) {
-      const { data } = await apiRequest(
-        "POST",
-        `/repos/${owner}/${repo}/issues`,
-        {
-          title: input.title,
-          body: input.body,
-          labels: input.labels
-        }
-      );
+      const { data } = await apiRequest("POST", `/repos/${owner}/${repo}/issues`, {
+        title: input.title,
+        body: input.body,
+        labels: input.labels
+      });
       if (!data) {
         throw new Error("Failed to create GitHub issue.");
       }
-      return data;
+      return {
+        ...typeof data.id === "number" ? { id: data.id } : {},
+        number: data.number,
+        html_url: data.html_url
+      };
+    },
+    async updateIssue(issueNumber, input) {
+      try {
+        await apiRequest(
+          "PATCH",
+          `/repos/${owner}/${repo}/issues/${issueNumber}`,
+          {
+            ...input.title !== void 0 ? { title: input.title } : {},
+            ...input.body !== void 0 ? { body: input.body } : {},
+            ...input.state !== void 0 ? { state: input.state } : {}
+          }
+        );
+      } catch {
+      }
+    },
+    async addSubIssue(parentIssueNumber, subIssueDatabaseId) {
+      if (!Number.isFinite(subIssueDatabaseId) || subIssueDatabaseId <= 0) {
+        return;
+      }
+      try {
+        await apiRequest(
+          "POST",
+          `/repos/${owner}/${repo}/issues/${parentIssueNumber}/sub_issues`,
+          { sub_issue_id: subIssueDatabaseId }
+        );
+      } catch {
+      }
+    },
+    async addIssueBlockedByDependency(issueNumber, blockerDatabaseId) {
+      if (!Number.isFinite(blockerDatabaseId) || blockerDatabaseId <= 0) {
+        return;
+      }
+      try {
+        await apiRequest(
+          "POST",
+          `/repos/${owner}/${repo}/issues/${issueNumber}/dependencies/blocked_by`,
+          { issue_id: blockerDatabaseId }
+        );
+      } catch {
+      }
     },
     async closeIssue(issueNumber) {
       await apiRequest(
@@ -6437,7 +6512,7 @@ function createGitHubRestHelper(params) {
         return null;
       }
     },
-    async readBranchWorkspaceFiles(branch, hintText = "") {
+    async readBranchWorkspaceFiles(branch, hintText = "", pinnedPaths = []) {
       const filesMap = /* @__PURE__ */ new Map();
       try {
         const treeRes = await apiRequest(
@@ -6452,7 +6527,7 @@ function createGitHubRestHelper(params) {
             return false;
           }
           const p = entry.path;
-          if (p.startsWith(".github/") || p.startsWith(".cursor/") || p.startsWith(".agents/") || p.startsWith("docs/") || p === ".gitignore" || p === "renovate.json" || p === "GLOSSARY.md" || /(?:^|\/)(?:package-lock\.json|pnpm-lock\.yaml|yarn\.lock)$/i.test(
+          if (p.startsWith(".github/") || p.startsWith(".cursor/") || p.startsWith(".agents/") || p.startsWith("docs/") || p === ".gitignore" || p === "renovate.json" || p === "GLOSSARY.md" || /(?:^|\/)(?:package-lock\.json|pnpm-lock\.yaml|yarn\.lock|Cargo\.lock)$/i.test(
             p
           ) || /\.(?:png|jpe?g|gif|webp|svg|ico|woff2?|ttf|eot|mp3|ogg|wav|mp4|webm|pdf|zip|tar|gz)$/i.test(
             p
@@ -6562,7 +6637,42 @@ function createGitHubRestHelper(params) {
               lowerHint.split(/[^a-z0-9_]+/).filter((w) => w.length >= 5 && !stopWords.has(w))
             )
           );
-          const scored = candidates.map((entry) => {
+          const maxTotalBytes = 38e4;
+          const maxPinnedBytes = Math.floor(maxTotalBytes * 0.35);
+          const normalizedPinnedSet = new Set(
+            pinnedPaths.map((p) => p.trim().replace(/^\/+/, "").toLowerCase()).filter((p) => p.length > 0)
+          );
+          for (const bt of backtickedTokens) {
+            if (bt.includes("/") || /\.[a-z0-9]{1,6}$/i.test(bt)) {
+              normalizedPinnedSet.add(bt.replace(/^\/+/, ""));
+            }
+          }
+          const picked = [];
+          const pickedPathsSet = /* @__PURE__ */ new Set();
+          let totalBytes = 0;
+          let pinnedBytes = 0;
+          const isBuildOrEntrypointManifest = (lowerPath) => /(?:^|\/)(?:package\.json|cargo\.toml|pyproject\.toml|go\.mod|makefile|justfile|taskfile\.ya?ml|turbo\.json)$/i.test(
+            lowerPath
+          );
+          for (const entry of candidates) {
+            const p = entry.path;
+            const lowerPath = p.toLowerCase();
+            const isExplicitlyPinned = normalizedPinnedSet.has(lowerPath) || Array.from(normalizedPinnedSet).some(
+              (pin) => pin.length >= 4 && lowerPath.endsWith(`/${pin}`)
+            );
+            if (!isExplicitlyPinned && !isBuildOrEntrypointManifest(lowerPath)) {
+              continue;
+            }
+            const entrySize = entry.size ?? 4e3;
+            if (pinnedBytes + entrySize > maxPinnedBytes) {
+              continue;
+            }
+            picked.push(entry);
+            pickedPathsSet.add(p);
+            pinnedBytes += entrySize;
+            totalBytes += entrySize;
+          }
+          const scored = candidates.filter((entry) => !pickedPathsSet.has(entry.path)).map((entry) => {
             const p = entry.path;
             const lowerPath = p.toLowerCase();
             const baseName = lowerPath.split("/").pop() ?? lowerPath;
@@ -6596,13 +6706,11 @@ function createGitHubRestHelper(params) {
             return { entry, score, size: entry.size ?? 4e3 };
           });
           scored.sort((a, b) => b.score - a.score);
-          const picked = [];
-          let totalBytes = 0;
           for (const s of scored) {
-            if (s.score < 25 || picked.length >= 16) {
+            if (s.score < 25 || picked.length >= 28) {
               break;
             }
-            if (totalBytes + s.size > 38e4) {
+            if (totalBytes + s.size > maxTotalBytes) {
               continue;
             }
             picked.push(s.entry);
@@ -7192,9 +7300,73 @@ var GRILL_ROUND_EVALUATION_SCHEMA = {
     };
   }
 };
+function parseOptionalEpicGoalContract(raw, fallbackSummary = "") {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return void 0;
+  }
+  const rec = raw;
+  const summary = typeof rec.epic_goal_summary === "string" && rec.epic_goal_summary.trim().length > 0 ? rec.epic_goal_summary.trim() : fallbackSummary;
+  const requiredEntrypoints = asStringArray(rec.required_entrypoints);
+  const forbiddenStubs = asStringArray(rec.forbidden_stubs);
+  const endToEndCriteria = asStringArray(rec.end_to_end_verification_criteria);
+  if (!summary && requiredEntrypoints.length === 0 && forbiddenStubs.length === 0 && endToEndCriteria.length === 0) {
+    return void 0;
+  }
+  return {
+    epic_goal_summary: summary,
+    required_entrypoints: requiredEntrypoints,
+    forbidden_stubs: forbiddenStubs,
+    end_to_end_verification_criteria: endToEndCriteria
+  };
+}
+var EPIC_GOAL_CONTRACT_SCHEMA_PROPERTY = {
+  type: "object",
+  properties: {
+    epic_goal_summary: { type: "string" },
+    required_entrypoints: {
+      type: "array",
+      items: { type: "string" }
+    },
+    forbidden_stubs: {
+      type: "array",
+      items: { type: "string" }
+    },
+    end_to_end_verification_criteria: {
+      type: "array",
+      items: { type: "string" }
+    }
+  }
+};
+var TICKET_SPEC_SCHEMA_ITEM = {
+  type: "object",
+  properties: {
+    index: { type: "integer" },
+    slug: { type: "string" },
+    title: { type: "string" },
+    description: { type: "string" },
+    summary: { type: "string" },
+    acceptance_criteria: {
+      type: "array",
+      items: { type: "string" }
+    },
+    blocked_by_indices: {
+      type: "array",
+      items: { type: "integer" }
+    },
+    files_to_create_or_update: {
+      type: "array",
+      items: { type: "string" }
+    },
+    files_likely_touched: {
+      type: "array",
+      items: { type: "string" }
+    }
+  },
+  required: ["title", "acceptance_criteria", "blocked_by_indices"]
+};
 var GENERATED_PLANNING_BUNDLE_SCHEMA = {
   name: "generated_planning_bundle",
-  description: "Complete EPURE planning bundle including GLOSSARY.md, ADRs, specification, and DAG tickets.",
+  description: "Complete EPURE planning bundle including GLOSSARY.md, ADRs, specification, EpicGoalContract, and DAG tickets.",
   schema: {
     type: "object",
     properties: {
@@ -7216,39 +7388,10 @@ var GENERATED_PLANNING_BUNDLE_SCHEMA = {
       },
       spec_path: { type: "string" },
       spec_markdown: { type: "string" },
+      epic_goal_contract: EPIC_GOAL_CONTRACT_SCHEMA_PROPERTY,
       tickets: {
         type: "array",
-        items: {
-          type: "object",
-          properties: {
-            index: { type: "integer" },
-            slug: { type: "string" },
-            title: { type: "string" },
-            description: { type: "string" },
-            summary: { type: "string" },
-            acceptance_criteria: {
-              type: "array",
-              items: { type: "string" }
-            },
-            blocked_by_indices: {
-              type: "array",
-              items: { type: "integer" }
-            },
-            files_to_create_or_update: {
-              type: "array",
-              items: { type: "string" }
-            },
-            files_likely_touched: {
-              type: "array",
-              items: { type: "string" }
-            }
-          },
-          required: [
-            "title",
-            "acceptance_criteria",
-            "blocked_by_indices"
-          ]
-        }
+        items: TICKET_SPEC_SCHEMA_ITEM
       }
     },
     required: [
@@ -7333,19 +7476,24 @@ var GENERATED_PLANNING_BUNDLE_SCHEMA = {
         files_likely_touched: filesToCreateOrUpdate
       };
     });
+    const epicGoalContract = parseOptionalEpicGoalContract(
+      obj.epic_goal_contract,
+      extractTitleFromMarkdown(specMarkdown, planSlug)
+    );
     return {
       plan_slug: planSlug,
       glossary_markdown: glossaryMarkdown,
       adrs,
       spec_path: specPath,
       spec_markdown: specMarkdown,
-      tickets
+      tickets,
+      ...epicGoalContract ? { epic_goal_contract: epicGoalContract } : {}
     };
   }
 };
 var GENERATED_SPEC_ARTIFACTS_SCHEMA = {
   name: "generated_spec_artifacts",
-  description: "EPURE specification artifacts (GLOSSARY.md, ADRs, and specification Markdown) generated during /epure to-spec prior to human validation and ticket decomposition.",
+  description: "EPURE specification artifacts (GLOSSARY.md, ADRs, specification Markdown, and EpicGoalContract) generated during /epure to-spec prior to human validation and ticket decomposition.",
   schema: {
     type: "object",
     properties: {
@@ -7370,7 +7518,8 @@ var GENERATED_SPEC_ARTIFACTS_SCHEMA = {
       target_files_hint: {
         type: "array",
         items: { type: "string" }
-      }
+      },
+      epic_goal_contract: EPIC_GOAL_CONTRACT_SCHEMA_PROPERTY
     },
     required: [
       "plan_slug",
@@ -7402,7 +7551,8 @@ var GENERATED_SPEC_ARTIFACTS_SCHEMA = {
       adrs: validatedBundle.adrs,
       spec_path: validatedBundle.spec_path,
       spec_markdown: validatedBundle.spec_markdown,
-      target_files_hint: asStringArray(obj.target_files_hint)
+      target_files_hint: asStringArray(obj.target_files_hint),
+      ...validatedBundle.epic_goal_contract ? { epic_goal_contract: validatedBundle.epic_goal_contract } : {}
     };
   }
 };
@@ -7414,37 +7564,7 @@ var GENERATED_TICKET_DAG_SCHEMA = {
     properties: {
       tickets: {
         type: "array",
-        items: {
-          type: "object",
-          properties: {
-            index: { type: "integer" },
-            slug: { type: "string" },
-            title: { type: "string" },
-            description: { type: "string" },
-            summary: { type: "string" },
-            acceptance_criteria: {
-              type: "array",
-              items: { type: "string" }
-            },
-            blocked_by_indices: {
-              type: "array",
-              items: { type: "integer" }
-            },
-            files_to_create_or_update: {
-              type: "array",
-              items: { type: "string" }
-            },
-            files_likely_touched: {
-              type: "array",
-              items: { type: "string" }
-            }
-          },
-          required: [
-            "title",
-            "acceptance_criteria",
-            "blocked_by_indices"
-          ]
-        }
+        items: TICKET_SPEC_SCHEMA_ITEM
       }
     },
     required: ["tickets"]
@@ -7474,138 +7594,142 @@ var GENERATED_TICKET_DAG_SCHEMA = {
     };
   }
 };
-var GENERATED_TICKET_IMPLEMENTATION_SCHEMA = {
-  name: "generated_ticket_implementation",
-  description: "Structured TDD code implementation or remediation payload for a ticket.",
-  schema: {
-    type: "object",
-    properties: {
-      commit_message: { type: "string" },
-      test_summary: { type: "string" },
-      files: {
-        type: "array",
-        items: {
-          type: "object",
-          properties: {
-            path: { type: "string" },
-            content: { type: "string" }
-          },
-          required: ["path", "content"]
-        }
-      },
-      patches: {
-        type: "array",
-        items: {
-          type: "object",
-          properties: {
-            path: { type: "string" },
-            edits: {
-              type: "array",
-              items: {
-                type: "object",
-                properties: {
-                  old_string: { type: "string" },
-                  new_string: { type: "string" },
-                  search: { type: "string" },
-                  replace: { type: "string" }
-                },
-                required: ["old_string", "new_string"]
+function createGeneratedTicketImplementationSchema(options) {
+  return {
+    name: "generated_ticket_implementation",
+    description: "Structured TDD code implementation or remediation payload for a ticket.",
+    schema: {
+      type: "object",
+      properties: {
+        commit_message: { type: "string" },
+        test_summary: { type: "string" },
+        files: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              path: { type: "string" },
+              content: { type: "string" }
+            },
+            required: ["path", "content"]
+          }
+        },
+        patches: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              path: { type: "string" },
+              edits: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    old_string: { type: "string" },
+                    new_string: { type: "string" },
+                    search: { type: "string" },
+                    replace: { type: "string" }
+                  },
+                  required: ["old_string", "new_string"]
+                }
               }
-            }
-          },
-          required: ["path", "edits"]
+            },
+            required: ["path", "edits"]
+          }
+        },
+        deleted_files: {
+          type: "array",
+          items: { type: "string" }
         }
       },
-      deleted_files: {
-        type: "array",
-        items: { type: "string" }
-      }
+      required: [
+        "commit_message",
+        "test_summary",
+        "files",
+        "patches",
+        "deleted_files"
+      ]
     },
-    required: [
-      "commit_message",
-      "test_summary",
-      "files",
-      "patches",
-      "deleted_files"
-    ]
-  },
-  validate(parsed) {
-    const obj = asRecord(parsed, "GeneratedTicketImplementation");
-    if (typeof obj.commit_message !== "string" || obj.commit_message.trim().length === 0) {
-      throw new Error(
-        "GeneratedTicketImplementation.commit_message must be a non-empty string."
-      );
-    }
-    const commitMessage = obj.commit_message.trim();
-    const testSummary = typeof obj.test_summary === "string" ? obj.test_summary : "";
-    const files = Array.isArray(obj.files) ? obj.files.map((item, idx) => {
-      const rec = asRecord(item, `GeneratedFileChange[${idx}]`);
-      if (typeof rec.path !== "string" || rec.path.trim().length === 0) {
+    validate(parsed) {
+      const obj = asRecord(parsed, "GeneratedTicketImplementation");
+      if (typeof obj.commit_message !== "string" || obj.commit_message.trim().length === 0) {
         throw new Error(
-          `GeneratedFileChange[${idx}].path must be a non-empty string.`
+          "GeneratedTicketImplementation.commit_message must be a non-empty string."
         );
       }
-      if (typeof rec.content !== "string") {
-        throw new Error(
-          `GeneratedFileChange[${idx}].content for '${rec.path.trim()}' must be a string.`
-        );
-      }
-      return {
-        path: rec.path.trim(),
-        content: rec.content
-      };
-    }) : void 0;
-    const patches = Array.isArray(
-      obj.patches
-    ) ? obj.patches.map((item, idx) => {
-      const rec = asRecord(item, `GeneratedFilePatch[${idx}]`);
-      if (typeof rec.path !== "string" || rec.path.trim().length === 0) {
-        throw new Error(
-          `GeneratedFilePatch[${idx}].path must be a non-empty string.`
-        );
-      }
-      const rawEdits = Array.isArray(rec.edits) ? rec.edits : [];
-      const edits = rawEdits.map(
-        (editItem, editIdx) => {
-          const editRec = asRecord(
-            editItem,
-            `GeneratedFilePatchEdit[${idx}][${editIdx}]`
+      const commitMessage = obj.commit_message.trim();
+      const testSummary = typeof obj.test_summary === "string" ? obj.test_summary : "";
+      const files = Array.isArray(obj.files) ? obj.files.map((item, idx) => {
+        const rec = asRecord(item, `GeneratedFileChange[${idx}]`);
+        if (typeof rec.path !== "string" || rec.path.trim().length === 0) {
+          throw new Error(
+            `GeneratedFileChange[${idx}].path must be a non-empty string.`
           );
-          const oldStr = typeof editRec.old_string === "string" ? editRec.old_string : typeof editRec.search === "string" ? editRec.search : "";
-          const newStr = typeof editRec.new_string === "string" ? editRec.new_string : typeof editRec.replace === "string" ? editRec.replace : "";
-          return {
-            old_string: oldStr,
-            new_string: newStr,
-            search: oldStr,
-            replace: newStr
-          };
         }
-      );
+        if (typeof rec.content !== "string") {
+          throw new Error(
+            `GeneratedFileChange[${idx}].content for '${rec.path.trim()}' must be a string.`
+          );
+        }
+        return {
+          path: rec.path.trim(),
+          content: rec.content
+        };
+      }) : void 0;
+      const patches = Array.isArray(
+        obj.patches
+      ) ? obj.patches.map((item, idx) => {
+        const rec = asRecord(item, `GeneratedFilePatch[${idx}]`);
+        if (typeof rec.path !== "string" || rec.path.trim().length === 0) {
+          throw new Error(
+            `GeneratedFilePatch[${idx}].path must be a non-empty string.`
+          );
+        }
+        const rawEdits = Array.isArray(rec.edits) ? rec.edits : [];
+        const edits = rawEdits.map(
+          (editItem, editIdx) => {
+            const editRec = asRecord(
+              editItem,
+              `GeneratedFilePatchEdit[${idx}][${editIdx}]`
+            );
+            const oldStr = typeof editRec.old_string === "string" ? editRec.old_string : typeof editRec.search === "string" ? editRec.search : "";
+            const newStr = typeof editRec.new_string === "string" ? editRec.new_string : typeof editRec.replace === "string" ? editRec.replace : "";
+            return {
+              old_string: oldStr,
+              new_string: newStr,
+              search: oldStr,
+              replace: newStr
+            };
+          }
+        );
+        return {
+          path: rec.path.trim(),
+          edits
+        };
+      }) : void 0;
+      const deletedFiles = Array.isArray(
+        obj.deleted_files
+      ) ? asStringArray(obj.deleted_files) : void 0;
+      const hasFiles = (files?.length ?? 0) > 0;
+      const hasPatches = (patches?.some((p) => p.edits.length > 0) ?? false) && (patches?.length ?? 0) > 0;
+      const hasDeleted = (deletedFiles?.length ?? 0) > 0;
+      const hasStaged = Boolean(options?.hasStagedMutations?.());
+      if (!hasFiles && !hasPatches && !hasDeleted && !hasStaged) {
+        throw new Error(
+          "GeneratedTicketImplementation must include at least one non-empty file in 'files', 'patches', or 'deleted_files'."
+        );
+      }
       return {
-        path: rec.path.trim(),
-        edits
+        commit_message: commitMessage,
+        test_summary: testSummary,
+        ...files !== void 0 ? { files } : {},
+        ...patches !== void 0 ? { patches } : {},
+        ...deletedFiles !== void 0 ? { deleted_files: deletedFiles } : {}
       };
-    }) : void 0;
-    const deletedFiles = Array.isArray(
-      obj.deleted_files
-    ) ? asStringArray(obj.deleted_files) : void 0;
-    const hasFiles = (files?.length ?? 0) > 0;
-    const hasPatches = (patches?.some((p) => p.edits.length > 0) ?? false) && (patches?.length ?? 0) > 0;
-    const hasDeleted = (deletedFiles?.length ?? 0) > 0;
-    if (!hasFiles && !hasPatches && !hasDeleted) {
-      throw new Error(
-        "GeneratedTicketImplementation must include at least one non-empty file in 'files', 'patches', or 'deleted_files'."
-      );
     }
-    return {
-      commit_message: commitMessage,
-      test_summary: testSummary,
-      ...files !== void 0 ? { files } : {},
-      ...patches !== void 0 ? { patches } : {},
-      ...deletedFiles !== void 0 ? { deleted_files: deletedFiles } : {}
-    };
-  }
-};
+  };
+}
+var GENERATED_TICKET_IMPLEMENTATION_SCHEMA = createGeneratedTicketImplementationSchema();
 var REVIEWER_FINDINGS_SCHEMA = {
   name: "reviewer_findings_payload",
   description: "Structured output from a single EPURE multi-agent PR reviewer pass.",
@@ -7890,6 +8014,133 @@ var GOLDFISH_SPEC_AUDIT_SCHEMA = {
       overengineering_warnings: asStringArray(obj.overengineering_warnings),
       untestable_criteria: asStringArray(obj.untestable_criteria),
       amended_sections_suggestion: typeof obj.amended_sections_suggestion === "string" ? obj.amended_sections_suggestion : ""
+    };
+  }
+};
+var ADR_COHERENCE_RECONCILIATION_SCHEMA = {
+  name: "adr_coherence_reconciliation",
+  description: "Semantic cross-ADR coherence and reference reconciliation payload when concurrent ADRs are synchronized between dev and feature/* (Q114, Q118).",
+  schema: {
+    type: "object",
+    properties: {
+      coherent: { type: "boolean" },
+      summary: { type: "string" },
+      updated_files: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            path: { type: "string" },
+            content: { type: "string" }
+          },
+          required: ["path", "content"]
+        }
+      },
+      deleted_adr_paths: {
+        type: "array",
+        items: { type: "string" }
+      }
+    },
+    required: ["coherent", "summary", "updated_files", "deleted_adr_paths"]
+  },
+  validate(parsed) {
+    const obj = asRecord(parsed, "AdrCoherenceReconciliationPayload");
+    const coherent = typeof obj.coherent === "boolean" ? obj.coherent : true;
+    const summary = typeof obj.summary === "string" ? obj.summary.trim() : "";
+    const rawUpdated = Array.isArray(obj.updated_files) ? obj.updated_files : [];
+    const updatedFiles = rawUpdated.map((item, idx) => {
+      const rec = asRecord(
+        item,
+        `AdrCoherenceReconciliationPayload.updated_files[${idx}]`
+      );
+      const path = typeof rec.path === "string" ? rec.path.trim().replace(/^\/+/, "") : "";
+      const content = typeof rec.content === "string" ? rec.content : "";
+      return { path, content };
+    }).filter((f) => f.path.length > 0 && f.content.trim().length > 0);
+    const deletedAdrPaths = asStringArray(obj.deleted_adr_paths).map(
+      (p) => p.replace(/^\/+/, "")
+    );
+    return {
+      coherent,
+      summary,
+      updated_files: updatedFiles,
+      deleted_adr_paths: deletedAdrPaths
+    };
+  }
+};
+var EPIC_CONVERGENCE_AUDIT_SCHEMA = {
+  name: "epic_convergence_audit",
+  description: "Zero-context Goldfish Epic Convergence Audit checking end-to-end entrypoint wiring, absence of forbidden stubs, and specification convergence before opening the feature/* -> dev PR (ADR-0032, Q116-Q121).",
+  schema: {
+    type: "object",
+    properties: {
+      verdict: {
+        type: "string",
+        enum: ["CONVERGED", "INCOMPLETE"]
+      },
+      rationale: { type: "string" },
+      unwired_modules: {
+        type: "array",
+        items: { type: "string" }
+      },
+      stub_violations: {
+        type: "array",
+        items: { type: "string" }
+      },
+      unmet_criteria: {
+        type: "array",
+        items: { type: "string" }
+      },
+      remediation_tickets: {
+        type: "array",
+        items: TICKET_SPEC_SCHEMA_ITEM
+      }
+    },
+    required: [
+      "verdict",
+      "rationale",
+      "unwired_modules",
+      "stub_violations",
+      "unmet_criteria",
+      "remediation_tickets"
+    ]
+  },
+  validate(parsed) {
+    const obj = asRecord(parsed, "EpicConvergenceAuditPayload");
+    const rawVerdict = typeof obj.verdict === "string" ? obj.verdict.trim().toUpperCase() : "";
+    const verdict = rawVerdict === "INCOMPLETE" ? "INCOMPLETE" : "CONVERGED";
+    const rawRationale = typeof obj.rationale === "string" ? obj.rationale.trim() : "";
+    const rawSummary = typeof obj.summary === "string" ? obj.summary.trim() : "";
+    const rationale = rawRationale || rawSummary;
+    const unwiredModules = asStringArray(obj.unwired_modules);
+    const stubViolations = asStringArray(obj.stub_violations);
+    const unmetCriteria = asStringArray(obj.unmet_criteria);
+    const rawTicketsSource = Array.isArray(obj.remediation_tickets) && obj.remediation_tickets.length > 0 ? obj.remediation_tickets : Array.isArray(obj.phase2_tickets) ? obj.phase2_tickets : [];
+    const rawPhase2 = rawTicketsSource.slice(0, 4);
+    let remediationTickets = [];
+    if (rawPhase2.length > 0) {
+      const validatedBundle = GENERATED_PLANNING_BUNDLE_SCHEMA.validate({
+        plan_slug: "phase2-convergence",
+        glossary_markdown: "# GLOSSARY\n\nExisting glossary.",
+        adrs: [
+          {
+            path: "docs/adr/0001-existing.md",
+            content: "# ADR\n\nExisting ADR."
+          }
+        ],
+        spec_path: "docs/specs/existing.md",
+        spec_markdown: "# Specification\n\nExisting specification.",
+        tickets: rawPhase2
+      });
+      remediationTickets = [...validatedBundle.tickets];
+    }
+    return {
+      verdict,
+      rationale,
+      unwired_modules: unwiredModules,
+      stub_violations: stubViolations,
+      unmet_criteria: unmetCriteria,
+      remediation_tickets: remediationTickets
     };
   }
 };
@@ -9228,6 +9479,280 @@ function buildWebExplorationToolsAndHandlers(params) {
 }
 
 // src/orchestrator/workspace/repo-tools.ts
+var GUARDED_VERIFICATION_KEYS = [
+  "build",
+  "test",
+  "lint",
+  "typecheck",
+  "check"
+];
+function createIntegrityViolation(kind, path, details) {
+  return {
+    kind,
+    path,
+    details
+  };
+}
+function isTestFilePath(filePath) {
+  const clean = filePath.trim().replace(/^\/+/, "");
+  const baseName = clean.split("/").pop() ?? clean;
+  return /(?:^|\/)(?:__tests__|tests?|specs?)\//i.test(clean) || /(?:\.test|\.spec|_test|_spec)\.[a-z0-9]+$/i.test(baseName) || /^test_[^/]+\.py$/i.test(baseName);
+}
+function isNoopStubCommand(cmd) {
+  const trimmed = cmd.trim();
+  if (!trimmed) {
+    return true;
+  }
+  return /^\s*(?:@?echo\b|true\b|:\s*$|exit\s+0\b)/i.test(trimmed);
+}
+function isUnitTestOnlyCommand(cmd) {
+  const trimmed = cmd.trim();
+  return /\b(?:vitest|jest|mocha|pytest|unittest|cargo\s+test|go\s+test|node\s+--test)\b/i.test(
+    trimmed
+  ) && !/\b(?:tsc|vite\s+build|next\s+build|tsup|esbuild|webpack|rollup|cargo\s+build|go\s+build|poetry\s+build|hatch\s+build|maturin\s+build|python\s+-m\s+build)\b/i.test(
+    trimmed
+  );
+}
+function extractTomlVerificationScripts(tomlContent) {
+  const scripts = /* @__PURE__ */ new Map();
+  let currentSection = "";
+  for (const rawLine of tomlContent.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) {
+      continue;
+    }
+    const sectionMatch = /^\[([^\]]+)\]$/.exec(line);
+    if (sectionMatch?.[1]) {
+      currentSection = sectionMatch[1].trim().toLowerCase();
+      continue;
+    }
+    const isScriptOrAliasSection = currentSection === "package" || currentSection === "alias" || currentSection === "scripts" || currentSection.endsWith(".scripts") || currentSection.endsWith(".tasks") || currentSection.endsWith(".alias");
+    if (!isScriptOrAliasSection) {
+      continue;
+    }
+    const kvMatch = /^(build|test|lint|typecheck|check)\s*=\s*(?:"([^"]*)"|'([^']*)'|\{[^}]*cmd\s*=\s*"([^"]*)"[^}]*\})/.exec(
+      line
+    );
+    if (kvMatch?.[1]) {
+      const key = kvMatch[1].toLowerCase();
+      const val = (kvMatch[2] ?? kvMatch[3] ?? kvMatch[4] ?? "").trim();
+      if (currentSection === "package" && key !== "build") {
+        continue;
+      }
+      scripts.set(key, val);
+    }
+  }
+  return scripts;
+}
+function evaluateManifestScriptMapDegradation(params) {
+  for (const key of GUARDED_VERIFICATION_KEYS) {
+    const baseCmd = (params.baseMap.get(key) ?? "").trim();
+    if (!baseCmd || isNoopStubCommand(baseCmd)) {
+      continue;
+    }
+    const newCmd = (params.newMap.get(key) ?? "").trim();
+    if (!newCmd || isNoopStubCommand(newCmd)) {
+      params.violations.push(
+        createIntegrityViolation(
+          "verification_script_degradation",
+          params.cleanPath,
+          `Manifest '${params.cleanPath}' degraded verification command '${key}' from '${baseCmd}' to '${newCmd || "<deleted>"}'. Replacing verification scripts with echo/true stubs is strictly forbidden (ADR-0032, Q113).`
+        )
+      );
+      continue;
+    }
+    if (key === "build" && !isUnitTestOnlyCommand(baseCmd)) {
+      const newTestCmd = (params.newMap.get("test") ?? params.baseMap.get("test") ?? "").trim();
+      if (isUnitTestOnlyCommand(newCmd) || newTestCmd.length > 0 && newCmd === newTestCmd) {
+        params.violations.push(
+          createIntegrityViolation(
+            "verification_script_degradation",
+            params.cleanPath,
+            `Manifest '${params.cleanPath}' degraded 'build' command from '${baseCmd}' to unit-test command '${newCmd}'. Preserve the real build/compilation command (ADR-0032, Q113).`
+          )
+        );
+      }
+    }
+  }
+}
+function countNonEmptyLines(content) {
+  return content.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0 && !l.startsWith("//") && !l.startsWith("#")).length;
+}
+function countPublicSymbolDeclarations(content) {
+  const matches = content.match(
+    /^\s*(?:export\s+(?:async\s+)?(?:function|class|const|let|type|interface|enum)\b|pub\s+(?:async\s+)?(?:fn|struct|enum|trait|type|mod)\b|def\s+[A-Za-z0-9_]+\s*\(|func\s+[A-Z][A-Za-z0-9_]*\s*\()/gm
+  );
+  return matches ? matches.length : 0;
+}
+function isDirectBarrelNeighbor(filePath, ticketFilesToTouch) {
+  const clean = filePath.trim().replace(/^\/+/, "").toLowerCase();
+  const baseName = clean.split("/").pop() ?? clean;
+  if (!/^(?:index\.[a-z0-9]+|mod\.rs|lib\.rs|__init__\.py)$/i.test(baseName)) {
+    return false;
+  }
+  const barrelDir = clean.includes("/") ? clean.slice(0, clean.lastIndexOf("/")) : "";
+  return ticketFilesToTouch.some((rawTarget) => {
+    const target = rawTarget.trim().replace(/^\/+/, "").toLowerCase();
+    const targetDir = target.includes("/") ? target.slice(0, target.lastIndexOf("/")) : "";
+    return targetDir === barrelDir || barrelDir.length > 0 && targetDir.startsWith(`${barrelDir}/`);
+  });
+}
+function isPathInTicketScope(filePath, ticketFilesToTouch) {
+  const clean = filePath.trim().replace(/^\/+/, "").toLowerCase();
+  for (const rawTarget of ticketFilesToTouch) {
+    const target = rawTarget.trim().replace(/^\/+/, "").toLowerCase();
+    if (!target) {
+      continue;
+    }
+    if (clean === target || clean.endsWith(`/${target}`) || target.endsWith(`/${clean}`)) {
+      return true;
+    }
+    if (target.endsWith("/**") || target.endsWith("/*")) {
+      const prefix = target.replace(/\/\*+$/, "");
+      if (clean.startsWith(`${prefix}/`)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+function validateTicketIntegrityGuard(input) {
+  const violations = [];
+  const deletedList = (input.deletedFiles ?? []).map(
+    (p) => p.trim().replace(/^\/+/, "")
+  );
+  const explicitDeletionAllowedByDescription = typeof input.ticketDescription === "string" && /(?:delete|remove|supprim|remplac|renomm|rename|deprecate|obsol)/i.test(
+    input.ticketDescription
+  );
+  for (const delPath of deletedList) {
+    if (!input.baseFiles.has(delPath)) {
+      continue;
+    }
+    if (isTestFilePath(delPath)) {
+      const inScope = isPathInTicketScope(delPath, input.ticketFilesToTouch);
+      if (!inScope || !explicitDeletionAllowedByDescription) {
+        violations.push(
+          createIntegrityViolation(
+            "unauthorized_test_deletion",
+            delPath,
+            `Existing test file '${delPath}' cannot be deleted by a ticket unless explicitly targeted for removal/replacement in the ticket scope (ADR-0032, Q113).`
+          )
+        );
+      }
+    }
+  }
+  for (const file of input.changedFiles) {
+    const cleanPath = file.path.trim().replace(/^\/+/, "");
+    const baseContent = input.baseFiles.get(cleanPath);
+    if (baseContent === void 0) {
+      continue;
+    }
+    const baseNonEmptyLines = countNonEmptyLines(baseContent);
+    const newNonEmptyLines = countNonEmptyLines(file.content);
+    if (isTestFilePath(cleanPath) && (baseNonEmptyLines >= 1 && newNonEmptyLines === 0 || baseNonEmptyLines >= 5 && newNonEmptyLines < Math.ceil(baseNonEmptyLines * 0.4))) {
+      const inScope2 = isPathInTicketScope(cleanPath, input.ticketFilesToTouch);
+      if (!inScope2 || !explicitDeletionAllowedByDescription) {
+        violations.push(
+          createIntegrityViolation(
+            "unauthorized_test_deletion",
+            cleanPath,
+            `Existing test file '${cleanPath}' lost ${baseNonEmptyLines - newNonEmptyLines}/${baseNonEmptyLines} non-empty lines. Tickets must preserve existing regression tests from prior tickets and base branch (ADR-0032, Q113).`
+          )
+        );
+        continue;
+      }
+    }
+    const inScope = input.ticketFilesToTouch.length === 0 || isPathInTicketScope(cleanPath, input.ticketFilesToTouch) || isDirectBarrelNeighbor(cleanPath, input.ticketFilesToTouch);
+    if (!inScope && baseNonEmptyLines >= 15) {
+      const baseSymbols = countPublicSymbolDeclarations(baseContent);
+      const newSymbols = countPublicSymbolDeclarations(file.content);
+      const lineRatio = newNonEmptyLines / baseNonEmptyLines;
+      const symbolRatio = baseSymbols >= 3 ? newSymbols / baseSymbols : 1;
+      if (lineRatio < 0.7 || symbolRatio < 0.7) {
+        violations.push(
+          createIntegrityViolation(
+            "out_of_scope_file_truncation",
+            cleanPath,
+            `Out-of-scope file '${cleanPath}' (not in ticket filesToTouch) was truncated from ${baseNonEmptyLines} to ${newNonEmptyLines} non-empty lines (${baseSymbols} -> ${newSymbols} public symbols). Use surgical patches and preserve existing code outside ticket scope (ADR-0032, Q113).`
+          )
+        );
+      }
+    }
+    const lowerName = (cleanPath.split("/").pop() ?? cleanPath).toLowerCase();
+    if (lowerName === "package.json") {
+      try {
+        const basePkg = JSON.parse(baseContent);
+        const newPkg = JSON.parse(file.content);
+        const baseMap = /* @__PURE__ */ new Map();
+        const newMap = /* @__PURE__ */ new Map();
+        for (const key of GUARDED_VERIFICATION_KEYS) {
+          if (typeof basePkg.scripts?.[key] === "string") {
+            baseMap.set(key, basePkg.scripts[key]);
+          }
+          if (typeof newPkg.scripts?.[key] === "string") {
+            newMap.set(key, newPkg.scripts[key]);
+          }
+        }
+        evaluateManifestScriptMapDegradation({
+          cleanPath,
+          baseMap,
+          newMap,
+          violations
+        });
+      } catch {
+      }
+    } else if (lowerName === "makefile" || lowerName === "justfile") {
+      const targetRegex = /^(build|test|lint|typecheck|check)\s*:[^\n]*\n((?:[ \t]+[^\n]+\n?)+)/gm;
+      const baseTargets = /* @__PURE__ */ new Map();
+      let m;
+      while ((m = targetRegex.exec(baseContent)) !== null) {
+        if (m[1] && m[2]) {
+          baseTargets.set(
+            m[1].toLowerCase(),
+            m[2].split(/\r?\n/).map((l) => l.trim()).filter(Boolean).join(" && ")
+          );
+        }
+      }
+      targetRegex.lastIndex = 0;
+      const newTargets = /* @__PURE__ */ new Map();
+      while ((m = targetRegex.exec(file.content)) !== null) {
+        if (m[1] && m[2]) {
+          newTargets.set(
+            m[1].toLowerCase(),
+            m[2].split(/\r?\n/).map((l) => l.trim()).filter(Boolean).join(" && ")
+          );
+        }
+      }
+      evaluateManifestScriptMapDegradation({
+        cleanPath,
+        baseMap: baseTargets,
+        newMap: newTargets,
+        violations
+      });
+    } else if (lowerName === "pyproject.toml" || lowerName === "cargo.toml") {
+      const baseScripts = extractTomlVerificationScripts(baseContent);
+      const newScripts = extractTomlVerificationScripts(file.content);
+      evaluateManifestScriptMapDegradation({
+        cleanPath,
+        baseMap: baseScripts,
+        newMap: newScripts,
+        violations
+      });
+    }
+  }
+  const diagnosticMarkdown = violations.length === 0 ? "" : [
+    "[EPURE][TicketIntegrityGuard] Inter-ticket integrity violation(s) blocked pre-commit (ADR-0032, Q113):",
+    ...violations.map(
+      (v) => `- [${v.kind}] (${v.path}): ${v.details}`
+    ),
+    "Restore the deleted tests, truncated out-of-scope code, or degraded manifest scripts while implementing the ticket requirements."
+  ].join("\n");
+  return {
+    passed: violations.length === 0,
+    violations,
+    diagnosticMarkdown
+  };
+}
 async function applyTicketImplementationPayload(params) {
   for (const f of params.parsed.files ?? []) {
     const cleanPath = f.path.replace(/^\/+/, "");
@@ -9298,7 +9823,7 @@ async function applyTicketImplementationPayload(params) {
     ([path, content]) => ({ path, content })
   );
 }
-function parseTrackedTicketsFromComments(comments) {
+function parsePlanManifestFromComments(comments) {
   for (let i = comments.length - 1; i >= 0; i -= 1) {
     const body = comments[i]?.body ?? "";
     const match = /<!-- epure-plan-manifest:([\s\S]*?)-->/.exec(body);
@@ -9306,13 +9831,21 @@ function parseTrackedTicketsFromComments(comments) {
       try {
         const parsed = JSON.parse(match[1].trim());
         if (Array.isArray(parsed.tickets) && parsed.tickets.length > 0) {
-          return parsed.tickets;
+          return {
+            ...typeof parsed.planBranch === "string" ? { planBranch: parsed.planBranch } : {},
+            ...typeof parsed.specPath === "string" ? { specPath: parsed.specPath } : {},
+            ...parsed.epicGoalContract ? { epicGoalContract: parsed.epicGoalContract } : {},
+            tickets: parsed.tickets
+          };
         }
       } catch {
       }
     }
   }
-  return [];
+  return null;
+}
+function parseTrackedTicketsFromComments(comments) {
+  return parsePlanManifestFromComments(comments)?.tickets ?? [];
 }
 async function runTestsInIsolatedWorkspace(params) {
   const isGha = process.env.GITHUB_ACTIONS === "true";
@@ -9364,18 +9897,126 @@ ${stage1Result.output.slice(-4e3)}
     }
   }
 }
-function checkIsBrownfieldSubpackageRepo(accumulatedFiles, devBranchPaths) {
-  return accumulatedFiles.size > 0 && !accumulatedFiles.has("package.json") && Array.from(accumulatedFiles.keys()).some(
-    (k) => k.startsWith("backend/") || k.startsWith("frontend/")
-  ) || !devBranchPaths.includes("package.json") && devBranchPaths.some(
-    (k) => k.startsWith("backend/") || k.startsWith("frontend/")
+function checkIsExistingRepoWorkspace(accumulatedFiles, devBranchPaths) {
+  return accumulatedFiles.size > 0 || devBranchPaths.length > 0;
+}
+function createStagedTicketImplementationBuffer(ensureBaselineLoaded) {
+  const files = /* @__PURE__ */ new Map();
+  const deletedFiles = /* @__PURE__ */ new Set();
+  return {
+    files,
+    deletedFiles,
+    hasMutations: () => files.size > 0 || deletedFiles.size > 0,
+    ...ensureBaselineLoaded ? { ensureBaselineLoaded } : {}
+  };
+}
+function mergeStagedBufferIntoImplementationPayload(staged, parsed) {
+  if (!staged.hasMutations()) {
+    return parsed;
+  }
+  const mergedFilesMap = /* @__PURE__ */ new Map();
+  const mergedDeletedSet = /* @__PURE__ */ new Set();
+  for (const [path, content] of staged.files.entries()) {
+    const clean = path.trim().replace(/^\/+/, "");
+    if (clean) {
+      mergedFilesMap.set(clean, content);
+      mergedDeletedSet.delete(clean);
+    }
+  }
+  for (const del of staged.deletedFiles) {
+    const clean = del.trim().replace(/^\/+/, "");
+    if (clean) {
+      mergedFilesMap.delete(clean);
+      mergedDeletedSet.add(clean);
+    }
+  }
+  for (const f of parsed.files ?? []) {
+    const clean = f.path.trim().replace(/^\/+/, "");
+    if (clean) {
+      mergedFilesMap.set(clean, f.content);
+      mergedDeletedSet.delete(clean);
+    }
+  }
+  for (const del of parsed.deleted_files ?? []) {
+    const clean = del.trim().replace(/^\/+/, "");
+    if (clean) {
+      mergedFilesMap.delete(clean);
+      mergedDeletedSet.add(clean);
+    }
+  }
+  return {
+    commit_message: parsed.commit_message,
+    test_summary: parsed.test_summary,
+    files: Array.from(mergedFilesMap.entries()).map(([path, content]) => ({
+      path,
+      content
+    })),
+    ...parsed.patches && parsed.patches.length > 0 ? { patches: parsed.patches } : {},
+    deleted_files: Array.from(mergedDeletedSet)
+  };
+}
+function buildCompactWorkspaceFilesContext(input) {
+  const maxLines = input.maxInlineLinesPerFile ?? 400;
+  const maxChars = input.maxTotalInlineChars ?? 6e4;
+  const priorityNormalized = /* @__PURE__ */ new Set();
+  for (const raw of input.priorityPaths ?? []) {
+    const clean = raw.trim().replace(/^\/+/, "");
+    if (clean) {
+      priorityNormalized.add(clean);
+    }
+  }
+  const isPriorityFile = (filePath) => {
+    const clean = filePath.trim().replace(/^\/+/, "");
+    if (priorityNormalized.has(clean)) {
+      return true;
+    }
+    return isPathInTicketScope(clean, Array.from(priorityNormalized));
+  };
+  const inlinedBlocks = [];
+  const catalogEntries = [];
+  let usedChars = 0;
+  const sortedEntries = Array.from(input.accumulatedFiles.entries()).sort(
+    ([a], [b]) => {
+      const aPrio = isPriorityFile(a) ? 0 : 1;
+      const bPrio = isPriorityFile(b) ? 0 : 1;
+      if (aPrio !== bPrio) {
+        return aPrio - bPrio;
+      }
+      return a.localeCompare(b);
+    }
   );
+  for (const [rawPath, content] of sortedEntries) {
+    const cleanPath = rawPath.trim().replace(/^\/+/, "");
+    if (!cleanPath || isSensitiveTaskBranchPath(cleanPath)) {
+      continue;
+    }
+    const lineCount = content.split("\n").length;
+    const block = `--- FILE: ${cleanPath} ---
+${content}`;
+    const shouldInline = (priorityNormalized.size === 0 || isPriorityFile(cleanPath)) && lineCount <= maxLines && usedChars + block.length <= maxChars;
+    if (shouldInline) {
+      inlinedBlocks.push(block);
+      usedChars += block.length;
+    } else {
+      catalogEntries.push(`- ${cleanPath} (${lineCount} lines)`);
+    }
+  }
+  const sections = [];
+  if (inlinedBlocks.length > 0) {
+    sections.push(inlinedBlocks.join("\n\n"));
+  }
+  if (catalogEntries.length > 0) {
+    sections.push(
+      [
+        "--- WORKSPACE FILE CATALOG (use `read_repo_file` or `search_in_repo_file` to inspect full content) ---",
+        ...catalogEntries
+      ].join("\n")
+    );
+  }
+  return sections.join("\n\n");
 }
 function buildRepoExplorationToolsAndHandlers(params) {
-  if (!checkIsBrownfieldSubpackageRepo(
-    params.accumulatedFiles,
-    params.devBranchPaths
-  ) && process.env.GITHUB_ACTIONS !== "true" && params.webToolsConfig === void 0) {
+  if (!params.alwaysEnableRepoTools && !params.stagedImplementation && params.devBranchPaths.length === 0 && params.accumulatedFiles.size === 0 && process.env.GITHUB_ACTIONS !== "true" && params.webToolsConfig === void 0) {
     return {};
   }
   const webExploration = buildWebExplorationToolsAndHandlers({
@@ -9383,11 +10024,263 @@ function buildRepoExplorationToolsAndHandlers(params) {
     webToolsConfig: params.webToolsConfig,
     fetchImpl: params.fetchImpl
   });
+  const isEffectiveDeleted = (cleanPath) => {
+    if (params.stagedImplementation?.deletedFiles.has(cleanPath)) {
+      return true;
+    }
+    if (params.stagedImplementation?.files.has(cleanPath)) {
+      return false;
+    }
+    return Boolean(params.deletedFilesSet?.has(cleanPath));
+  };
+  const resolveEffectiveFileContent = async (cleanPath) => {
+    if (isEffectiveDeleted(cleanPath)) {
+      return null;
+    }
+    const stagedContent = params.stagedImplementation?.files.get(cleanPath);
+    if (stagedContent !== void 0) {
+      return stagedContent;
+    }
+    let content = params.accumulatedFiles.get(cleanPath) ?? null;
+    if (content === null) {
+      content = await params.gh.readSingleBranchFile(params.branch, cleanPath) ?? (params.branch !== params.featureBranch ? await params.gh.readSingleBranchFile(
+        params.featureBranch,
+        cleanPath
+      ) : null);
+      if (content !== null) {
+        params.accumulatedFiles.set(cleanPath, content);
+      }
+    }
+    return content;
+  };
+  const searchInRepoHandler = async (args) => {
+    const p = String(args.path ?? "").trim().replace(/^\/+/, "");
+    const q = String(args.query ?? "").trim();
+    if (!p) {
+      if (!q) {
+        return { error: "Missing search query." };
+      }
+      const combinedFiles = new Map(params.accumulatedFiles);
+      if (params.stagedImplementation) {
+        for (const [sp, sc] of params.stagedImplementation.files.entries()) {
+          combinedFiles.set(sp, sc);
+        }
+      }
+      const crossFileMatches = [];
+      for (const [filePath, fileContent] of combinedFiles.entries()) {
+        if (isEffectiveDeleted(filePath) || isSensitiveTaskBranchPath(filePath)) {
+          continue;
+        }
+        const fileLines = fileContent.split("\n");
+        for (let idx = 0; idx < fileLines.length; idx += 1) {
+          if (fileLines[idx].toLowerCase().includes(q.toLowerCase())) {
+            crossFileMatches.push({
+              path: filePath,
+              line: idx + 1,
+              text: wrapUntrustedContent(
+                "untrusted_workspace_files",
+                fileLines[idx]
+              )
+            });
+            if (crossFileMatches.length >= 25) {
+              break;
+            }
+          }
+        }
+        if (crossFileMatches.length >= 25) {
+          break;
+        }
+      }
+      return { query: q, matches: crossFileMatches };
+    }
+    if (p.includes("..") || isSensitiveTaskBranchPath(p)) {
+      return { error: `Access denied or invalid path: ${p}` };
+    }
+    if (isEffectiveDeleted(p)) {
+      return { error: `File '${p}' was deleted in the current branch.` };
+    }
+    const content = await resolveEffectiveFileContent(p);
+    if (content === null) {
+      return { error: `File not found: ${p}` };
+    }
+    const lines = content.split("\n");
+    const snippets = [];
+    for (let i = 0; i < lines.length; i += 1) {
+      if (lines[i].toLowerCase().includes(q.toLowerCase())) {
+        const start = Math.max(0, i - 15);
+        const end = Math.min(lines.length, i + 20);
+        snippets.push(
+          wrapUntrustedContent(
+            "untrusted_workspace_files",
+            `Lines ${start + 1}-${end}:
+` + lines.slice(start, end).map((l, idx) => `${start + idx + 1}| ${l}`).join("\n")
+          )
+        );
+        i = end - 1;
+        if (snippets.length >= 8) {
+          break;
+        }
+      }
+    }
+    return {
+      path: p,
+      total_lines: lines.length,
+      matches: snippets
+    };
+  };
+  const mutationTools = params.stagedImplementation ? [
+    {
+      name: "write_repo_file",
+      description: "Create or overwrite a repository file in the transactional ticket buffer during implementation or remediation.",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          path: {
+            type: "STRING",
+            description: "Repository-relative file path"
+          },
+          content: {
+            type: "STRING",
+            description: "Complete file content to stage"
+          }
+        },
+        required: ["path", "content"]
+      }
+    },
+    {
+      name: "patch_repo_file",
+      description: "Apply exact old_string -> new_string surgical replacements to an existing repository file in the transactional ticket buffer.",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          path: {
+            type: "STRING",
+            description: "Repository-relative file path"
+          },
+          edits: {
+            type: "ARRAY",
+            description: "Ordered list of surgical string replacements",
+            items: {
+              type: "OBJECT",
+              properties: {
+                old_string: {
+                  type: "STRING",
+                  description: "Exact existing snippet to replace"
+                },
+                new_string: {
+                  type: "STRING",
+                  description: "Replacement snippet"
+                }
+              },
+              required: ["old_string", "new_string"]
+            }
+          }
+        },
+        required: ["path", "edits"]
+      }
+    },
+    {
+      name: "delete_repo_file",
+      description: "Stage the deletion of an obsolete repository file in the transactional ticket buffer.",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          path: {
+            type: "STRING",
+            description: "Repository-relative file path to delete"
+          }
+        },
+        required: ["path"]
+      }
+    }
+  ] : [];
+  const mutationToolHandlers = params.stagedImplementation ? {
+    write_repo_file: async (args) => {
+      const p = String(args.path ?? "").trim().replace(/^\/+/, "");
+      if (!p || p.includes("..") || isSensitiveTaskBranchPath(p)) {
+        return { error: `Access denied or invalid path: ${p}` };
+      }
+      if (typeof args.content !== "string") {
+        return { error: `Content for '${p}' must be a string.` };
+      }
+      await params.stagedImplementation.ensureBaselineLoaded?.([p]);
+      params.stagedImplementation.files.set(p, args.content);
+      params.stagedImplementation.deletedFiles.delete(p);
+      return {
+        staged: true,
+        path: p,
+        total_lines: args.content.split("\n").length
+      };
+    },
+    patch_repo_file: async (args) => {
+      const p = String(args.path ?? "").trim().replace(/^\/+/, "");
+      if (!p || p.includes("..") || isSensitiveTaskBranchPath(p)) {
+        return { error: `Access denied or invalid path: ${p}` };
+      }
+      const rawEdits = Array.isArray(args.edits) ? args.edits : [];
+      if (rawEdits.length === 0) {
+        return {
+          error: `patch_repo_file requires at least one edit for '${p}'.`
+        };
+      }
+      await params.stagedImplementation.ensureBaselineLoaded?.([p]);
+      const baseContent = await resolveEffectiveFileContent(p);
+      if (baseContent === null) {
+        return { error: `File not found for patching: ${p}` };
+      }
+      let updatedContent = baseContent;
+      for (let idx = 0; idx < rawEdits.length; idx += 1) {
+        const editItem = rawEdits[idx];
+        const editRec = editItem && typeof editItem === "object" ? editItem : {};
+        const oldStr = typeof editRec.old_string === "string" ? editRec.old_string : typeof editRec.search === "string" ? editRec.search : "";
+        const newStr = typeof editRec.new_string === "string" ? editRec.new_string : typeof editRec.replace === "string" ? editRec.replace : "";
+        if (!oldStr) {
+          return {
+            error: `Edit #${idx + 1} in '${p}' has an empty old_string.`
+          };
+        }
+        if (updatedContent.includes(oldStr)) {
+          updatedContent = updatedContent.replace(oldStr, newStr);
+          continue;
+        }
+        const normalizedOld = oldStr.replace(/\r\n/g, "\n").trim();
+        const normalizedDoc = updatedContent.replace(/\r\n/g, "\n");
+        if (normalizedOld && normalizedDoc.includes(normalizedOld)) {
+          updatedContent = normalizedDoc.replace(
+            normalizedOld,
+            newStr.replace(/\r\n/g, "\n").trim()
+          );
+          continue;
+        }
+        return {
+          error: `Edit #${idx + 1} old_string (${oldStr.length} chars) did not match in '${p}'. Read the file first with read_repo_file.`
+        };
+      }
+      params.stagedImplementation.files.set(p, updatedContent);
+      params.stagedImplementation.deletedFiles.delete(p);
+      return {
+        applied: true,
+        path: p,
+        edits_applied: rawEdits.length,
+        total_lines: updatedContent.split("\n").length
+      };
+    },
+    delete_repo_file: async (args) => {
+      const p = String(args.path ?? "").trim().replace(/^\/+/, "");
+      if (!p || p.includes("..") || isSensitiveTaskBranchPath(p)) {
+        return { error: `Access denied or invalid path: ${p}` };
+      }
+      await params.stagedImplementation.ensureBaselineLoaded?.([p]);
+      params.stagedImplementation.files.delete(p);
+      params.stagedImplementation.deletedFiles.add(p);
+      return { deleted: true, path: p };
+    }
+  } : {};
   return {
     tools: [
       {
         name: "list_repo_files",
-        description: "Search file paths in the repository matching a substring or keyword (e.g. 'toast', 'fog', 'CampaignContext', 'sessionStore').",
+        description: "Search file paths in the repository matching a substring or keyword (e.g. 'router', 'auth', 'config', 'cli').",
         parameters: {
           type: "OBJECT",
           properties: {
@@ -9417,6 +10310,26 @@ function buildRepoExplorationToolsAndHandlers(params) {
           required: ["path", "query"]
         }
       },
+      ...params.alwaysEnableRepoTools ? [
+        {
+          name: "search_repo_code",
+          description: "Search for a substring or symbol across repository files (or inside an optional file path) and return matching lines.",
+          parameters: {
+            type: "OBJECT",
+            properties: {
+              query: {
+                type: "STRING",
+                description: "Substring or identifier to search for"
+              },
+              path: {
+                type: "STRING",
+                description: "Optional repository-relative file path to scope the search"
+              }
+            },
+            required: ["query"]
+          }
+        }
+      ] : [],
       {
         name: "read_repo_file",
         description: "Read a file (or line range start_line..end_line) from the repository branch.",
@@ -9439,10 +10352,12 @@ function buildRepoExplorationToolsAndHandlers(params) {
           required: ["path"]
         }
       },
+      ...mutationTools,
       ...webExploration.tools
     ],
     toolHandlers: {
       ...webExploration.toolHandlers,
+      ...mutationToolHandlers,
       list_repo_files: async (args) => {
         const rawQuery = String(args.query ?? "").trim().toLowerCase();
         const q = rawQuery === "*" || rawQuery === "**" || rawQuery === "." || rawQuery === "./" ? "" : rawQuery;
@@ -9451,86 +10366,55 @@ function buildRepoExplorationToolsAndHandlers(params) {
         if (allPaths.length === 0 && params.branch !== params.featureBranch) {
           allPaths = await params.gh.listBranchPaths(params.featureBranch);
         }
-        const matches = allPaths.filter((p) => {
-          const cleanP = p.trim().replace(/^\/+/, "");
-          if (params.deletedFilesSet?.has(cleanP)) {
+        const pathSet = new Set(
+          allPaths.map((p) => p.trim().replace(/^\/+/, "")).filter(Boolean)
+        );
+        for (const k of params.accumulatedFiles.keys()) {
+          const cleanK = k.trim().replace(/^\/+/, "");
+          if (cleanK) {
+            pathSet.add(cleanK);
+          }
+        }
+        if (params.stagedImplementation) {
+          for (const k of params.stagedImplementation.files.keys()) {
+            const cleanK = k.trim().replace(/^\/+/, "");
+            if (cleanK) {
+              pathSet.add(cleanK);
+            }
+          }
+        }
+        const matches = Array.from(pathSet).filter((cleanP) => {
+          if (isEffectiveDeleted(cleanP)) {
             return false;
           }
           const lower = cleanP.toLowerCase();
           return queryTokens.length === 0 ? true : queryTokens.every((token) => lower.includes(token));
-        }).slice(0, 60);
-        return { matches };
-      },
-      search_in_repo_file: async (args) => {
-        const p = String(args.path ?? "").trim().replace(/^\/+/, "");
-        if (!p || p.includes("..") || isSensitiveTaskBranchPath(p)) {
-          return { error: `Access denied or invalid path: ${p}` };
-        }
-        if (params.deletedFilesSet?.has(p)) {
-          return { error: `File '${p}' was deleted in the current branch.` };
-        }
-        const q = String(args.query ?? "").trim();
-        let content = params.accumulatedFiles.get(p) ?? null;
-        if (content === null) {
-          content = await params.gh.readSingleBranchFile(params.branch, p) ?? (params.branch !== params.featureBranch ? await params.gh.readSingleBranchFile(params.featureBranch, p) : null);
-          if (content !== null) {
-            params.accumulatedFiles.set(p, content);
-          }
-        }
-        if (content === null) {
-          return { error: `File not found: ${p}` };
-        }
-        const lines = content.split("\n");
-        const snippets = [];
-        for (let i = 0; i < lines.length; i += 1) {
-          if (lines[i].toLowerCase().includes(q.toLowerCase())) {
-            const start = Math.max(0, i - 15);
-            const end = Math.min(lines.length, i + 20);
-            snippets.push(
-              wrapUntrustedContent(
-                "untrusted_workspace_files",
-                `Lines ${start + 1}-${end}:
-` + lines.slice(start, end).map((l, idx) => `${start + idx + 1}| ${l}`).join("\n")
-              )
-            );
-            i = end - 1;
-            if (snippets.length >= 8) {
-              break;
-            }
-          }
-        }
+        });
         return {
-          path: p,
-          total_lines: lines.length,
-          matches: snippets
+          total_matches: matches.length,
+          matches
         };
       },
+      search_in_repo_file: searchInRepoHandler,
+      search_repo_code: searchInRepoHandler,
       read_repo_file: async (args) => {
         const p = String(args.path ?? "").trim().replace(/^\/+/, "");
         if (!p || p.includes("..") || isSensitiveTaskBranchPath(p)) {
           return { error: `Access denied or invalid path: ${p}` };
         }
-        if (params.deletedFilesSet?.has(p)) {
+        if (isEffectiveDeleted(p)) {
           return { error: `File '${p}' was deleted in the current branch.` };
         }
-        let content = params.accumulatedFiles.get(p) ?? null;
-        if (content === null) {
-          content = await params.gh.readSingleBranchFile(params.branch, p) ?? (params.branch !== params.featureBranch ? await params.gh.readSingleBranchFile(params.featureBranch, p) : null);
-          if (content !== null) {
-            params.accumulatedFiles.set(p, content);
-          }
-        }
+        const content = await resolveEffectiveFileContent(p);
         if (content === null) {
           return { error: `File not found: ${p}` };
         }
         const lines = content.split("\n");
         const startLine = Math.max(1, Number(args.start_line ?? 1) || 1);
-        const endLine = Math.min(
+        const endLine = args.end_line !== void 0 && args.end_line !== null ? Math.min(
           lines.length,
-          Number(
-            args.end_line ?? Math.min(lines.length, startLine + 250)
-          ) || lines.length
-        );
+          Math.max(startLine, Number(args.end_line) || lines.length)
+        ) : lines.length;
         return {
           path: p,
           total_lines: lines.length,
@@ -9702,6 +10586,9 @@ ${formattedBlocks}`;
 `;
 }
 var ADR_PATH_REGEX = /^docs\/adr\/(\d{4})-(.+)\.md$/;
+function normalizeAdrSlug(rawSlug) {
+  return rawSlug.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
 function replaceAdrReferencesSinglePass(text, replacements) {
   if (replacements.length === 0) {
     return text;
@@ -9733,38 +10620,39 @@ function replaceAdrReferencesSinglePass(text, replacements) {
 }
 function renumberCollidingAdrs(input) {
   const devAdrsByNumber = /* @__PURE__ */ new Map();
+  const devAdrsBySlug = /* @__PURE__ */ new Map();
   let maxAdrNumber = 0;
   for (const rawPath of input.devPaths) {
     const cleanPath = rawPath.trim().replace(/^\/+/, "");
     const match = ADR_PATH_REGEX.exec(cleanPath);
-    if (match && match[1]) {
+    if (match && match[1] && match[2]) {
       const num = Number.parseInt(match[1], 10);
+      const normSlug = normalizeAdrSlug(match[2]);
       if (Number.isFinite(num)) {
         devAdrsByNumber.set(num, cleanPath);
+        if (!devAdrsBySlug.has(normSlug)) {
+          devAdrsBySlug.set(normSlug, {
+            num,
+            numStr: match[1],
+            slug: match[2],
+            path: cleanPath
+          });
+        }
         if (num > maxAdrNumber) {
           maxAdrNumber = num;
         }
       }
     }
   }
-  for (const adr of input.planAdrs) {
-    const cleanPath = adr.path.trim().replace(/^\/+/, "");
-    const match = ADR_PATH_REGEX.exec(cleanPath);
-    if (match && match[1]) {
-      const num = Number.parseInt(match[1], 10);
-      if (Number.isFinite(num) && num > maxAdrNumber) {
-        maxAdrNumber = num;
-      }
-    }
-  }
   const renumberMap = /* @__PURE__ */ new Map();
-  const resultingAdrs = [];
-  const deletedAdrPaths = [];
+  const deletedAdrPathsSet = /* @__PURE__ */ new Set();
+  const planBySlug = /* @__PURE__ */ new Map();
+  const passthroughAdrs = [];
   for (const adr of input.planAdrs) {
     const cleanPath = adr.path.trim().replace(/^\/+/, "");
     const match = ADR_PATH_REGEX.exec(cleanPath);
     if (!match || !match[1] || !match[2]) {
-      resultingAdrs.push({
+      passthroughAdrs.push({
         path: cleanPath,
         content: adr.content,
         oldPath: cleanPath,
@@ -9772,57 +10660,224 @@ function renumberCollidingAdrs(input) {
       });
       continue;
     }
-    const oldNum = Number.parseInt(match[1], 10);
-    const slug = match[2];
-    const existingDevPath = devAdrsByNumber.get(oldNum);
-    if (existingDevPath && existingDevPath !== cleanPath) {
-      maxAdrNumber = Math.max(maxAdrNumber, oldNum) + 1;
-      const oldNumStr = match[1];
-      const newNumStr = String(maxAdrNumber).padStart(4, "0");
-      const oldFileName = `${oldNumStr}-${slug}.md`;
-      const newFileName = `${newNumStr}-${slug}.md`;
-      const newPath = `docs/adr/${newFileName}`;
-      devAdrsByNumber.set(maxAdrNumber, newPath);
-      const singleReplacement = {
-        oldNumStr,
-        newNumStr,
-        oldFileName,
-        newFileName
-      };
-      renumberMap.set(cleanPath, singleReplacement);
-      deletedAdrPaths.push(cleanPath);
-      const updatedContent = replaceAdrReferencesSinglePass(adr.content, [
-        singleReplacement
-      ]);
-      resultingAdrs.push({
-        path: newPath,
-        content: updatedContent,
-        oldPath: cleanPath,
-        renumbered: true
-      });
-    } else {
-      if (oldNum > maxAdrNumber) {
-        maxAdrNumber = oldNum;
-      }
-      devAdrsByNumber.set(oldNum, cleanPath);
-      resultingAdrs.push({
-        path: cleanPath,
-        content: adr.content,
-        oldPath: cleanPath,
-        renumbered: false
-      });
+    const num = Number.parseInt(match[1], 10);
+    const normSlug = normalizeAdrSlug(match[2]);
+    const list = planBySlug.get(normSlug) ?? [];
+    list.push({
+      cleanPath,
+      num,
+      numStr: match[1],
+      slug: match[2],
+      content: adr.content
+    });
+    planBySlug.set(normSlug, list);
+  }
+  for (const [normSlug, entries] of planBySlug.entries()) {
+    if (devAdrsBySlug.has(normSlug)) {
+      continue;
+    }
+    const primary = entries[0];
+    if (!devAdrsByNumber.has(primary.num) && Number.isFinite(primary.num) && primary.num > maxAdrNumber) {
+      maxAdrNumber = primary.num;
     }
   }
+  const intermediateAdrs = [...passthroughAdrs];
+  for (const [normSlug, entries] of planBySlug.entries()) {
+    entries.sort((a, b) => a.num - b.num);
+    const latestEntry = entries[entries.length - 1];
+    const earliestEntry = entries[0];
+    const existingDevForSlug = devAdrsBySlug.get(normSlug);
+    if (existingDevForSlug) {
+      const canonicalPath = existingDevForSlug.path;
+      const canonicalFileName = `${existingDevForSlug.numStr}-${existingDevForSlug.slug}.md`;
+      let wasRenumbered = false;
+      for (const entry of entries) {
+        if (entry.cleanPath !== canonicalPath) {
+          wasRenumbered = true;
+          deletedAdrPathsSet.add(entry.cleanPath);
+          renumberMap.set(entry.cleanPath, {
+            oldNumStr: entry.numStr,
+            newNumStr: existingDevForSlug.numStr,
+            oldFileName: `${entry.numStr}-${entry.slug}.md`,
+            newFileName: canonicalFileName
+          });
+        }
+      }
+      intermediateAdrs.push({
+        path: canonicalPath,
+        content: latestEntry.content,
+        oldPath: latestEntry.cleanPath,
+        renumbered: wasRenumbered
+      });
+      continue;
+    }
+    const collidingDevPath = devAdrsByNumber.get(earliestEntry.num);
+    let targetNum = earliestEntry.num;
+    let targetNumStr = earliestEntry.numStr;
+    let targetSlug = earliestEntry.slug;
+    let targetPath = earliestEntry.cleanPath;
+    let renumbered = false;
+    if (collidingDevPath && collidingDevPath !== earliestEntry.cleanPath) {
+      maxAdrNumber = Math.max(maxAdrNumber, earliestEntry.num) + 1;
+      targetNum = maxAdrNumber;
+      targetNumStr = String(targetNum).padStart(4, "0");
+      targetSlug = latestEntry.slug;
+      targetPath = `docs/adr/${targetNumStr}-${targetSlug}.md`;
+      renumbered = true;
+    } else if (targetNum > maxAdrNumber) {
+      maxAdrNumber = targetNum;
+    }
+    devAdrsByNumber.set(targetNum, targetPath);
+    devAdrsBySlug.set(normSlug, {
+      num: targetNum,
+      numStr: targetNumStr,
+      slug: targetSlug,
+      path: targetPath
+    });
+    const targetFileName = `${targetNumStr}-${targetSlug}.md`;
+    for (const entry of entries) {
+      if (entry.cleanPath !== targetPath) {
+        renumbered = true;
+        deletedAdrPathsSet.add(entry.cleanPath);
+        renumberMap.set(entry.cleanPath, {
+          oldNumStr: entry.numStr,
+          newNumStr: targetNumStr,
+          oldFileName: `${entry.numStr}-${entry.slug}.md`,
+          newFileName: targetFileName
+        });
+      }
+    }
+    intermediateAdrs.push({
+      path: targetPath,
+      content: latestEntry.content,
+      oldPath: earliestEntry.cleanPath,
+      renumbered
+    });
+  }
   const allReplacements = Array.from(renumberMap.values());
+  const resultingAdrs = intermediateAdrs.map((adr) => ({
+    ...adr,
+    content: replaceAdrReferencesSinglePass(adr.content, allReplacements)
+  }));
   const updatedSpecFiles = (input.specFiles ?? []).map((spec) => ({
     path: spec.path.trim().replace(/^\/+/, ""),
     content: replaceAdrReferencesSinglePass(spec.content, allReplacements)
   }));
+  const updatedGlossaryContent = input.glossaryContent !== void 0 ? replaceAdrReferencesSinglePass(input.glossaryContent, allReplacements) : void 0;
   return {
     adrs: resultingAdrs,
     specFiles: updatedSpecFiles,
-    deletedAdrPaths
+    ...updatedGlossaryContent !== void 0 ? { glossaryContent: updatedGlossaryContent } : {},
+    deletedAdrPaths: Array.from(deletedAdrPathsSet)
   };
+}
+async function reconcileAdrsWithLlm(input) {
+  if (!input.llmClient && !input.llmApiKey) {
+    return null;
+  }
+  if (input.devAdrs.length === 0 || input.featureAdrs.length === 0) {
+    return null;
+  }
+  const systemInstruction = [
+    "Tu es l'architecte EPURE charg\xE9 de la r\xE9conciliation s\xE9mantique et monotone des ADRs (ADR-0032, Q114 & Q118).",
+    "Lorsqu'une branche `feature/*` ou `plan/*` est synchronis\xE9e avec `dev` o\xF9 d'autres ADRs ont \xE9t\xE9 fusionn\xE9s concurremment :",
+    "1. V\xE9rifie qu'aucune d\xE9cision de `featureAdrs` n'est redondante ou contradictoire avec `devAdrs`.",
+    "2. Si un ADR de `featureAdrs` porte sur la m\xEAme d\xE9cision architecturale qu'un ADR de `devAdrs` sous un autre slug, fusionne-le dans le chemin canonique de `devAdrs` et ajoute le chemin redondant dans `deleted_adr_paths`.",
+    "3. Assure-toi que tous les liens et r\xE9f\xE9rences `ADR-NNNN` dans les ADRs, les sp\xE9cifications (`specFiles`) et `GLOSSARY.md` pointent vers les bons num\xE9ros et titres.",
+    "4. Ne renvoie dans `updated_files` que les fichiers (`docs/adr/*.md`, `docs/specs/*.md`, `GLOSSARY.md`) dont le contenu doit \xEAtre mis \xE0 jour.",
+    EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
+  ].join("\n");
+  const userPrompt = [
+    "### ADRs d\xE9j\xE0 pr\xE9sents sur `dev` (contenu int\xE9gral) :",
+    ...input.devAdrs.map(
+      (a) => `#### \`${a.path}\`
+${wrapUntrustedContent("untrusted_workspace_files", a.content)}`
+    ),
+    "",
+    "### ADRs de la fonctionnalit\xE9 courante (apr\xE8s renum\xE9rotation d\xE9terministe, contenu int\xE9gral) :",
+    ...input.featureAdrs.map(
+      (a) => `#### \`${a.path}\`
+${wrapUntrustedContent("untrusted_workspace_files", a.content)}`
+    ),
+    "",
+    "### Sp\xE9cifications de la fonctionnalit\xE9 (contenu int\xE9gral) :",
+    ...input.specFiles.map(
+      (s) => `#### \`${s.path}\`
+${wrapUntrustedContent("untrusted_workspace_files", s.content)}`
+    ),
+    ...input.glossaryContent ? [
+      "",
+      "### `GLOSSARY.md` (contenu int\xE9gral) :",
+      wrapUntrustedContent(
+        "untrusted_workspace_files",
+        input.glossaryContent
+      )
+    ] : []
+  ].join("\n");
+  try {
+    if (input.llmClient) {
+      return await input.llmClient.completeStructured({
+        model: input.model ?? "gemini-3.8-flash",
+        systemInstruction,
+        userPrompt,
+        responseSchema: ADR_COHERENCE_RECONCILIATION_SCHEMA,
+        temperature: 0.1
+      });
+    }
+    return await callGeminiJson({
+      apiKey: input.llmApiKey ?? "",
+      model: input.model ?? "gemini-3.8-flash",
+      systemInstruction,
+      prompt: userPrompt,
+      temperature: 0.1,
+      responseSchema: ADR_COHERENCE_RECONCILIATION_SCHEMA,
+      fetchImpl: input.fetchImpl
+    });
+  } catch {
+    return null;
+  }
+}
+async function applyAdrLlmReconciliation(params) {
+  if (!params.llmClient && !params.llmApiKey) {
+    return;
+  }
+  const devAdrsLoaded = [];
+  for (const dp of params.devAdrPaths) {
+    const c = await params.gh.readSingleBranchFile(params.baseBranch, dp);
+    if (c !== null) {
+      devAdrsLoaded.push({ path: dp, content: c });
+    }
+  }
+  const llmReconciled = await reconcileAdrsWithLlm({
+    devAdrs: devAdrsLoaded,
+    featureAdrs: params.featureAdrs,
+    specFiles: params.specFiles,
+    glossaryContent: params.glossaryContent,
+    llmClient: params.llmClient,
+    llmApiKey: params.llmApiKey,
+    model: params.model,
+    fetchImpl: params.fetchImpl
+  });
+  if (!llmReconciled) {
+    return;
+  }
+  for (const updated of llmReconciled.updated_files) {
+    if (updated.path === "GLOSSARY.md" || updated.path.startsWith("docs/adr/") || updated.path.startsWith("docs/specs/")) {
+      const existingIdx = params.filesToMutate.findIndex(
+        (f) => f.path === updated.path
+      );
+      if (existingIdx >= 0) {
+        params.filesToMutate[existingIdx] = updated;
+      } else {
+        params.filesToMutate.push(updated);
+      }
+    }
+  }
+  for (const delPath of llmReconciled.deleted_adr_paths) {
+    if (delPath.startsWith("docs/adr/") && !params.deletedAdrPaths.includes(delPath)) {
+      params.deletedAdrPaths.push(delPath);
+    }
+  }
 }
 async function integratePlanBranchIntoFeature(params) {
   const baseBranch = params.baseBranch ?? "dev";
@@ -9900,13 +10955,41 @@ async function integratePlanBranchIntoFeature(params) {
   const renumberedResult = renumberCollidingAdrs({
     devPaths,
     planAdrs: planAdrsToProcess,
-    specFiles: specFilesToProcess
+    specFiles: specFilesToProcess,
+    glossaryContent: filesToCommit.find((f) => f.path === "GLOSSARY.md")?.content
   });
+  if (renumberedResult.glossaryContent !== void 0) {
+    const idx = filesToCommit.findIndex((f) => f.path === "GLOSSARY.md");
+    if (idx >= 0) {
+      filesToCommit[idx] = {
+        path: "GLOSSARY.md",
+        content: renumberedResult.glossaryContent
+      };
+    }
+  }
   for (const adr of renumberedResult.adrs) {
     filesToCommit.push({ path: adr.path, content: adr.content });
   }
   for (const spec of renumberedResult.specFiles) {
     filesToCommit.push({ path: spec.path, content: spec.content });
+  }
+  const deletedAdrPaths = [...renumberedResult.deletedAdrPaths];
+  const devAdrPaths = devPaths.map((p) => p.trim().replace(/^\/+/, "")).filter((p) => ADR_PATH_REGEX.test(p));
+  if (renumberedResult.adrs.length > 0 && (renumberedResult.adrs.some((a) => a.renumbered) || renumberedResult.deletedAdrPaths.length > 0 || devAdrPaths.length > 0)) {
+    await applyAdrLlmReconciliation({
+      gh: params.gh,
+      baseBranch,
+      devAdrPaths,
+      featureAdrs: renumberedResult.adrs,
+      specFiles: renumberedResult.specFiles,
+      glossaryContent: filesToCommit.find((f) => f.path === "GLOSSARY.md")?.content,
+      filesToMutate: filesToCommit,
+      deletedAdrPaths,
+      llmClient: params.llmClient,
+      llmApiKey: params.llmApiKey,
+      model: params.model,
+      fetchImpl: params.fetchImpl
+    });
   }
   if (filesToCommit.length === 0) {
     return {
@@ -9921,7 +11004,7 @@ async function integratePlanBranchIntoFeature(params) {
     fromBranch: baseBranch,
     commitMessage: `docs(plan): integrate approved planning artifacts from ${params.planBranch}`,
     files: filesToCommit,
-    ...renumberedResult.deletedAdrPaths.length > 0 ? { deletedFiles: renumberedResult.deletedAdrPaths } : {}
+    ...deletedAdrPaths.length > 0 ? { deletedFiles: deletedAdrPaths } : {}
   });
   return {
     featureHeadSha,
@@ -9941,6 +11024,86 @@ async function syncBranchWithBase(input) {
     commitMessage: `chore(sync): merge ${input.baseBranch} into ${input.targetBranch}`
   });
   if (mergeRes.status === "up_to_date" || mergeRes.status === "merged") {
+    if (mergeRes.status === "merged" && typeof input.gh.listBranchPaths === "function" && typeof input.gh.readSingleBranchFile === "function" && (input.targetBranch.startsWith("feature/") || input.targetBranch.startsWith("plan/"))) {
+      const [basePathsAfterMerge, targetPathsAfterMerge] = await Promise.all([
+        input.gh.listBranchPaths(input.baseBranch),
+        input.gh.listBranchPaths(input.targetBranch)
+      ]);
+      const baseAdrSet = new Set(
+        basePathsAfterMerge.map((p) => p.trim().replace(/^\/+/, "")).filter((p) => ADR_PATH_REGEX.test(p))
+      );
+      const targetOnlyAdrPaths = targetPathsAfterMerge.map((p) => p.trim().replace(/^\/+/, "")).filter((p) => ADR_PATH_REGEX.test(p) && !baseAdrSet.has(p));
+      if (baseAdrSet.size > 0 && targetOnlyAdrPaths.length > 0) {
+        const planAdrsLoaded = [];
+        for (const p of targetOnlyAdrPaths) {
+          const c = await input.gh.readSingleBranchFile(input.targetBranch, p);
+          if (c !== null) {
+            planAdrsLoaded.push({ path: p, content: c });
+          }
+        }
+        const specPathsOnTarget = targetPathsAfterMerge.map((p) => p.trim().replace(/^\/+/, "")).filter((p) => /^docs\/specs\/.+\.md$/.test(p));
+        const specFilesLoaded = [];
+        for (const sp of specPathsOnTarget) {
+          const c = await input.gh.readSingleBranchFile(input.targetBranch, sp);
+          if (c !== null) {
+            specFilesLoaded.push({ path: sp, content: c });
+          }
+        }
+        const glossaryOnTarget = await input.gh.readSingleBranchFile(
+          input.targetBranch,
+          "GLOSSARY.md"
+        );
+        const renumberedOnMerge = renumberCollidingAdrs({
+          devPaths: basePathsAfterMerge,
+          planAdrs: planAdrsLoaded,
+          specFiles: specFilesLoaded,
+          ...glossaryOnTarget !== null ? { glossaryContent: glossaryOnTarget } : {}
+        });
+        const adrFilesToUpdate = [];
+        const adrDeletedPaths = [...renumberedOnMerge.deletedAdrPaths];
+        if (renumberedOnMerge.adrs.some((a) => a.renumbered) || adrDeletedPaths.length > 0) {
+          for (const adr of renumberedOnMerge.adrs) {
+            adrFilesToUpdate.push({ path: adr.path, content: adr.content });
+          }
+          for (const spec of renumberedOnMerge.specFiles) {
+            adrFilesToUpdate.push({ path: spec.path, content: spec.content });
+          }
+          if (renumberedOnMerge.glossaryContent !== void 0) {
+            adrFilesToUpdate.push({
+              path: "GLOSSARY.md",
+              content: renumberedOnMerge.glossaryContent
+            });
+          }
+        }
+        await applyAdrLlmReconciliation({
+          gh: input.gh,
+          baseBranch: input.baseBranch,
+          devAdrPaths: Array.from(baseAdrSet),
+          featureAdrs: renumberedOnMerge.adrs,
+          specFiles: renumberedOnMerge.specFiles,
+          glossaryContent: renumberedOnMerge.glossaryContent ?? (glossaryOnTarget ?? void 0),
+          filesToMutate: adrFilesToUpdate,
+          deletedAdrPaths: adrDeletedPaths,
+          llmClient: input.llmClient,
+          llmApiKey: input.llmApiKey,
+          model: input.model,
+          fetchImpl: input.fetchImpl
+        });
+        if (adrFilesToUpdate.length > 0 || adrDeletedPaths.length > 0) {
+          const reconciledSha = await input.gh.commitFilesToBranch({
+            branch: input.targetBranch,
+            commitMessage: `docs(adr): reconcile concurrent ADRs from ${input.baseBranch} into ${input.targetBranch}`,
+            files: adrFilesToUpdate,
+            ...adrDeletedPaths.length > 0 ? { deletedFiles: adrDeletedPaths } : {}
+          });
+          return {
+            status: mergeRes.status,
+            headSha: reconciledSha,
+            conflictsResolved: []
+          };
+        }
+      }
+    }
     return {
       status: mergeRes.status,
       headSha: mergeRes.sha,
@@ -10076,24 +11239,21 @@ async function syncBranchWithBase(input) {
       ]);
       fileTriplets.push(
         [
-          `### File: \`${filePath}\``,
+          `### File: \`${filePath}\` (untruncated 3-way versions)`,
           "#### `<base_version>` (common ancestor):",
           wrapUntrustedContent(
             "untrusted_workspace_files",
-            baseContent ?? "",
-            12e3
+            baseContent ?? ""
           ),
           `#### \`<ours_target_branch>\` (\`${input.targetBranch}\`):`,
           wrapUntrustedContent(
             "untrusted_workspace_files",
-            oursContent ?? "",
-            12e3
+            oursContent ?? ""
           ),
           `#### \`<theirs_base_branch>\` (\`${input.baseBranch}\`):`,
           wrapUntrustedContent(
             "untrusted_workspace_files",
-            theirsContent ?? "",
-            12e3
+            theirsContent ?? ""
           )
         ].join("\n")
       );
@@ -10259,6 +11419,1565 @@ ${stage1Result.output.slice(0, 4e3)}`;
     headSha,
     conflictsResolved: resolvedFiles.map((f) => f.path)
   };
+}
+
+// src/orchestrator/types.ts
+function canUsePhaseModelFromConfig(candidateModel, hasProvidersMap) {
+  if (!candidateModel || candidateModel.trim().length === 0) {
+    return false;
+  }
+  const clean = candidateModel.trim();
+  if (hasProvidersMap || clean.includes("/")) {
+    return true;
+  }
+  const lower = clean.toLowerCase();
+  if (lower.startsWith("gemini-")) {
+    return true;
+  }
+  if (lower.startsWith("claude-")) {
+    return Boolean(process.env.ANTHROPIC_API_KEY?.trim());
+  }
+  if (lower.startsWith("gpt-") || lower.startsWith("o1") || lower.startsWith("o3") || lower.startsWith("o4")) {
+    return Boolean(process.env.OPENAI_API_KEY?.trim());
+  }
+  return false;
+}
+function resolvePhaseModels(inputModel, agentsConfig) {
+  const fallbackModel = inputModel?.trim() || "gemini-3.8-flash";
+  const explicitOverride = Boolean(inputModel && inputModel.trim().length > 0);
+  const providers = agentsConfig?.providers;
+  const maxTransientRetries = agentsConfig?.max_transient_api_retries;
+  const transientRetryBackoffSeconds = agentsConfig?.transient_retry_backoff_seconds;
+  const requestTimeoutMs = agentsConfig?.llm_request_timeout_seconds !== void 0 && agentsConfig.llm_request_timeout_seconds > 0 ? agentsConfig.llm_request_timeout_seconds * 1e3 : 9e5;
+  const hasProvidersMap = Boolean(
+    providers && Object.keys(providers).length > 0
+  );
+  if (explicitOverride || !agentsConfig) {
+    return {
+      planningModel: fallbackModel,
+      implementationModel: fallbackModel,
+      reviewModel: fallbackModel,
+      requestTimeoutMs,
+      ...providers ? { providers } : {},
+      ...maxTransientRetries !== void 0 ? { maxTransientRetries } : {},
+      ...transientRetryBackoffSeconds !== void 0 ? { transientRetryBackoffSeconds } : {}
+    };
+  }
+  const pickModel = (phaseCandidate) => canUsePhaseModelFromConfig(phaseCandidate, hasProvidersMap) ? phaseCandidate.trim() : fallbackModel;
+  return {
+    planningModel: pickModel(agentsConfig.models?.planning),
+    implementationModel: pickModel(agentsConfig.models?.implementation),
+    reviewModel: pickModel(agentsConfig.models?.review),
+    requestTimeoutMs,
+    ...providers ? { providers } : {},
+    ...maxTransientRetries !== void 0 ? { maxTransientRetries } : {},
+    ...transientRetryBackoffSeconds !== void 0 ? { transientRetryBackoffSeconds } : {}
+  };
+}
+
+// src/frontend/impeccable-planning.ts
+function planImpeccableDesignSession(input) {
+  if (!input.touchesFrontendUi) {
+    return {
+      impeccable_invoked: false,
+      open_design_questions: [],
+      versioned_artifact_paths: []
+    };
+  }
+  const answeredSet = new Set(
+    input.alreadyAnsweredTopics.map((t) => t.trim().toLowerCase())
+  );
+  const openQuestions = input.candidateDesignTopics.filter(
+    (topic) => !answeredSet.has(topic.trim().toLowerCase())
+  );
+  const cleanSlug = input.surfaceSlug.trim().replace(/^\/+|\/+$/g, "");
+  return {
+    impeccable_invoked: true,
+    open_design_questions: openQuestions,
+    versioned_artifact_paths: [
+      ".impeccable.md",
+      "DESIGN.md",
+      `.impeccable/surfaces/${cleanSlug}.md`
+    ]
+  };
+}
+
+// src/planning/artifacts-gate.ts
+var ADR_PATH_PATTERN = /^docs\/adr\/\d{4}-[a-z0-9-]+\.md$/;
+function hasDependencyCycle(tickets) {
+  const byId = /* @__PURE__ */ new Map();
+  for (const t of tickets) {
+    byId.set(t.id, t);
+  }
+  const visiting = /* @__PURE__ */ new Set();
+  const visited = /* @__PURE__ */ new Set();
+  function dfs(id) {
+    if (visiting.has(id)) {
+      return true;
+    }
+    if (visited.has(id)) {
+      return false;
+    }
+    visiting.add(id);
+    const node = byId.get(id);
+    if (node) {
+      for (const blockerId of node.blockedBy) {
+        if (dfs(blockerId)) {
+          return true;
+        }
+      }
+    }
+    visiting.delete(id);
+    visited.add(id);
+    return false;
+  }
+  for (const t of tickets) {
+    if (dfs(t.id)) {
+      return true;
+    }
+  }
+  return false;
+}
+function validatePlanningArtifactsAndGraph(bundle) {
+  if (bundle.introducesDomainTerms && bundle.glossaryContent.trim().length === 0) {
+    return {
+      valid: false,
+      error_code: "GLOSSARY_MISSING_FOR_DOMAIN_TERMS",
+      error_message: "GLOSSARY.md is required when domain terms are introduced or refined (ADR-0007).",
+      ready_ticket_ids: [],
+      blocked_ticket_ids: []
+    };
+  }
+  if (bundle.adrFiles.length === 0) {
+    return {
+      valid: false,
+      error_code: "ADR_MISSING_OR_INCOMPLETE",
+      error_message: "At least one numbered ADR under docs/adr/NNNN-*.md is required before implementation (ADR-0007).",
+      ready_ticket_ids: [],
+      blocked_ticket_ids: []
+    };
+  }
+  for (const adr of bundle.adrFiles) {
+    if (!ADR_PATH_PATTERN.test(adr.path.trim()) || adr.content.trim().length === 0) {
+      return {
+        valid: false,
+        error_code: "ADR_MISSING_OR_INCOMPLETE",
+        error_message: `Invalid or empty ADR file '${adr.path}'.`,
+        ready_ticket_ids: [],
+        blocked_ticket_ids: []
+      };
+    }
+  }
+  if (!bundle.specPath.trim().startsWith("docs/specs/") || bundle.specContent.trim().length === 0) {
+    return {
+      valid: false,
+      error_code: "SPEC_MISSING_OR_INCOMPLETE",
+      error_message: "Approved specification under docs/specs/<slug>.md is missing or empty (ADR-0002, ADR-0007).",
+      ready_ticket_ids: [],
+      blocked_ticket_ids: []
+    };
+  }
+  if (bundle.tickets.length === 0) {
+    return {
+      valid: false,
+      error_code: "TICKET_GRAPH_EMPTY",
+      error_message: "Ticket breakdown graph cannot be empty.",
+      ready_ticket_ids: [],
+      blocked_ticket_ids: []
+    };
+  }
+  if (hasDependencyCycle(bundle.tickets)) {
+    return {
+      valid: false,
+      error_code: "TICKET_GRAPH_CYCLE_DETECTED",
+      error_message: "Ticket dependency graph contains a cycle; blocked_by edges must form a strict DAG (ADR-0003).",
+      ready_ticket_ids: [],
+      blocked_ticket_ids: []
+    };
+  }
+  const stateById = /* @__PURE__ */ new Map();
+  for (const t of bundle.tickets) {
+    stateById.set(t.id, t.state);
+  }
+  const readyTicketIds = [];
+  const blockedTicketIds = [];
+  for (const t of bundle.tickets) {
+    if (t.state === "closed") {
+      continue;
+    }
+    const hasOpenBlocker = t.blockedBy.some(
+      (blockerId) => stateById.get(blockerId) !== "closed"
+    );
+    if (hasOpenBlocker) {
+      blockedTicketIds.push(t.id);
+    } else {
+      readyTicketIds.push(t.id);
+    }
+  }
+  return {
+    valid: true,
+    error_code: "NONE",
+    error_message: "",
+    ready_ticket_ids: readyTicketIds,
+    blocked_ticket_ids: blockedTicketIds
+  };
+}
+
+// src/orchestrator/phases/grill-and-plan.ts
+function buildParentIssueTicketsTasklistBlock(tickets) {
+  const byPhase = /* @__PURE__ */ new Map();
+  for (const t of tickets) {
+    const phase = t.phase && t.phase >= 1 ? t.phase : 1;
+    const list = byPhase.get(phase) ?? [];
+    list.push(t);
+    byPhase.set(phase, list);
+  }
+  const phases = Array.from(byPhase.keys()).sort((a, b) => a - b);
+  const lines = ["<!-- epure-tickets-tasklist:start -->"];
+  for (const phase of phases) {
+    if (lines.length > 1) {
+      lines.push("");
+    }
+    lines.push(
+      phase === 1 ? "### Plan Tickets (Phase 1)" : `### Remediation Tickets (Phase ${phase})`
+    );
+    for (const t of byPhase.get(phase) ?? []) {
+      const blockedSuffix = t.blockedByIssueNumbers.length > 0 ? ` _(blocked by ${t.blockedByIssueNumbers.map((n) => `#${n}`).join(", ")})_` : "";
+      lines.push(`- [ ] #${t.ticketIssueNumber} \u2014 ${t.title}${blockedSuffix}`);
+    }
+  }
+  lines.push("<!-- epure-tickets-tasklist:end -->");
+  return lines.join("\n");
+}
+async function createLinkedPhaseTicketsOnGitHub(params) {
+  const indexToIssueNumber = /* @__PURE__ */ new Map();
+  const indexToIssueDatabaseId = /* @__PURE__ */ new Map();
+  const createdTicketsManifest = [];
+  for (const ticket of params.tickets) {
+    const blockerNumbers = ticket.blockedByIndices.map((idx) => indexToIssueNumber.get(idx)).filter((n) => typeof n === "number");
+    const blockerDatabaseIds = ticket.blockedByIndices.map((idx) => indexToIssueDatabaseId.get(idx)).filter((id) => typeof id === "number");
+    const depLines = blockerNumbers.length > 0 ? blockerNumbers.map((n) => `blocked_by: #${n}`).join("\n") : "blocked_by: none";
+    const ticketBody = appendEpureCommandsSpoiler(
+      [
+        `Parent Plan: #${params.parentIssueNumber}`,
+        ...ticket.extraHeaderLines ?? [],
+        depLines,
+        "",
+        "## Description",
+        ticket.description,
+        "",
+        `## ${ticket.acceptanceSectionHeading}`,
+        ...ticket.acceptanceCriteria.map((c) => `- [ ] ${c}`),
+        "",
+        "## Target Files",
+        ...ticket.filesToTouch.map((f) => `- \`${f}\``)
+      ].join("\n"),
+      {
+        phase: params.spoilerContext.phase,
+        status: params.spoilerContext.status,
+        issueNumber: params.parentIssueNumber
+      }
+    );
+    const createdIssue = await params.gh.createIssue({
+      title: ticket.title,
+      body: ticketBody,
+      labels: ["ready-for-agent"]
+    });
+    indexToIssueNumber.set(ticket.index, createdIssue.number);
+    if (typeof createdIssue.id === "number") {
+      indexToIssueDatabaseId.set(ticket.index, createdIssue.id);
+      await params.gh.addSubIssue?.(params.parentIssueNumber, createdIssue.id);
+    }
+    for (const blockerDbId of blockerDatabaseIds) {
+      await params.gh.addIssueBlockedByDependency?.(
+        createdIssue.number,
+        blockerDbId
+      );
+    }
+    createdTicketsManifest.push({
+      ticketIssueNumber: createdIssue.number,
+      slug: ticket.slug,
+      title: ticket.title,
+      description: ticket.description,
+      acceptanceCriteria: [...ticket.acceptanceCriteria],
+      blockedByIssueNumbers: blockerNumbers,
+      filesToTouch: [...ticket.filesToTouch],
+      phase: params.phase
+    });
+  }
+  return createdTicketsManifest;
+}
+async function upsertParentIssueTicketsTasklist(params) {
+  if (typeof params.gh.updateIssue !== "function" || params.tickets.length === 0) {
+    return;
+  }
+  try {
+    let currentBody = params.fallbackBody ?? "";
+    try {
+      const freshIssue = await params.gh.getIssue(params.parentIssueNumber);
+      if (typeof freshIssue.body === "string") {
+        currentBody = freshIssue.body;
+      }
+    } catch {
+    }
+    const block = buildParentIssueTicketsTasklistBlock(params.tickets);
+    const markerRegex = /<!-- epure-tickets-tasklist:start -->[\s\S]*?<!-- epure-tickets-tasklist:end -->/;
+    const nextBody = markerRegex.test(currentBody) ? currentBody.replace(markerRegex, block) : `${currentBody.trimEnd()}
+
+${block}
+`;
+    await params.gh.updateIssue(params.parentIssueNumber, { body: nextBody });
+  } catch {
+  }
+}
+async function runGoldfishSpecAudit(params) {
+  const systemInstruction = [
+    "Tu es le 'Goldfish Spec Auditor' (mod\xE8le Google Elephant-Goldfish, ADR-0031) : un auditeur d'architecture totalement vierge de l'historique conversationnel de l'issue.",
+    PROMPT_INJECTION_IMMUNITY_CLAUSE,
+    "Tu disposes UNIQUEMENT des documents livr\xE9s (`spec_markdown`, `glossary_markdown`, `adrs`, `target_files_hint`) \u2014 tu n'as AUCUNE m\xE9moire de la discussion pr\xE9alable.",
+    "\xC9value rigoureusement trois axes :",
+    "1. Auto-suffisance de compr\xE9hension (`comprehension_self_contained`) : un ing\xE9nieur ou agent vierge du contexte peut-il comprendre 100 % des r\xE8gles m\xE9tier et contrats techniques sans lire les commentaires de l'issue ? Signale toute d\xE9cision implicite dans `missing_context_questions`.",
+    "2. Zoom-Out / YAGNI (`zoom_out_yagni_passed`) : la sp\xE9cification \xE9vite-t-elle toute sur-ing\xE9nierie, abstraction sp\xE9culative ou couche inutile (Ponytail 5) ? Signale tout exc\xE8s dans `overengineering_warnings`.",
+    "3. Implementation Readiness, ASD-STE100 & EpicGoalContract (`implementation_readiness_passed`, ADR-0032, Q115) : chaque exigence et crit\xE8re d'acceptation respecte-t-il les r\xE8gles ASD-STE100 (vocabulaire bijectif `GLOSSARY.md` sans synonymes `_Avoid_`, voix active avec acteur explicite, 1 phrase = 1 action, conditionnelles d\xE9terministes `WHEN/IF ... THEN` sans modalit\xE9 floue `should`/`might`/`if needed`/`correctement`) et est-il directement v\xE9rifiable par un test automatis\xE9 ? De plus, v\xE9rifie la pr\xE9sence, la compl\xE9tude et la testabilit\xE9 du contrat de convergence de fonctionnalit\xE9 (`epic_goal_contract` : `epic_goal_summary`, `required_entrypoints`, `forbidden_stubs`, `end_to_end_verification_criteria`). Signale toute violation, absence de contrat ou crit\xE8re flou dans `untestable_criteria`.",
+    "Renvoie un objet JSON strictement conforme au sch\xE9ma `goldfish_spec_audit` (`passed: true` uniquement si les 3 axes sont valid\xE9s)."
+  ].join("\n");
+  const adrsSummary = params.specArtifacts.adrs.map((a) => `### ADR: ${a.path}
+${a.content}`).join("\n\n");
+  const userPrompt = [
+    "Audite en mode z\xE9ro-contexte (Goldfish) le dossier de sp\xE9cification suivant :",
+    "",
+    `### Sp\xE9cification (\`${params.specArtifacts.spec_path}\`) :`,
+    wrapUntrustedContent(
+      "untrusted_spec_content",
+      params.specArtifacts.spec_markdown
+    ),
+    "",
+    "### Glossaire (`GLOSSARY.md`) :",
+    wrapUntrustedContent(
+      "untrusted_spec_content",
+      params.specArtifacts.glossary_markdown
+    ),
+    "",
+    "### ADRs :",
+    wrapUntrustedContent("untrusted_spec_content", adrsSummary),
+    "",
+    `### Fichiers cibles pressentis : ${(params.specArtifacts.target_files_hint ?? []).join(", ") || "aucun"}`,
+    ...params.specArtifacts.epic_goal_contract ? [
+      "",
+      "### Contrat de convergence de fonctionnalit\xE9 (`epic_goal_contract`, ADR-0032) :",
+      wrapUntrustedContent(
+        "untrusted_spec_content",
+        JSON.stringify(params.specArtifacts.epic_goal_contract, null, 2)
+      )
+    ] : []
+  ].join("\n");
+  return await callGeminiJson({
+    apiKey: params.apiKey,
+    model: params.model,
+    providers: params.providers,
+    maxTransientRetries: params.maxTransientRetries,
+    transientRetryBackoffSeconds: params.transientRetryBackoffSeconds,
+    requestTimeoutMs: params.requestTimeoutMs,
+    onTransientRetriesUsed: params.onTransientRetriesUsed,
+    systemInstruction,
+    prompt: userPrompt,
+    temperature: 0.1,
+    logLabel: `goldfish-spec-audit:${params.specArtifacts.plan_slug}`,
+    responseSchema: GOLDFISH_SPEC_AUDIT_SCHEMA,
+    fetchImpl: params.fetchImpl
+  });
+}
+function parseLatestSpecManifest(comments) {
+  for (let i = comments.length - 1; i >= 0; i -= 1) {
+    const body = comments[i]?.body ?? "";
+    const match = body.match(/<!-- epure-spec-manifest:(\{[\s\S]*?\}) -->/);
+    if (match?.[1]) {
+      try {
+        const parsed = JSON.parse(match[1]);
+        if (typeof parsed.planBranch === "string" && typeof parsed.specPath === "string" && Array.isArray(parsed.adrPaths)) {
+          return {
+            planBranch: parsed.planBranch,
+            specPath: parsed.specPath,
+            adrPaths: parsed.adrPaths.filter(
+              (p) => typeof p === "string"
+            ),
+            targetFilesHint: Array.isArray(parsed.targetFilesHint) ? parsed.targetFilesHint.filter(
+              (f) => typeof f === "string"
+            ) : [],
+            ...parsed.epicGoalContract ? { epicGoalContract: parsed.epicGoalContract } : {}
+          };
+        }
+      } catch {
+      }
+    }
+  }
+  return null;
+}
+async function runGrillAndPlanPhase(params) {
+  const {
+    command,
+    currentPhase,
+    currentStatus,
+    repository,
+    issueNumber,
+    commentId,
+    issue,
+    allComments,
+    planSlug,
+    planBranch,
+    gh,
+    store,
+    llmApiKey,
+    phaseModels,
+    onTransientRetriesUsed,
+    fetchImpl
+  } = params;
+  if (currentStatus === "suspended") {
+    await gh.removeIssueLabel?.(issueNumber, "needs-human");
+  }
+  const grillExplorationCache = /* @__PURE__ */ new Map();
+  const grillRepoTools = buildRepoExplorationToolsAndHandlers({
+    gh,
+    branch: "dev",
+    featureBranch: "main",
+    accumulatedFiles: grillExplorationCache,
+    devBranchPaths: [],
+    phase: command === "to-spec" ? "spec" : "plan",
+    fetchImpl
+  });
+  if (command === "plan") {
+    const updated2 = await updateIssueStateWithCas({
+      issueNumber,
+      store,
+      mutator: (prev) => ({
+        ...prev,
+        phase: "grilling",
+        status: "active",
+        active_branch: planBranch,
+        last_processed_comment_id: commentId ?? prev.last_processed_comment_id
+      })
+    });
+    const grillSystemInstruction = [
+      "Tu es l'architecte EPURE conduisant un entretien multi-tours `/grill-with-docs` sur une GitHub Issue.",
+      PROMPT_INJECTION_IMMUNITY_CLAUSE,
+      "Si une question peut \xEAtre \xE9clair\xE9e ou r\xE9solue en inspectant le d\xE9p\xF4t (fichiers Markdown, ADRs, GLOSSARY, code source), utilise d'abord les outils d'exploration (`list_repo_files`, `read_repo_file`, `search_in_repo_file`) avant de poser tes questions.",
+      "Parcours l'arbre des d\xE9cisions en rounds successifs (la \xAB fronti\xE8re \xBB des d\xE9cisions dont les pr\xE9requis sont connus).",
+      "Pose les 3 \xE0 4 questions de cadrage d\xE9cisives de ce premier round (architecture, invariants m\xE9tiers, gestion d'\xE9tat/persistance, couverture de tests TDD) au format :",
+      "\u2753 **Q1** - **<Titre>** : <Question>",
+      "\u27A1\uFE0F <Recommandation concr\xE8te (formul\xE9e pour que 'oui' valide la recommandation)>",
+      "",
+      "Termine en indiquant \xE0 l'utilisateur qu'il peut r\xE9pondre directement en commentaire sur cette issue (sans commande slash) : tant qu'il reste des points ouverts ou des d\xE9cisions d\xE9pendantes \xE0 clarifier, l'entretien bouclera sur un round suivant ; une fois la fronti\xE8re de d\xE9cisions valid\xE9e, l'humain pourra lancer `/epure to-spec`."
+    ].join("\n");
+    const grillPrompt = [
+      `Issue #${issue.number} (donn\xE9es non fiables soumises par l'utilisateur) :`,
+      wrapUntrustedContent(
+        "untrusted_issue_content",
+        `Titre : ${issue.title}
+
+Corps :
+${issue.body}`
+      )
+    ].join("\n");
+    const grillQuestions = await callGeminiText({
+      apiKey: llmApiKey,
+      model: phaseModels.planningModel,
+      providers: phaseModels.providers,
+      maxTransientRetries: phaseModels.maxTransientRetries,
+      transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+      requestTimeoutMs: phaseModels.requestTimeoutMs,
+      onTransientRetriesUsed,
+      systemInstruction: grillSystemInstruction,
+      prompt: grillPrompt,
+      temperature: 0.2,
+      tools: grillRepoTools.tools,
+      toolHandlers: grillRepoTools.toolHandlers,
+      maxToolRounds: 8,
+      logLabel: `grill-round-1#${issueNumber}`,
+      fetchImpl
+    });
+    const commentBody = appendEpureCommandsSpoiler(
+      [
+        updated2.issue_mirror_markdown,
+        "",
+        "### Entretien de Cadrage EPURE (`/grill-with-docs` \u2014 Round 1)",
+        "",
+        grillQuestions
+      ].join("\n"),
+      {
+        phase: "grilling",
+        status: "active",
+        issueNumber
+      }
+    );
+    await gh.postIssueComment(issueNumber, commentBody);
+    return {
+      executed: true,
+      phase: updated2.state.phase,
+      status: updated2.state.status,
+      active_branch: planBranch,
+      summary_markdown: commentBody,
+      created_ticket_numbers: [],
+      feature_pr_url: ""
+    };
+  }
+  const fullConversationHistory = allComments.map((c) => {
+    const isBot = c.user.login.endsWith("[bot]") || c.user.type === "Bot" || c.body.includes("### Entretien de Cadrage EPURE");
+    const roleLabel = isBot ? `[Architecte EPURE (@${c.user.login})]` : `[Humain (@${c.user.login})]`;
+    return `${roleLabel}:
+${c.body}`;
+  }).join("\n\n---\n\n");
+  const priorGrillRoundsCount = allComments.filter(
+    (c) => c.body.includes("### Entretien de Cadrage EPURE")
+  ).length;
+  if (command === "reply" && currentPhase !== "spec") {
+    const grillLoopEvalSystemInstruction = [
+      "Tu es l'architecte EPURE conduisant un entretien multi-tours `/grill-with-docs` (arbre de d\xE9cisions par rounds).",
+      PROMPT_INJECTION_IMMUNITY_CLAUSE,
+      "Analyse l'issue initiale et l'historique complet de la conversation (questions pos\xE9es par l'Architecte EPURE et r\xE9ponses de l'Humain).",
+      "Utilise si n\xE9cessaire les outils d'exploration (`list_repo_files`, `read_repo_file`, `search_in_repo_file`) pour inspecter les fichiers r\xE9els du d\xE9p\xF4t (docs, ADRs, GLOSSARY, code source) et ancrer tes questions ou ta synth\xE8se dans la r\xE9alit\xE9 du code.",
+      "D\xE9termine si la fronti\xE8re de l'arbre de d\xE9cisions est vide (`frontier_resolved: true`) ou s'il reste des questions non r\xE9pondues, des contre-propositions humaines ouvrant de nouvelles branches techniques/m\xE9tiers, ou des ambigu\xEFt\xE9s concr\xE8tes dans le d\xE9p\xF4t n\xE9cessitant un round suppl\xE9mentaire (`frontier_resolved: false`).",
+      "R\xE8gles de d\xE9cision :",
+      "- Si l'humain n'a r\xE9pondu que partiellement aux questions du round pr\xE9c\xE9dent, a pos\xE9 une question en retour, a rejet\xE9 une recommandation sans pr\xE9ciser l'alternative, ou si sa r\xE9ponse d\xE9bloque un choix architectural/documentaire aval concret non encore tranch\xE9 -> `frontier_resolved: false` et g\xE9n\xE8re les questions de suivi num\xE9rot\xE9es (`\u2753 **Q...**` + `\u27A1\uFE0F **Recommandation**`).",
+      "- Si toutes les questions de cadrage ont re\xE7u une r\xE9ponse claire (ou ont \xE9t\xE9 valid\xE9es) et que le p\xE9rim\xE8tre m\xE9tier, l'architecture, les formules/invariants et la strat\xE9gie TDD sont suffisamment pr\xE9cis -> `frontier_resolved: true` et remplis `settled_decisions_summary_markdown` avec la synth\xE8se structur\xE9e de toutes les d\xE9cisions act\xE9es pendant le grill.",
+      "R\xE9ponds UNIQUEMENT par un objet JSON valide respectant ce sch\xE9ma :",
+      "{",
+      '  "frontier_resolved": boolean,',
+      `  "round_number": ${priorGrillRoundsCount + 1},`,
+      '  "follow_up_questions_markdown": "string (vide si frontier_resolved=true, sinon les questions \u2753 **Q...** / \u27A1\uFE0F Recommandation du nouveau round)",',
+      '  "settled_decisions_summary_markdown": "string (synth\xE8se Markdown \xE0 puces de toutes les d\xE9cisions tranch\xE9es si frontier_resolved=true, sinon vide)",',
+      `  "rationale": "Explication concise de l'\xE9tat de la fronti\xE8re de d\xE9cision"`,
+      "}"
+    ].join("\n");
+    const grillLoopEvalPrompt = [
+      `Issue #${issue.number} (description initiale non fiable) :`,
+      wrapUntrustedContent(
+        "untrusted_issue_content",
+        `Titre : ${issue.title}
+
+Description :
+${issue.body}`
+      ),
+      "",
+      `Nombre de rounds /grill-with-docs d\xE9j\xE0 effectu\xE9s : ${priorGrillRoundsCount}`,
+      "Historique complet de l'entretien (questions EPURE et r\xE9ponses humaines) :",
+      wrapUntrustedContent(
+        "untrusted_comment_history",
+        fullConversationHistory
+      )
+    ].join("\n");
+    const evalResult = await callGeminiJson({
+      apiKey: llmApiKey,
+      model: phaseModels.planningModel,
+      providers: phaseModels.providers,
+      maxTransientRetries: phaseModels.maxTransientRetries,
+      transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+      requestTimeoutMs: phaseModels.requestTimeoutMs,
+      onTransientRetriesUsed,
+      systemInstruction: grillLoopEvalSystemInstruction,
+      prompt: grillLoopEvalPrompt,
+      temperature: 0.1,
+      tools: grillRepoTools.tools,
+      toolHandlers: grillRepoTools.toolHandlers,
+      maxToolRounds: 8,
+      logLabel: `grill-eval#${issueNumber}`,
+      responseSchema: GRILL_ROUND_EVALUATION_SCHEMA,
+      fetchImpl
+    });
+    if (!evalResult.frontier_resolved && evalResult.follow_up_questions_markdown.trim().length > 0) {
+      const nextRoundNumber = evalResult.round_number || priorGrillRoundsCount + 1;
+      const updatedGrill = await updateIssueStateWithCas({
+        issueNumber,
+        store,
+        mutator: (prev) => ({
+          ...prev,
+          phase: "grilling",
+          status: "active",
+          active_branch: planBranch,
+          last_processed_comment_id: commentId ?? prev.last_processed_comment_id
+        })
+      });
+      const followUpBody = appendEpureCommandsSpoiler(
+        [
+          updatedGrill.issue_mirror_markdown,
+          "",
+          `### Entretien de Cadrage EPURE (\`/grill-with-docs\` \u2014 Round ${nextRoundNumber})`,
+          "",
+          evalResult.follow_up_questions_markdown.trim(),
+          "",
+          "---",
+          "_R\xE9ponds directement en commentaire pour poursuivre l'entretien, ou poste `/epure to-spec` pour valider le cadrage et g\xE9n\xE9rer la sp\xE9cification._"
+        ].join("\n"),
+        {
+          phase: "grilling",
+          status: "active",
+          issueNumber
+        }
+      );
+      await gh.postIssueComment(issueNumber, followUpBody);
+      return {
+        executed: true,
+        phase: updatedGrill.state.phase,
+        status: updatedGrill.state.status,
+        active_branch: planBranch,
+        summary_markdown: followUpBody,
+        created_ticket_numbers: [],
+        feature_pr_url: ""
+      };
+    }
+    const updatedFrontierReady = await updateIssueStateWithCas({
+      issueNumber,
+      store,
+      mutator: (prev) => ({
+        ...prev,
+        phase: "grilling",
+        status: "awaiting_human_approval",
+        active_branch: planBranch,
+        last_processed_comment_id: commentId ?? prev.last_processed_comment_id
+      })
+    });
+    const settledSummary = evalResult.settled_decisions_summary_markdown?.trim() || evalResult.rationale.trim() || "Toutes les questions de la fronti\xE8re de d\xE9cisions ont re\xE7u une r\xE9ponse.";
+    const frontierResolvedComment = appendEpureCommandsSpoiler(
+      [
+        updatedFrontierReady.issue_mirror_markdown,
+        "",
+        "### \u2705 Fronti\xE8re de Cadrage R\xE9solue (`/grill-with-docs` \u2014 En attente de validation humaine)",
+        "",
+        settledSummary,
+        "",
+        "---",
+        "\u{1F449} **Validation humaine requise avant `/to-spec`** :",
+        "- Si ce cadrage vous convient, postez **`/epure to-spec`** pour g\xE9n\xE9rer le `GLOSSARY.md`, les ADRs et la sp\xE9cification compl\xE8te sur `" + planBranch + "`.",
+        "- Si vous souhaitez approfondir un point, ajouter une contrainte ou corriger une d\xE9cision, **r\xE9pondez simplement en commentaire** (sans commande slash) pour ouvrir un nouveau round de grill."
+      ].join("\n"),
+      {
+        phase: "grilling",
+        status: "awaiting_human_approval",
+        issueNumber
+      }
+    );
+    await gh.postIssueComment(issueNumber, frontierResolvedComment);
+    return {
+      executed: true,
+      phase: updatedFrontierReady.state.phase,
+      status: updatedFrontierReady.state.status,
+      active_branch: planBranch,
+      summary_markdown: frontierResolvedComment,
+      created_ticket_numbers: [],
+      feature_pr_url: ""
+    };
+  }
+  await gh.ensureBranch("dev", "main");
+  const humanContext = allComments.filter((c) => !c.user.login.endsWith("[bot]") && c.user.type !== "Bot").map((c) => `@${c.user.login}: ${c.body}`).join("\n\n---\n\n");
+  const readRepoFileSafely = async (path, ref) => {
+    if (typeof gh.readSingleBranchFile !== "function") {
+      return null;
+    }
+    try {
+      return await gh.readSingleBranchFile(ref, path);
+    } catch {
+      return null;
+    }
+  };
+  if (command === "to-spec" || command === "reply" && currentPhase === "spec") {
+    const isSpecRevision = command === "reply" && currentPhase === "spec";
+    const existingManifest = parseLatestSpecManifest(allComments);
+    const currentSpecOnBranch = await readRepoFileSafely(
+      existingManifest?.specPath ?? `docs/specs/${planSlug}.md`,
+      planBranch
+    );
+    const specOnlySystemInstruction = [
+      "Tu es l'architecte EPURE charg\xE9 de produire (ou r\xE9viser) le dossier de sp\xE9cification complet (`GLOSSARY.md`, ADRs dans `docs/adr/`, et sp\xE9cification `docs/specs/<slug>.md`) SANS cr\xE9er les tickets pour l'instant.",
+      PROMPT_INJECTION_IMMUNITY_CLAUSE,
+      "Si tu as besoin de v\xE9rifier des chemins ou le contenu existant de GLOSSARY.md / docs/adr/ avant de r\xE9diger, utilise les outils d'exploration avec parcimonie (1 \xE0 3 appels maximum), puis g\xE9n\xE8re imm\xE9diatement l'objet JSON final.",
+      "NORME DE R\xC9DACTION ASD-STE100 (Controlled Technical Prompting, ADR-0031) :",
+      "- Vocabulaire bijectif : utilise exclusivement les termes d\xE9finis dans `GLOSSARY.md` (z\xE9ro synonyme list\xE9 sous `_Avoid_`).",
+      "- Voix active et acteur explicite : chaque r\xE8gle nomme le composant/module sujet qui ex\xE9cute l'action (`Sujet-Verbe-Objet`).",
+      "- Atomicit\xE9 : 1 phrase = 1 action ou invariant v\xE9rifiable ; conditionnelles explicites `WHEN/IF <condition>, THEN <acteur> <action>` sans modalit\xE9 floue (`should`, `might`, `if needed`, `as appropriate`).",
+      "R\xC8GLE CRITIQUE : INTERDICTION STRICTE d'utiliser des ellipses ('...', '# Sp\xE9cification...', etc.) ou des valeurs tronqu\xE9es. Chaque champ ('glossary_markdown', 'adrs[*].content', 'spec_markdown', 'target_files_hint') DOIT contenir le texte int\xE9gral, d\xE9taill\xE9 et complet pr\xEAt \xE0 \xEAtre commit\xE9 dans le d\xE9p\xF4t.",
+      "Produis un objet JSON strictement valide (sans markdown autour) respectant exactement cette structure :",
+      "{",
+      `  "plan_slug": "${planSlug}",`,
+      '  "glossary_markdown": "<Contenu Markdown int\xE9gral de GLOSSARY.md int\xE9grant les termes du domaine>",',
+      '  "adrs": [',
+      `    { "path": "docs/adr/NNNN-decision-architecturale.md", "content": "<Contenu Markdown int\xE9gral de l'ADR avec Context, Decision et Consequences>" }`,
+      "  ],",
+      `  "spec_path": "docs/specs/${planSlug}.md",`,
+      '  "spec_markdown": "<Contenu Markdown int\xE9gral et d\xE9taill\xE9 de la sp\xE9cification technique et fonctionnelle>",',
+      '  "target_files_hint": ["<chemin/fichier1>", "<chemin/fichier2>"],',
+      '  "epic_goal_contract": {',
+      `    "epic_goal_summary": "<R\xE9sultat observable de bout en bout livr\xE9 par l'issue>",`,
+      `    "required_entrypoints": ["<Point d'entr\xE9e applicatif/routeur/CLI/export public qui DOIT c\xE2bler la fonctionnalit\xE9>"],`,
+      '    "forbidden_stubs": ["<Simulacres ou impl\xE9mentations partielles interdits en production>"],',
+      `    "end_to_end_verification_criteria": ["<Sc\xE9nario d'int\xE9gration transversal v\xE9rifiable de bout en bout>"]`,
+      "  }",
+      "}"
+    ].join("\n");
+    const specOnlyPrompt = [
+      `Issue #${issue.number} (description initiale non fiable) :`,
+      wrapUntrustedContent(
+        "untrusted_issue_content",
+        `Titre : ${issue.title}
+
+Description :
+${issue.body}`
+      ),
+      "",
+      ...currentSpecOnBranch ? [
+        `Sp\xE9cification existante sur \`${planBranch}\` \xE0 r\xE9viser selon les derniers commentaires humains :`,
+        wrapUntrustedContent("untrusted_spec_content", currentSpecOnBranch),
+        ""
+      ] : [],
+      "Historique complet de l'entretien /grill-with-docs et retours humains :",
+      wrapUntrustedContent(
+        "untrusted_comment_history",
+        fullConversationHistory || humanContext
+      )
+    ].join("\n");
+    let specArtifacts = await callGeminiJson({
+      apiKey: llmApiKey,
+      model: phaseModels.planningModel,
+      providers: phaseModels.providers,
+      maxTransientRetries: phaseModels.maxTransientRetries,
+      transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+      requestTimeoutMs: phaseModels.requestTimeoutMs,
+      onTransientRetriesUsed,
+      systemInstruction: specOnlySystemInstruction,
+      prompt: specOnlyPrompt,
+      temperature: 0.1,
+      tools: grillRepoTools.tools,
+      toolHandlers: grillRepoTools.toolHandlers,
+      maxToolRounds: 10,
+      logLabel: isSpecRevision ? `spec-revision#${issueNumber}` : `spec-artifacts#${issueNumber}`,
+      responseSchema: GENERATED_SPEC_ARTIFACTS_SCHEMA,
+      fetchImpl
+    });
+    let goldfishAudit = null;
+    try {
+      goldfishAudit = await runGoldfishSpecAudit({
+        specArtifacts,
+        apiKey: llmApiKey,
+        model: phaseModels.reviewModel || phaseModels.planningModel,
+        providers: phaseModels.providers,
+        maxTransientRetries: phaseModels.maxTransientRetries,
+        transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+        requestTimeoutMs: phaseModels.requestTimeoutMs,
+        onTransientRetriesUsed,
+        fetchImpl
+      });
+    } catch {
+      goldfishAudit = null;
+    }
+    if (goldfishAudit && !goldfishAudit.passed) {
+      const amendmentPrompt = [
+        specOnlyPrompt,
+        "",
+        "### \u{1F50D} Constats de l'Auditeur Goldfish Z\xE9ro-Contexte (\xE0 corriger imp\xE9rativement dans la sp\xE9cification) :",
+        ...goldfishAudit.missing_context_questions.length > 0 ? [
+          `- Contexte implicite manquant : ${goldfishAudit.missing_context_questions.join(" ; ")}`
+        ] : [],
+        ...goldfishAudit.overengineering_warnings.length > 0 ? [
+          `- Avertissements YAGNI / sur-ing\xE9nierie : ${goldfishAudit.overengineering_warnings.join(" ; ")}`
+        ] : [],
+        ...goldfishAudit.untestable_criteria.length > 0 ? [
+          `- Crit\xE8res non v\xE9rifiables : ${goldfishAudit.untestable_criteria.join(" ; ")}`
+        ] : [],
+        ...goldfishAudit.amended_sections_suggestion ? [
+          `- Suggestion d'amendement : ${goldfishAudit.amended_sections_suggestion}`
+        ] : [],
+        "",
+        "Produis la version amend\xE9e et auto-suffisante du JSON de sp\xE9cification."
+      ].join("\n");
+      try {
+        specArtifacts = await callGeminiJson({
+          apiKey: llmApiKey,
+          model: phaseModels.planningModel,
+          providers: phaseModels.providers,
+          maxTransientRetries: phaseModels.maxTransientRetries,
+          transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+          requestTimeoutMs: phaseModels.requestTimeoutMs,
+          onTransientRetriesUsed,
+          systemInstruction: specOnlySystemInstruction,
+          prompt: amendmentPrompt,
+          temperature: 0.1,
+          logLabel: `spec-goldfish-amend#${issueNumber}`,
+          responseSchema: GENERATED_SPEC_ARTIFACTS_SCHEMA,
+          fetchImpl
+        });
+      } catch {
+      }
+    }
+    const specGateResult = validatePlanningArtifactsAndGraph({
+      introducesDomainTerms: true,
+      glossaryContent: specArtifacts.glossary_markdown,
+      adrFiles: specArtifacts.adrs.map((a) => ({
+        path: a.path,
+        content: a.content
+      })),
+      specPath: specArtifacts.spec_path,
+      specContent: specArtifacts.spec_markdown,
+      tickets: [
+        {
+          id: 1,
+          issueNumber: 1,
+          title: "spec-validation-placeholder",
+          state: "open",
+          blockedBy: []
+        }
+      ]
+    });
+    if (!specGateResult.valid) {
+      await gh.ensureLabel(
+        "needs-human",
+        "D93F0B",
+        "Requires human maintainer intervention"
+      );
+      await gh.addIssueLabels(issueNumber, ["needs-human"]);
+      const suspended = await updateIssueStateWithCas({
+        issueNumber,
+        store,
+        mutator: (prev) => ({
+          ...prev,
+          phase: "spec",
+          status: "suspended",
+          active_branch: planBranch,
+          last_processed_comment_id: commentId ?? prev.last_processed_comment_id
+        })
+      });
+      const escalationComment = appendEpureCommandsSpoiler(
+        [
+          suspended.issue_mirror_markdown,
+          "",
+          `### \u26A0\uFE0F Escalade \`needs-human\` \u2014 \xC9chec de validation des livrables de sp\xE9cification (\`${specGateResult.error_code}\`)`,
+          "",
+          `- **Code d'erreur** : \`${specGateResult.error_code}\``,
+          `- **Raison** : ${specGateResult.error_message}`,
+          "- **Action requise** : Corrigez les livrables ou relancez `/epure to-spec`."
+        ].join("\n"),
+        {
+          phase: "suspended",
+          status: "suspended",
+          issueNumber
+        }
+      );
+      await gh.postIssueComment(issueNumber, escalationComment);
+      return {
+        executed: true,
+        phase: suspended.state.phase,
+        status: suspended.state.status,
+        active_branch: planBranch,
+        summary_markdown: escalationComment,
+        created_ticket_numbers: [],
+        feature_pr_url: ""
+      };
+    }
+    const targetFilesHint = specArtifacts.target_files_hint ?? [];
+    const touchesFrontendUi2 = targetFilesHint.some(
+      (f) => /\.(?:tsx|jsx|css|scss|html)$/i.test(f)
+    );
+    const impeccableSession2 = planImpeccableDesignSession({
+      issueNumber,
+      surfaceSlug: planSlug,
+      touchesFrontendUi: touchesFrontendUi2,
+      alreadyAnsweredTopics: ["theme", "layout"],
+      candidateDesignTopics: ["theme", "layout", "accessibility"]
+    });
+    const designGate2 = touchesFrontendUi2 ? await runUserAdvocateDesignGate({
+      repository,
+      planTitle: issue.title,
+      glossaryMarkdown: specArtifacts.glossary_markdown,
+      specMarkdown: specArtifacts.spec_markdown,
+      llmApiKey,
+      model: phaseModels.reviewModel,
+      providers: phaseModels.providers,
+      maxTransientRetries: phaseModels.maxTransientRetries,
+      transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+      requestTimeoutMs: phaseModels.requestTimeoutMs,
+      onTransientRetriesUsed,
+      fetchImpl
+    }) : null;
+    const plannedStack2 = detectRepositoryStack({
+      targetFilesHint
+    });
+    const adaptedRoster2 = adaptReviewerRosterForDomain({
+      repository,
+      planTitle: issue.title,
+      glossaryMarkdown: specArtifacts.glossary_markdown,
+      specMarkdown: specArtifacts.spec_markdown,
+      touchesFrontendUi: touchesFrontendUi2,
+      stackKind: plannedStack2.kind,
+      personas: designGate2?.personas,
+      domainInvariants: designGate2?.domain_invariants
+    });
+    const zizmorFile2 = buildZizmorConfigYaml();
+    const renovateFile2 = buildRenovateConfigJson(plannedStack2);
+    const ciFile2 = buildStackAwareCiWorkflowYaml({
+      pinnedSha: "main",
+      stack: plannedStack2
+    });
+    const existingBaseRoster2 = await gh.readTrustedBaseRosterFiles("dev");
+    const hasExistingConfiguredRoster2 = existingBaseRoster2.size > 0;
+    const corePlanningDocs2 = [
+      ...specArtifacts.glossary_markdown.trim().length > 0 ? [{ path: "GLOSSARY.md", content: specArtifacts.glossary_markdown }] : [],
+      { path: specArtifacts.spec_path, content: specArtifacts.spec_markdown },
+      ...specArtifacts.adrs.map((a) => ({ path: a.path, content: a.content }))
+    ];
+    const planningFiles2 = hasExistingConfiguredRoster2 ? corePlanningDocs2 : [
+      ...corePlanningDocs2,
+      ...adaptedRoster2.files,
+      zizmorFile2,
+      renovateFile2,
+      ciFile2
+    ];
+    await gh.commitFilesToBranch({
+      branch: planBranch,
+      fromBranch: "dev",
+      commitMessage: isSpecRevision ? `docs(plan): revise GLOSSARY, ADRs, and spec for #${issueNumber}` : `docs(plan): generate GLOSSARY, ADRs, spec, DESIGN.md, and adapted reviewer roster for #${issueNumber}`,
+      files: planningFiles2
+    });
+    const updatedSpec = await updateIssueStateWithCas({
+      issueNumber,
+      store,
+      mutator: (prev) => ({
+        ...prev,
+        phase: "spec",
+        status: "awaiting_human_approval",
+        active_branch: planBranch,
+        last_processed_comment_id: commentId ?? prev.last_processed_comment_id
+      })
+    });
+    const specManifestPayload = {
+      planBranch,
+      specPath: specArtifacts.spec_path,
+      adrPaths: specArtifacts.adrs.map((a) => a.path),
+      targetFilesHint,
+      ...specArtifacts.epic_goal_contract ? { epicGoalContract: specArtifacts.epic_goal_contract } : {}
+    };
+    const specReviewComment = appendEpureCommandsSpoiler(
+      [
+        updatedSpec.issue_mirror_markdown,
+        "",
+        isSpecRevision ? `### \u{1F4DD} Sp\xE9cification r\xE9vis\xE9e sur \`${planBranch}\` (En attente de validation humaine)` : `### \u{1F4C4} Sp\xE9cification, Glossaire et ADRs g\xE9n\xE9r\xE9s sur \`${planBranch}\` (En attente de validation humaine)`,
+        "",
+        "- **Glossaire** : `GLOSSARY.md`",
+        `- **ADRs** : ${specArtifacts.adrs.map((a) => `\`${a.path}\``).join(", ")}`,
+        `- **Sp\xE9cification** : \`${specArtifacts.spec_path}\``,
+        `- **Roster Multi-Agents adapt\xE9** : \`.cursor/agents/*.md\` (${adaptedRoster2.files.length} fichiers)`,
+        ...impeccableSession2.impeccable_invoked ? [
+          "- **Design Gate Impeccable & `user-advocate` (`design-gate`)** : `DESIGN.md` g\xE9n\xE9r\xE9"
+        ] : [],
+        "",
+        "\u{1F449} **Validation humaine de la sp\xE9cification requise avant `/to-tickets`** :",
+        `- Inspectez les fichiers sur la branche \`${planBranch}\` (\`${specArtifacts.spec_path}\`, \`GLOSSARY.md\`, ADRs).`,
+        "- Pour demander un ajustement ou une correction de la sp\xE9cification, **r\xE9pondez directement en commentaire** (sans commande slash).",
+        "- Si la sp\xE9cification est valid\xE9e, postez **`/epure to-tickets`** pour g\xE9n\xE9rer le graphe de tickets TDD (`ready-for-agent`).",
+        "",
+        `<!-- epure-spec-manifest:${JSON.stringify(specManifestPayload)} -->`
+      ].join("\n"),
+      {
+        phase: "spec",
+        status: "awaiting_human_approval",
+        issueNumber
+      }
+    );
+    await gh.postIssueComment(issueNumber, specReviewComment);
+    return {
+      executed: true,
+      phase: updatedSpec.state.phase,
+      status: updatedSpec.state.status,
+      active_branch: planBranch,
+      summary_markdown: specReviewComment,
+      created_ticket_numbers: [],
+      feature_pr_url: ""
+    };
+  }
+  const storedSpecManifest = parseLatestSpecManifest(allComments);
+  const candidateSpecPath = storedSpecManifest?.specPath ?? `docs/specs/${planSlug}.md`;
+  const existingSpecOnPlanBranch = await readRepoFileSafely(
+    candidateSpecPath,
+    planBranch
+  );
+  let bundle;
+  if (existingSpecOnPlanBranch && existingSpecOnPlanBranch.trim().length > 0) {
+    const existingGlossary = await readRepoFileSafely("GLOSSARY.md", planBranch) ?? await readRepoFileSafely("GLOSSARY.md", "dev") ?? "# Glossary\n\n- **Domain Term**: Canonical project definition.\n";
+    const adrPathsToRead = storedSpecManifest?.adrPaths ?? [];
+    const loadedAdrs = [];
+    for (const adrPath of adrPathsToRead) {
+      const adrContent = await readRepoFileSafely(adrPath, planBranch);
+      if (adrContent) {
+        const filename = adrPath.split("/").pop() ?? adrPath;
+        loadedAdrs.push({
+          path: adrPath,
+          content: adrContent,
+          filename,
+          title: filename,
+          markdown: adrContent
+        });
+      }
+    }
+    const ticketsOnlySystemInstruction = [
+      "Tu es l'architecte EPURE charg\xE9 de d\xE9couper la sp\xE9cification approuv\xE9e en un graphe acyclique (DAG) de tickets atomiques TDD.",
+      PROMPT_INJECTION_IMMUNITY_CLAUSE,
+      "NORME ASD-STE100 POUR LES TICKETS (`acceptance_criteria` et `description`, ADR-0031) : r\xE9dige chaque crit\xE8re d'acceptation \xE0 la voix active avec un acteur explicite, 1 phrase = 1 comportement v\xE9rifiable (`WHEN <entr\xE9e>, <module> returns/throws <sortie exacte>`), en utilisant le vocabulaire bijectif de `GLOSSARY.md` et sans aucun modal flou (`should`, `might`, `if needed`, `correctement`).",
+      "CONVERGENCE DE BOUT EN BOUT (ADR-0032, Q115) : lorsque le graphe comporte plusieurs tickets (> 1), le dernier ticket terminal du DAG (bloqu\xE9 par les tickets de composants pr\xE9c\xE9dents) DOIT explicitement c\xE2bler les `required_entrypoints`, \xE9liminer tout `forbidden_stubs` et v\xE9rifier les `end_to_end_verification_criteria` afin d'\xE9viter tout code insulaire ('island code').",
+      "R\xC8GLE CRITIQUE : INTERDICTION STRICTE d'utiliser des ellipses ('...', etc.) ou des valeurs tronqu\xE9es. Chaque champ ('tickets[*].title', 'tickets[*].description', 'tickets[*].acceptance_criteria', 'tickets[*].files_to_create_or_update') DOIT contenir le texte int\xE9gral, d\xE9taill\xE9 et complet.",
+      "Produis un objet JSON strictement valide (sans markdown autour) respectant exactement cette structure :",
+      "{",
+      '  "tickets": [',
+      "    {",
+      '      "index": 1,',
+      '      "slug": "<slug-court-du-ticket-1>",',
+      '      "title": "[Ticket 1] <Titre explicite et complet du ticket 1>",',
+      '      "description": "<Description technique compl\xE8te et d\xE9taill\xE9e du ticket 1>",',
+      `      "acceptance_criteria": ["<Crit\xE8re d'acceptation v\xE9rifiable 1>", "<Crit\xE8re d'acceptation v\xE9rifiable 2>"],`,
+      '      "blocked_by_indices": [],',
+      '      "files_to_create_or_update": ["<chemin/fichier1>", "<chemin/fichier2>"]',
+      "    }",
+      "  ]",
+      "}"
+    ].join("\n");
+    const ticketsOnlyPrompt = [
+      `Issue #${issue.number} :`,
+      wrapUntrustedContent(
+        "untrusted_issue_content",
+        `Titre : ${issue.title}
+
+Description :
+${issue.body}`
+      ),
+      "",
+      `Sp\xE9cification approuv\xE9e sur \`${planBranch}\` (\`${candidateSpecPath}\`) :`,
+      wrapUntrustedContent("untrusted_spec_content", existingSpecOnPlanBranch),
+      "",
+      "Historique complet de l'entretien et des validations :",
+      wrapUntrustedContent(
+        "untrusted_comment_history",
+        fullConversationHistory || humanContext
+      )
+    ].join("\n");
+    const ticketDag = await callGeminiJson({
+      apiKey: llmApiKey,
+      model: phaseModels.planningModel,
+      providers: phaseModels.providers,
+      maxTransientRetries: phaseModels.maxTransientRetries,
+      transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+      requestTimeoutMs: phaseModels.requestTimeoutMs,
+      onTransientRetriesUsed,
+      systemInstruction: ticketsOnlySystemInstruction,
+      prompt: ticketsOnlyPrompt,
+      temperature: 0.1,
+      tools: grillRepoTools.tools,
+      toolHandlers: grillRepoTools.toolHandlers,
+      maxToolRounds: 8,
+      logLabel: `ticket-dag#${issueNumber}`,
+      responseSchema: GENERATED_TICKET_DAG_SCHEMA,
+      fetchImpl
+    });
+    const fallbackAdrContent = "# ADR 0001\n\n## Context\nApproved specification on plan branch.\n\n## Decision\nExecute atomic TDD ticket DAG.\n\n## Consequences\nDeterministic execution.\n";
+    bundle = {
+      plan_slug: planSlug,
+      glossary_markdown: existingGlossary,
+      adrs: loadedAdrs.length > 0 ? loadedAdrs : [
+        {
+          path: "docs/adr/0001-plan-architecture.md",
+          content: fallbackAdrContent,
+          filename: "0001-plan-architecture.md",
+          title: "ADR 0001",
+          markdown: fallbackAdrContent
+        }
+      ],
+      spec_path: candidateSpecPath,
+      spec_markdown: existingSpecOnPlanBranch,
+      tickets: ticketDag.tickets,
+      ...storedSpecManifest?.epicGoalContract ? { epic_goal_contract: storedSpecManifest.epicGoalContract } : {}
+    };
+  } else {
+    const specSystemInstruction = [
+      "Tu es l'architecte EPURE charg\xE9 de produire le dossier de sp\xE9cification complet et le d\xE9coupage en tickets atomiques TDD.",
+      PROMPT_INJECTION_IMMUNITY_CLAUSE,
+      "Si tu as besoin de v\xE9rifier des chemins ou le contenu existant de GLOSSARY.md / docs/adr/ avant de r\xE9diger, utilise les outils d'exploration avec parcimonie (1 \xE0 3 appels maximum), puis g\xE9n\xE8re imm\xE9diatement l'objet JSON final.",
+      "NORME ASD-STE100 (Controlled Technical Prompting, ADR-0031) : utilise exclusivement le vocabulaire bijectif de `GLOSSARY.md` (z\xE9ro synonyme `_Avoid_`), la voix active avec acteur explicite (`Sujet-Verbe-Objet`), 1 phrase = 1 action ou crit\xE8re v\xE9rifiable, et des conditionnelles d\xE9terministes `WHEN/IF ... THEN` sans modalit\xE9 floue (`should`, `might`, `if needed`).",
+      "R\xC8GLE CRITIQUE : INTERDICTION STRICTE d'utiliser des ellipses ('...', '# Sp\xE9cification...', etc.) ou des valeurs tronqu\xE9es. Chaque champ ('glossary_markdown', 'adrs[*].content', 'spec_markdown', 'tickets[*].title', 'tickets[*].description', 'tickets[*].acceptance_criteria', 'tickets[*].files_to_create_or_update') DOIT contenir le texte int\xE9gral, d\xE9taill\xE9 et complet pr\xEAt \xE0 \xEAtre commit\xE9 dans le d\xE9p\xF4t.",
+      "Produis un objet JSON strictement valide (sans markdown autour) respectant exactement cette structure :",
+      "{",
+      `  "plan_slug": "${planSlug}",`,
+      '  "glossary_markdown": "<Contenu Markdown int\xE9gral de GLOSSARY.md int\xE9grant les termes du domaine>",',
+      '  "adrs": [',
+      `    { "path": "docs/adr/NNNN-decision-architecturale.md", "content": "<Contenu Markdown int\xE9gral de l'ADR avec Context, Decision et Consequences>" }`,
+      "  ],",
+      `  "spec_path": "docs/specs/${planSlug}.md",`,
+      '  "spec_markdown": "<Contenu Markdown int\xE9gral et d\xE9taill\xE9 de la sp\xE9cification technique et fonctionnelle>",',
+      '  "tickets": [',
+      "    {",
+      '      "index": 1,',
+      '      "slug": "<slug-court-du-ticket-1>",',
+      '      "title": "[Ticket 1] <Titre explicite et complet du ticket 1>",',
+      '      "description": "<Description technique compl\xE8te et d\xE9taill\xE9e du ticket 1>",',
+      `      "acceptance_criteria": ["<Crit\xE8re d'acceptation v\xE9rifiable 1>", "<Crit\xE8re d'acceptation v\xE9rifiable 2>"],`,
+      '      "blocked_by_indices": [],',
+      '      "files_to_create_or_update": ["<chemin/fichier1>", "<chemin/fichier2>"]',
+      "    }",
+      "  ]",
+      "}"
+    ].join("\n");
+    const specGenerationPrompt = [
+      `Issue #${issue.number} (description initiale non fiable) :`,
+      wrapUntrustedContent(
+        "untrusted_issue_content",
+        `Titre : ${issue.title}
+
+Description :
+${issue.body}`
+      ),
+      "",
+      "Historique complet de l'entretien /grill-with-docs (questions EPURE et r\xE9ponses humaines) :",
+      wrapUntrustedContent(
+        "untrusted_comment_history",
+        fullConversationHistory || humanContext
+      )
+    ].join("\n");
+    bundle = await callGeminiJson({
+      apiKey: llmApiKey,
+      model: phaseModels.planningModel,
+      providers: phaseModels.providers,
+      maxTransientRetries: phaseModels.maxTransientRetries,
+      transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+      requestTimeoutMs: phaseModels.requestTimeoutMs,
+      onTransientRetriesUsed,
+      systemInstruction: specSystemInstruction,
+      prompt: specGenerationPrompt,
+      temperature: 0.1,
+      tools: grillRepoTools.tools,
+      toolHandlers: grillRepoTools.toolHandlers,
+      maxToolRounds: 10,
+      logLabel: `spec-bundle#${issueNumber}`,
+      responseSchema: GENERATED_PLANNING_BUNDLE_SCHEMA,
+      fetchImpl
+    });
+  }
+  const gateBundle = {
+    introducesDomainTerms: true,
+    glossaryContent: bundle.glossary_markdown,
+    adrFiles: bundle.adrs.map((a) => ({
+      path: a.path,
+      content: a.content
+    })),
+    specPath: bundle.spec_path,
+    specContent: bundle.spec_markdown,
+    tickets: bundle.tickets.map((t) => ({
+      id: t.index,
+      issueNumber: t.index,
+      title: t.title,
+      state: "open",
+      blockedBy: t.blocked_by_indices
+    }))
+  };
+  const gateResult = validatePlanningArtifactsAndGraph(gateBundle);
+  if (!gateResult.valid) {
+    await gh.ensureLabel(
+      "needs-human",
+      "D93F0B",
+      "Requires human maintainer intervention"
+    );
+    await gh.addIssueLabels(issueNumber, ["needs-human"]);
+    const suspended = await updateIssueStateWithCas({
+      issueNumber,
+      store,
+      mutator: (prev) => ({
+        ...prev,
+        phase: "tickets",
+        status: "suspended",
+        active_branch: planBranch,
+        last_processed_comment_id: commentId ?? prev.last_processed_comment_id
+      })
+    });
+    const escalationComment = appendEpureCommandsSpoiler(
+      [
+        suspended.issue_mirror_markdown,
+        "",
+        `### \u26A0\uFE0F Escalade \`needs-human\` \u2014 \xC9chec de validation du graphe de planification (\`${gateResult.error_code}\`)`,
+        "",
+        `- **Code d'erreur** : \`${gateResult.error_code}\``,
+        `- **Raison** : ${gateResult.error_message}`,
+        "- **Action requise** : Corrigez le d\xE9coupage ou les d\xE9pendances circulaires puis relancez `/epure to-spec`."
+      ].join("\n"),
+      {
+        phase: "suspended",
+        status: "suspended",
+        issueNumber
+      }
+    );
+    await gh.postIssueComment(issueNumber, escalationComment);
+    return {
+      executed: true,
+      phase: suspended.state.phase,
+      status: suspended.state.status,
+      active_branch: planBranch,
+      summary_markdown: escalationComment,
+      created_ticket_numbers: [],
+      feature_pr_url: ""
+    };
+  }
+  const allTargetFiles = bundle.tickets.flatMap(
+    (t) => t.files_to_create_or_update
+  );
+  const touchesFrontendUi = allTargetFiles.some(
+    (f) => /\.(?:tsx|jsx|css|scss|html)$/i.test(f)
+  );
+  const impeccableSession = planImpeccableDesignSession({
+    issueNumber,
+    surfaceSlug: planSlug,
+    touchesFrontendUi,
+    alreadyAnsweredTopics: ["theme", "layout"],
+    candidateDesignTopics: ["theme", "layout", "accessibility"]
+  });
+  const designGate = touchesFrontendUi ? await runUserAdvocateDesignGate({
+    repository,
+    planTitle: issue.title,
+    glossaryMarkdown: bundle.glossary_markdown,
+    specMarkdown: bundle.spec_markdown,
+    llmApiKey,
+    model: phaseModels.reviewModel,
+    providers: phaseModels.providers,
+    maxTransientRetries: phaseModels.maxTransientRetries,
+    transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+    requestTimeoutMs: phaseModels.requestTimeoutMs,
+    onTransientRetriesUsed,
+    fetchImpl
+  }) : null;
+  const plannedStack = detectRepositoryStack({
+    targetFilesHint: allTargetFiles
+  });
+  const adaptedRoster = adaptReviewerRosterForDomain({
+    repository,
+    planTitle: issue.title,
+    glossaryMarkdown: bundle.glossary_markdown,
+    specMarkdown: bundle.spec_markdown,
+    touchesFrontendUi,
+    stackKind: plannedStack.kind,
+    personas: designGate?.personas,
+    domainInvariants: designGate?.domain_invariants
+  });
+  const zizmorFile = buildZizmorConfigYaml();
+  const renovateFile = buildRenovateConfigJson(plannedStack);
+  const ciFile = buildStackAwareCiWorkflowYaml({
+    pinnedSha: "main",
+    stack: plannedStack
+  });
+  const existingBaseRoster = await gh.readTrustedBaseRosterFiles("dev");
+  const hasExistingConfiguredRoster = existingBaseRoster.size > 0;
+  const corePlanningDocs = [
+    ...bundle.glossary_markdown.trim().length > 0 ? [{ path: "GLOSSARY.md", content: bundle.glossary_markdown }] : [],
+    { path: bundle.spec_path, content: bundle.spec_markdown },
+    ...bundle.adrs.map((a) => ({ path: a.path, content: a.content }))
+  ];
+  const planningFiles = hasExistingConfiguredRoster ? corePlanningDocs : [
+    ...corePlanningDocs,
+    ...adaptedRoster.files,
+    zizmorFile,
+    renovateFile,
+    ciFile
+  ];
+  if (!existingSpecOnPlanBranch || existingSpecOnPlanBranch.trim().length === 0) {
+    await gh.commitFilesToBranch({
+      branch: planBranch,
+      fromBranch: "dev",
+      commitMessage: `docs(plan): generate GLOSSARY, ADRs, spec, DESIGN.md, and adapted reviewer roster for #${issueNumber}`,
+      files: planningFiles
+    });
+  }
+  await gh.ensureLabel(
+    "ready-for-agent",
+    "0E8A16",
+    "Ticket ready for autonomous EPURE agent execution"
+  );
+  const createdTicketsManifest = await createLinkedPhaseTicketsOnGitHub({
+    gh,
+    parentIssueNumber: issueNumber,
+    phase: 1,
+    spoilerContext: {
+      phase: "tickets",
+      status: "awaiting-human"
+    },
+    tickets: bundle.tickets.map((ticket) => {
+      const ticketTouchesUi = ticket.files_to_create_or_update.some(
+        (f) => /\.(?:tsx|jsx|css|scss|html)$/i.test(f)
+      );
+      const enrichedAcceptanceCriteria = [
+        ...ticket.acceptance_criteria,
+        ...ticketTouchesUi && designGate ? designGate.ux_acceptance_criteria : []
+      ];
+      return {
+        index: ticket.index,
+        slug: ticket.slug,
+        title: ticket.title,
+        description: ticket.description,
+        acceptanceCriteria: enrichedAcceptanceCriteria,
+        blockedByIndices: ticket.blocked_by_indices,
+        filesToTouch: ticket.files_to_create_or_update,
+        acceptanceSectionHeading: "Acceptance Criteria (TDD & UX)"
+      };
+    })
+  });
+  await upsertParentIssueTicketsTasklist({
+    gh,
+    parentIssueNumber: issueNumber,
+    fallbackBody: issue.body,
+    tickets: createdTicketsManifest
+  });
+  const updated = await updateIssueStateWithCas({
+    issueNumber,
+    store,
+    mutator: (prev) => ({
+      ...prev,
+      phase: "tickets",
+      status: "awaiting_human_approval",
+      active_branch: planBranch,
+      last_processed_comment_id: commentId ?? prev.last_processed_comment_id
+    })
+  });
+  const ticketLines = createdTicketsManifest.map((t) => {
+    const blockedText = t.blockedByIssueNumbers.length > 0 ? ` (blocked_by: ${t.blockedByIssueNumbers.map((n) => `#${n}`).join(", ")})` : " (ready \u2014 root)";
+    return `- **#${t.ticketIssueNumber}** \u2014 ${t.title}${blockedText}`;
+  });
+  const manifestComment = appendEpureCommandsSpoiler(
+    [
+      updated.issue_mirror_markdown,
+      "",
+      `### Sp\xE9cification, Roster Adapt\xE9 et Graphe de Tickets g\xE9n\xE9r\xE9s sur \`${planBranch}\``,
+      "",
+      "- **Glossaire** : `GLOSSARY.md`",
+      `- **ADRs** : ${bundle.adrs.map((a) => `\`${a.path}\``).join(", ")}`,
+      `- **Sp\xE9cification** : \`${bundle.spec_path}\``,
+      `- **Roster Multi-Agents adapt\xE9** : \`.cursor/agents/*.md\` (${adaptedRoster.files.length} fichiers)`,
+      ...impeccableSession.impeccable_invoked ? [
+        "- **Design Gate Impeccable & `user-advocate` (`design-gate`)** : `DESIGN.md` g\xE9n\xE9r\xE9 et crit\xE8res UX inject\xE9s dans les tickets UI"
+      ] : [],
+      "",
+      "#### Graphe de Tickets (`ready-for-agent`) :",
+      ...ticketLines,
+      "",
+      "\u{1F449} **Action requise** : V\xE9rifiez les livrables sur la branche de plan et les tickets ci-dessus, puis postez `/epure approve` sur cette issue pour verrouiller le p\xE9rim\xE8tre et lancer l'impl\xE9mentation TDD autonome.",
+      "",
+      `<!-- epure-plan-manifest:${JSON.stringify({
+        planBranch,
+        specPath: bundle.spec_path,
+        ...bundle.epic_goal_contract ? { epicGoalContract: bundle.epic_goal_contract } : {},
+        tickets: createdTicketsManifest
+      })} -->`
+    ].join("\n"),
+    {
+      phase: "tickets",
+      status: "awaiting-human",
+      issueNumber
+    }
+  );
+  await gh.postIssueComment(issueNumber, manifestComment);
+  return {
+    executed: true,
+    phase: updated.state.phase,
+    status: updated.state.status,
+    active_branch: planBranch,
+    summary_markdown: manifestComment,
+    created_ticket_numbers: createdTicketsManifest.map(
+      (t) => t.ticketIssueNumber
+    ),
+    feature_pr_url: ""
+  };
+}
+
+// src/orchestrator/phases/epic-convergence.ts
+async function runEpicConvergenceAudit(params) {
+  const explorationTools = buildRepoExplorationToolsAndHandlers({
+    gh: params.gh,
+    branch: params.featureBranch,
+    featureBranch: params.featureBranch,
+    accumulatedFiles: params.accumulatedFiles,
+    devBranchPaths: params.devBranchPaths,
+    phase: "review",
+    alwaysEnableRepoTools: true,
+    fetchImpl: params.fetchImpl
+  });
+  const changedEntries = params.featureChangedFilesMap.size > 0 ? Array.from(params.featureChangedFilesMap.entries()) : Array.from(params.accumulatedFiles.entries());
+  const entrypointSnippets = [];
+  for (const ep of params.epicGoalContract.required_entrypoints) {
+    const cleanEp = ep.trim().replace(/^\/+/, "");
+    const content = params.accumulatedFiles.get(cleanEp) ?? await params.gh.readSingleBranchFile(params.featureBranch, cleanEp);
+    if (content !== null) {
+      params.accumulatedFiles.set(cleanEp, content);
+      entrypointSnippets.push(
+        `--- REQUIRED ENTRYPOINT: ${cleanEp} (${content.split("\n").length} lines, untruncated) ---
+${content}`
+      );
+    } else {
+      entrypointSnippets.push(
+        `--- REQUIRED ENTRYPOINT: ${cleanEp} (MISSING ON ${params.featureBranch}) ---`
+      );
+    }
+  }
+  const changedFilesDigest = changedEntries.map(
+    ([path, content]) => `--- CHANGED FILE: ${path} (${content.split("\n").length} lines, untruncated) ---
+${content}`
+  ).join("\n\n");
+  const systemInstruction = [
+    "Tu es l'Auditeur de Convergence de Fonctionnalit\xE9 Goldfish Z\xE9ro-Contexte (`runEpicConvergenceAudit`, ADR-0032, Q116).",
+    PROMPT_INJECTION_IMMUNITY_CLAUSE,
+    "Tu n'as AUCUNE m\xE9moire des discussions ou des tickets pr\xE9c\xE9dents. Tu audites uniquement l'\xE9tat r\xE9el de la branche de fonctionnalit\xE9 (`feature/*`) par rapport \xE0 la sp\xE9cification approuv\xE9e et au `EpicGoalContract`.",
+    "Tu disposes du texte int\xE9gral (non tronqu\xE9) de la sp\xE9cification, du glossaire, des `required_entrypoints` et des fichiers modifi\xE9s, ainsi que des outils d'exploration en lecture seule (`list_repo_files`, `read_repo_file`, `search_repo_code`, `search_in_repo_file`) pour inspecter l'int\xE9gralit\xE9 de tout autre fichier du d\xE9p\xF4t sur demande.",
+    "V\xE9rifie rigoureusement trois invariants :",
+    "1. C\xE2blage des points d'entr\xE9e (`required_entrypoints`) : chaque module cr\xE9\xE9 est-il effectivement import\xE9, instanci\xE9 et branch\xE9 dans les points d'entr\xE9e applicatifs d\xE9clar\xE9s (ex: routeur, serveur, CLI, store, App) ? Signale tout module isol\xE9 ('island code') dans `unwired_modules`.",
+    "2. Absence de simulacres interdits (`forbidden_stubs`) : le code de production est-il exempt des mocks/stubs/adaptateurs en m\xE9moire interdits par `forbidden_stubs` ? Signale toute violation dans `stub_violations`.",
+    "3. Crit\xE8res de bout en bout (`end_to_end_verification_criteria`) : tous les sc\xE9narios transversaux du contrat sont-ils impl\xE9ment\xE9s et couverts par des tests ? Signale tout \xE9cart dans `unmet_criteria`.",
+    'Si 100 % des invariants sont respect\xE9s, renvoie `verdict: "CONVERGED"` et `remediation_tickets: []`.',
+    'Si au moins un \xE9cart subsiste, renvoie `verdict: "INCOMPLETE"` et g\xE9n\xE8re dans `remediation_tickets` un mini-DAG correctif born\xE9 (1 \xE0 4 tickets atomiques TDD maximum) pour c\xE2bler les modules manquants, remplacer les stubs et ajouter les tests d\'int\xE9gration de bout en bout.',
+    EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
+  ].join("\n");
+  const userPrompt = [
+    `### Contrat de convergence de fonctionnalit\xE9 (\`EpicGoalContract\`) pour #${params.issueNumber} :`,
+    wrapUntrustedContent(
+      "untrusted_spec_content",
+      JSON.stringify(params.epicGoalContract, null, 2)
+    ),
+    "",
+    `### Sp\xE9cification (\`${params.specPath}\`, int\xE9grale) :`,
+    wrapUntrustedContent("untrusted_spec_content", params.specMarkdown),
+    "",
+    "### Glossaire (`GLOSSARY.md`, int\xE9gral) :",
+    wrapUntrustedContent("untrusted_spec_content", params.glossaryMarkdown),
+    "",
+    "### \xC9tat int\xE9gral des `required_entrypoints` sur la branche `feature/*` :",
+    wrapUntrustedContent(
+      "untrusted_workspace_files",
+      entrypointSnippets.join("\n\n") || "(aucun entrypoint d\xE9clar\xE9)"
+    ),
+    "",
+    "### Fichiers cr\xE9\xE9s ou modifi\xE9s sur la branche `feature/*` (int\xE9graux) :",
+    wrapUntrustedContent(
+      "untrusted_workspace_files",
+      changedFilesDigest || "(aucun fichier modifi\xE9)"
+    ),
+    ...params.stage1Summary ? [
+      "",
+      "### R\xE9sum\xE9 de v\xE9rification Stage 1 :",
+      wrapUntrustedContent("untrusted_test_output", params.stage1Summary)
+    ] : []
+  ].join("\n");
+  return await callGeminiJson({
+    apiKey: params.llmApiKey,
+    model: params.phaseModels.reviewModel || params.phaseModels.planningModel,
+    providers: params.phaseModels.providers,
+    maxTransientRetries: params.phaseModels.maxTransientRetries,
+    transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
+    requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+    onTransientRetriesUsed: params.onTransientRetriesUsed,
+    systemInstruction,
+    prompt: userPrompt,
+    temperature: 0.1,
+    ...explorationTools.tools ? { tools: explorationTools.tools } : {},
+    ...explorationTools.toolHandlers ? { toolHandlers: explorationTools.toolHandlers } : {},
+    maxToolRounds: 6,
+    logLabel: `epic-convergence-audit#${params.issueNumber}`,
+    responseSchema: EPIC_CONVERGENCE_AUDIT_SCHEMA,
+    fetchImpl: params.fetchImpl
+  });
+}
+async function spawnPhase2ConvergenceTickets(params) {
+  const sourceTickets = params.auditResult.remediation_tickets;
+  const rawPhaseTickets = sourceTickets.length > 0 ? sourceTickets.slice(0, 4) : [
+    {
+      index: 1,
+      slug: `phase-${params.nextEpicPhase}-convergence-wiring`,
+      title: `[Phase ${params.nextEpicPhase} - Ticket 1] C\xE2blage de convergence et \xE9limination des stubs`,
+      description: params.auditResult.rationale || "Corriger les \xE9carts de convergence identifi\xE9s par l'audit Goldfish.",
+      summary: params.auditResult.rationale || "Corriger les \xE9carts de convergence identifi\xE9s par l'audit Goldfish.",
+      acceptance_criteria: [
+        ...params.auditResult.unwired_modules.map(
+          (m) => `C\xE2bler le module ${m} dans les points d'entr\xE9e requis`
+        ),
+        ...params.auditResult.stub_violations.map(
+          (s) => `Remplacer le simulacre interdit : ${s}`
+        ),
+        ...params.auditResult.unmet_criteria
+      ].filter(Boolean),
+      blocked_by_indices: [],
+      files_to_create_or_update: [
+        ...params.epicGoalContract.required_entrypoints
+      ],
+      files_likely_touched: [
+        ...params.epicGoalContract.required_entrypoints
+      ]
+    }
+  ];
+  const createdPhaseTickets = await createLinkedPhaseTicketsOnGitHub({
+    gh: params.gh,
+    parentIssueNumber: params.issueNumber,
+    phase: params.nextEpicPhase,
+    spoilerContext: {
+      phase: "implementation",
+      status: "active"
+    },
+    tickets: rawPhaseTickets.map((specTicket, i) => {
+      const cleanTitle = /^\[phase\s*\d+/i.test(specTicket.title.trim()) ? specTicket.title.trim() : `[Phase ${params.nextEpicPhase} - Ticket ${i + 1}] ${specTicket.title.trim().replace(/^\[ticket\s*\d+\]\s*/i, "")}`;
+      const criteria = specTicket.acceptance_criteria.length > 0 ? specTicket.acceptance_criteria : ["V\xE9rifier la convergence de bout en bout sur la branche feature"];
+      return {
+        index: specTicket.index,
+        slug: specTicket.slug,
+        title: cleanTitle,
+        description: specTicket.description,
+        acceptanceCriteria: criteria,
+        blockedByIndices: specTicket.blocked_by_indices,
+        filesToTouch: specTicket.files_to_create_or_update,
+        acceptanceSectionHeading: "Acceptance Criteria (Convergence TDD)",
+        extraHeaderLines: [`Convergence Phase: ${params.nextEpicPhase}`]
+      };
+    })
+  });
+  const combinedTickets = [
+    ...params.existingTickets,
+    ...createdPhaseTickets
+  ];
+  await upsertParentIssueTicketsTasklist({
+    gh: params.gh,
+    parentIssueNumber: params.issueNumber,
+    fallbackBody: params.issue.body,
+    tickets: combinedTickets
+  });
+  const phaseComment = appendEpureCommandsSpoiler(
+    [
+      params.stateMirrorMarkdown,
+      "",
+      `### \u{1F504} Audit de Convergence Goldfish (\`INCOMPLETE\`) \u2014 Lancement automatique de la Phase ${params.nextEpicPhase}`,
+      "",
+      `- **Synth\xE8se** : ${params.auditResult.rationale}`,
+      ...params.auditResult.unwired_modules.length > 0 ? [
+        `- **Modules non c\xE2bl\xE9s d\xE9tect\xE9s** : ${params.auditResult.unwired_modules.join(" ; ")}`
+      ] : [],
+      ...params.auditResult.stub_violations.length > 0 ? [
+        `- **Simulacres interdits d\xE9tect\xE9s** : ${params.auditResult.stub_violations.join(" ; ")}`
+      ] : [],
+      ...params.auditResult.unmet_criteria.length > 0 ? [
+        `- **Crit\xE8res non satisfaits** : ${params.auditResult.unmet_criteria.join(" ; ")}`
+      ] : [],
+      "",
+      `#### Tickets correctifs de Phase ${params.nextEpicPhase} cr\xE9\xE9s et lanc\xE9s automatiquement :`,
+      ...createdPhaseTickets.map(
+        (t) => `- **#${t.ticketIssueNumber}** \u2014 ${t.title}`
+      ),
+      "",
+      `<!-- epure-plan-manifest:${JSON.stringify({
+        planBranch: params.planBranch,
+        specPath: params.specPath,
+        epicGoalContract: params.epicGoalContract,
+        tickets: combinedTickets
+      })} -->`
+    ].join("\n"),
+    {
+      phase: "implementation",
+      status: "active",
+      issueNumber: params.issueNumber
+    }
+  );
+  await params.gh.postIssueComment(params.issueNumber, phaseComment);
+  return combinedTickets;
 }
 
 // src/planning/feature-to-dev-pr.ts
@@ -10976,60 +13695,6 @@ async function runMultiAgentPrReviewPass(input) {
   };
 }
 
-// src/orchestrator/types.ts
-function canUsePhaseModelFromConfig(candidateModel, hasProvidersMap) {
-  if (!candidateModel || candidateModel.trim().length === 0) {
-    return false;
-  }
-  const clean = candidateModel.trim();
-  if (hasProvidersMap || clean.includes("/")) {
-    return true;
-  }
-  const lower = clean.toLowerCase();
-  if (lower.startsWith("gemini-")) {
-    return true;
-  }
-  if (lower.startsWith("claude-")) {
-    return Boolean(process.env.ANTHROPIC_API_KEY?.trim());
-  }
-  if (lower.startsWith("gpt-") || lower.startsWith("o1") || lower.startsWith("o3") || lower.startsWith("o4")) {
-    return Boolean(process.env.OPENAI_API_KEY?.trim());
-  }
-  return false;
-}
-function resolvePhaseModels(inputModel, agentsConfig) {
-  const fallbackModel = inputModel?.trim() || "gemini-3.8-flash";
-  const explicitOverride = Boolean(inputModel && inputModel.trim().length > 0);
-  const providers = agentsConfig?.providers;
-  const maxTransientRetries = agentsConfig?.max_transient_api_retries;
-  const transientRetryBackoffSeconds = agentsConfig?.transient_retry_backoff_seconds;
-  const requestTimeoutMs = agentsConfig?.llm_request_timeout_seconds !== void 0 && agentsConfig.llm_request_timeout_seconds > 0 ? agentsConfig.llm_request_timeout_seconds * 1e3 : 9e5;
-  const hasProvidersMap = Boolean(
-    providers && Object.keys(providers).length > 0
-  );
-  if (explicitOverride || !agentsConfig) {
-    return {
-      planningModel: fallbackModel,
-      implementationModel: fallbackModel,
-      reviewModel: fallbackModel,
-      requestTimeoutMs,
-      ...providers ? { providers } : {},
-      ...maxTransientRetries !== void 0 ? { maxTransientRetries } : {},
-      ...transientRetryBackoffSeconds !== void 0 ? { transientRetryBackoffSeconds } : {}
-    };
-  }
-  const pickModel = (phaseCandidate) => canUsePhaseModelFromConfig(phaseCandidate, hasProvidersMap) ? phaseCandidate.trim() : fallbackModel;
-  return {
-    planningModel: pickModel(agentsConfig.models?.planning),
-    implementationModel: pickModel(agentsConfig.models?.implementation),
-    reviewModel: pickModel(agentsConfig.models?.review),
-    requestTimeoutMs,
-    ...providers ? { providers } : {},
-    ...maxTransientRetries !== void 0 ? { maxTransientRetries } : {},
-    ...transientRetryBackoffSeconds !== void 0 ? { transientRetryBackoffSeconds } : {}
-  };
-}
-
 // src/orchestrator/phases/feature-integration.ts
 async function runFeatureIntegrationPhase(params) {
   let verificationProfile = params.initialVerificationProfile;
@@ -11115,6 +13780,12 @@ async function runFeatureIntegrationPhase(params) {
       "",
       "## Completed Tickets & Squash History",
       ...params.completedTicketsSummary,
+      ...params.epicConvergenceSummary ? [
+        "",
+        "## Epic Convergence Audit (ADR-0032)",
+        "- **Verdict**: `CONVERGED`",
+        `- **Summary**: ${params.epicConvergenceSummary}`
+      ] : [],
       "",
       "## Governance",
       "- Requires human review and squash-merge into `dev` in the GitHub UI (ADR-0001, ADR-0027, Q45, Q91, Q95)."
@@ -11517,7 +14188,7 @@ ${c}`).join("\n\n");
             `La correction de review finale a \xE9chou\xE9 \xE0 la v\xE9rification Stage 1 (tentative ${featureTestRetry}/2) :`,
             wrapUntrustedContent(
               "untrusted_test_output",
-              featureTestCheck.output.slice(-6e3)
+              featureTestCheck.output
             ),
             "",
             ...findingsText ? [
@@ -11770,1205 +14441,6 @@ Refs #${params.issueNumber}`
     summary_markdown: finalComment,
     created_ticket_numbers: allTicketNumbers,
     feature_pr_url: featurePr.html_url
-  };
-}
-
-// src/frontend/impeccable-planning.ts
-function planImpeccableDesignSession(input) {
-  if (!input.touchesFrontendUi) {
-    return {
-      impeccable_invoked: false,
-      open_design_questions: [],
-      versioned_artifact_paths: []
-    };
-  }
-  const answeredSet = new Set(
-    input.alreadyAnsweredTopics.map((t) => t.trim().toLowerCase())
-  );
-  const openQuestions = input.candidateDesignTopics.filter(
-    (topic) => !answeredSet.has(topic.trim().toLowerCase())
-  );
-  const cleanSlug = input.surfaceSlug.trim().replace(/^\/+|\/+$/g, "");
-  return {
-    impeccable_invoked: true,
-    open_design_questions: openQuestions,
-    versioned_artifact_paths: [
-      ".impeccable.md",
-      "DESIGN.md",
-      `.impeccable/surfaces/${cleanSlug}.md`
-    ]
-  };
-}
-
-// src/planning/artifacts-gate.ts
-var ADR_PATH_PATTERN = /^docs\/adr\/\d{4}-[a-z0-9-]+\.md$/;
-function hasDependencyCycle(tickets) {
-  const byId = /* @__PURE__ */ new Map();
-  for (const t of tickets) {
-    byId.set(t.id, t);
-  }
-  const visiting = /* @__PURE__ */ new Set();
-  const visited = /* @__PURE__ */ new Set();
-  function dfs(id) {
-    if (visiting.has(id)) {
-      return true;
-    }
-    if (visited.has(id)) {
-      return false;
-    }
-    visiting.add(id);
-    const node = byId.get(id);
-    if (node) {
-      for (const blockerId of node.blockedBy) {
-        if (dfs(blockerId)) {
-          return true;
-        }
-      }
-    }
-    visiting.delete(id);
-    visited.add(id);
-    return false;
-  }
-  for (const t of tickets) {
-    if (dfs(t.id)) {
-      return true;
-    }
-  }
-  return false;
-}
-function validatePlanningArtifactsAndGraph(bundle) {
-  if (bundle.introducesDomainTerms && bundle.glossaryContent.trim().length === 0) {
-    return {
-      valid: false,
-      error_code: "GLOSSARY_MISSING_FOR_DOMAIN_TERMS",
-      error_message: "GLOSSARY.md is required when domain terms are introduced or refined (ADR-0007).",
-      ready_ticket_ids: [],
-      blocked_ticket_ids: []
-    };
-  }
-  if (bundle.adrFiles.length === 0) {
-    return {
-      valid: false,
-      error_code: "ADR_MISSING_OR_INCOMPLETE",
-      error_message: "At least one numbered ADR under docs/adr/NNNN-*.md is required before implementation (ADR-0007).",
-      ready_ticket_ids: [],
-      blocked_ticket_ids: []
-    };
-  }
-  for (const adr of bundle.adrFiles) {
-    if (!ADR_PATH_PATTERN.test(adr.path.trim()) || adr.content.trim().length === 0) {
-      return {
-        valid: false,
-        error_code: "ADR_MISSING_OR_INCOMPLETE",
-        error_message: `Invalid or empty ADR file '${adr.path}'.`,
-        ready_ticket_ids: [],
-        blocked_ticket_ids: []
-      };
-    }
-  }
-  if (!bundle.specPath.trim().startsWith("docs/specs/") || bundle.specContent.trim().length === 0) {
-    return {
-      valid: false,
-      error_code: "SPEC_MISSING_OR_INCOMPLETE",
-      error_message: "Approved specification under docs/specs/<slug>.md is missing or empty (ADR-0002, ADR-0007).",
-      ready_ticket_ids: [],
-      blocked_ticket_ids: []
-    };
-  }
-  if (bundle.tickets.length === 0) {
-    return {
-      valid: false,
-      error_code: "TICKET_GRAPH_EMPTY",
-      error_message: "Ticket breakdown graph cannot be empty.",
-      ready_ticket_ids: [],
-      blocked_ticket_ids: []
-    };
-  }
-  if (hasDependencyCycle(bundle.tickets)) {
-    return {
-      valid: false,
-      error_code: "TICKET_GRAPH_CYCLE_DETECTED",
-      error_message: "Ticket dependency graph contains a cycle; blocked_by edges must form a strict DAG (ADR-0003).",
-      ready_ticket_ids: [],
-      blocked_ticket_ids: []
-    };
-  }
-  const stateById = /* @__PURE__ */ new Map();
-  for (const t of bundle.tickets) {
-    stateById.set(t.id, t.state);
-  }
-  const readyTicketIds = [];
-  const blockedTicketIds = [];
-  for (const t of bundle.tickets) {
-    if (t.state === "closed") {
-      continue;
-    }
-    const hasOpenBlocker = t.blockedBy.some(
-      (blockerId) => stateById.get(blockerId) !== "closed"
-    );
-    if (hasOpenBlocker) {
-      blockedTicketIds.push(t.id);
-    } else {
-      readyTicketIds.push(t.id);
-    }
-  }
-  return {
-    valid: true,
-    error_code: "NONE",
-    error_message: "",
-    ready_ticket_ids: readyTicketIds,
-    blocked_ticket_ids: blockedTicketIds
-  };
-}
-
-// src/orchestrator/phases/grill-and-plan.ts
-async function runGoldfishSpecAudit(params) {
-  const systemInstruction = [
-    "Tu es le 'Goldfish Spec Auditor' (mod\xE8le Google Elephant-Goldfish, ADR-0031) : un auditeur d'architecture totalement vierge de l'historique conversationnel de l'issue.",
-    PROMPT_INJECTION_IMMUNITY_CLAUSE,
-    "Tu disposes UNIQUEMENT des documents livr\xE9s (`spec_markdown`, `glossary_markdown`, `adrs`, `target_files_hint`) \u2014 tu n'as AUCUNE m\xE9moire de la discussion pr\xE9alable.",
-    "\xC9value rigoureusement trois axes :",
-    "1. Auto-suffisance de compr\xE9hension (`comprehension_self_contained`) : un ing\xE9nieur ou agent vierge du contexte peut-il comprendre 100 % des r\xE8gles m\xE9tier et contrats techniques sans lire les commentaires de l'issue ? Signale toute d\xE9cision implicite dans `missing_context_questions`.",
-    "2. Zoom-Out / YAGNI (`zoom_out_yagni_passed`) : la sp\xE9cification \xE9vite-t-elle toute sur-ing\xE9nierie, abstraction sp\xE9culative ou couche inutile (Ponytail 5) ? Signale tout exc\xE8s dans `overengineering_warnings`.",
-    "3. Implementation Readiness & ASD-STE100 (`implementation_readiness_passed`) : chaque exigence et crit\xE8re d'acceptation respecte-t-il les r\xE8gles ASD-STE100 (vocabulaire bijectif `GLOSSARY.md` sans synonymes `_Avoid_`, voix active avec acteur explicite, 1 phrase = 1 action, conditionnelles d\xE9terministes `WHEN/IF ... THEN` sans modalit\xE9 floue `should`/`might`/`if needed`/`correctement`) et est-il directement v\xE9rifiable par un test automatis\xE9 ? Signale toute violation ou crit\xE8re flou dans `untestable_criteria`.",
-    "Renvoie un objet JSON strictement conforme au sch\xE9ma `goldfish_spec_audit` (`passed: true` uniquement si les 3 axes sont valid\xE9s)."
-  ].join("\n");
-  const adrsSummary = params.specArtifacts.adrs.map((a) => `### ADR: ${a.path}
-${a.content}`).join("\n\n");
-  const userPrompt = [
-    "Audite en mode z\xE9ro-contexte (Goldfish) le dossier de sp\xE9cification suivant :",
-    "",
-    `### Sp\xE9cification (\`${params.specArtifacts.spec_path}\`) :`,
-    wrapUntrustedContent(
-      "untrusted_spec_content",
-      params.specArtifacts.spec_markdown
-    ),
-    "",
-    "### Glossaire (`GLOSSARY.md`) :",
-    wrapUntrustedContent(
-      "untrusted_spec_content",
-      params.specArtifacts.glossary_markdown
-    ),
-    "",
-    "### ADRs :",
-    wrapUntrustedContent("untrusted_spec_content", adrsSummary),
-    "",
-    `### Fichiers cibles pressentis : ${(params.specArtifacts.target_files_hint ?? []).join(", ") || "aucun"}`
-  ].join("\n");
-  return await callGeminiJson({
-    apiKey: params.apiKey,
-    model: params.model,
-    providers: params.providers,
-    maxTransientRetries: params.maxTransientRetries,
-    transientRetryBackoffSeconds: params.transientRetryBackoffSeconds,
-    requestTimeoutMs: params.requestTimeoutMs,
-    onTransientRetriesUsed: params.onTransientRetriesUsed,
-    systemInstruction,
-    prompt: userPrompt,
-    temperature: 0.1,
-    logLabel: `goldfish-spec-audit:${params.specArtifacts.plan_slug}`,
-    responseSchema: GOLDFISH_SPEC_AUDIT_SCHEMA,
-    fetchImpl: params.fetchImpl
-  });
-}
-function parseLatestSpecManifest(comments) {
-  for (let i = comments.length - 1; i >= 0; i -= 1) {
-    const body = comments[i]?.body ?? "";
-    const match = body.match(/<!-- epure-spec-manifest:(\{[\s\S]*?\}) -->/);
-    if (match?.[1]) {
-      try {
-        const parsed = JSON.parse(match[1]);
-        if (typeof parsed.planBranch === "string" && typeof parsed.specPath === "string" && Array.isArray(parsed.adrPaths)) {
-          return {
-            planBranch: parsed.planBranch,
-            specPath: parsed.specPath,
-            adrPaths: parsed.adrPaths.filter(
-              (p) => typeof p === "string"
-            ),
-            targetFilesHint: Array.isArray(parsed.targetFilesHint) ? parsed.targetFilesHint.filter(
-              (f) => typeof f === "string"
-            ) : []
-          };
-        }
-      } catch {
-      }
-    }
-  }
-  return null;
-}
-async function runGrillAndPlanPhase(params) {
-  const {
-    command,
-    currentPhase,
-    currentStatus,
-    repository,
-    issueNumber,
-    commentId,
-    issue,
-    allComments,
-    planSlug,
-    planBranch,
-    gh,
-    store,
-    llmApiKey,
-    phaseModels,
-    onTransientRetriesUsed,
-    fetchImpl
-  } = params;
-  if (currentStatus === "suspended") {
-    await gh.removeIssueLabel?.(issueNumber, "needs-human");
-  }
-  const grillExplorationCache = /* @__PURE__ */ new Map();
-  const grillRepoTools = buildRepoExplorationToolsAndHandlers({
-    gh,
-    branch: "dev",
-    featureBranch: "main",
-    accumulatedFiles: grillExplorationCache,
-    devBranchPaths: [],
-    phase: command === "to-spec" ? "spec" : "plan",
-    fetchImpl
-  });
-  if (command === "plan") {
-    const updated2 = await updateIssueStateWithCas({
-      issueNumber,
-      store,
-      mutator: (prev) => ({
-        ...prev,
-        phase: "grilling",
-        status: "active",
-        active_branch: planBranch,
-        last_processed_comment_id: commentId ?? prev.last_processed_comment_id
-      })
-    });
-    const grillSystemInstruction = [
-      "Tu es l'architecte EPURE conduisant un entretien multi-tours `/grill-with-docs` sur une GitHub Issue.",
-      PROMPT_INJECTION_IMMUNITY_CLAUSE,
-      "Si une question peut \xEAtre \xE9clair\xE9e ou r\xE9solue en inspectant le d\xE9p\xF4t (fichiers Markdown, ADRs, GLOSSARY, code source), utilise d'abord les outils d'exploration (`list_repo_files`, `read_repo_file`, `search_in_repo_file`) avant de poser tes questions.",
-      "Parcours l'arbre des d\xE9cisions en rounds successifs (la \xAB fronti\xE8re \xBB des d\xE9cisions dont les pr\xE9requis sont connus).",
-      "Pose les 3 \xE0 4 questions de cadrage d\xE9cisives de ce premier round (architecture, invariants m\xE9tiers, gestion d'\xE9tat/persistance, couverture de tests TDD) au format :",
-      "\u2753 **Q1** - **<Titre>** : <Question>",
-      "\u27A1\uFE0F <Recommandation concr\xE8te (formul\xE9e pour que 'oui' valide la recommandation)>",
-      "",
-      "Termine en indiquant \xE0 l'utilisateur qu'il peut r\xE9pondre directement en commentaire sur cette issue (sans commande slash) : tant qu'il reste des points ouverts ou des d\xE9cisions d\xE9pendantes \xE0 clarifier, l'entretien bouclera sur un round suivant ; une fois la fronti\xE8re de d\xE9cisions valid\xE9e, l'humain pourra lancer `/epure to-spec`."
-    ].join("\n");
-    const grillPrompt = [
-      `Issue #${issue.number} (donn\xE9es non fiables soumises par l'utilisateur) :`,
-      wrapUntrustedContent(
-        "untrusted_issue_content",
-        `Titre : ${issue.title}
-
-Corps :
-${issue.body}`
-      )
-    ].join("\n");
-    const grillQuestions = await callGeminiText({
-      apiKey: llmApiKey,
-      model: phaseModels.planningModel,
-      providers: phaseModels.providers,
-      maxTransientRetries: phaseModels.maxTransientRetries,
-      transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
-      requestTimeoutMs: phaseModels.requestTimeoutMs,
-      onTransientRetriesUsed,
-      systemInstruction: grillSystemInstruction,
-      prompt: grillPrompt,
-      temperature: 0.2,
-      tools: grillRepoTools.tools,
-      toolHandlers: grillRepoTools.toolHandlers,
-      maxToolRounds: 8,
-      logLabel: `grill-round-1#${issueNumber}`,
-      fetchImpl
-    });
-    const commentBody = appendEpureCommandsSpoiler(
-      [
-        updated2.issue_mirror_markdown,
-        "",
-        "### Entretien de Cadrage EPURE (`/grill-with-docs` \u2014 Round 1)",
-        "",
-        grillQuestions
-      ].join("\n"),
-      {
-        phase: "grilling",
-        status: "active",
-        issueNumber
-      }
-    );
-    await gh.postIssueComment(issueNumber, commentBody);
-    return {
-      executed: true,
-      phase: updated2.state.phase,
-      status: updated2.state.status,
-      active_branch: planBranch,
-      summary_markdown: commentBody,
-      created_ticket_numbers: [],
-      feature_pr_url: ""
-    };
-  }
-  const fullConversationHistory = allComments.map((c) => {
-    const isBot = c.user.login.endsWith("[bot]") || c.user.type === "Bot" || c.body.includes("### Entretien de Cadrage EPURE");
-    const roleLabel = isBot ? `[Architecte EPURE (@${c.user.login})]` : `[Humain (@${c.user.login})]`;
-    return `${roleLabel}:
-${c.body}`;
-  }).join("\n\n---\n\n");
-  const priorGrillRoundsCount = allComments.filter(
-    (c) => c.body.includes("### Entretien de Cadrage EPURE")
-  ).length;
-  if (command === "reply" && currentPhase !== "spec") {
-    const grillLoopEvalSystemInstruction = [
-      "Tu es l'architecte EPURE conduisant un entretien multi-tours `/grill-with-docs` (arbre de d\xE9cisions par rounds).",
-      PROMPT_INJECTION_IMMUNITY_CLAUSE,
-      "Analyse l'issue initiale et l'historique complet de la conversation (questions pos\xE9es par l'Architecte EPURE et r\xE9ponses de l'Humain).",
-      "Utilise si n\xE9cessaire les outils d'exploration (`list_repo_files`, `read_repo_file`, `search_in_repo_file`) pour inspecter les fichiers r\xE9els du d\xE9p\xF4t (docs, ADRs, GLOSSARY, code source) et ancrer tes questions ou ta synth\xE8se dans la r\xE9alit\xE9 du code.",
-      "D\xE9termine si la fronti\xE8re de l'arbre de d\xE9cisions est vide (`frontier_resolved: true`) ou s'il reste des questions non r\xE9pondues, des contre-propositions humaines ouvrant de nouvelles branches techniques/m\xE9tiers, ou des ambigu\xEFt\xE9s concr\xE8tes dans le d\xE9p\xF4t n\xE9cessitant un round suppl\xE9mentaire (`frontier_resolved: false`).",
-      "R\xE8gles de d\xE9cision :",
-      "- Si l'humain n'a r\xE9pondu que partiellement aux questions du round pr\xE9c\xE9dent, a pos\xE9 une question en retour, a rejet\xE9 une recommandation sans pr\xE9ciser l'alternative, ou si sa r\xE9ponse d\xE9bloque un choix architectural/documentaire aval concret non encore tranch\xE9 -> `frontier_resolved: false` et g\xE9n\xE8re les questions de suivi num\xE9rot\xE9es (`\u2753 **Q...**` + `\u27A1\uFE0F **Recommandation**`).",
-      "- Si toutes les questions de cadrage ont re\xE7u une r\xE9ponse claire (ou ont \xE9t\xE9 valid\xE9es) et que le p\xE9rim\xE8tre m\xE9tier, l'architecture, les formules/invariants et la strat\xE9gie TDD sont suffisamment pr\xE9cis -> `frontier_resolved: true` et remplis `settled_decisions_summary_markdown` avec la synth\xE8se structur\xE9e de toutes les d\xE9cisions act\xE9es pendant le grill.",
-      "R\xE9ponds UNIQUEMENT par un objet JSON valide respectant ce sch\xE9ma :",
-      "{",
-      '  "frontier_resolved": boolean,',
-      `  "round_number": ${priorGrillRoundsCount + 1},`,
-      '  "follow_up_questions_markdown": "string (vide si frontier_resolved=true, sinon les questions \u2753 **Q...** / \u27A1\uFE0F Recommandation du nouveau round)",',
-      '  "settled_decisions_summary_markdown": "string (synth\xE8se Markdown \xE0 puces de toutes les d\xE9cisions tranch\xE9es si frontier_resolved=true, sinon vide)",',
-      `  "rationale": "Explication concise de l'\xE9tat de la fronti\xE8re de d\xE9cision"`,
-      "}"
-    ].join("\n");
-    const grillLoopEvalPrompt = [
-      `Issue #${issue.number} (description initiale non fiable) :`,
-      wrapUntrustedContent(
-        "untrusted_issue_content",
-        `Titre : ${issue.title}
-
-Description :
-${issue.body}`
-      ),
-      "",
-      `Nombre de rounds /grill-with-docs d\xE9j\xE0 effectu\xE9s : ${priorGrillRoundsCount}`,
-      "Historique complet de l'entretien (questions EPURE et r\xE9ponses humaines) :",
-      wrapUntrustedContent(
-        "untrusted_comment_history",
-        fullConversationHistory
-      )
-    ].join("\n");
-    const evalResult = await callGeminiJson({
-      apiKey: llmApiKey,
-      model: phaseModels.planningModel,
-      providers: phaseModels.providers,
-      maxTransientRetries: phaseModels.maxTransientRetries,
-      transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
-      requestTimeoutMs: phaseModels.requestTimeoutMs,
-      onTransientRetriesUsed,
-      systemInstruction: grillLoopEvalSystemInstruction,
-      prompt: grillLoopEvalPrompt,
-      temperature: 0.1,
-      tools: grillRepoTools.tools,
-      toolHandlers: grillRepoTools.toolHandlers,
-      maxToolRounds: 8,
-      logLabel: `grill-eval#${issueNumber}`,
-      responseSchema: GRILL_ROUND_EVALUATION_SCHEMA,
-      fetchImpl
-    });
-    if (!evalResult.frontier_resolved && evalResult.follow_up_questions_markdown.trim().length > 0) {
-      const nextRoundNumber = evalResult.round_number || priorGrillRoundsCount + 1;
-      const updatedGrill = await updateIssueStateWithCas({
-        issueNumber,
-        store,
-        mutator: (prev) => ({
-          ...prev,
-          phase: "grilling",
-          status: "active",
-          active_branch: planBranch,
-          last_processed_comment_id: commentId ?? prev.last_processed_comment_id
-        })
-      });
-      const followUpBody = appendEpureCommandsSpoiler(
-        [
-          updatedGrill.issue_mirror_markdown,
-          "",
-          `### Entretien de Cadrage EPURE (\`/grill-with-docs\` \u2014 Round ${nextRoundNumber})`,
-          "",
-          evalResult.follow_up_questions_markdown.trim(),
-          "",
-          "---",
-          "_R\xE9ponds directement en commentaire pour poursuivre l'entretien, ou poste `/epure to-spec` pour valider le cadrage et g\xE9n\xE9rer la sp\xE9cification._"
-        ].join("\n"),
-        {
-          phase: "grilling",
-          status: "active",
-          issueNumber
-        }
-      );
-      await gh.postIssueComment(issueNumber, followUpBody);
-      return {
-        executed: true,
-        phase: updatedGrill.state.phase,
-        status: updatedGrill.state.status,
-        active_branch: planBranch,
-        summary_markdown: followUpBody,
-        created_ticket_numbers: [],
-        feature_pr_url: ""
-      };
-    }
-    const updatedFrontierReady = await updateIssueStateWithCas({
-      issueNumber,
-      store,
-      mutator: (prev) => ({
-        ...prev,
-        phase: "grilling",
-        status: "awaiting_human_approval",
-        active_branch: planBranch,
-        last_processed_comment_id: commentId ?? prev.last_processed_comment_id
-      })
-    });
-    const settledSummary = evalResult.settled_decisions_summary_markdown?.trim() || evalResult.rationale.trim() || "Toutes les questions de la fronti\xE8re de d\xE9cisions ont re\xE7u une r\xE9ponse.";
-    const frontierResolvedComment = appendEpureCommandsSpoiler(
-      [
-        updatedFrontierReady.issue_mirror_markdown,
-        "",
-        "### \u2705 Fronti\xE8re de Cadrage R\xE9solue (`/grill-with-docs` \u2014 En attente de validation humaine)",
-        "",
-        settledSummary,
-        "",
-        "---",
-        "\u{1F449} **Validation humaine requise avant `/to-spec`** :",
-        "- Si ce cadrage vous convient, postez **`/epure to-spec`** pour g\xE9n\xE9rer le `GLOSSARY.md`, les ADRs et la sp\xE9cification compl\xE8te sur `" + planBranch + "`.",
-        "- Si vous souhaitez approfondir un point, ajouter une contrainte ou corriger une d\xE9cision, **r\xE9pondez simplement en commentaire** (sans commande slash) pour ouvrir un nouveau round de grill."
-      ].join("\n"),
-      {
-        phase: "grilling",
-        status: "awaiting_human_approval",
-        issueNumber
-      }
-    );
-    await gh.postIssueComment(issueNumber, frontierResolvedComment);
-    return {
-      executed: true,
-      phase: updatedFrontierReady.state.phase,
-      status: updatedFrontierReady.state.status,
-      active_branch: planBranch,
-      summary_markdown: frontierResolvedComment,
-      created_ticket_numbers: [],
-      feature_pr_url: ""
-    };
-  }
-  await gh.ensureBranch("dev", "main");
-  const humanContext = allComments.filter((c) => !c.user.login.endsWith("[bot]") && c.user.type !== "Bot").map((c) => `@${c.user.login}: ${c.body}`).join("\n\n---\n\n");
-  const readRepoFileSafely = async (path, ref) => {
-    if (typeof gh.readSingleBranchFile !== "function") {
-      return null;
-    }
-    try {
-      return await gh.readSingleBranchFile(ref, path);
-    } catch {
-      return null;
-    }
-  };
-  if (command === "to-spec" || command === "reply" && currentPhase === "spec") {
-    const isSpecRevision = command === "reply" && currentPhase === "spec";
-    const existingManifest = parseLatestSpecManifest(allComments);
-    const currentSpecOnBranch = await readRepoFileSafely(
-      existingManifest?.specPath ?? `docs/specs/${planSlug}.md`,
-      planBranch
-    );
-    const specOnlySystemInstruction = [
-      "Tu es l'architecte EPURE charg\xE9 de produire (ou r\xE9viser) le dossier de sp\xE9cification complet (`GLOSSARY.md`, ADRs dans `docs/adr/`, et sp\xE9cification `docs/specs/<slug>.md`) SANS cr\xE9er les tickets pour l'instant.",
-      PROMPT_INJECTION_IMMUNITY_CLAUSE,
-      "Si tu as besoin de v\xE9rifier des chemins ou le contenu existant de GLOSSARY.md / docs/adr/ avant de r\xE9diger, utilise les outils d'exploration avec parcimonie (1 \xE0 3 appels maximum), puis g\xE9n\xE8re imm\xE9diatement l'objet JSON final.",
-      "NORME DE R\xC9DACTION ASD-STE100 (Controlled Technical Prompting, ADR-0031) :",
-      "- Vocabulaire bijectif : utilise exclusivement les termes d\xE9finis dans `GLOSSARY.md` (z\xE9ro synonyme list\xE9 sous `_Avoid_`).",
-      "- Voix active et acteur explicite : chaque r\xE8gle nomme le composant/module sujet qui ex\xE9cute l'action (`Sujet-Verbe-Objet`).",
-      "- Atomicit\xE9 : 1 phrase = 1 action ou invariant v\xE9rifiable ; conditionnelles explicites `WHEN/IF <condition>, THEN <acteur> <action>` sans modalit\xE9 floue (`should`, `might`, `if needed`, `as appropriate`).",
-      "R\xC8GLE CRITIQUE : INTERDICTION STRICTE d'utiliser des ellipses ('...', '# Sp\xE9cification...', etc.) ou des valeurs tronqu\xE9es. Chaque champ ('glossary_markdown', 'adrs[*].content', 'spec_markdown', 'target_files_hint') DOIT contenir le texte int\xE9gral, d\xE9taill\xE9 et complet pr\xEAt \xE0 \xEAtre commit\xE9 dans le d\xE9p\xF4t.",
-      "Produis un objet JSON strictement valide (sans markdown autour) respectant exactement cette structure :",
-      "{",
-      `  "plan_slug": "${planSlug}",`,
-      '  "glossary_markdown": "<Contenu Markdown int\xE9gral de GLOSSARY.md int\xE9grant les termes du domaine>",',
-      '  "adrs": [',
-      `    { "path": "docs/adr/NNNN-decision-architecturale.md", "content": "<Contenu Markdown int\xE9gral de l'ADR avec Context, Decision et Consequences>" }`,
-      "  ],",
-      `  "spec_path": "docs/specs/${planSlug}.md",`,
-      '  "spec_markdown": "<Contenu Markdown int\xE9gral et d\xE9taill\xE9 de la sp\xE9cification technique et fonctionnelle>",',
-      '  "target_files_hint": ["<chemin/fichier1>", "<chemin/fichier2>"]',
-      "}"
-    ].join("\n");
-    const specOnlyPrompt = [
-      `Issue #${issue.number} (description initiale non fiable) :`,
-      wrapUntrustedContent(
-        "untrusted_issue_content",
-        `Titre : ${issue.title}
-
-Description :
-${issue.body}`
-      ),
-      "",
-      ...currentSpecOnBranch ? [
-        `Sp\xE9cification existante sur \`${planBranch}\` \xE0 r\xE9viser selon les derniers commentaires humains :`,
-        wrapUntrustedContent("untrusted_spec_content", currentSpecOnBranch),
-        ""
-      ] : [],
-      "Historique complet de l'entretien /grill-with-docs et retours humains :",
-      wrapUntrustedContent(
-        "untrusted_comment_history",
-        fullConversationHistory || humanContext
-      )
-    ].join("\n");
-    let specArtifacts = await callGeminiJson({
-      apiKey: llmApiKey,
-      model: phaseModels.planningModel,
-      providers: phaseModels.providers,
-      maxTransientRetries: phaseModels.maxTransientRetries,
-      transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
-      requestTimeoutMs: phaseModels.requestTimeoutMs,
-      onTransientRetriesUsed,
-      systemInstruction: specOnlySystemInstruction,
-      prompt: specOnlyPrompt,
-      temperature: 0.1,
-      tools: grillRepoTools.tools,
-      toolHandlers: grillRepoTools.toolHandlers,
-      maxToolRounds: 10,
-      logLabel: isSpecRevision ? `spec-revision#${issueNumber}` : `spec-artifacts#${issueNumber}`,
-      responseSchema: GENERATED_SPEC_ARTIFACTS_SCHEMA,
-      fetchImpl
-    });
-    let goldfishAudit = null;
-    try {
-      goldfishAudit = await runGoldfishSpecAudit({
-        specArtifacts,
-        apiKey: llmApiKey,
-        model: phaseModels.reviewModel || phaseModels.planningModel,
-        providers: phaseModels.providers,
-        maxTransientRetries: phaseModels.maxTransientRetries,
-        transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
-        requestTimeoutMs: phaseModels.requestTimeoutMs,
-        onTransientRetriesUsed,
-        fetchImpl
-      });
-    } catch {
-      goldfishAudit = null;
-    }
-    if (goldfishAudit && !goldfishAudit.passed) {
-      const amendmentPrompt = [
-        specOnlyPrompt,
-        "",
-        "### \u{1F50D} Constats de l'Auditeur Goldfish Z\xE9ro-Contexte (\xE0 corriger imp\xE9rativement dans la sp\xE9cification) :",
-        ...goldfishAudit.missing_context_questions.length > 0 ? [
-          `- Contexte implicite manquant : ${goldfishAudit.missing_context_questions.join(" ; ")}`
-        ] : [],
-        ...goldfishAudit.overengineering_warnings.length > 0 ? [
-          `- Avertissements YAGNI / sur-ing\xE9nierie : ${goldfishAudit.overengineering_warnings.join(" ; ")}`
-        ] : [],
-        ...goldfishAudit.untestable_criteria.length > 0 ? [
-          `- Crit\xE8res non v\xE9rifiables : ${goldfishAudit.untestable_criteria.join(" ; ")}`
-        ] : [],
-        ...goldfishAudit.amended_sections_suggestion ? [
-          `- Suggestion d'amendement : ${goldfishAudit.amended_sections_suggestion}`
-        ] : [],
-        "",
-        "Produis la version amend\xE9e et auto-suffisante du JSON de sp\xE9cification."
-      ].join("\n");
-      try {
-        specArtifacts = await callGeminiJson({
-          apiKey: llmApiKey,
-          model: phaseModels.planningModel,
-          providers: phaseModels.providers,
-          maxTransientRetries: phaseModels.maxTransientRetries,
-          transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
-          requestTimeoutMs: phaseModels.requestTimeoutMs,
-          onTransientRetriesUsed,
-          systemInstruction: specOnlySystemInstruction,
-          prompt: amendmentPrompt,
-          temperature: 0.1,
-          logLabel: `spec-goldfish-amend#${issueNumber}`,
-          responseSchema: GENERATED_SPEC_ARTIFACTS_SCHEMA,
-          fetchImpl
-        });
-      } catch {
-      }
-    }
-    const specGateResult = validatePlanningArtifactsAndGraph({
-      introducesDomainTerms: true,
-      glossaryContent: specArtifacts.glossary_markdown,
-      adrFiles: specArtifacts.adrs.map((a) => ({
-        path: a.path,
-        content: a.content
-      })),
-      specPath: specArtifacts.spec_path,
-      specContent: specArtifacts.spec_markdown,
-      tickets: [
-        {
-          id: 1,
-          issueNumber: 1,
-          title: "spec-validation-placeholder",
-          state: "open",
-          blockedBy: []
-        }
-      ]
-    });
-    if (!specGateResult.valid) {
-      await gh.ensureLabel(
-        "needs-human",
-        "D93F0B",
-        "Requires human maintainer intervention"
-      );
-      await gh.addIssueLabels(issueNumber, ["needs-human"]);
-      const suspended = await updateIssueStateWithCas({
-        issueNumber,
-        store,
-        mutator: (prev) => ({
-          ...prev,
-          phase: "spec",
-          status: "suspended",
-          active_branch: planBranch,
-          last_processed_comment_id: commentId ?? prev.last_processed_comment_id
-        })
-      });
-      const escalationComment = appendEpureCommandsSpoiler(
-        [
-          suspended.issue_mirror_markdown,
-          "",
-          `### \u26A0\uFE0F Escalade \`needs-human\` \u2014 \xC9chec de validation des livrables de sp\xE9cification (\`${specGateResult.error_code}\`)`,
-          "",
-          `- **Code d'erreur** : \`${specGateResult.error_code}\``,
-          `- **Raison** : ${specGateResult.error_message}`,
-          "- **Action requise** : Corrigez les livrables ou relancez `/epure to-spec`."
-        ].join("\n"),
-        {
-          phase: "suspended",
-          status: "suspended",
-          issueNumber
-        }
-      );
-      await gh.postIssueComment(issueNumber, escalationComment);
-      return {
-        executed: true,
-        phase: suspended.state.phase,
-        status: suspended.state.status,
-        active_branch: planBranch,
-        summary_markdown: escalationComment,
-        created_ticket_numbers: [],
-        feature_pr_url: ""
-      };
-    }
-    const targetFilesHint = specArtifacts.target_files_hint ?? [];
-    const touchesFrontendUi2 = targetFilesHint.some(
-      (f) => /\.(?:tsx|jsx|css|scss|html)$/i.test(f)
-    );
-    const impeccableSession2 = planImpeccableDesignSession({
-      issueNumber,
-      surfaceSlug: planSlug,
-      touchesFrontendUi: touchesFrontendUi2,
-      alreadyAnsweredTopics: ["theme", "layout"],
-      candidateDesignTopics: ["theme", "layout", "accessibility"]
-    });
-    const designGate2 = touchesFrontendUi2 ? await runUserAdvocateDesignGate({
-      repository,
-      planTitle: issue.title,
-      glossaryMarkdown: specArtifacts.glossary_markdown,
-      specMarkdown: specArtifacts.spec_markdown,
-      llmApiKey,
-      model: phaseModels.reviewModel,
-      providers: phaseModels.providers,
-      maxTransientRetries: phaseModels.maxTransientRetries,
-      transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
-      requestTimeoutMs: phaseModels.requestTimeoutMs,
-      onTransientRetriesUsed,
-      fetchImpl
-    }) : null;
-    const plannedStack2 = detectRepositoryStack({
-      targetFilesHint
-    });
-    const adaptedRoster2 = adaptReviewerRosterForDomain({
-      repository,
-      planTitle: issue.title,
-      glossaryMarkdown: specArtifacts.glossary_markdown,
-      specMarkdown: specArtifacts.spec_markdown,
-      touchesFrontendUi: touchesFrontendUi2,
-      stackKind: plannedStack2.kind,
-      personas: designGate2?.personas,
-      domainInvariants: designGate2?.domain_invariants
-    });
-    const zizmorFile2 = buildZizmorConfigYaml();
-    const renovateFile2 = buildRenovateConfigJson(plannedStack2);
-    const ciFile2 = buildStackAwareCiWorkflowYaml({
-      pinnedSha: "main",
-      stack: plannedStack2
-    });
-    const existingBaseRoster2 = await gh.readTrustedBaseRosterFiles("dev");
-    const hasExistingConfiguredRoster2 = existingBaseRoster2.size > 0;
-    const corePlanningDocs2 = [
-      ...specArtifacts.glossary_markdown.trim().length > 0 ? [{ path: "GLOSSARY.md", content: specArtifacts.glossary_markdown }] : [],
-      { path: specArtifacts.spec_path, content: specArtifacts.spec_markdown },
-      ...specArtifacts.adrs.map((a) => ({ path: a.path, content: a.content }))
-    ];
-    const planningFiles2 = hasExistingConfiguredRoster2 ? corePlanningDocs2 : [
-      ...corePlanningDocs2,
-      ...adaptedRoster2.files,
-      zizmorFile2,
-      renovateFile2,
-      ciFile2
-    ];
-    await gh.commitFilesToBranch({
-      branch: planBranch,
-      fromBranch: "dev",
-      commitMessage: isSpecRevision ? `docs(plan): revise GLOSSARY, ADRs, and spec for #${issueNumber}` : `docs(plan): generate GLOSSARY, ADRs, spec, DESIGN.md, and adapted reviewer roster for #${issueNumber}`,
-      files: planningFiles2
-    });
-    const updatedSpec = await updateIssueStateWithCas({
-      issueNumber,
-      store,
-      mutator: (prev) => ({
-        ...prev,
-        phase: "spec",
-        status: "awaiting_human_approval",
-        active_branch: planBranch,
-        last_processed_comment_id: commentId ?? prev.last_processed_comment_id
-      })
-    });
-    const specManifestPayload = {
-      planBranch,
-      specPath: specArtifacts.spec_path,
-      adrPaths: specArtifacts.adrs.map((a) => a.path),
-      targetFilesHint
-    };
-    const specReviewComment = appendEpureCommandsSpoiler(
-      [
-        updatedSpec.issue_mirror_markdown,
-        "",
-        isSpecRevision ? `### \u{1F4DD} Sp\xE9cification r\xE9vis\xE9e sur \`${planBranch}\` (En attente de validation humaine)` : `### \u{1F4C4} Sp\xE9cification, Glossaire et ADRs g\xE9n\xE9r\xE9s sur \`${planBranch}\` (En attente de validation humaine)`,
-        "",
-        "- **Glossaire** : `GLOSSARY.md`",
-        `- **ADRs** : ${specArtifacts.adrs.map((a) => `\`${a.path}\``).join(", ")}`,
-        `- **Sp\xE9cification** : \`${specArtifacts.spec_path}\``,
-        `- **Roster Multi-Agents adapt\xE9** : \`.cursor/agents/*.md\` (${adaptedRoster2.files.length} fichiers)`,
-        ...impeccableSession2.impeccable_invoked ? [
-          "- **Design Gate Impeccable & `user-advocate` (`design-gate`)** : `DESIGN.md` g\xE9n\xE9r\xE9"
-        ] : [],
-        "",
-        "\u{1F449} **Validation humaine de la sp\xE9cification requise avant `/to-tickets`** :",
-        `- Inspectez les fichiers sur la branche \`${planBranch}\` (\`${specArtifacts.spec_path}\`, \`GLOSSARY.md\`, ADRs).`,
-        "- Pour demander un ajustement ou une correction de la sp\xE9cification, **r\xE9pondez directement en commentaire** (sans commande slash).",
-        "- Si la sp\xE9cification est valid\xE9e, postez **`/epure to-tickets`** pour g\xE9n\xE9rer le graphe de tickets TDD (`ready-for-agent`).",
-        "",
-        `<!-- epure-spec-manifest:${JSON.stringify(specManifestPayload)} -->`
-      ].join("\n"),
-      {
-        phase: "spec",
-        status: "awaiting_human_approval",
-        issueNumber
-      }
-    );
-    await gh.postIssueComment(issueNumber, specReviewComment);
-    return {
-      executed: true,
-      phase: updatedSpec.state.phase,
-      status: updatedSpec.state.status,
-      active_branch: planBranch,
-      summary_markdown: specReviewComment,
-      created_ticket_numbers: [],
-      feature_pr_url: ""
-    };
-  }
-  const storedSpecManifest = parseLatestSpecManifest(allComments);
-  const candidateSpecPath = storedSpecManifest?.specPath ?? `docs/specs/${planSlug}.md`;
-  const existingSpecOnPlanBranch = await readRepoFileSafely(
-    candidateSpecPath,
-    planBranch
-  );
-  let bundle;
-  if (existingSpecOnPlanBranch && existingSpecOnPlanBranch.trim().length > 0) {
-    const existingGlossary = await readRepoFileSafely("GLOSSARY.md", planBranch) ?? await readRepoFileSafely("GLOSSARY.md", "dev") ?? "# Glossary\n\n- **Domain Term**: Canonical project definition.\n";
-    const adrPathsToRead = storedSpecManifest?.adrPaths ?? [];
-    const loadedAdrs = [];
-    for (const adrPath of adrPathsToRead) {
-      const adrContent = await readRepoFileSafely(adrPath, planBranch);
-      if (adrContent) {
-        const filename = adrPath.split("/").pop() ?? adrPath;
-        loadedAdrs.push({
-          path: adrPath,
-          content: adrContent,
-          filename,
-          title: filename,
-          markdown: adrContent
-        });
-      }
-    }
-    const ticketsOnlySystemInstruction = [
-      "Tu es l'architecte EPURE charg\xE9 de d\xE9couper la sp\xE9cification approuv\xE9e en un graphe acyclique (DAG) de tickets atomiques TDD.",
-      PROMPT_INJECTION_IMMUNITY_CLAUSE,
-      "NORME ASD-STE100 POUR LES TICKETS (`acceptance_criteria` et `description`, ADR-0031) : r\xE9dige chaque crit\xE8re d'acceptation \xE0 la voix active avec un acteur explicite, 1 phrase = 1 comportement v\xE9rifiable (`WHEN <entr\xE9e>, <module> returns/throws <sortie exacte>`), en utilisant le vocabulaire bijectif de `GLOSSARY.md` et sans aucun modal flou (`should`, `might`, `if needed`, `correctement`).",
-      "R\xC8GLE CRITIQUE : INTERDICTION STRICTE d'utiliser des ellipses ('...', etc.) ou des valeurs tronqu\xE9es. Chaque champ ('tickets[*].title', 'tickets[*].description', 'tickets[*].acceptance_criteria', 'tickets[*].files_to_create_or_update') DOIT contenir le texte int\xE9gral, d\xE9taill\xE9 et complet.",
-      "Produis un objet JSON strictement valide (sans markdown autour) respectant exactement cette structure :",
-      "{",
-      '  "tickets": [',
-      "    {",
-      '      "index": 1,',
-      '      "slug": "<slug-court-du-ticket-1>",',
-      '      "title": "[Ticket 1] <Titre explicite et complet du ticket 1>",',
-      '      "description": "<Description technique compl\xE8te et d\xE9taill\xE9e du ticket 1>",',
-      `      "acceptance_criteria": ["<Crit\xE8re d'acceptation v\xE9rifiable 1>", "<Crit\xE8re d'acceptation v\xE9rifiable 2>"],`,
-      '      "blocked_by_indices": [],',
-      '      "files_to_create_or_update": ["<chemin/fichier1>", "<chemin/fichier2>"]',
-      "    }",
-      "  ]",
-      "}"
-    ].join("\n");
-    const ticketsOnlyPrompt = [
-      `Issue #${issue.number} :`,
-      wrapUntrustedContent(
-        "untrusted_issue_content",
-        `Titre : ${issue.title}
-
-Description :
-${issue.body}`
-      ),
-      "",
-      `Sp\xE9cification approuv\xE9e sur \`${planBranch}\` (\`${candidateSpecPath}\`) :`,
-      wrapUntrustedContent("untrusted_spec_content", existingSpecOnPlanBranch),
-      "",
-      "Historique complet de l'entretien et des validations :",
-      wrapUntrustedContent(
-        "untrusted_comment_history",
-        fullConversationHistory || humanContext
-      )
-    ].join("\n");
-    const ticketDag = await callGeminiJson({
-      apiKey: llmApiKey,
-      model: phaseModels.planningModel,
-      providers: phaseModels.providers,
-      maxTransientRetries: phaseModels.maxTransientRetries,
-      transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
-      requestTimeoutMs: phaseModels.requestTimeoutMs,
-      onTransientRetriesUsed,
-      systemInstruction: ticketsOnlySystemInstruction,
-      prompt: ticketsOnlyPrompt,
-      temperature: 0.1,
-      tools: grillRepoTools.tools,
-      toolHandlers: grillRepoTools.toolHandlers,
-      maxToolRounds: 8,
-      logLabel: `ticket-dag#${issueNumber}`,
-      responseSchema: GENERATED_TICKET_DAG_SCHEMA,
-      fetchImpl
-    });
-    const fallbackAdrContent = "# ADR 0001\n\n## Context\nApproved specification on plan branch.\n\n## Decision\nExecute atomic TDD ticket DAG.\n\n## Consequences\nDeterministic execution.\n";
-    bundle = {
-      plan_slug: planSlug,
-      glossary_markdown: existingGlossary,
-      adrs: loadedAdrs.length > 0 ? loadedAdrs : [
-        {
-          path: "docs/adr/0001-plan-architecture.md",
-          content: fallbackAdrContent,
-          filename: "0001-plan-architecture.md",
-          title: "ADR 0001",
-          markdown: fallbackAdrContent
-        }
-      ],
-      spec_path: candidateSpecPath,
-      spec_markdown: existingSpecOnPlanBranch,
-      tickets: ticketDag.tickets
-    };
-  } else {
-    const specSystemInstruction = [
-      "Tu es l'architecte EPURE charg\xE9 de produire le dossier de sp\xE9cification complet et le d\xE9coupage en tickets atomiques TDD.",
-      PROMPT_INJECTION_IMMUNITY_CLAUSE,
-      "Si tu as besoin de v\xE9rifier des chemins ou le contenu existant de GLOSSARY.md / docs/adr/ avant de r\xE9diger, utilise les outils d'exploration avec parcimonie (1 \xE0 3 appels maximum), puis g\xE9n\xE8re imm\xE9diatement l'objet JSON final.",
-      "NORME ASD-STE100 (Controlled Technical Prompting, ADR-0031) : utilise exclusivement le vocabulaire bijectif de `GLOSSARY.md` (z\xE9ro synonyme `_Avoid_`), la voix active avec acteur explicite (`Sujet-Verbe-Objet`), 1 phrase = 1 action ou crit\xE8re v\xE9rifiable, et des conditionnelles d\xE9terministes `WHEN/IF ... THEN` sans modalit\xE9 floue (`should`, `might`, `if needed`).",
-      "R\xC8GLE CRITIQUE : INTERDICTION STRICTE d'utiliser des ellipses ('...', '# Sp\xE9cification...', etc.) ou des valeurs tronqu\xE9es. Chaque champ ('glossary_markdown', 'adrs[*].content', 'spec_markdown', 'tickets[*].title', 'tickets[*].description', 'tickets[*].acceptance_criteria', 'tickets[*].files_to_create_or_update') DOIT contenir le texte int\xE9gral, d\xE9taill\xE9 et complet pr\xEAt \xE0 \xEAtre commit\xE9 dans le d\xE9p\xF4t.",
-      "Produis un objet JSON strictement valide (sans markdown autour) respectant exactement cette structure :",
-      "{",
-      `  "plan_slug": "${planSlug}",`,
-      '  "glossary_markdown": "<Contenu Markdown int\xE9gral de GLOSSARY.md int\xE9grant les termes du domaine>",',
-      '  "adrs": [',
-      `    { "path": "docs/adr/NNNN-decision-architecturale.md", "content": "<Contenu Markdown int\xE9gral de l'ADR avec Context, Decision et Consequences>" }`,
-      "  ],",
-      `  "spec_path": "docs/specs/${planSlug}.md",`,
-      '  "spec_markdown": "<Contenu Markdown int\xE9gral et d\xE9taill\xE9 de la sp\xE9cification technique et fonctionnelle>",',
-      '  "tickets": [',
-      "    {",
-      '      "index": 1,',
-      '      "slug": "<slug-court-du-ticket-1>",',
-      '      "title": "[Ticket 1] <Titre explicite et complet du ticket 1>",',
-      '      "description": "<Description technique compl\xE8te et d\xE9taill\xE9e du ticket 1>",',
-      `      "acceptance_criteria": ["<Crit\xE8re d'acceptation v\xE9rifiable 1>", "<Crit\xE8re d'acceptation v\xE9rifiable 2>"],`,
-      '      "blocked_by_indices": [],',
-      '      "files_to_create_or_update": ["<chemin/fichier1>", "<chemin/fichier2>"]',
-      "    }",
-      "  ]",
-      "}"
-    ].join("\n");
-    const specGenerationPrompt = [
-      `Issue #${issue.number} (description initiale non fiable) :`,
-      wrapUntrustedContent(
-        "untrusted_issue_content",
-        `Titre : ${issue.title}
-
-Description :
-${issue.body}`
-      ),
-      "",
-      "Historique complet de l'entretien /grill-with-docs (questions EPURE et r\xE9ponses humaines) :",
-      wrapUntrustedContent(
-        "untrusted_comment_history",
-        fullConversationHistory || humanContext
-      )
-    ].join("\n");
-    bundle = await callGeminiJson({
-      apiKey: llmApiKey,
-      model: phaseModels.planningModel,
-      providers: phaseModels.providers,
-      maxTransientRetries: phaseModels.maxTransientRetries,
-      transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
-      requestTimeoutMs: phaseModels.requestTimeoutMs,
-      onTransientRetriesUsed,
-      systemInstruction: specSystemInstruction,
-      prompt: specGenerationPrompt,
-      temperature: 0.1,
-      tools: grillRepoTools.tools,
-      toolHandlers: grillRepoTools.toolHandlers,
-      maxToolRounds: 10,
-      logLabel: `spec-bundle#${issueNumber}`,
-      responseSchema: GENERATED_PLANNING_BUNDLE_SCHEMA,
-      fetchImpl
-    });
-  }
-  const gateBundle = {
-    introducesDomainTerms: true,
-    glossaryContent: bundle.glossary_markdown,
-    adrFiles: bundle.adrs.map((a) => ({
-      path: a.path,
-      content: a.content
-    })),
-    specPath: bundle.spec_path,
-    specContent: bundle.spec_markdown,
-    tickets: bundle.tickets.map((t) => ({
-      id: t.index,
-      issueNumber: t.index,
-      title: t.title,
-      state: "open",
-      blockedBy: t.blocked_by_indices
-    }))
-  };
-  const gateResult = validatePlanningArtifactsAndGraph(gateBundle);
-  if (!gateResult.valid) {
-    await gh.ensureLabel(
-      "needs-human",
-      "D93F0B",
-      "Requires human maintainer intervention"
-    );
-    await gh.addIssueLabels(issueNumber, ["needs-human"]);
-    const suspended = await updateIssueStateWithCas({
-      issueNumber,
-      store,
-      mutator: (prev) => ({
-        ...prev,
-        phase: "tickets",
-        status: "suspended",
-        active_branch: planBranch,
-        last_processed_comment_id: commentId ?? prev.last_processed_comment_id
-      })
-    });
-    const escalationComment = appendEpureCommandsSpoiler(
-      [
-        suspended.issue_mirror_markdown,
-        "",
-        `### \u26A0\uFE0F Escalade \`needs-human\` \u2014 \xC9chec de validation du graphe de planification (\`${gateResult.error_code}\`)`,
-        "",
-        `- **Code d'erreur** : \`${gateResult.error_code}\``,
-        `- **Raison** : ${gateResult.error_message}`,
-        "- **Action requise** : Corrigez le d\xE9coupage ou les d\xE9pendances circulaires puis relancez `/epure to-spec`."
-      ].join("\n"),
-      {
-        phase: "suspended",
-        status: "suspended",
-        issueNumber
-      }
-    );
-    await gh.postIssueComment(issueNumber, escalationComment);
-    return {
-      executed: true,
-      phase: suspended.state.phase,
-      status: suspended.state.status,
-      active_branch: planBranch,
-      summary_markdown: escalationComment,
-      created_ticket_numbers: [],
-      feature_pr_url: ""
-    };
-  }
-  const allTargetFiles = bundle.tickets.flatMap(
-    (t) => t.files_to_create_or_update
-  );
-  const touchesFrontendUi = allTargetFiles.some(
-    (f) => /\.(?:tsx|jsx|css|scss|html)$/i.test(f)
-  );
-  const impeccableSession = planImpeccableDesignSession({
-    issueNumber,
-    surfaceSlug: planSlug,
-    touchesFrontendUi,
-    alreadyAnsweredTopics: ["theme", "layout"],
-    candidateDesignTopics: ["theme", "layout", "accessibility"]
-  });
-  const designGate = touchesFrontendUi ? await runUserAdvocateDesignGate({
-    repository,
-    planTitle: issue.title,
-    glossaryMarkdown: bundle.glossary_markdown,
-    specMarkdown: bundle.spec_markdown,
-    llmApiKey,
-    model: phaseModels.reviewModel,
-    providers: phaseModels.providers,
-    maxTransientRetries: phaseModels.maxTransientRetries,
-    transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
-    requestTimeoutMs: phaseModels.requestTimeoutMs,
-    onTransientRetriesUsed,
-    fetchImpl
-  }) : null;
-  const plannedStack = detectRepositoryStack({
-    targetFilesHint: allTargetFiles
-  });
-  const adaptedRoster = adaptReviewerRosterForDomain({
-    repository,
-    planTitle: issue.title,
-    glossaryMarkdown: bundle.glossary_markdown,
-    specMarkdown: bundle.spec_markdown,
-    touchesFrontendUi,
-    stackKind: plannedStack.kind,
-    personas: designGate?.personas,
-    domainInvariants: designGate?.domain_invariants
-  });
-  const zizmorFile = buildZizmorConfigYaml();
-  const renovateFile = buildRenovateConfigJson(plannedStack);
-  const ciFile = buildStackAwareCiWorkflowYaml({
-    pinnedSha: "main",
-    stack: plannedStack
-  });
-  const existingBaseRoster = await gh.readTrustedBaseRosterFiles("dev");
-  const hasExistingConfiguredRoster = existingBaseRoster.size > 0;
-  const corePlanningDocs = [
-    ...bundle.glossary_markdown.trim().length > 0 ? [{ path: "GLOSSARY.md", content: bundle.glossary_markdown }] : [],
-    { path: bundle.spec_path, content: bundle.spec_markdown },
-    ...bundle.adrs.map((a) => ({ path: a.path, content: a.content }))
-  ];
-  const planningFiles = hasExistingConfiguredRoster ? corePlanningDocs : [
-    ...corePlanningDocs,
-    ...adaptedRoster.files,
-    zizmorFile,
-    renovateFile,
-    ciFile
-  ];
-  if (!existingSpecOnPlanBranch || existingSpecOnPlanBranch.trim().length === 0) {
-    await gh.commitFilesToBranch({
-      branch: planBranch,
-      fromBranch: "dev",
-      commitMessage: `docs(plan): generate GLOSSARY, ADRs, spec, DESIGN.md, and adapted reviewer roster for #${issueNumber}`,
-      files: planningFiles
-    });
-  }
-  await gh.ensureLabel(
-    "ready-for-agent",
-    "0E8A16",
-    "Ticket ready for autonomous EPURE agent execution"
-  );
-  const indexToIssueNumber = /* @__PURE__ */ new Map();
-  const createdTicketsManifest = [];
-  for (const ticket of bundle.tickets) {
-    const blockerNumbers = ticket.blocked_by_indices.map((idx) => indexToIssueNumber.get(idx)).filter((n) => typeof n === "number");
-    const depLines = blockerNumbers.length > 0 ? blockerNumbers.map((n) => `blocked_by: #${n}`).join("\n") : "blocked_by: none";
-    const ticketTouchesUi = ticket.files_to_create_or_update.some(
-      (f) => /\.(?:tsx|jsx|css|scss|html)$/i.test(f)
-    );
-    const enrichedAcceptanceCriteria = [
-      ...ticket.acceptance_criteria,
-      ...ticketTouchesUi && designGate ? designGate.ux_acceptance_criteria : []
-    ];
-    const ticketBody = appendEpureCommandsSpoiler(
-      [
-        `Parent Plan: #${issueNumber}`,
-        depLines,
-        "",
-        "## Description",
-        ticket.description,
-        "",
-        "## Acceptance Criteria (TDD & UX)",
-        ...enrichedAcceptanceCriteria.map((c) => `- [ ] ${c}`),
-        "",
-        "## Target Files",
-        ...ticket.files_to_create_or_update.map((f) => `- \`${f}\``)
-      ].join("\n"),
-      {
-        phase: "tickets",
-        status: "awaiting-human",
-        issueNumber
-      }
-    );
-    const createdIssue = await gh.createIssue({
-      title: ticket.title,
-      body: ticketBody,
-      labels: ["ready-for-agent"]
-    });
-    indexToIssueNumber.set(ticket.index, createdIssue.number);
-    createdTicketsManifest.push({
-      ticketIssueNumber: createdIssue.number,
-      slug: ticket.slug,
-      title: ticket.title,
-      description: ticket.description,
-      acceptanceCriteria: enrichedAcceptanceCriteria,
-      blockedByIssueNumbers: blockerNumbers,
-      filesToTouch: [...ticket.files_to_create_or_update]
-    });
-  }
-  const updated = await updateIssueStateWithCas({
-    issueNumber,
-    store,
-    mutator: (prev) => ({
-      ...prev,
-      phase: "tickets",
-      status: "awaiting_human_approval",
-      active_branch: planBranch,
-      last_processed_comment_id: commentId ?? prev.last_processed_comment_id
-    })
-  });
-  const ticketLines = createdTicketsManifest.map((t) => {
-    const blockedText = t.blockedByIssueNumbers.length > 0 ? ` (blocked_by: ${t.blockedByIssueNumbers.map((n) => `#${n}`).join(", ")})` : " (ready \u2014 root)";
-    return `- **#${t.ticketIssueNumber}** \u2014 ${t.title}${blockedText}`;
-  });
-  const manifestComment = appendEpureCommandsSpoiler(
-    [
-      updated.issue_mirror_markdown,
-      "",
-      `### Sp\xE9cification, Roster Adapt\xE9 et Graphe de Tickets g\xE9n\xE9r\xE9s sur \`${planBranch}\``,
-      "",
-      "- **Glossaire** : `GLOSSARY.md`",
-      `- **ADRs** : ${bundle.adrs.map((a) => `\`${a.path}\``).join(", ")}`,
-      `- **Sp\xE9cification** : \`${bundle.spec_path}\``,
-      `- **Roster Multi-Agents adapt\xE9** : \`.cursor/agents/*.md\` (${adaptedRoster.files.length} fichiers)`,
-      ...impeccableSession.impeccable_invoked ? [
-        "- **Design Gate Impeccable & `user-advocate` (`design-gate`)** : `DESIGN.md` g\xE9n\xE9r\xE9 et crit\xE8res UX inject\xE9s dans les tickets UI"
-      ] : [],
-      "",
-      "#### Graphe de Tickets (`ready-for-agent`) :",
-      ...ticketLines,
-      "",
-      "\u{1F449} **Action requise** : V\xE9rifiez les livrables sur la branche de plan et les tickets ci-dessus, puis postez `/epure approve` sur cette issue pour verrouiller le p\xE9rim\xE8tre et lancer l'impl\xE9mentation TDD autonome.",
-      "",
-      `<!-- epure-plan-manifest:${JSON.stringify({
-        planBranch,
-        specPath: bundle.spec_path,
-        tickets: createdTicketsManifest
-      })} -->`
-    ].join("\n"),
-    {
-      phase: "tickets",
-      status: "awaiting-human",
-      issueNumber
-    }
-  );
-  await gh.postIssueComment(issueNumber, manifestComment);
-  return {
-    executed: true,
-    phase: updated.state.phase,
-    status: updated.state.status,
-    active_branch: planBranch,
-    summary_markdown: manifestComment,
-    created_ticket_numbers: createdTicketsManifest.map(
-      (t) => t.ticketIssueNumber
-    ),
-    feature_pr_url: ""
   };
 }
 
@@ -13229,6 +14701,174 @@ async function checkMidLoopCancellation(params) {
   }
   return null;
 }
+function isLikelyTestTargetPath(filePath) {
+  const clean = filePath.trim().replace(/^\/+/, "");
+  const baseName = clean.split("/").pop() ?? clean;
+  return /(?:^|\/)(?:__tests__|tests?|specs?)\//i.test(clean) || /(?:\.test|\.spec|_test|_spec)\.[a-z0-9]+$/i.test(baseName) || /^test_[^/]+\.py$/i.test(baseName);
+}
+async function generateTicketImplementationWithFallback(params) {
+  const stagedBuffer = createStagedTicketImplementationBuffer(params.ensureBaselineLoaded);
+  const schemaWithStaged = createGeneratedTicketImplementationSchema({
+    hasStagedMutations: () => stagedBuffer.hasMutations()
+  });
+  try {
+    const parsedPrimary = await callGeminiJson({
+      apiKey: params.llmApiKey,
+      model: params.phaseModels.implementationModel,
+      providers: params.phaseModels.providers,
+      maxTransientRetries: params.phaseModels.maxTransientRetries,
+      transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
+      requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+      onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
+      thinkingLevel: params.thinkingLevel,
+      logLabel: params.logLabel,
+      systemInstruction: params.systemInstruction,
+      prompt: params.prompt,
+      temperature: 0.1,
+      maxToolRounds: 35,
+      ...buildRepoExplorationToolsAndHandlers({
+        branch: params.branch,
+        featureBranch: params.featureBranch,
+        accumulatedFiles: params.accumulatedFiles,
+        deletedFilesSet: params.deletedFilesSet,
+        stagedImplementation: stagedBuffer,
+        devBranchPaths: params.devBranchPaths,
+        gh: params.gh
+      }),
+      responseSchema: schemaWithStaged,
+      fetchImpl: params.fetchImpl
+    });
+    return mergeStagedBufferIntoImplementationPayload(
+      stagedBuffer,
+      parsedPrimary
+    );
+  } catch (primaryErr) {
+    if (!(primaryErr instanceof StructuredOutputValidationError)) {
+      stagedBuffer.files.clear();
+      stagedBuffer.deletedFiles.clear();
+      throw primaryErr;
+    }
+    const declaredTargets = params.ticket.filesToTouch.map((f) => f.trim().replace(/^\/+/, "")).filter(Boolean);
+    const untouchedTargets = declaredTargets.filter(
+      (targetPath) => !stagedBuffer.files.has(targetPath) && !stagedBuffer.deletedFiles.has(targetPath)
+    );
+    const hasTestInTargetsOrStaged = declaredTargets.some((t) => isLikelyTestTargetPath(t)) || Array.from(stagedBuffer.files.keys()).some(
+      (t) => isLikelyTestTargetPath(t)
+    );
+    const fallbackBatches = [...untouchedTargets];
+    if (!hasTestInTargetsOrStaged) {
+      fallbackBatches.push("__TEST_SUITE_BATCH__");
+    }
+    if (fallbackBatches.length === 0 && stagedBuffer.hasMutations()) {
+      return mergeStagedBufferIntoImplementationPayload(stagedBuffer, {
+        commit_message: `feat(ticket-${params.ticket.ticketIssueNumber}): ${params.ticket.title}`,
+        test_summary: "Recovered staged incremental mutations after final turn truncation",
+        files: [],
+        patches: [],
+        deleted_files: []
+      });
+    }
+    if (fallbackBatches.length === 0) {
+      stagedBuffer.files.clear();
+      stagedBuffer.deletedFiles.clear();
+      throw primaryErr;
+    }
+    if (process.env.GITHUB_ACTIONS === "true") {
+      process.stdout.write(
+        `[EPURE][Ticket #${params.ticket.ticketIssueNumber}] Primary codegen hit StructuredOutputValidationError; triggering ChunkedTicketImplementationFallback across ${fallbackBatches.length} target(s)
+`
+      );
+    }
+    let lastCommitMessage = `feat(ticket-${params.ticket.ticketIssueNumber}): ${params.ticket.title}`;
+    let lastTestSummary = "Chunked file-by-file implementation verified";
+    const collectedPatches = [];
+    try {
+      for (const batchTarget of fallbackBatches) {
+        const isTestBatch = batchTarget === "__TEST_SUITE_BATCH__";
+        const stagedSummary = stagedBuffer.files.size > 0 ? [
+          "Fichiers d\xE9j\xE0 g\xE9n\xE9r\xE9s dans le tampon transactionnel de ce ticket :",
+          ...Array.from(stagedBuffer.files.entries()).map(
+            ([sp, sc]) => `--- STAGED FILE: ${sp} ---
+${sc}`
+          )
+        ].join("\n\n") : "";
+        const batchPrompt = [
+          params.prompt,
+          "",
+          ...stagedSummary ? [stagedSummary, ""] : [],
+          isTestBatch ? `REPLI SEGMENT\xC9 (Lot de tests unitaires) : G\xE9n\xE8re UNIQUEMENT le(s) fichier(s) de tests param\xE9tr\xE9s couvrant les crit\xE8res d'acceptation du Ticket #${params.ticket.ticketIssueNumber}. Ne r\xE9\xE9cris pas les fichiers d'impl\xE9mentation d\xE9j\xE0 pr\xE9sents dans le tampon.` : `REPLI SEGMENT\xC9 (Fichier cible unique : \`${batchTarget}\`) : G\xE9n\xE8re ou patche UNIQUEMENT le fichier \`${batchTarget}\` requis par le Ticket #${params.ticket.ticketIssueNumber}. Ne g\xE9n\xE8re aucun autre fichier dans cet appel.`
+        ].join("\n");
+        const batchImpl = await callGeminiJson({
+          apiKey: params.llmApiKey,
+          model: params.phaseModels.implementationModel,
+          providers: params.phaseModels.providers,
+          maxTransientRetries: params.phaseModels.maxTransientRetries,
+          transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
+          requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+          onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
+          thinkingLevel: params.thinkingLevel,
+          logLabel: params.logLabel ? `${params.logLabel}/chunk:${batchTarget}` : `chunk:#${params.ticket.ticketIssueNumber}:${batchTarget}`,
+          systemInstruction: params.systemInstruction,
+          prompt: batchPrompt,
+          temperature: 0.1,
+          maxToolRounds: 20,
+          ...buildRepoExplorationToolsAndHandlers({
+            branch: params.branch,
+            featureBranch: params.featureBranch,
+            accumulatedFiles: params.accumulatedFiles,
+            deletedFilesSet: params.deletedFilesSet,
+            stagedImplementation: stagedBuffer,
+            devBranchPaths: params.devBranchPaths,
+            gh: params.gh
+          }),
+          responseSchema: schemaWithStaged,
+          fetchImpl: params.fetchImpl
+        });
+        if (batchImpl.commit_message?.trim()) {
+          lastCommitMessage = batchImpl.commit_message.trim();
+        }
+        if (batchImpl.test_summary?.trim()) {
+          lastTestSummary = batchImpl.test_summary.trim();
+        }
+        for (const f of batchImpl.files ?? []) {
+          const clean = f.path.trim().replace(/^\/+/, "");
+          if (clean) {
+            await params.ensureBaselineLoaded([clean]);
+            stagedBuffer.files.set(clean, f.content);
+            stagedBuffer.deletedFiles.delete(clean);
+          }
+        }
+        for (const del of batchImpl.deleted_files ?? []) {
+          const clean = del.trim().replace(/^\/+/, "");
+          if (clean) {
+            await params.ensureBaselineLoaded([clean]);
+            stagedBuffer.files.delete(clean);
+            stagedBuffer.deletedFiles.add(clean);
+          }
+        }
+        for (const patch of batchImpl.patches ?? []) {
+          collectedPatches.push(patch);
+        }
+      }
+    } catch (fallbackErr) {
+      stagedBuffer.files.clear();
+      stagedBuffer.deletedFiles.clear();
+      throw fallbackErr;
+    }
+    if (!stagedBuffer.hasMutations() && collectedPatches.length === 0) {
+      stagedBuffer.files.clear();
+      stagedBuffer.deletedFiles.clear();
+      throw primaryErr;
+    }
+    return mergeStagedBufferIntoImplementationPayload(stagedBuffer, {
+      commit_message: lastCommitMessage,
+      test_summary: lastTestSummary,
+      files: [],
+      ...collectedPatches.length > 0 ? { patches: collectedPatches } : {},
+      deleted_files: []
+    });
+  }
+}
 async function runTicketExecutionLoop(params) {
   let verificationProfile = params.initialVerificationProfile;
   let verificationGuideMarkdown = params.initialVerificationGuideMarkdown;
@@ -13462,6 +15102,74 @@ async function runTicketExecutionLoop(params) {
       const ticketDeletedFilesSet = /* @__PURE__ */ new Set();
       let impl;
       let currentPrHeadSha;
+      const baseBranchFilesSnapshot = new Map(
+        params.accumulatedFiles
+      );
+      const ensureBaselineFilesLoaded = async (candidatePaths) => {
+        for (const rawP of candidatePaths) {
+          const cleanP = rawP.trim().replace(/^\/+/, "");
+          if (!cleanP || baseBranchFilesSnapshot.has(cleanP)) {
+            continue;
+          }
+          const existingOnFeature = await params.gh.readSingleBranchFile(
+            params.featureBranch,
+            cleanP
+          );
+          if (existingOnFeature !== null) {
+            baseBranchFilesSnapshot.set(cleanP, existingOnFeature);
+            if (!params.accumulatedFiles.has(cleanP)) {
+              params.accumulatedFiles.set(cleanP, existingOnFeature);
+            }
+          }
+        }
+      };
+      const restoreViolatedBaselineFiles = (integrityCheck) => {
+        if (integrityCheck.passed) {
+          return;
+        }
+        for (const v of integrityCheck.violations) {
+          const baseline = baseBranchFilesSnapshot.get(v.path);
+          if (baseline !== void 0) {
+            params.accumulatedFiles.set(v.path, baseline);
+            params.featureChangedFilesMap.set(v.path, baseline);
+            ticketChangedFilesMap.delete(v.path);
+            params.featureDeletedFilesSet.delete(v.path);
+            ticketDeletedFilesSet.delete(v.path);
+          }
+        }
+      };
+      const evaluateIntegrityAndStage1Suite = async (label) => {
+        const integrityCheck = validateTicketIntegrityGuard({
+          baseFiles: baseBranchFilesSnapshot,
+          changedFiles: impl.files,
+          deletedFiles: Array.from(ticketDeletedFilesSet),
+          ticketFilesToTouch: ticket.filesToTouch,
+          ticketDescription: `${ticket.title}
+${ticket.description}
+${ticket.acceptanceCriteria.join("\n")}`
+        });
+        const testCheck = !integrityCheck.passed ? {
+          passed: false,
+          output: integrityCheck.diagnosticMarkdown
+        } : await runTestsInIsolatedWorkspace({
+          workDir: sandboxWorkspace.workDir,
+          files: Array.from(params.accumulatedFiles.entries()).map(
+            ([path, content]) => ({ path, content })
+          ),
+          deleted_files: Array.from(ticketDeletedFilesSet),
+          changedPaths: [
+            ...impl.files.map((f) => f.path),
+            ...Array.from(ticketDeletedFilesSet)
+          ],
+          isTaskBranch: true,
+          verificationProfile,
+          bootstrappedTargets,
+          sandboxRunner: params.sandboxRunner,
+          llmApiKey: params.llmApiKey,
+          label
+        });
+        return { integrityCheck, testCheck };
+      };
       const existingTaskPr = await params.gh.findOpenPullRequestByHead(
         taskBranch,
         params.featureBranch
@@ -13537,11 +15245,15 @@ async function runTicketExecutionLoop(params) {
         taskPr = existingTaskPr;
         currentPrHeadSha = existingTaskPr.head_sha;
       } else {
-        const existingFilesContext = Array.from(
-          params.accumulatedFiles.entries()
-        ).map(([path, content]) => `--- FILE: ${path} ---
-${content}`).join("\n\n");
-        const isBrownfieldSubpackageRepo = checkIsBrownfieldSubpackageRepo(
+        const existingFilesContext = buildCompactWorkspaceFilesContext({
+          accumulatedFiles: params.accumulatedFiles,
+          priorityPaths: [
+            ...ticket.filesToTouch,
+            ...ticketChangedFilesMap.keys(),
+            ...params.featureChangedFilesMap.keys()
+          ]
+        });
+        const isBrownfieldRepo = checkIsExistingRepoWorkspace(
           params.accumulatedFiles,
           params.devBranchPaths
         );
@@ -13556,31 +15268,34 @@ ${content}`).join("\n\n");
           "",
           verificationGuideMarkdown,
           "",
-          ...isBrownfieldSubpackageRepo ? [
-            "5. Il s'agit d'un d\xE9p\xF4t existant multi-packages (`backend/`, `frontend/`). Utilise les outils `list_repo_files`, `search_in_repo_file` et `read_repo_file` pour inspecter les fichiers pertinents avant de coder.",
-            "6. Pour modifier un fichier existant du d\xE9p\xF4t, utilise de pr\xE9f\xE9rence `patches` (`old_string` -> `new_string` exact) afin de faire une modification chirurgicale sans r\xE9\xE9crire des milliers de lignes inchang\xE9es. Pour cr\xE9er un nouveau fichier (ex: nouveau fichier de test), utilise `files` avec son contenu complet. Pour supprimer un fichier obsol\xE8te, utilise `deleted_files`. Ne cr\xE9e PAS de package.json \xE0 la racine.",
+          ...isBrownfieldRepo ? [
+            "5. Il s'agit d'un d\xE9p\xF4t existant. Utilise les outils `list_repo_files`, `search_in_repo_file` et `read_repo_file` pour inspecter le contenu int\xE9gral des fichiers pertinents avant de coder.",
+            "6. Tu peux \xE9crire ou modifier les fichiers au fil des tours d'outils avec `write_repo_file`, `patch_repo_file` et `delete_repo_file` (recommand\xE9 pour les tickets multi-fichiers afin d'\xE9viter toute troncature du JSON final), ou les renvoyer dans l'objet JSON final (`patches`, `files`, `deleted_files`). Si tu as d\xE9j\xE0 \xE9crit tous les fichiers via `write_repo_file` / `patch_repo_file`, renvoie simplement `files: []`, `patches: []`, `deleted_files: []` avec `commit_message` et `test_summary`.",
             "Renvoie un objet JSON strictement valide respectant ce sch\xE9ma :",
             "{",
             '  "commit_message": "fix: ...",',
             '  "test_summary": "Tests and acceptance criteria verified",',
             '  "patches": [',
-            '    { "path": "backend/src/...", "edits": [{ "old_string": "...", "new_string": "..." }] }',
+            '    { "path": "src/...", "edits": [{ "old_string": "...", "new_string": "..." }] }',
             "  ],",
             '  "files": [',
-            '    { "path": "backend/src/__tests__/...", "content": "..." }',
+            '    { "path": "tests/...", "content": "..." }',
             "  ],",
             '  "deleted_files": []',
             "}"
           ] : [
-            "5. Renvoie un objet JSON strictement valide respectant exactement ce sch\xE9ma :",
+            "5. Tu disposes des fichiers du workspace (int\xE9graux) et des outils (`list_repo_files`, `search_in_repo_file`, `read_repo_file`, `write_repo_file`, `patch_repo_file`, `delete_repo_file`). Tu peux cr\xE9er ou modifier les fichiers au fil des tours d'outils ou les renvoyer dans l'objet JSON final respectant exactement ce sch\xE9ma :",
             "{",
             `  "commit_message": "feat(ticket-${ticket.ticketIssueNumber}): ...",`,
-            '  "test_summary": "Vitest parameterized suite verified",',
+            '  "test_summary": "Parameterized test suite verified",',
+            '  "patches": [',
+            '    { "path": "src/...", "edits": [{ "old_string": "...", "new_string": "..." }] }',
+            "  ],",
             '  "files": [',
-            '    { "path": "package.json", "content": "..." },',
             '    { "path": "src/...", "content": "..." },',
             '    { "path": "tests/...", "content": "..." }',
-            "  ]",
+            "  ],",
+            '  "deleted_files": []',
             "}"
           ],
           "",
@@ -13612,25 +15327,21 @@ ${params.issue.body}`
           existingFilesContext ? `Fichiers d\xE9j\xE0 pr\xE9sents sur la branche feature :
 ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C'est le premier ticket : inclus un package.json complet (avec scripts 'test': 'vitest run' et 'build': 'vite build', dependencies react/react-dom, devDependencies typescript/vite/vitest/@vitejs/plugin-react/@types/react/@types/react-dom) ainsi que tsconfig.json et vite.config.ts."
         ].join("\n");
-        const parsedImpl = await callGeminiJson({
-          apiKey: params.llmApiKey,
-          model: params.phaseModels.implementationModel,
-          providers: params.phaseModels.providers,
-          maxTransientRetries: params.phaseModels.maxTransientRetries,
-          transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
-          requestTimeoutMs: params.phaseModels.requestTimeoutMs,
-          onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
+        const parsedImpl = await generateTicketImplementationWithFallback({
+          ticket,
+          branch: params.featureBranch,
+          featureBranch: params.featureBranch,
           systemInstruction: tddSystemInstruction,
           prompt: tddPrompt,
-          temperature: 0.1,
-          ...buildRepoExplorationToolsAndHandlers({
-            branch: params.featureBranch,
-            featureBranch: params.featureBranch,
-            accumulatedFiles: params.accumulatedFiles,
-            devBranchPaths: params.devBranchPaths,
-            gh: params.gh
-          }),
-          responseSchema: GENERATED_TICKET_IMPLEMENTATION_SCHEMA,
+          logLabel: `tdd-init:#${ticket.ticketIssueNumber}`,
+          accumulatedFiles: params.accumulatedFiles,
+          deletedFilesSet: ticketDeletedFilesSet,
+          devBranchPaths: params.devBranchPaths,
+          ensureBaselineLoaded: ensureBaselineFilesLoaded,
+          gh: params.gh,
+          llmApiKey: params.llmApiKey,
+          phaseModels: params.phaseModels,
+          addTransientRetriesUsed: params.addTransientRetriesUsed,
           fetchImpl: params.fetchImpl
         });
         const preStage1Check = validateWorkspaceFileOperations({
@@ -13658,6 +15369,11 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
             verificationGuideMarkdown
           };
         }
+        await ensureBaselineFilesLoaded([
+          ...(parsedImpl.files ?? []).map((f) => f.path),
+          ...(parsedImpl.patches ?? []).map((p) => p.path),
+          ...parsedImpl.deleted_files ?? []
+        ]);
         const initialChangedFiles = await applyTicketImplementationPayload({
           parsed: parsedImpl,
           accumulatedFiles: params.accumulatedFiles,
@@ -13680,36 +15396,26 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
 `
           );
         }
-        let testCheck = await runTestsInIsolatedWorkspace({
-          workDir: sandboxWorkspace.workDir,
-          files: Array.from(params.accumulatedFiles.entries()).map(
-            ([path, content]) => ({ path, content })
-          ),
-          deleted_files: Array.from(ticketDeletedFilesSet),
-          changedPaths: [
-            ...impl.files.map((f) => f.path),
-            ...Array.from(ticketDeletedFilesSet)
-          ],
-          isTaskBranch: true,
-          verificationProfile,
-          bootstrappedTargets,
-          sandboxRunner: params.sandboxRunner,
-          llmApiKey: params.llmApiKey,
-          label: `Ticket #${ticket.ticketIssueNumber} initial TDD suite`
-        });
+        let { integrityCheck, testCheck } = await evaluateIntegrityAndStage1Suite(
+          `Ticket #${ticket.ticketIssueNumber} initial TDD suite`
+        );
         while (!testCheck.passed && fixAttempt < params.maxCodeFixAttempts) {
           fixAttempt += 1;
-          const currentFilesContext = Array.from(
-            params.accumulatedFiles.entries()
-          ).map(([p, c]) => `--- FILE: ${p} ---
-${c}`).join("\n\n");
+          restoreViolatedBaselineFiles(integrityCheck);
+          const currentFilesContext = buildCompactWorkspaceFilesContext({
+            accumulatedFiles: params.accumulatedFiles,
+            priorityPaths: [
+              ...ticket.filesToTouch,
+              ...ticketChangedFilesMap.keys()
+            ]
+          });
           const fixSystemInstruction = [
             "Tu es un ing\xE9nieur TDD EPURE corrigeant un \xE9chec de v\xE9rification Stage 1 en sandbox isol\xE9e.",
             PROMPT_INJECTION_IMMUNITY_CLAUSE,
             "Corrige les fichiers en d\xE9faut (code ou assertions de test) pour que 100% des cibles Stage 1 passent.",
             "Ne modifie JAMAIS .cursor/agents/**, .github/workflows/**, .github/agents.yml ou .env*.",
-            "Tu peux utiliser les outils `list_repo_files`, `search_in_repo_file` et `read_repo_file` pour inspecter les fichiers du d\xE9p\xF4t.",
-            "Pour modifier un fichier existant volumineux, utilise de pr\xE9f\xE9rence `patches` (`old_string` -> `new_string` exact). Pour supprimer un fichier obsol\xE8te, utilise `deleted_files`.",
+            "Tu peux utiliser les outils `list_repo_files`, `search_in_repo_file`, `read_repo_file`, `write_repo_file`, `patch_repo_file` et `delete_repo_file` pour inspecter et modifier les fichiers du d\xE9p\xF4t.",
+            "Pour modifier un fichier existant volumineux, utilise de pr\xE9f\xE9rence `patch_repo_file` ou `patches` (`old_string` -> `new_string` exact). Pour supprimer un fichier obsol\xE8te, utilise `delete_repo_file` ou `deleted_files`.",
             "",
             verificationGuideMarkdown,
             "",
@@ -13740,26 +15446,21 @@ ${c}`).join("\n\n");
               currentFilesContext
             )
           ].join("\n");
-          const fixedImpl = await callGeminiJson({
-            apiKey: params.llmApiKey,
-            model: params.phaseModels.implementationModel,
-            providers: params.phaseModels.providers,
-            maxTransientRetries: params.phaseModels.maxTransientRetries,
-            transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
-            requestTimeoutMs: params.phaseModels.requestTimeoutMs,
-            onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
+          const fixedImpl = await generateTicketImplementationWithFallback({
+            ticket,
+            branch: params.featureBranch,
+            featureBranch: params.featureBranch,
             systemInstruction: fixSystemInstruction,
             prompt: fixPrompt,
-            temperature: 0.1,
-            ...buildRepoExplorationToolsAndHandlers({
-              branch: params.featureBranch,
-              featureBranch: params.featureBranch,
-              accumulatedFiles: params.accumulatedFiles,
-              deletedFilesSet: ticketDeletedFilesSet,
-              devBranchPaths: params.devBranchPaths,
-              gh: params.gh
-            }),
-            responseSchema: GENERATED_TICKET_IMPLEMENTATION_SCHEMA,
+            logLabel: `stage1-fix:#${ticket.ticketIssueNumber}/iter-${fixAttempt}`,
+            accumulatedFiles: params.accumulatedFiles,
+            deletedFilesSet: ticketDeletedFilesSet,
+            devBranchPaths: params.devBranchPaths,
+            ensureBaselineLoaded: ensureBaselineFilesLoaded,
+            gh: params.gh,
+            llmApiKey: params.llmApiKey,
+            phaseModels: params.phaseModels,
+            addTransientRetriesUsed: params.addTransientRetriesUsed,
             fetchImpl: params.fetchImpl
           });
           const fixPreCheck = validateWorkspaceFileOperations({
@@ -13788,6 +15489,11 @@ ${c}`).join("\n\n");
               verificationGuideMarkdown
             };
           }
+          await ensureBaselineFilesLoaded([
+            ...(fixedImpl.files ?? []).map((f) => f.path),
+            ...(fixedImpl.patches ?? []).map((p) => p.path),
+            ...fixedImpl.deleted_files ?? []
+          ]);
           const updatedFiles = await applyTicketImplementationPayload({
             parsed: fixedImpl,
             accumulatedFiles: params.accumulatedFiles,
@@ -13803,23 +15509,11 @@ ${c}`).join("\n\n");
             test_summary: fixedImpl.test_summary || impl.test_summary,
             files: updatedFiles
           };
-          testCheck = await runTestsInIsolatedWorkspace({
-            workDir: sandboxWorkspace.workDir,
-            files: Array.from(params.accumulatedFiles.entries()).map(
-              ([path, content]) => ({ path, content })
-            ),
-            deleted_files: Array.from(ticketDeletedFilesSet),
-            changedPaths: [
-              ...impl.files.map((f) => f.path),
-              ...Array.from(ticketDeletedFilesSet)
-            ],
-            isTaskBranch: true,
-            verificationProfile,
-            bootstrappedTargets,
-            sandboxRunner: params.sandboxRunner,
-            llmApiKey: params.llmApiKey,
-            label: `Ticket #${ticket.ticketIssueNumber} TDD auto-fix attempt ${fixAttempt}/${params.maxCodeFixAttempts}`
-          });
+          const nextEval = await evaluateIntegrityAndStage1Suite(
+            `Ticket #${ticket.ticketIssueNumber} TDD auto-fix attempt ${fixAttempt}/${params.maxCodeFixAttempts}`
+          );
+          integrityCheck = nextEval.integrityCheck;
+          testCheck = nextEval.testCheck;
         }
         if (!testCheck.passed) {
           const escalated = await params.escalateToNeedsHuman({
@@ -14095,20 +15789,24 @@ ${c}`).join("\n\n");
         const findingsText = reviewResult.must_fix_findings.map(
           (f, idx) => `${idx + 1}. [${f.reviewer}] (${f.path}:${f.line}) ${f.title} \u2014 ${f.rationale} -> Action: ${f.suggested_action}`
         ).join("\n");
-        const currentFilesContext = Array.from(
-          params.accumulatedFiles.entries()
-        ).map(([p, c]) => `--- FILE: ${p} ---
-${c}`).join("\n\n");
+        const currentFilesContext = buildCompactWorkspaceFilesContext({
+          accumulatedFiles: params.accumulatedFiles,
+          priorityPaths: [
+            ...ticket.filesToTouch,
+            ...ticketChangedFilesMap.keys(),
+            ...reviewResult.must_fix_findings.map((f) => f.path)
+          ]
+        });
         const reviewFixSystemInstruction = [
           "Tu es un ing\xE9nieur TDD EPURE corrigeant les constats bloquants ('must_fix') de revue multi-agents et/ou les \xE9checs CI externes.",
           PROMPT_INJECTION_IMMUNITY_CLAUSE,
           "Corrige pr\xE9cis\xE9ment chaque anomalie tout en maintenant 100% des cibles Stage 1 au vert.",
           "Ne modifie JAMAIS .cursor/agents/**, .github/workflows/**, .github/agents.yml ou .env*.",
-          "Utilise les outils `list_repo_files`, `search_in_repo_file` et `read_repo_file` pour inspecter les fichiers pertinents du d\xE9p\xF4t avant de coder.",
+          "Utilise les outils `list_repo_files`, `search_in_repo_file`, `read_repo_file`, `write_repo_file`, `patch_repo_file` et `delete_repo_file` pour inspecter et modifier les fichiers pertinents du d\xE9p\xF4t.",
           "",
           verificationGuideMarkdown,
           "",
-          "Pour modifier un fichier existant volumineux, utilise de pr\xE9f\xE9rence `patches` (`old_string` -> `new_string` exact). Sinon utilise `files` avec le contenu int\xE9gral du fichier. Pour supprimer un fichier obsol\xE8te, utilise `deleted_files`.",
+          "Pour modifier un fichier existant volumineux, utilise de pr\xE9f\xE9rence `patch_repo_file` ou `patches` (`old_string` -> `new_string` exact). Sinon utilise `write_repo_file` ou `files` avec le contenu int\xE9gral du fichier. Pour supprimer un fichier obsol\xE8te, utilise `delete_repo_file` ou `deleted_files`.",
           "Renvoie un objet JSON strictement valide :",
           "{",
           `  "commit_message": "fix(review): address post-PR findings on #${ticket.ticketIssueNumber}",`,
@@ -14145,28 +15843,22 @@ ${c}`).join("\n\n");
           "Fichiers actuels du workspace :",
           wrapUntrustedContent("untrusted_workspace_files", currentFilesContext)
         );
-        const reviewFixedImpl = await callGeminiJson({
-          apiKey: params.llmApiKey,
-          model: params.phaseModels.implementationModel,
-          providers: params.phaseModels.providers,
-          maxTransientRetries: params.phaseModels.maxTransientRetries,
-          transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
-          requestTimeoutMs: params.phaseModels.requestTimeoutMs,
-          onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
+        const reviewFixedImpl = await generateTicketImplementationWithFallback({
+          ticket,
+          branch: taskBranch,
+          featureBranch: params.featureBranch,
           thinkingLevel: "HIGH",
           logLabel: `review-fix:#${ticket.ticketIssueNumber}/iter-${reviewFixAttempt}`,
           systemInstruction: reviewFixSystemInstruction,
           prompt: promptParts.join("\n"),
-          temperature: 0.1,
-          ...buildRepoExplorationToolsAndHandlers({
-            branch: taskBranch,
-            featureBranch: params.featureBranch,
-            accumulatedFiles: params.accumulatedFiles,
-            deletedFilesSet: ticketDeletedFilesSet,
-            devBranchPaths: params.devBranchPaths,
-            gh: params.gh
-          }),
-          responseSchema: GENERATED_TICKET_IMPLEMENTATION_SCHEMA,
+          accumulatedFiles: params.accumulatedFiles,
+          deletedFilesSet: ticketDeletedFilesSet,
+          devBranchPaths: params.devBranchPaths,
+          ensureBaselineLoaded: ensureBaselineFilesLoaded,
+          gh: params.gh,
+          llmApiKey: params.llmApiKey,
+          phaseModels: params.phaseModels,
+          addTransientRetriesUsed: params.addTransientRetriesUsed,
           fetchImpl: params.fetchImpl
         });
         const remediationPreCheck = validateWorkspaceFileOperations({
@@ -14199,6 +15891,11 @@ ${c}`).join("\n\n");
             verificationGuideMarkdown
           };
         }
+        await ensureBaselineFilesLoaded([
+          ...(reviewFixedImpl.files ?? []).map((f) => f.path),
+          ...(reviewFixedImpl.patches ?? []).map((p) => p.path),
+          ...reviewFixedImpl.deleted_files ?? []
+        ]);
         const updatedReviewFiles = await applyTicketImplementationPayload({
           parsed: reviewFixedImpl,
           accumulatedFiles: params.accumulatedFiles,
@@ -14214,45 +15911,36 @@ ${c}`).join("\n\n");
           test_summary: reviewFixedImpl.test_summary || impl.test_summary,
           files: updatedReviewFiles
         };
-        let testCheck = await runTestsInIsolatedWorkspace({
-          workDir: sandboxWorkspace.workDir,
-          files: Array.from(params.accumulatedFiles.entries()).map(
-            ([path, content]) => ({ path, content })
-          ),
-          deleted_files: Array.from(ticketDeletedFilesSet),
-          changedPaths: [
-            ...impl.files.map((f) => f.path),
-            ...Array.from(ticketDeletedFilesSet)
-          ],
-          isTaskBranch: true,
-          verificationProfile,
-          bootstrappedTargets,
-          sandboxRunner: params.sandboxRunner,
-          llmApiKey: params.llmApiKey,
-          label: `Ticket #${ticket.ticketIssueNumber} review-fix iteration ${reviewFixAttempt}/${params.maxCodeFixAttempts}`
-        });
+        let {
+          integrityCheck: reviewIntegrityCheck,
+          testCheck
+        } = await evaluateIntegrityAndStage1Suite(
+          `Ticket #${ticket.ticketIssueNumber} review-fix iteration ${reviewFixAttempt}/${params.maxCodeFixAttempts}`
+        );
         let reviewTestRetry = 0;
         while (!testCheck.passed && reviewTestRetry < 2) {
           reviewTestRetry += 1;
-          const retryFilesContext = Array.from(
-            params.accumulatedFiles.entries()
-          ).map(([p, c]) => `--- FILE: ${p} ---
-${c}`).join("\n\n");
-          const retryImpl = await callGeminiJson({
-            apiKey: params.llmApiKey,
-            model: params.phaseModels.implementationModel,
-            providers: params.phaseModels.providers,
-            maxTransientRetries: params.phaseModels.maxTransientRetries,
-            transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
-            requestTimeoutMs: params.phaseModels.requestTimeoutMs,
-            onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
+          restoreViolatedBaselineFiles(reviewIntegrityCheck);
+          const retryFilesContext = buildCompactWorkspaceFilesContext({
+            accumulatedFiles: params.accumulatedFiles,
+            priorityPaths: [
+              ...ticket.filesToTouch,
+              ...ticketChangedFilesMap.keys(),
+              ...reviewResult.must_fix_findings.map((f) => f.path)
+            ]
+          });
+          const retryImpl = await generateTicketImplementationWithFallback({
+            ticket,
+            branch: taskBranch,
+            featureBranch: params.featureBranch,
             thinkingLevel: "HIGH",
+            logLabel: `review-fix-retry:#${ticket.ticketIssueNumber}/iter-${reviewFixAttempt}/retry-${reviewTestRetry}`,
             systemInstruction: reviewFixSystemInstruction,
             prompt: [
               `La correction a fait \xE9chouer la v\xE9rification Stage 1 en sandbox (tentative ${reviewTestRetry}/2) :`,
               wrapUntrustedContent(
                 "untrusted_test_output",
-                testCheck.output.slice(-6e3)
+                testCheck.output
               ),
               "",
               ...findingsText ? [
@@ -14269,16 +15957,14 @@ ${c}`).join("\n\n");
                 retryFilesContext
               )
             ].join("\n"),
-            temperature: 0.1,
-            ...buildRepoExplorationToolsAndHandlers({
-              branch: taskBranch,
-              featureBranch: params.featureBranch,
-              accumulatedFiles: params.accumulatedFiles,
-              deletedFilesSet: ticketDeletedFilesSet,
-              devBranchPaths: params.devBranchPaths,
-              gh: params.gh
-            }),
-            responseSchema: GENERATED_TICKET_IMPLEMENTATION_SCHEMA,
+            accumulatedFiles: params.accumulatedFiles,
+            deletedFilesSet: ticketDeletedFilesSet,
+            devBranchPaths: params.devBranchPaths,
+            ensureBaselineLoaded: ensureBaselineFilesLoaded,
+            gh: params.gh,
+            llmApiKey: params.llmApiKey,
+            phaseModels: params.phaseModels,
+            addTransientRetriesUsed: params.addTransientRetriesUsed,
             fetchImpl: params.fetchImpl
           });
           const retryPreCheck = validateWorkspaceFileOperations({
@@ -14309,6 +15995,11 @@ ${c}`).join("\n\n");
               verificationGuideMarkdown
             };
           }
+          await ensureBaselineFilesLoaded([
+            ...(retryImpl.files ?? []).map((f) => f.path),
+            ...(retryImpl.patches ?? []).map((p) => p.path),
+            ...retryImpl.deleted_files ?? []
+          ]);
           const updatedRetryFiles = await applyTicketImplementationPayload({
             parsed: retryImpl,
             accumulatedFiles: params.accumulatedFiles,
@@ -14324,32 +16015,24 @@ ${c}`).join("\n\n");
             test_summary: retryImpl.test_summary || impl.test_summary,
             files: updatedRetryFiles
           };
-          testCheck = await runTestsInIsolatedWorkspace({
-            workDir: sandboxWorkspace.workDir,
-            files: Array.from(params.accumulatedFiles.entries()).map(
-              ([path, content]) => ({ path, content })
-            ),
-            deleted_files: Array.from(ticketDeletedFilesSet),
-            changedPaths: [
-              ...impl.files.map((f) => f.path),
-              ...Array.from(ticketDeletedFilesSet)
-            ],
-            isTaskBranch: true,
-            verificationProfile,
-            bootstrappedTargets,
-            sandboxRunner: params.sandboxRunner,
-            llmApiKey: params.llmApiKey,
-            label: `Ticket #${ticket.ticketIssueNumber} review-fix iteration ${reviewFixAttempt} test retry ${reviewTestRetry}/2`
-          });
+          const retryEval = await evaluateIntegrityAndStage1Suite(
+            `Ticket #${ticket.ticketIssueNumber} review-fix iteration ${reviewFixAttempt} test retry ${reviewTestRetry}/2`
+          );
+          reviewIntegrityCheck = retryEval.integrityCheck;
+          testCheck = retryEval.testCheck;
         }
         if (!testCheck.passed) {
-          currentPrHeadSha = await params.gh.commitFilesToBranch({
-            branch: taskBranch,
-            fromBranch: params.featureBranch,
-            commitMessage: `chore(wip): checkpoint review-fix attempt ${reviewFixAttempt} on #${ticket.ticketIssueNumber}`,
-            files: impl.files,
-            deletedFiles: Array.from(ticketDeletedFilesSet)
-          });
+          if (!reviewIntegrityCheck.passed) {
+            restoreViolatedBaselineFiles(reviewIntegrityCheck);
+          } else {
+            currentPrHeadSha = await params.gh.commitFilesToBranch({
+              branch: taskBranch,
+              fromBranch: params.featureBranch,
+              commitMessage: `chore(wip): checkpoint review-fix attempt ${reviewFixAttempt} on #${ticket.ticketIssueNumber}`,
+              files: impl.files,
+              deletedFiles: Array.from(ticketDeletedFilesSet)
+            });
+          }
           if (reviewFixAttempt < params.maxCodeFixAttempts) {
             continue;
           }
@@ -15085,7 +16768,8 @@ async function orchestrateIssueCommand(input) {
         if (currentState?.status === "suspended") {
           await gh.removeIssueLabel?.(effectiveInput.issueNumber, "needs-human");
         }
-        let ticketsManifest = parseTrackedTicketsFromComments(allComments);
+        const parsedPlanManifest = parsePlanManifestFromComments(allComments);
+        let ticketsManifest = parsedPlanManifest?.tickets ? [...parsedPlanManifest.tickets] : parseTrackedTicketsFromComments(allComments);
         const hasExplicitPlanManifest = ticketsManifest.length > 0;
         if (!hasExplicitPlanManifest) {
           const parsedCriteria = Array.from(
@@ -15126,9 +16810,12 @@ async function orchestrateIssueCommand(input) {
         if (hasExplicitPlanManifest && !existingFeaturePrCheck) {
           await integratePlanBranchIntoFeature({
             gh,
-            planBranch,
+            planBranch: parsedPlanManifest?.planBranch ?? planBranch,
             featureBranch,
-            baseBranch: "dev"
+            baseBranch: "dev",
+            llmApiKey: effectiveInput.llmApiKey,
+            model: phaseModels.planningModel,
+            fetchImpl: effectiveInput.fetchImpl
           });
         }
         const remoteTrustedRoster = await gh.readTrustedBaseRosterFiles("dev");
@@ -15198,7 +16885,8 @@ async function orchestrateIssueCommand(input) {
                 mustFixFindings: params.mustFixFindings,
                 sensitivePaths: params.sensitivePaths,
                 traversalPaths: params.traversalPaths,
-                diagnosticExcerpt: params.diagnosticExcerpt
+                diagnosticExcerpt: params.diagnosticExcerpt,
+                epicConvergenceDetails: params.epicConvergenceDetails
               })
             ].join("\n"),
             {
@@ -15229,6 +16917,7 @@ async function orchestrateIssueCommand(input) {
             phase: "implementation",
             status: "active",
             active_branch: featureBranch,
+            epic_phase: prev.epic_phase ?? 1,
             last_processed_comment_id: effectiveInput.commentId ?? prev.last_processed_comment_id
           })
         });
@@ -15241,9 +16930,14 @@ ${t.description}
 ${t.filesToTouch.join(" ")}`
           )
         ].join("\n");
+        const pinnedWorkspacePaths = [
+          ...parsedPlanManifest?.epicGoalContract?.required_entrypoints ?? [],
+          ...ticketsManifest.flatMap((t) => t.filesToTouch)
+        ];
         const accumulatedFiles = await gh.readBranchWorkspaceFiles(
           featureBranch,
-          hintForWorkspace
+          hintForWorkspace,
+          pinnedWorkspacePaths
         );
         const featureChangedFilesMap = /* @__PURE__ */ new Map();
         const featureDeletedFilesSet = /* @__PURE__ */ new Set();
@@ -15294,7 +16988,7 @@ ${t.filesToTouch.join(" ")}`
           }
         }
         const asyncCiEnabled = effectiveInput.asyncCiContinuation ?? process.env.EPURE_ASYNC_CI_CONTINUATION === "true";
-        const loopOutcome = await runTicketExecutionLoop({
+        let loopOutcome = await runTicketExecutionLoop({
           repository: effectiveInput.repository,
           issueNumber: effectiveInput.issueNumber,
           commentId: effectiveInput.commentId,
@@ -15337,6 +17031,157 @@ ${t.filesToTouch.join(" ")}`
         if (loopOutcome.halted && loopOutcome.result) {
           return loopOutcome.result;
         }
+        const epicGoalContract = parsedPlanManifest?.epicGoalContract;
+        let epicConvergenceSummary;
+        if (epicGoalContract && !skipTicketLoopForExistingFeaturePr) {
+          const maxEpicPhases = Math.min(
+            3,
+            Math.max(1, parsedDevAgentsConfig?.max_epic_phases ?? 2)
+          );
+          const highestTicketPhase = ticketsManifest.reduce(
+            (maxP, t) => Math.max(maxP, t.phase ?? 1),
+            1
+          );
+          let currentEpicPhase = Math.max(
+            updatedStart.state.epic_phase ?? 1,
+            highestTicketPhase
+          );
+          const effectiveSpecPath = parsedPlanManifest?.specPath ?? `docs/specs/${planSlug}.md`;
+          const specMarkdownOnFeature = await gh.readSingleBranchFile(featureBranch, effectiveSpecPath) ?? issue.body;
+          const glossaryMarkdownOnFeature = await gh.readSingleBranchFile(featureBranch, "GLOSSARY.md") ?? "";
+          while (true) {
+            await updateIssueStateWithCas({
+              issueNumber: effectiveInput.issueNumber,
+              store,
+              mutator: (prev) => ({
+                ...prev,
+                phase: "implementation",
+                status: "active",
+                subphase: "auditing_epic_convergence",
+                epic_phase: currentEpicPhase
+              })
+            });
+            const stage1Summary = completedTicketsSummary.length > 0 ? `Stage 1 PASSED across ${completedTicketsSummary.length} merged ticket(s) on ${featureBranch}:
+${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
+            const convergenceAudit = await runEpicConvergenceAudit({
+              issueNumber: effectiveInput.issueNumber,
+              featureBranch,
+              specPath: effectiveSpecPath,
+              specMarkdown: specMarkdownOnFeature,
+              glossaryMarkdown: glossaryMarkdownOnFeature,
+              epicGoalContract,
+              accumulatedFiles,
+              featureChangedFilesMap,
+              devBranchPaths,
+              stage1Summary,
+              gh,
+              llmApiKey: effectiveInput.llmApiKey,
+              phaseModels,
+              onTransientRetriesUsed: (used) => {
+                totalTransientRetriesUsed += used;
+              },
+              fetchImpl: effectiveInput.fetchImpl
+            });
+            if (convergenceAudit.verdict === "CONVERGED") {
+              epicConvergenceSummary = convergenceAudit.rationale || `All required entrypoints (${epicGoalContract.required_entrypoints.join(", ")}) wired and verified in Phase ${currentEpicPhase}.`;
+              await updateIssueStateWithCas({
+                issueNumber: effectiveInput.issueNumber,
+                store,
+                mutator: (prev) => ({
+                  ...prev,
+                  subphase: "idle",
+                  epic_phase: currentEpicPhase
+                })
+              });
+              break;
+            }
+            if (currentEpicPhase >= maxEpicPhases) {
+              return await escalateToNeedsHuman({
+                reason: "epic_convergence_exhausted",
+                ticketNumber: effectiveInput.issueNumber,
+                branch: featureBranch,
+                phase: "implementation",
+                diagnosticExcerpt: convergenceAudit.rationale,
+                epicConvergenceDetails: {
+                  epicPhase: currentEpicPhase,
+                  maxEpicPhases,
+                  summary: convergenceAudit.rationale,
+                  unwiredModules: convergenceAudit.unwired_modules,
+                  stubViolations: convergenceAudit.stub_violations,
+                  unmetCriteria: convergenceAudit.unmet_criteria
+                }
+              });
+            }
+            const nextEpicPhase = currentEpicPhase + 1;
+            const phase2State = await updateIssueStateWithCas({
+              issueNumber: effectiveInput.issueNumber,
+              store,
+              mutator: (prev) => ({
+                ...prev,
+                phase: "implementation",
+                status: "active",
+                subphase: "implementing_ticket",
+                epic_phase: nextEpicPhase
+              })
+            });
+            ticketsManifest = await spawnPhase2ConvergenceTickets({
+              gh,
+              issueNumber: effectiveInput.issueNumber,
+              issue,
+              planBranch: parsedPlanManifest?.planBranch ?? planBranch,
+              specPath: effectiveSpecPath,
+              epicGoalContract,
+              nextEpicPhase,
+              existingTickets: ticketsManifest,
+              auditResult: convergenceAudit,
+              stateMirrorMarkdown: phase2State.issue_mirror_markdown
+            });
+            currentEpicPhase = nextEpicPhase;
+            loopOutcome = await runTicketExecutionLoop({
+              repository: effectiveInput.repository,
+              issueNumber: effectiveInput.issueNumber,
+              commentId: effectiveInput.commentId,
+              activeToken,
+              issue,
+              featureBranch,
+              ticketsManifest,
+              skipTicketLoopForExistingFeaturePr: false,
+              accumulatedFiles,
+              featureChangedFilesMap,
+              featureDeletedFilesSet,
+              completedTicketsSummary,
+              devBranchPaths,
+              devWorkflowsMap,
+              trustedBaseFilesMap,
+              trustedBaseDesignMarkdown: trustedBaseRoster.designMarkdown,
+              parsedDevAgentsConfig,
+              initialVerificationProfile: loopOutcome.verificationProfile,
+              initialVerificationGuideMarkdown: loopOutcome.verificationGuideMarkdown,
+              maxCodeFixAttempts,
+              hintForWorkspace,
+              infraRerunsBySha,
+              getTotalTransientRetriesUsed: () => totalTransientRetriesUsed,
+              addTransientRetriesUsed: (delta) => {
+                totalTransientRetriesUsed += delta;
+              },
+              escalateToNeedsHuman,
+              gh,
+              store,
+              llmApiKey: effectiveInput.llmApiKey,
+              phaseModels,
+              fetchImpl: effectiveInput.fetchImpl,
+              effectiveSleepFn,
+              pollIntervalMs: effectiveInput.pollIntervalMs,
+              sandboxRunner: effectiveInput.sandboxRunner,
+              asyncCiContinuation: asyncCiEnabled,
+              forceOneRemediationRoundOnOpenPr: false,
+              initialCodeFixAttemptsUsed: 0
+            });
+            if (loopOutcome.halted && loopOutcome.result) {
+              return loopOutcome.result;
+            }
+          }
+        }
         try {
           return await runFeatureIntegrationPhase({
             repository: effectiveInput.repository,
@@ -15353,6 +17198,7 @@ ${t.filesToTouch.join(" ")}`
             featureChangedFilesMap,
             featureDeletedFilesSet,
             completedTicketsSummary,
+            ...epicConvergenceSummary !== void 0 ? { epicConvergenceSummary } : {},
             devBranchPaths,
             devWorkflowsMap,
             trustedBaseFilesMap,

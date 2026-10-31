@@ -434,4 +434,40 @@ _Éviter_ : autoriser des requêtes HTTP non chiffrées ou vers des IPs internes
 **Langage technique contrôlé ASD-STE100 (`STE100 Controlled Prompting`)** : Contrat de rédaction technique dérivé de la norme aéronautique ASD-STE100 appliqué aux prompts système, spécifications, ADRs et critères d'acceptation de tickets d'EPURE, imposant cinq invariants : (1) bijection lexicale stricte avec `GLOSSARY.md` (`1 terme = 1 concept`, interdiction des synonymes listés sous `_Éviter_`), (2) voix active avec acteur grammatical explicite, (3) atomicité procédurale (`1 phrase = 1 action`), (4) conditionnelles déterministes (`QUAND / SI <condition>, ALORS <acteur> DOIT <action>`) sans verbe modal flou, et (5) formulation affirmative couplée à **Zero-Filler** et **Auto-Clarity**.
 _Éviter_ : style télégraphique ambigu omettant le sujet de l'action, synonymes libres hors glossaire, voix passive sans acteur (« *les fichiers sont vérifiés* »), ou modaux flous (« *devrait* », « *pourrait* », « *si nécessaire* »).
 
+## Graphe relationnel GitHub, garde-fous d'intégrité et convergence multi-phases (ADR-0032)
+
+**Graphe relationnel GitHub natif (`sub_issues` / `dependencies/blocked_by` / Tasklist d'issue)** : matérialisation dans l'interface GitHub de la hiérarchie parent-enfant entre l'**Issue de pilotage** et chaque **Ticket d'implémentation** (`sub_issues`), des **Dépendances bloquantes** entre tickets (`dependencies/blocked_by` référençant l'identifiant numérique de base de données du ticket bloqueur) et d'une liste de tâches Markdown délimitée dans le corps de l'**Issue de pilotage**, appliquée de manière tolérante aux pannes sans remplacer la **Référence Git d'état d'orchestration**.
+_Éviter_ : limiter le graphe de tickets à du texte brut non cliquable ou faire échouer l'orchestration si un endpoint relationnel GitHub renvoie une erreur cosmétique.
+
+**Garde-fou d'intégrité inter-tickets (`validateTicketIntegrityGuard`)** : contrôle déterministe exécuté avant toute publication sur une **Branche de ticket** qui interdit (1) la suppression ou le vidage non autorisé de fichiers de test existants sur la branche de base, (2) la troncature de plus de 30 % des lignes ou symboles publics d'un fichier existant hors du périmètre déclaré du ticket, et (3) la dégradation des commandes de vérification (`build`, `test`, `lint`, `typecheck`, `check`) dans les manifestes du dépôt en commandes factices ou alias de tests unitaires.
+_Éviter_ : autoriser un ticket à supprimer les tests d'un ticket précédent ou à remplacer une commande de compilation par un `echo`.
+
+**Réconciliation sémantique et monotone des ADRs (`renumberCollidingAdrs` / `reconcileAdrsWithLlm`)** : mécanisme combinant la déduplication déterministe par slug (`docs/adr/NNNN-<slug>.md`), la renumérotation monotone avec suppression des anciens chemins dupliqués et une passe LLM structurée de cohérence croisée lorsque des ADRs concurrents apparaissent sur `dev`, alignant les références `ADR-NNNN` dans les spécifications et le glossaire.
+_Éviter_ : créer des triplons d'un même ADR sous plusieurs numéros successifs lors des synchronisations inter-branches ou laisser des décisions contradictoires sans mise à jour des références croisées.
+
+**Contrat de convergence de fonctionnalité (`EpicGoalContract`)** : engagement vérifiable produit dès la spécification d'une **Issue de pilotage**, déclarant de façon agnostique le résultat observable de bout en bout (`epic_goal_summary`), les points d'entrée du dépôt qui doivent exposer ou câbler la fonctionnalité (`required_entrypoints`), les simulacres interdits en production (`forbidden_stubs`) et les scénarios d'intégration transversaux (`end_to_end_verification_criteria`).
+_Éviter_ : spécifier uniquement des briques isolées sans déclarer les points d'entrée applicatifs où elles doivent être branchées.
+
+**Audit de convergence de fonctionnalité zéro-contexte (`runEpicConvergenceAudit`)** : évaluation indépendante exécutée sur la **Branche de fonctionnalité** après l'intégration de tous les tickets d'une phase et avant l'ouverture de la Pull Request vers `dev`, dans une session LLM isolée dépourvue de l'historique conversationnel des tickets et dotée d'outils d'exploration en lecture seule, qui vérifie le câblage effectif des `required_entrypoints`, l'absence de `forbidden_stubs` et la couverture intégrale du **Contrat de convergence de fonctionnalité**.
+_Éviter_ : ouvrir la Pull Request finale `feature/* -> dev` sur la seule foi de tests unitaires par ticket alors que des modules restent non câblés (« *island code* »).
+
+**Phase de convergence corrective (`Phase 2 de tickets` / `epic_phase`)** : seconde vague bornée de **Tickets d'implémentation** (`[Phase 2 - Ticket N]`) générée, chaînée nativement sur GitHub et exécutée automatiquement par l'orchestrateur lorsque l'**Audit de convergence de fonctionnalité zéro-contexte** conclut qu'une **Branche de fonctionnalité** est incomplète (`verdict: "INCOMPLETE"`) et que le nombre de phases exécutées est inférieur au plafond configuré (`max_epic_phases`, fixé à 2 par défaut).
+_Éviter_ : boucler indéfiniment sans plafond de phases ou laisser à l'humain la charge de diagnostiquer des oublis de câblage évidents entre tickets.
+
+**Non-convergence après phases maximales (`epic_convergence_exhausted`)** : raison d'**Escalade humaine** (`needs-human`) déclenchée lorsque l'**Audit de convergence de fonctionnalité zéro-contexte** détecte encore des modules non câblés, des simulacres interdits ou des critères non satisfaits après l'exécution du nombre maximal autorisé de phases (`max_epic_phases`).
+_Éviter_ : présenter une Pull Request `feature/* -> dev` incomplète comme prête pour validation humaine ou masquer les écarts de convergence restants.
+
+## Mutation incrémentale d'espace de travail et repli segmenté des tickets (ADR-0033)
+
+**Tampon de mutation incrémentale de ticket (`StagedTicketImplementationBuffer`)** : espace de travail transactionnel en mémoire accumulant les créations (`write_repo_file`), modifications chirurgicales (`patch_repo_file`) et suppressions (`delete_repo_file`) effectuées par le modèle au fil de la boucle d'outils d'un **Ticket d'implémentation**, isolé de l'état de la **Branche de fonctionnalité** jusqu'à la fin du tour et soumis intégralement à `validateWorkspaceFileOperations`, `validateTicketIntegrityGuard` et à la **Vérification locale de pré-publication (Stage 1)** avant tout commit sur `task/*`.
+_Éviter_ : écriture directe non vérifiée sur la branche Git pendant un appel d'outil, pollution de `accumulatedFiles` en cas d'échec du tour, ou obligation de répéter dans le JSON final les fichiers déjà écrits via outils.
+
+**Repli segmenté fichier par fichier (`ChunkedTicketImplementationFallback`)** : décomposition automatique d'un appel d'implémentation ou de remédiation de ticket en sous-appels ciblés par fichier de `filesToTouch` (suivis d'un lot de tests unitaires) lorsque l'appel initial échoue par troncature (`MAX_TOKENS`) ou renvoie une **Sortie structurée par schéma** vide, conservant les mutations déjà validées dans le **Tampon de mutation incrémentale de ticket** et abandonnant l'intégralité du tampon sans commit partiel si un sous-appel échoue encore après ses relances de validation.
+_Éviter_ : escalade immédiate `needs-human` dès la première troncature d'un ticket multi-fichiers ou publication d'un commit partiel non vérifié sur `task/*`.
+
+**Catalogue compact de contexte de dépôt (`CompactWorkspaceFilesContext`)** : représentation bornée des fichiers connus du dépôt dans le prompt d'implémentation ou de remédiation, qui injecte intégralement (sans jamais tronquer un fichier en son milieu) uniquement les fichiers déjà modifiés par le ticket ou ciblés par `filesToTouch` dans la limite du budget de prompt, et expose tous les autres fichiers sous forme d'un index `chemin (N lignes)` consultable à la demande via `read_repo_file` et `search_in_repo_file`.
+_Éviter_ : réinjecter l'intégralité de `accumulatedFiles` en texte brut à chaque tour de remédiation ou tronquer arbitrairement un fichier source en son milieu.
+
+
+
 

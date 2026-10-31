@@ -31,6 +31,13 @@ export interface GeneratedTicketSpec {
 
 export type PlannedTicketDefinition = GeneratedTicketSpec;
 
+export interface EpicGoalContract {
+  readonly epic_goal_summary: string;
+  readonly required_entrypoints: readonly string[];
+  readonly forbidden_stubs: readonly string[];
+  readonly end_to_end_verification_criteria: readonly string[];
+}
+
 export interface GeneratedSpecArtifacts {
   readonly plan_slug: string;
   readonly glossary_markdown: string;
@@ -38,6 +45,7 @@ export interface GeneratedSpecArtifacts {
   readonly spec_path: string;
   readonly spec_markdown: string;
   readonly target_files_hint?: readonly string[] | undefined;
+  readonly epic_goal_contract?: EpicGoalContract | undefined;
 }
 
 export interface GeneratedTicketDag {
@@ -51,6 +59,7 @@ export interface GeneratedPlanningBundle {
   readonly spec_path: string;
   readonly spec_markdown: string;
   readonly tickets: readonly GeneratedTicketSpec[];
+  readonly epic_goal_contract?: EpicGoalContract | undefined;
 }
 
 export interface GeneratedFileChange {
@@ -248,11 +257,90 @@ export const GRILL_ROUND_EVALUATION_SCHEMA: ResponseSchemaSpec<GrillRoundEvaluat
     }
   };
 
+export function parseOptionalEpicGoalContract(
+  raw: unknown,
+  fallbackSummary = ""
+): EpicGoalContract | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return undefined;
+  }
+  const rec = raw as Record<string, unknown>;
+  const summary =
+    typeof rec.epic_goal_summary === "string" &&
+    rec.epic_goal_summary.trim().length > 0
+      ? rec.epic_goal_summary.trim()
+      : fallbackSummary;
+  const requiredEntrypoints = asStringArray(rec.required_entrypoints);
+  const forbiddenStubs = asStringArray(rec.forbidden_stubs);
+  const endToEndCriteria = asStringArray(rec.end_to_end_verification_criteria);
+  if (
+    !summary &&
+    requiredEntrypoints.length === 0 &&
+    forbiddenStubs.length === 0 &&
+    endToEndCriteria.length === 0
+  ) {
+    return undefined;
+  }
+  return {
+    epic_goal_summary: summary,
+    required_entrypoints: requiredEntrypoints,
+    forbidden_stubs: forbiddenStubs,
+    end_to_end_verification_criteria: endToEndCriteria
+  };
+}
+
+const EPIC_GOAL_CONTRACT_SCHEMA_PROPERTY = {
+  type: "object",
+  properties: {
+    epic_goal_summary: { type: "string" },
+    required_entrypoints: {
+      type: "array",
+      items: { type: "string" }
+    },
+    forbidden_stubs: {
+      type: "array",
+      items: { type: "string" }
+    },
+    end_to_end_verification_criteria: {
+      type: "array",
+      items: { type: "string" }
+    }
+  }
+} as const;
+
+const TICKET_SPEC_SCHEMA_ITEM = {
+  type: "object",
+  properties: {
+    index: { type: "integer" },
+    slug: { type: "string" },
+    title: { type: "string" },
+    description: { type: "string" },
+    summary: { type: "string" },
+    acceptance_criteria: {
+      type: "array",
+      items: { type: "string" }
+    },
+    blocked_by_indices: {
+      type: "array",
+      items: { type: "integer" }
+    },
+    files_to_create_or_update: {
+      type: "array",
+      items: { type: "string" }
+    },
+    files_likely_touched: {
+      type: "array",
+      items: { type: "string" }
+    }
+  },
+  required: ["title", "acceptance_criteria", "blocked_by_indices"]
+} as const;
+
 export const GENERATED_PLANNING_BUNDLE_SCHEMA: ResponseSchemaSpec<GeneratedPlanningBundle> =
   {
     name: "generated_planning_bundle",
     description:
-      "Complete EPURE planning bundle including GLOSSARY.md, ADRs, specification, and DAG tickets.",
+      "Complete EPURE planning bundle including GLOSSARY.md, ADRs, specification, EpicGoalContract, and DAG tickets.",
     schema: {
       type: "object",
       properties: {
@@ -274,39 +362,10 @@ export const GENERATED_PLANNING_BUNDLE_SCHEMA: ResponseSchemaSpec<GeneratedPlann
         },
         spec_path: { type: "string" },
         spec_markdown: { type: "string" },
+        epic_goal_contract: EPIC_GOAL_CONTRACT_SCHEMA_PROPERTY,
         tickets: {
           type: "array",
-          items: {
-            type: "object",
-            properties: {
-              index: { type: "integer" },
-              slug: { type: "string" },
-              title: { type: "string" },
-              description: { type: "string" },
-              summary: { type: "string" },
-              acceptance_criteria: {
-                type: "array",
-                items: { type: "string" }
-              },
-              blocked_by_indices: {
-                type: "array",
-                items: { type: "integer" }
-              },
-              files_to_create_or_update: {
-                type: "array",
-                items: { type: "string" }
-              },
-              files_likely_touched: {
-                type: "array",
-                items: { type: "string" }
-              }
-            },
-            required: [
-              "title",
-              "acceptance_criteria",
-              "blocked_by_indices"
-            ]
-          }
+          items: TICKET_SPEC_SCHEMA_ITEM
         }
       },
       required: [
@@ -446,13 +505,19 @@ export const GENERATED_PLANNING_BUNDLE_SCHEMA: ResponseSchemaSpec<GeneratedPlann
         };
       });
 
+      const epicGoalContract = parseOptionalEpicGoalContract(
+        obj.epic_goal_contract,
+        extractTitleFromMarkdown(specMarkdown, planSlug)
+      );
+
       return {
         plan_slug: planSlug,
         glossary_markdown: glossaryMarkdown,
         adrs,
         spec_path: specPath,
         spec_markdown: specMarkdown,
-        tickets
+        tickets,
+        ...(epicGoalContract ? { epic_goal_contract: epicGoalContract } : {})
       };
     }
   };
@@ -461,7 +526,7 @@ export const GENERATED_SPEC_ARTIFACTS_SCHEMA: ResponseSchemaSpec<GeneratedSpecAr
   {
     name: "generated_spec_artifacts",
     description:
-      "EPURE specification artifacts (GLOSSARY.md, ADRs, and specification Markdown) generated during /epure to-spec prior to human validation and ticket decomposition.",
+      "EPURE specification artifacts (GLOSSARY.md, ADRs, specification Markdown, and EpicGoalContract) generated during /epure to-spec prior to human validation and ticket decomposition.",
     schema: {
       type: "object",
       properties: {
@@ -486,7 +551,8 @@ export const GENERATED_SPEC_ARTIFACTS_SCHEMA: ResponseSchemaSpec<GeneratedSpecAr
         target_files_hint: {
           type: "array",
           items: { type: "string" }
-        }
+        },
+        epic_goal_contract: EPIC_GOAL_CONTRACT_SCHEMA_PROPERTY
       },
       required: [
         "plan_slug",
@@ -518,7 +584,10 @@ export const GENERATED_SPEC_ARTIFACTS_SCHEMA: ResponseSchemaSpec<GeneratedSpecAr
         adrs: validatedBundle.adrs,
         spec_path: validatedBundle.spec_path,
         spec_markdown: validatedBundle.spec_markdown,
-        target_files_hint: asStringArray(obj.target_files_hint)
+        target_files_hint: asStringArray(obj.target_files_hint),
+        ...(validatedBundle.epic_goal_contract
+          ? { epic_goal_contract: validatedBundle.epic_goal_contract }
+          : {})
       };
     }
   };
@@ -533,37 +602,7 @@ export const GENERATED_TICKET_DAG_SCHEMA: ResponseSchemaSpec<GeneratedTicketDag>
       properties: {
         tickets: {
           type: "array",
-          items: {
-            type: "object",
-            properties: {
-              index: { type: "integer" },
-              slug: { type: "string" },
-              title: { type: "string" },
-              description: { type: "string" },
-              summary: { type: "string" },
-              acceptance_criteria: {
-                type: "array",
-                items: { type: "string" }
-              },
-              blocked_by_indices: {
-                type: "array",
-                items: { type: "integer" }
-              },
-              files_to_create_or_update: {
-                type: "array",
-                items: { type: "string" }
-              },
-              files_likely_touched: {
-                type: "array",
-                items: { type: "string" }
-              }
-            },
-            required: [
-              "title",
-              "acceptance_criteria",
-              "blocked_by_indices"
-            ]
-          }
+          items: TICKET_SPEC_SCHEMA_ITEM
         }
       },
       required: ["tickets"]
@@ -594,8 +633,14 @@ export const GENERATED_TICKET_DAG_SCHEMA: ResponseSchemaSpec<GeneratedTicketDag>
     }
   };
 
-export const GENERATED_TICKET_IMPLEMENTATION_SCHEMA: ResponseSchemaSpec<GeneratedTicketImplementation> =
-  {
+export interface CreateGeneratedTicketImplementationSchemaOptions {
+  readonly hasStagedMutations?: (() => boolean) | undefined;
+}
+
+export function createGeneratedTicketImplementationSchema(
+  options?: CreateGeneratedTicketImplementationSchemaOptions | undefined
+): ResponseSchemaSpec<GeneratedTicketImplementation> {
+  return {
     name: "generated_ticket_implementation",
     description:
       "Structured TDD code implementation or remediation payload for a ticket.",
@@ -740,7 +785,8 @@ export const GENERATED_TICKET_IMPLEMENTATION_SCHEMA: ResponseSchemaSpec<Generate
         (patches?.some((p) => p.edits.length > 0) ?? false) &&
         (patches?.length ?? 0) > 0;
       const hasDeleted = (deletedFiles?.length ?? 0) > 0;
-      if (!hasFiles && !hasPatches && !hasDeleted) {
+      const hasStaged = Boolean(options?.hasStagedMutations?.());
+      if (!hasFiles && !hasPatches && !hasDeleted && !hasStaged) {
         throw new Error(
           "GeneratedTicketImplementation must include at least one non-empty file in 'files', 'patches', or 'deleted_files'."
         );
@@ -755,6 +801,10 @@ export const GENERATED_TICKET_IMPLEMENTATION_SCHEMA: ResponseSchemaSpec<Generate
       };
     }
   };
+}
+
+export const GENERATED_TICKET_IMPLEMENTATION_SCHEMA: ResponseSchemaSpec<GeneratedTicketImplementation> =
+  createGeneratedTicketImplementationSchema();
 
 export const REVIEWER_FINDINGS_SCHEMA: ResponseSchemaSpec<ReviewerFindingsPayload> =
   {
@@ -1191,3 +1241,180 @@ export const GOLDFISH_SPEC_AUDIT_SCHEMA: ResponseSchemaSpec<GoldfishSpecAuditPay
       };
     }
   };
+
+export interface AdrCoherenceReconciliationPayload {
+  readonly coherent: boolean;
+  readonly summary: string;
+  readonly updated_files: ReadonlyArray<{
+    readonly path: string;
+    readonly content: string;
+  }>;
+  readonly deleted_adr_paths: readonly string[];
+}
+
+export const ADR_COHERENCE_RECONCILIATION_SCHEMA: ResponseSchemaSpec<AdrCoherenceReconciliationPayload> =
+  {
+    name: "adr_coherence_reconciliation",
+    description:
+      "Semantic cross-ADR coherence and reference reconciliation payload when concurrent ADRs are synchronized between dev and feature/* (Q114, Q118).",
+    schema: {
+      type: "object",
+      properties: {
+        coherent: { type: "boolean" },
+        summary: { type: "string" },
+        updated_files: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              path: { type: "string" },
+              content: { type: "string" }
+            },
+            required: ["path", "content"]
+          }
+        },
+        deleted_adr_paths: {
+          type: "array",
+          items: { type: "string" }
+        }
+      },
+      required: ["coherent", "summary", "updated_files", "deleted_adr_paths"]
+    },
+    validate(parsed: unknown): AdrCoherenceReconciliationPayload {
+      const obj = asRecord(parsed, "AdrCoherenceReconciliationPayload");
+      const coherent =
+        typeof obj.coherent === "boolean" ? obj.coherent : true;
+      const summary =
+        typeof obj.summary === "string" ? obj.summary.trim() : "";
+      const rawUpdated = Array.isArray(obj.updated_files)
+        ? obj.updated_files
+        : [];
+      const updatedFiles = rawUpdated
+        .map((item, idx) => {
+          const rec = asRecord(
+            item,
+            `AdrCoherenceReconciliationPayload.updated_files[${idx}]`
+          );
+          const path =
+            typeof rec.path === "string"
+              ? rec.path.trim().replace(/^\/+/, "")
+              : "";
+          const content =
+            typeof rec.content === "string" ? rec.content : "";
+          return { path, content };
+        })
+        .filter((f) => f.path.length > 0 && f.content.trim().length > 0);
+      const deletedAdrPaths = asStringArray(obj.deleted_adr_paths).map((p) =>
+        p.replace(/^\/+/, "")
+      );
+      return {
+        coherent,
+        summary,
+        updated_files: updatedFiles,
+        deleted_adr_paths: deletedAdrPaths
+      };
+    }
+  };
+
+export interface EpicConvergenceAuditPayload {
+  readonly verdict: "CONVERGED" | "INCOMPLETE";
+  readonly rationale: string;
+  readonly unwired_modules: readonly string[];
+  readonly stub_violations: readonly string[];
+  readonly unmet_criteria: readonly string[];
+  readonly remediation_tickets: readonly GeneratedTicketSpec[];
+}
+
+export const EPIC_CONVERGENCE_AUDIT_SCHEMA: ResponseSchemaSpec<EpicConvergenceAuditPayload> =
+  {
+    name: "epic_convergence_audit",
+    description:
+      "Zero-context Goldfish Epic Convergence Audit checking end-to-end entrypoint wiring, absence of forbidden stubs, and specification convergence before opening the feature/* -> dev PR (ADR-0032, Q116-Q121).",
+    schema: {
+      type: "object",
+      properties: {
+        verdict: {
+          type: "string",
+          enum: ["CONVERGED", "INCOMPLETE"]
+        },
+        rationale: { type: "string" },
+        unwired_modules: {
+          type: "array",
+          items: { type: "string" }
+        },
+        stub_violations: {
+          type: "array",
+          items: { type: "string" }
+        },
+        unmet_criteria: {
+          type: "array",
+          items: { type: "string" }
+        },
+        remediation_tickets: {
+          type: "array",
+          items: TICKET_SPEC_SCHEMA_ITEM
+        }
+      },
+      required: [
+        "verdict",
+        "rationale",
+        "unwired_modules",
+        "stub_violations",
+        "unmet_criteria",
+        "remediation_tickets"
+      ]
+    },
+    validate(parsed: unknown): EpicConvergenceAuditPayload {
+      const obj = asRecord(parsed, "EpicConvergenceAuditPayload");
+      const rawVerdict =
+        typeof obj.verdict === "string"
+          ? obj.verdict.trim().toUpperCase()
+          : "";
+      const verdict: "CONVERGED" | "INCOMPLETE" =
+        rawVerdict === "INCOMPLETE" ? "INCOMPLETE" : "CONVERGED";
+      const rawRationale =
+        typeof obj.rationale === "string" ? obj.rationale.trim() : "";
+      const rawSummary =
+        typeof obj.summary === "string" ? obj.summary.trim() : "";
+      const rationale = rawRationale || rawSummary;
+      const unwiredModules = asStringArray(obj.unwired_modules);
+      const stubViolations = asStringArray(obj.stub_violations);
+      const unmetCriteria = asStringArray(obj.unmet_criteria);
+
+      const rawTicketsSource =
+        Array.isArray(obj.remediation_tickets) &&
+        obj.remediation_tickets.length > 0
+          ? obj.remediation_tickets
+          : Array.isArray(obj.phase2_tickets)
+            ? obj.phase2_tickets
+            : [];
+      const rawPhase2 = rawTicketsSource.slice(0, 4);
+      let remediationTickets: GeneratedTicketSpec[] = [];
+      if (rawPhase2.length > 0) {
+        const validatedBundle = GENERATED_PLANNING_BUNDLE_SCHEMA.validate({
+          plan_slug: "phase2-convergence",
+          glossary_markdown: "# GLOSSARY\n\nExisting glossary.",
+          adrs: [
+            {
+              path: "docs/adr/0001-existing.md",
+              content: "# ADR\n\nExisting ADR."
+            }
+          ],
+          spec_path: "docs/specs/existing.md",
+          spec_markdown: "# Specification\n\nExisting specification.",
+          tickets: rawPhase2
+        });
+        remediationTickets = [...validatedBundle.tickets];
+      }
+
+      return {
+        verdict,
+        rationale,
+        unwired_modules: unwiredModules,
+        stub_violations: stubViolations,
+        unmet_criteria: unmetCriteria,
+        remediation_tickets: remediationTickets
+      };
+    }
+  };
+

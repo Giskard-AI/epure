@@ -29,6 +29,7 @@ import {
   GENERATED_TICKET_DAG_SCHEMA,
   GOLDFISH_SPEC_AUDIT_SCHEMA,
   GRILL_ROUND_EVALUATION_SCHEMA,
+  type EpicGoalContract,
   type GeneratedPlanningBundle,
   type GeneratedSpecArtifacts,
   type GeneratedTicketDag,
@@ -38,7 +39,8 @@ import {
   type IssueCommentRecord,
   type IssueMetadata,
   type OrchestrateIssueResult,
-  type ResolvedPhaseModels
+  type ResolvedPhaseModels,
+  type TrackedTicketCommentMetadata
 } from "../types.js";
 import { buildRepoExplorationToolsAndHandlers } from "../workspace/repo-tools.js";
 
@@ -47,6 +49,180 @@ interface StoredSpecManifest {
   readonly specPath: string;
   readonly adrPaths: readonly string[];
   readonly targetFilesHint: readonly string[];
+  readonly epicGoalContract?: EpicGoalContract | undefined;
+}
+
+export function buildParentIssueTicketsTasklistBlock(
+  tickets: readonly Pick<
+    TrackedTicketCommentMetadata,
+    "ticketIssueNumber" | "title" | "blockedByIssueNumbers" | "phase"
+  >[]
+): string {
+  const byPhase = new Map<
+    number,
+    Array<
+      Pick<
+        TrackedTicketCommentMetadata,
+        "ticketIssueNumber" | "title" | "blockedByIssueNumbers" | "phase"
+      >
+    >
+  >();
+  for (const t of tickets) {
+    const phase = t.phase && t.phase >= 1 ? t.phase : 1;
+    const list = byPhase.get(phase) ?? [];
+    list.push(t);
+    byPhase.set(phase, list);
+  }
+  const phases = Array.from(byPhase.keys()).sort((a, b) => a - b);
+  const lines: string[] = ["<!-- epure-tickets-tasklist:start -->"];
+  for (const phase of phases) {
+    if (lines.length > 1) {
+      lines.push("");
+    }
+    lines.push(
+      phase === 1
+        ? "### Plan Tickets (Phase 1)"
+        : `### Remediation Tickets (Phase ${phase})`
+    );
+    for (const t of byPhase.get(phase) ?? []) {
+      const blockedSuffix =
+        t.blockedByIssueNumbers.length > 0
+          ? ` _(blocked by ${t.blockedByIssueNumbers.map((n) => `#${n}`).join(", ")})_`
+          : "";
+      lines.push(`- [ ] #${t.ticketIssueNumber} — ${t.title}${blockedSuffix}`);
+    }
+  }
+  lines.push("<!-- epure-tickets-tasklist:end -->");
+  return lines.join("\n");
+}
+
+export async function createLinkedPhaseTicketsOnGitHub(params: {
+  readonly gh: Pick<
+    GitHubRestHelper,
+    "createIssue" | "addSubIssue" | "addIssueBlockedByDependency"
+  >;
+  readonly parentIssueNumber: number;
+  readonly phase: number;
+  readonly spoilerContext: {
+    readonly phase: "tickets" | "implementation";
+    readonly status: "awaiting-human" | "active";
+  };
+  readonly tickets: ReadonlyArray<{
+    readonly index: number;
+    readonly slug: string;
+    readonly title: string;
+    readonly description: string;
+    readonly acceptanceCriteria: readonly string[];
+    readonly blockedByIndices: readonly number[];
+    readonly filesToTouch: readonly string[];
+    readonly acceptanceSectionHeading: string;
+    readonly extraHeaderLines?: readonly string[] | undefined;
+  }>;
+}): Promise<TrackedTicketCommentMetadata[]> {
+  const indexToIssueNumber = new Map<number, number>();
+  const indexToIssueDatabaseId = new Map<number, number>();
+  const createdTicketsManifest: TrackedTicketCommentMetadata[] = [];
+
+  for (const ticket of params.tickets) {
+    const blockerNumbers = ticket.blockedByIndices
+      .map((idx) => indexToIssueNumber.get(idx))
+      .filter((n): n is number => typeof n === "number");
+    const blockerDatabaseIds = ticket.blockedByIndices
+      .map((idx) => indexToIssueDatabaseId.get(idx))
+      .filter((id): id is number => typeof id === "number");
+
+    const depLines =
+      blockerNumbers.length > 0
+        ? blockerNumbers.map((n) => `blocked_by: #${n}`).join("\n")
+        : "blocked_by: none";
+
+    const ticketBody = appendEpureCommandsSpoiler(
+      [
+        `Parent Plan: #${params.parentIssueNumber}`,
+        ...(ticket.extraHeaderLines ?? []),
+        depLines,
+        "",
+        "## Description",
+        ticket.description,
+        "",
+        `## ${ticket.acceptanceSectionHeading}`,
+        ...ticket.acceptanceCriteria.map((c) => `- [ ] ${c}`),
+        "",
+        "## Target Files",
+        ...ticket.filesToTouch.map((f) => `- \`${f}\``)
+      ].join("\n"),
+      {
+        phase: params.spoilerContext.phase,
+        status: params.spoilerContext.status,
+        issueNumber: params.parentIssueNumber
+      }
+    );
+
+    const createdIssue = await params.gh.createIssue({
+      title: ticket.title,
+      body: ticketBody,
+      labels: ["ready-for-agent"]
+    });
+
+    indexToIssueNumber.set(ticket.index, createdIssue.number);
+    if (typeof createdIssue.id === "number") {
+      indexToIssueDatabaseId.set(ticket.index, createdIssue.id);
+      await params.gh.addSubIssue?.(params.parentIssueNumber, createdIssue.id);
+    }
+    for (const blockerDbId of blockerDatabaseIds) {
+      await params.gh.addIssueBlockedByDependency?.(
+        createdIssue.number,
+        blockerDbId
+      );
+    }
+
+    createdTicketsManifest.push({
+      ticketIssueNumber: createdIssue.number,
+      slug: ticket.slug,
+      title: ticket.title,
+      description: ticket.description,
+      acceptanceCriteria: [...ticket.acceptanceCriteria],
+      blockedByIssueNumbers: blockerNumbers,
+      filesToTouch: [...ticket.filesToTouch],
+      phase: params.phase
+    });
+  }
+
+  return createdTicketsManifest;
+}
+
+export async function upsertParentIssueTicketsTasklist(params: {
+  readonly gh: Pick<GitHubRestHelper, "getIssue" | "updateIssue">;
+  readonly parentIssueNumber: number;
+  readonly fallbackBody?: string | undefined;
+  readonly tickets: readonly Pick<
+    TrackedTicketCommentMetadata,
+    "ticketIssueNumber" | "title" | "blockedByIssueNumbers" | "phase"
+  >[];
+}): Promise<void> {
+  if (typeof params.gh.updateIssue !== "function" || params.tickets.length === 0) {
+    return;
+  }
+  try {
+    let currentBody = params.fallbackBody ?? "";
+    try {
+      const freshIssue = await params.gh.getIssue(params.parentIssueNumber);
+      if (typeof freshIssue.body === "string") {
+        currentBody = freshIssue.body;
+      }
+    } catch {
+      // Fallback to fallbackBody
+    }
+    const block = buildParentIssueTicketsTasklistBlock(params.tickets);
+    const markerRegex =
+      /<!-- epure-tickets-tasklist:start -->[\s\S]*?<!-- epure-tickets-tasklist:end -->/;
+    const nextBody = markerRegex.test(currentBody)
+      ? currentBody.replace(markerRegex, block)
+      : `${currentBody.trimEnd()}\n\n${block}\n`;
+    await params.gh.updateIssue(params.parentIssueNumber, { body: nextBody });
+  } catch {
+    // Fault-tolerant (ADR-0032, Q112)
+  }
 }
 
 export interface RunGoldfishSpecAuditParams {
@@ -77,7 +253,7 @@ export async function runGoldfishSpecAudit(
     "Évalue rigoureusement trois axes :",
     "1. Auto-suffisance de compréhension (`comprehension_self_contained`) : un ingénieur ou agent vierge du contexte peut-il comprendre 100 % des règles métier et contrats techniques sans lire les commentaires de l'issue ? Signale toute décision implicite dans `missing_context_questions`.",
     "2. Zoom-Out / YAGNI (`zoom_out_yagni_passed`) : la spécification évite-t-elle toute sur-ingénierie, abstraction spéculative ou couche inutile (Ponytail 5) ? Signale tout excès dans `overengineering_warnings`.",
-    "3. Implementation Readiness & ASD-STE100 (`implementation_readiness_passed`) : chaque exigence et critère d'acceptation respecte-t-il les règles ASD-STE100 (vocabulaire bijectif `GLOSSARY.md` sans synonymes `_Avoid_`, voix active avec acteur explicite, 1 phrase = 1 action, conditionnelles déterministes `WHEN/IF ... THEN` sans modalité floue `should`/`might`/`if needed`/`correctement`) et est-il directement vérifiable par un test automatisé ? Signale toute violation ou critère flou dans `untestable_criteria`.",
+    "3. Implementation Readiness, ASD-STE100 & EpicGoalContract (`implementation_readiness_passed`, ADR-0032, Q115) : chaque exigence et critère d'acceptation respecte-t-il les règles ASD-STE100 (vocabulaire bijectif `GLOSSARY.md` sans synonymes `_Avoid_`, voix active avec acteur explicite, 1 phrase = 1 action, conditionnelles déterministes `WHEN/IF ... THEN` sans modalité floue `should`/`might`/`if needed`/`correctement`) et est-il directement vérifiable par un test automatisé ? De plus, vérifie la présence, la complétude et la testabilité du contrat de convergence de fonctionnalité (`epic_goal_contract` : `epic_goal_summary`, `required_entrypoints`, `forbidden_stubs`, `end_to_end_verification_criteria`). Signale toute violation, absence de contrat ou critère flou dans `untestable_criteria`.",
     "Renvoie un objet JSON strictement conforme au schéma `goldfish_spec_audit` (`passed: true` uniquement si les 3 axes sont validés)."
   ].join("\n");
 
@@ -103,7 +279,17 @@ export async function runGoldfishSpecAudit(
     "### ADRs :",
     wrapUntrustedContent("untrusted_spec_content", adrsSummary),
     "",
-    `### Fichiers cibles pressentis : ${(params.specArtifacts.target_files_hint ?? []).join(", ") || "aucun"}`
+    `### Fichiers cibles pressentis : ${(params.specArtifacts.target_files_hint ?? []).join(", ") || "aucun"}`,
+    ...(params.specArtifacts.epic_goal_contract
+      ? [
+          "",
+          "### Contrat de convergence de fonctionnalité (`epic_goal_contract`, ADR-0032) :",
+          wrapUntrustedContent(
+            "untrusted_spec_content",
+            JSON.stringify(params.specArtifacts.epic_goal_contract, null, 2)
+          )
+        ]
+      : [])
   ].join("\n");
 
   return await callGeminiJson<GoldfishSpecAuditPayload>({
@@ -147,7 +333,10 @@ function parseLatestSpecManifest(
               ? parsed.targetFilesHint.filter(
                   (f): f is string => typeof f === "string"
                 )
-              : []
+              : [],
+            ...(parsed.epicGoalContract
+              ? { epicGoalContract: parsed.epicGoalContract }
+              : {})
           };
         }
       } catch {
@@ -506,7 +695,13 @@ export async function runGrillAndPlanPhase(params: {
       "  ],",
       `  "spec_path": "docs/specs/${planSlug}.md",`,
       '  "spec_markdown": "<Contenu Markdown intégral et détaillé de la spécification technique et fonctionnelle>",',
-      '  "target_files_hint": ["<chemin/fichier1>", "<chemin/fichier2>"]',
+      '  "target_files_hint": ["<chemin/fichier1>", "<chemin/fichier2>"],',
+      '  "epic_goal_contract": {',
+      '    "epic_goal_summary": "<Résultat observable de bout en bout livré par l\'issue>",',
+      '    "required_entrypoints": ["<Point d\'entrée applicatif/routeur/CLI/export public qui DOIT câbler la fonctionnalité>"],',
+      '    "forbidden_stubs": ["<Simulacres ou implémentations partielles interdits en production>"],',
+      '    "end_to_end_verification_criteria": ["<Scénario d\'intégration transversal vérifiable de bout en bout>"]',
+      "  }",
       "}"
     ].join("\n");
 
@@ -788,7 +983,10 @@ export async function runGrillAndPlanPhase(params: {
       planBranch,
       specPath: specArtifacts.spec_path,
       adrPaths: specArtifacts.adrs.map((a) => a.path),
-      targetFilesHint
+      targetFilesHint,
+      ...(specArtifacts.epic_goal_contract
+        ? { epicGoalContract: specArtifacts.epic_goal_contract }
+        : {})
     };
 
     const specReviewComment = appendEpureCommandsSpoiler(
@@ -879,6 +1077,7 @@ export async function runGrillAndPlanPhase(params: {
       "Tu es l'architecte EPURE chargé de découper la spécification approuvée en un graphe acyclique (DAG) de tickets atomiques TDD.",
       PROMPT_INJECTION_IMMUNITY_CLAUSE,
       "NORME ASD-STE100 POUR LES TICKETS (`acceptance_criteria` et `description`, ADR-0031) : rédige chaque critère d'acceptation à la voix active avec un acteur explicite, 1 phrase = 1 comportement vérifiable (`WHEN <entrée>, <module> returns/throws <sortie exacte>`), en utilisant le vocabulaire bijectif de `GLOSSARY.md` et sans aucun modal flou (`should`, `might`, `if needed`, `correctement`).",
+      "CONVERGENCE DE BOUT EN BOUT (ADR-0032, Q115) : lorsque le graphe comporte plusieurs tickets (> 1), le dernier ticket terminal du DAG (bloqué par les tickets de composants précédents) DOIT explicitement câbler les `required_entrypoints`, éliminer tout `forbidden_stubs` et vérifier les `end_to_end_verification_criteria` afin d'éviter tout code insulaire ('island code').",
       "RÈGLE CRITIQUE : INTERDICTION STRICTE d'utiliser des ellipses ('...', etc.) ou des valeurs tronquées. Chaque champ ('tickets[*].title', 'tickets[*].description', 'tickets[*].acceptance_criteria', 'tickets[*].files_to_create_or_update') DOIT contenir le texte intégral, détaillé et complet.",
       "Produis un objet JSON strictement valide (sans markdown autour) respectant exactement cette structure :",
       "{",
@@ -952,7 +1151,10 @@ export async function runGrillAndPlanPhase(params: {
             ],
       spec_path: candidateSpecPath,
       spec_markdown: existingSpecOnPlanBranch,
-      tickets: ticketDag.tickets
+      tickets: ticketDag.tickets,
+      ...(storedSpecManifest?.epicGoalContract
+        ? { epic_goal_contract: storedSpecManifest.epicGoalContract }
+        : {})
     };
   } else {
     const specSystemInstruction = [
@@ -1178,75 +1380,43 @@ export async function runGrillAndPlanPhase(params: {
     "Ticket ready for autonomous EPURE agent execution"
   );
 
-  const indexToIssueNumber = new Map<number, number>();
-  const createdTicketsManifest: Array<{
-    ticketIssueNumber: number;
-    slug: string;
-    title: string;
-    description: string;
-    acceptanceCriteria: string[];
-    blockedByIssueNumbers: number[];
-    filesToTouch: string[];
-  }> = [];
+  const createdTicketsManifest = await createLinkedPhaseTicketsOnGitHub({
+    gh,
+    parentIssueNumber: issueNumber,
+    phase: 1,
+    spoilerContext: {
+      phase: "tickets",
+      status: "awaiting-human"
+    },
+    tickets: bundle.tickets.map((ticket) => {
+      const ticketTouchesUi = ticket.files_to_create_or_update.some((f) =>
+        /\.(?:tsx|jsx|css|scss|html)$/i.test(f)
+      );
+      const enrichedAcceptanceCriteria = [
+        ...ticket.acceptance_criteria,
+        ...(ticketTouchesUi && designGate
+          ? designGate.ux_acceptance_criteria
+          : [])
+      ];
+      return {
+        index: ticket.index,
+        slug: ticket.slug,
+        title: ticket.title,
+        description: ticket.description,
+        acceptanceCriteria: enrichedAcceptanceCriteria,
+        blockedByIndices: ticket.blocked_by_indices,
+        filesToTouch: ticket.files_to_create_or_update,
+        acceptanceSectionHeading: "Acceptance Criteria (TDD & UX)"
+      };
+    })
+  });
 
-  for (const ticket of bundle.tickets) {
-    const blockerNumbers = ticket.blocked_by_indices
-      .map((idx) => indexToIssueNumber.get(idx))
-      .filter((n): n is number => typeof n === "number");
-
-    const depLines =
-      blockerNumbers.length > 0
-        ? blockerNumbers.map((n) => `blocked_by: #${n}`).join("\n")
-        : "blocked_by: none";
-
-    const ticketTouchesUi = ticket.files_to_create_or_update.some((f) =>
-      /\.(?:tsx|jsx|css|scss|html)$/i.test(f)
-    );
-    const enrichedAcceptanceCriteria = [
-      ...ticket.acceptance_criteria,
-      ...(ticketTouchesUi && designGate
-        ? designGate.ux_acceptance_criteria
-        : [])
-    ];
-
-    const ticketBody = appendEpureCommandsSpoiler(
-      [
-        `Parent Plan: #${issueNumber}`,
-        depLines,
-        "",
-        "## Description",
-        ticket.description,
-        "",
-        "## Acceptance Criteria (TDD & UX)",
-        ...enrichedAcceptanceCriteria.map((c) => `- [ ] ${c}`),
-        "",
-        "## Target Files",
-        ...ticket.files_to_create_or_update.map((f) => `- \`${f}\``)
-      ].join("\n"),
-      {
-        phase: "tickets",
-        status: "awaiting-human",
-        issueNumber
-      }
-    );
-
-    const createdIssue = await gh.createIssue({
-      title: ticket.title,
-      body: ticketBody,
-      labels: ["ready-for-agent"]
-    });
-
-    indexToIssueNumber.set(ticket.index, createdIssue.number);
-    createdTicketsManifest.push({
-      ticketIssueNumber: createdIssue.number,
-      slug: ticket.slug,
-      title: ticket.title,
-      description: ticket.description,
-      acceptanceCriteria: enrichedAcceptanceCriteria,
-      blockedByIssueNumbers: blockerNumbers,
-      filesToTouch: [...ticket.files_to_create_or_update]
-    });
-  }
+  await upsertParentIssueTicketsTasklist({
+    gh,
+    parentIssueNumber: issueNumber,
+    fallbackBody: issue.body,
+    tickets: createdTicketsManifest
+  });
 
   const updated = await updateIssueStateWithCas({
     issueNumber,
@@ -1292,6 +1462,9 @@ export async function runGrillAndPlanPhase(params: {
       `<!-- epure-plan-manifest:${JSON.stringify({
         planBranch,
         specPath: bundle.spec_path,
+        ...(bundle.epic_goal_contract
+          ? { epicGoalContract: bundle.epic_goal_contract }
+          : {}),
         tickets: createdTicketsManifest
       })} -->`
     ].join("\n"),

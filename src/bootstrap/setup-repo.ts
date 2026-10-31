@@ -75,6 +75,7 @@ export interface AgentsConfig {
   readonly providers?: Readonly<Record<string, ProviderConfig>> | undefined;
   readonly merge_policy: StaleBaseMergePolicy;
   readonly max_code_fix_attempts: number;
+  readonly max_epic_phases?: number | undefined;
   readonly max_transient_api_retries: number;
   readonly transient_retry_backoff_seconds: readonly [number, number, number, number];
   readonly llm_request_timeout_seconds: number;
@@ -104,6 +105,7 @@ export interface AgentsConfigOverrides {
   readonly providers?: Readonly<Record<string, ProviderConfig>> | undefined;
   readonly merge_policy?: StaleBaseMergePolicy | undefined;
   readonly max_code_fix_attempts?: number | undefined;
+  readonly max_epic_phases?: number | undefined;
   readonly max_transient_api_retries?: number | undefined;
   readonly transient_retry_backoff_seconds?:
     | readonly [number, number, number, number]
@@ -564,6 +566,14 @@ export function resolveAgentsConfig(
     max_code_fix_attempts:
       overrides.max_code_fix_attempts ??
       DEFAULT_AGENTS_CONFIG.max_code_fix_attempts,
+    ...(overrides.max_epic_phases !== undefined
+      ? {
+          max_epic_phases: Math.min(
+            3,
+            Math.max(1, Math.floor(overrides.max_epic_phases))
+          )
+        }
+      : {}),
     max_transient_api_retries:
       overrides.max_transient_api_retries ??
       DEFAULT_AGENTS_CONFIG.max_transient_api_retries,
@@ -911,6 +921,7 @@ export function parseAgentsYaml(
   let merge_policy: StaleBaseMergePolicy | undefined;
   let task_auto_merge_enabled: boolean | undefined;
   let max_code_fix_attempts: number | undefined;
+  let max_epic_phases: number | undefined;
   let max_transient_api_retries: number | undefined;
   let transient_retry_backoff_seconds:
     | readonly [number, number, number, number]
@@ -1095,6 +1106,8 @@ export function parseAgentsYaml(
         task_auto_merge_enabled = parseBool(val);
       } else if (key === "max_code_fix_attempts") {
         max_code_fix_attempts = parseNum(val);
+      } else if (key === "max_epic_phases") {
+        max_epic_phases = parseNum(val);
       } else if (key === "max_transient_api_retries") {
         max_transient_api_retries = parseNum(val);
       } else if (key === "transient_retry_backoff_seconds") {
@@ -1391,6 +1404,7 @@ export function parseAgentsYaml(
     ...(Object.keys(providers).length > 0 ? { providers } : {}),
     ...(merge_policy ? { merge_policy } : {}),
     ...(max_code_fix_attempts !== undefined ? { max_code_fix_attempts } : {}),
+    ...(max_epic_phases !== undefined ? { max_epic_phases } : {}),
     ...(max_transient_api_retries !== undefined
       ? { max_transient_api_retries }
       : {}),
@@ -1446,6 +1460,7 @@ export function parseAgentsYaml(
   const resolved = resolveAgentsConfig(overrides);
   return {
     ...resolved.config,
+    max_epic_phases: resolved.config.max_epic_phases ?? 2,
     ...(task_auto_merge_enabled !== undefined
       ? { task_auto_merge_enabled }
       : {}),
