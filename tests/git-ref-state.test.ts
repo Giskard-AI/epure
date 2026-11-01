@@ -1,11 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
   buildIssueStateRefName,
+  createGitHubApiRefStateStore,
   createInMemoryGitRefStateStore,
   formatIssueStateMirrorMarkdown,
   updateIssueStateWithCas,
   type EpureIssueState
 } from "../src/state/git-ref-state.js";
+import {
+  createGitHubMockRouter,
+  installFakeGitDataApi
+} from "./fixtures/github-mock-router.js";
 
 describe("Ticket 09 (#10) — Atomic Git ref state (refs/epure/state/*) & concurrent CAS", () => {
   it.each([
@@ -93,6 +98,46 @@ describe("Ticket 09 (#10) — Atomic Git ref state (refs/epure/state/*) & concur
       expect(latestResult.issue_mirror_markdown).toContain(
         `last_processed_comment_id: ${100 + initialMutations}`
       );
+    }
+  );
+
+  it.fails.each([
+    { id: "concurrent-writer-between-read-and-patch-is-not-overwritten-by-force-true" }
+  ])(
+    "createGitHubApiRefStateStore CAS [$id]: a concurrent ref update between the CAS read and the PATCH is detected and retried",
+    async () => {
+      const router = createGitHubMockRouter();
+      const git = installFakeGitDataApi(router, "acme/demo");
+      const store = createGitHubApiRefStateStore({
+        repository: "acme/demo",
+        githubToken: "ghs_test",
+        fetchImpl: router.fetch
+      });
+      await updateIssueStateWithCas({
+        issueNumber: 10,
+        store,
+        mutator: (prev) => ({ ...prev, phase: "implementation" })
+      });
+      git.onBeforeNextRefWrite("refs/epure/state/10", () => {
+        const current = JSON.parse(
+          git.readBlob(git.getRef("refs/epure/state/10")!)!
+        ) as EpureIssueState;
+        git.setRef(
+          "refs/epure/state/10",
+          git.putBlob(JSON.stringify({ ...current, version: 2, status: "cancelled" }))
+        );
+      });
+
+      const result = await updateIssueStateWithCas({
+        issueNumber: 10,
+        store,
+        mutator: (prev) => ({ ...prev, last_processed_comment_id: 42 })
+      });
+
+      expect(result.cas_conflicts_recovered).toBe(1);
+      const final = await store.readRef("refs/epure/state/10");
+      expect(final.state?.status).toBe("cancelled");
+      expect(final.state?.last_processed_comment_id).toBe(42);
     }
   );
 

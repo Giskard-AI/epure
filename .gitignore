@@ -47,6 +47,9 @@ web_modules/
 # Optional REPL history
 .node_repl_history
 
+# Editor local history
+.history/
+
 # Output of 'npm pack'
 *.tgz
 
@@ -109,5 +112,7 @@ Desktop.ini
 docs/.vitepress/cache/
 docs/.vitepress/dist/
 epure.live-test.json
+epure.live-github.json
+*.pem
 .cursor/plans/
 
