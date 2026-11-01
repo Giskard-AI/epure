@@ -192,6 +192,9 @@ _Éviter_ : confusion avec un dépassement du budget d'horloge du runner (`wall_
 **Réponse LLM invalide après relance corrective (`llm_request_invalid`)** : rejet non transitoire d'une requête LLM (`HTTP 400`) ou sortie structurée violant encore les invariants du schéma après les relances correctives avec rétroaction de l'erreur de validation ; déclenche une escalade humaine sans consommer le quota de corrections de code du ticket.
 _Éviter_ : qualifier une sortie invalide d'échec réseau transitoire ou relancer à l'aveugle sans transmettre l'erreur de validation au modèle.
 
+**Refus du modèle LLM (`llm_refusal`)** : réponse Anthropic terminée par `stop_reason: refusal`, signalée par une `LLMError` de `reasonCode` `REFUSAL` ; non relancée, elle déclenche une escalade humaine sans consommer le quota de corrections de code du ticket.
+_Éviter_ : traiter un refus comme une sortie structurée invalide (`llm_request_invalid`) ou relancer la même requête.
+
 **Configuration de modèle manquante (`model_config_missing`)** : absence d'entrée `model` sur l'action et d'au moins une clé `models.planning`, `models.implementation` ou `models.review` dans `.github/agents.yml` ; détectée par `resolvePhaseModels` (`MissingModelConfigError`) uniquement sur les commandes appelant un LLM, avant tout appel, et escaladée en `needs-human` en nommant la ou les clés à renseigner. Aucun modèle de repli n'est substitué, conformément au principe d'absence de bascule automatique de l'ADR-0012.
 _Éviter_ : modèle par défaut implicite, qualifier l'erreur d'échec d'authentification ou de quota fournisseur.
 

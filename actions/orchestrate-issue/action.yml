@@ -51,7 +51,7 @@ inputs:
     required: false
     default: ""
   model:
-    description: "Optional '<provider>/<model>' override for all phases; when empty, models.* from .github/agents.yml apply"
+    description: "Optional '<provider>/<model>' override for all phases; when empty, models.planning, models.implementation and models.review from .github/agents.yml are required (no fallback model)"
     required: false
     default: ""
 outputs:

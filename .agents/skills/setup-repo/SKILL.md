@@ -12,7 +12,7 @@ Use this skill locally from any Skills-compatible coding agent (e.g. Cursor, Cla
 Running `setup-repo` scaffolds **18 files** on a standard full-stack repository (or 15 when `--no-frontend-reviewers` is passed):
 
 1. **Declarative Orchestrator & Security Configuration (3 files)**:
-   - `.github/agents.yml`: Harness (`pi` or `codex`), `models` (`planning`, `implementation`, `review`; defaults `anthropic/claude-sonnet-4-20250514`, `anthropic/claude-sonnet-4-20250514`, `openai/gpt-4.1`), `reviewers_dir` (default `.agents/reviewers`), `llm_environment` (default `epure-agent`), optional `providers` (`os.environ/...`), polyglot `verification.targets` + `deferred_external_workflows`, `web_tools`, and non-weakenable `security_invariants`.
+   - `.github/agents.yml`: Harness (`pi` or `codex`), `models` (`planning`, `implementation`, `review`; required at runtime, no fallback model; `setup-repo` writes `anthropic/claude-sonnet-4-20250514`, `anthropic/claude-sonnet-4-20250514`, `openai/gpt-4.1` and fills keys missing from an existing file), `reviewers_dir` (default `.agents/reviewers`), `llm_environment` (default `epure-agent`), optional `providers` (`os.environ/...`), polyglot `verification.targets` + `deferred_external_workflows`, `web_tools`, and non-weakenable `security_invariants`.
    - `.github/zizmor.yml`: Zizmor static analysis configuration enforcing `dangerous-triggers` and least-privilege workflow auditing.
    - `renovate.json`: Hardened Renovate configuration targeting `dev`, pinning GitHub Action digests, disabling post-install scripts (`ignore-scripts=true`), and enforcing 3-to-14-day quarantine cooldowns (`minimumReleaseAge`).
 2. **Caller Workflows Pinned by 40-Character Commit SHA (5 files)**:
