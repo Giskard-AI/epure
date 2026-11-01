@@ -326,14 +326,21 @@ describeLive(
         }
       });
 
-      it("PATCH git/refs on a blob target without force is 422 'Update is not a fast forward'", async () => {
+      it("PATCH git/refs on a blob target without force is accepted with 200 (no fast-forward protection)", async () => {
         const blobA = await api<{ sha: string }>("POST", `${R}/git/blobs`, { content: "{\"v\":1}", encoding: "utf-8" });
         const blobB = await api<{ sha: string }>("POST", `${R}/git/blobs`, { content: "{\"v\":2}", encoding: "utf-8" });
         const ref = `refs/epure/state/${NS}/blob-parity`;
         expect((await api("POST", `${R}/git/refs`, { ref, sha: blobA.data.sha })).status).toBe(201);
-        const res = await api<{ message?: string }>("PATCH", `${R}/git/${ref}`, { sha: blobB.data.sha, force: false });
-        expect(res.status).toBe(422);
-        expect(res.data.message).toBe("Update is not a fast forward");
+        const res = await api<{ ref: string; object: { sha: string; type: string } }>(
+          "PATCH",
+          `${R}/git/${ref}`,
+          { sha: blobB.data.sha, force: false }
+        );
+        const after = await api<{ object: { sha: string } }>("GET", `${R}/git/${ref.replace(/^refs\//, "ref/")}`);
+
+        expect(res.status).toBe(200);
+        expect(res.data).toMatchObject({ ref, object: { sha: blobB.data.sha, type: "blob" } });
+        expect(after.data.object.sha).toBe(blobB.data.sha);
       });
     });
 
@@ -416,6 +423,7 @@ describeLive(
       let prNumber = 0;
       let headBranch = "";
       let headSha = "";
+      let mergeSha = "";
 
       beforeAll(async () => {
         const base = await createBranch("merge-base", baseSha);
@@ -430,23 +438,23 @@ describeLive(
       }, HOOK_TIMEOUT_MS);
 
       it("PUT pulls/:n/merge with a stale sha is 409, then with the head sha merges 200", async () => {
-        const stale = await api("PUT", `${R}/pulls/${prNumber}/merge`, { sha: baseSha, merge_method: "squash" });
-        const merged = await api<{ merged: boolean }>("PUT", `${R}/pulls/${prNumber}/merge`, { sha: headSha, merge_method: "squash" });
+        const stale = await api<{ message: string }>("PUT", `${R}/pulls/${prNumber}/merge`, { sha: baseSha, merge_method: "squash" });
+        const merged = await api<{ merged: boolean; message: string; sha: string }>("PUT", `${R}/pulls/${prNumber}/merge`, { sha: headSha, merge_method: "squash" });
         expect(stale.status).toBe(409);
+        expect(stale.data.message).toBe("Head branch was modified. Review and try the merge again.");
         expect(merged.status).toBe(200);
-        expect(merged.data.merged).toBe(true);
+        expect(merged.data).toMatchObject({ merged: true, message: "Pull Request successfully merged" });
+        expect(merged.data.sha).toMatch(/^[0-9a-f]{40}$/);
+        mergeSha = merged.data.sha;
       });
 
-      it("current: a second merge returns 405 and the rest client throws", async () => {
-        const again = await api<{ message: string }>("PUT", `${R}/pulls/${prNumber}/merge`, { sha: headSha, merge_method: "squash" });
-        expect(again.status).toBe(405);
-        const gh = createGitHubRestHelper({ repository: cfg.repository, token });
-        await expect(
-          gh.mergePullRequest(prNumber, { headBranch, baseBranch: `${NS}/merge-base`, commitTitle: "again" })
-        ).rejects.toThrow("HTTP 405");
+      it("a second merge of an already-merged PR returns 200 with the original merge sha", async () => {
+        const again = await api<{ merged: boolean; message: string; sha: string }>("PUT", `${R}/pulls/${prNumber}/merge`, { sha: headSha, merge_method: "squash" });
+        expect(again.status).toBe(200);
+        expect(again.data).toEqual({ merged: true, message: "Pull Request successfully merged", sha: mergeSha });
       });
 
-      it.fails("target: rest client merge is idempotent on an already-merged PR", async () => {
+      it("rest client merge is idempotent on an already-merged PR", async () => {
         const gh = createGitHubRestHelper({ repository: cfg.repository, token });
         await expect(
           gh.mergePullRequest(prNumber, { headBranch, baseBranch: `${NS}/merge-base`, commitTitle: "again" })

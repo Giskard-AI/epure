@@ -226,7 +226,7 @@ describe("Fake Git Database API (refs, blobs, commits)", () => {
     { id: "non-fast-forward-without-force-rejected-422", from: "child", to: "sibling", force: false, expectedStatus: 422, expectedRef: "child" },
     { id: "rewind-without-force-rejected-422", from: "child", to: "root", force: false, expectedStatus: 422, expectedRef: "child" },
     { id: "non-fast-forward-with-force-accepted", from: "child", to: "sibling", force: true, expectedStatus: 200, expectedRef: "sibling" },
-    { id: "blob-target-without-force-rejected-422", from: "blobA", to: "blobB", force: false, expectedStatus: 422, expectedRef: "blobA" },
+    { id: "blob-target-without-force-accepted-no-fast-forward-protection", from: "blobA", to: "blobB", force: false, expectedStatus: 200, expectedRef: "blobB" },
     { id: "blob-target-with-force-accepted", from: "blobA", to: "blobB", force: true, expectedStatus: 200, expectedRef: "blobB" }
   ])("PATCH git/refs honors force [$id]", async ({ from, to, force, expectedStatus, expectedRef }) => {
     const { router, git, root, child, sibling } = setup();

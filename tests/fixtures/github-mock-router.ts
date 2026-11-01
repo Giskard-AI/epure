@@ -368,7 +368,9 @@ export function installFakeGitDataApi(
       if (!sha || !objects.has(sha)) {
         return unprocessable("Object does not exist");
       }
-      if (force !== true && !isAncestor(current, sha)) {
+      // Real GitHub only checks fast-forward between commits; a blob-target ref moves freely.
+      const bothCommits = objects.get(current)?.type === "commit" && objects.get(sha)?.type === "commit";
+      if (force !== true && bothCommits && !isAncestor(current, sha)) {
         return unprocessable("Update is not a fast forward");
       }
       refs.set(ref, sha);
