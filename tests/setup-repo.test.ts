@@ -1,5 +1,12 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -134,7 +141,7 @@ describe("1. Dry-run simulation & guided application (planAndApplyRepoSetup)", (
     }
   });
 
-  it("applies the minimal functional setup and .cursor/agents/ roster on disk and reports required human interventions when dryRun is false", () => {
+  it("applies the minimal functional setup and .agents/reviewers/ roster on disk and reports required human interventions when dryRun is false", () => {
     const tempRepoDir = mkdtempSync(join(tmpdir(), "epure-setup-apply-"));
     try {
       const result = planAndApplyRepoSetup({
@@ -157,9 +164,9 @@ describe("1. Dry-run simulation & guided application (planAndApplyRepoSetup)", (
           ".github/workflows/epure-check.yml",
           ".github/workflows/pr-title.yml",
           ".github/workflows/release.yml",
-          ".cursor/agents/domain-backend-reviewer.md",
-          ".cursor/agents/frontend-reviewer.md",
-          ".cursor/agents/user-advocate.md"
+          ".agents/reviewers/domain-backend-reviewer.md",
+          ".agents/reviewers/frontend-reviewer.md",
+          ".agents/reviewers/user-advocate.md"
         ])
       );
 
@@ -174,12 +181,15 @@ describe("1. Dry-run simulation & guided application (planAndApplyRepoSetup)", (
       expect(agentsYmlContent).toContain("max_concurrent_tasks_per_feature: 3");
       expect(agentsYmlContent).toContain("trace_retention_days: 30");
       expect(agentsYmlContent).toContain("preview_retention_days: 14");
+      expect(agentsYmlContent).toContain("reviewers_dir: .agents/reviewers");
+      expect(agentsYmlContent).toContain("llm_environment: epure-agent");
 
       const issueWorkflowContent = readFileSync(
         join(tempRepoDir, ".github", "workflows", "epure-issue-command.yml"),
         "utf8"
       );
       expect(issueWorkflowContent).toContain("timeout-minutes: 60");
+      expect(issueWorkflowContent).toContain("    environment: epure-agent");
 
       expect(result.human_interventions.length).toBeGreaterThanOrEqual(3);
       expect(result.human_interventions.map((h) => h.id)).toEqual(
@@ -204,10 +214,12 @@ describe("2. .github/agents.yml defaults (Q78) and non-weakenable security invar
     expect(resolved.config).toMatchObject({
       harness: "pi",
       models: {
-        planning: "claude-sonnet-4-20250514",
-        implementation: "claude-sonnet-4-20250514",
-        review: "gpt-4.1"
+        planning: "anthropic/claude-sonnet-4-20250514",
+        implementation: "anthropic/claude-sonnet-4-20250514",
+        review: "openai/gpt-4.1"
       },
+      reviewers_dir: ".agents/reviewers",
+      llm_environment: "epure-agent",
       merge_policy: "strict",
       max_code_fix_attempts: 3,
       max_transient_api_retries: 4,
@@ -297,6 +309,290 @@ describe("2. .github/agents.yml defaults (Q78) and non-weakenable security invar
     const res = resolveAgentsConfig(overrides);
     expect(res.valid).toBe(expectedValid);
     expect(res.error_code).toBe(expectedErrorCode);
+  });
+
+  it.each([
+    {
+      id: "reviewers-dir-defaults-to-agents-reviewers",
+      overrides: {},
+      expectedValid: true,
+      expectedReviewersDir: ".agents/reviewers"
+    },
+    {
+      id: "reviewers-dir-accepts-custom-cursor-agents",
+      overrides: { reviewers_dir: ".cursor/agents" },
+      expectedValid: true,
+      expectedReviewersDir: ".cursor/agents"
+    },
+    {
+      id: "reviewers-dir-normalizes-trailing-slashes",
+      overrides: { reviewers_dir: ".claude/agents//" },
+      expectedValid: true,
+      expectedReviewersDir: ".claude/agents"
+    },
+    {
+      id: "reviewers-dir-rejects-empty-value",
+      overrides: { reviewers_dir: "" },
+      expectedValid: false,
+      expectedReviewersDir: ".agents/reviewers"
+    },
+    {
+      id: "reviewers-dir-rejects-repository-root-dot",
+      overrides: { reviewers_dir: "." },
+      expectedValid: false,
+      expectedReviewersDir: ".agents/reviewers"
+    },
+    {
+      id: "reviewers-dir-rejects-absolute-posix-path",
+      overrides: { reviewers_dir: "/abs" },
+      expectedValid: false,
+      expectedReviewersDir: ".agents/reviewers"
+    },
+    {
+      id: "reviewers-dir-rejects-windows-drive-letter-path",
+      overrides: { reviewers_dir: "C:\\reviewers" },
+      expectedValid: false,
+      expectedReviewersDir: ".agents/reviewers"
+    },
+    {
+      id: "reviewers-dir-rejects-parent-traversal-segment",
+      overrides: { reviewers_dir: "../x" },
+      expectedValid: false,
+      expectedReviewersDir: ".agents/reviewers"
+    },
+    {
+      id: "reviewers-dir-rejects-embedded-parent-traversal-segment",
+      overrides: { reviewers_dir: "docs/../../x" },
+      expectedValid: false,
+      expectedReviewersDir: ".agents/reviewers"
+    },
+    {
+      id: "reviewers-dir-rejects-src-root",
+      overrides: { reviewers_dir: "src" },
+      expectedValid: false,
+      expectedReviewersDir: ".agents/reviewers"
+    },
+    {
+      id: "reviewers-dir-rejects-directory-under-src",
+      overrides: { reviewers_dir: "src/reviewers" },
+      expectedValid: false,
+      expectedReviewersDir: ".agents/reviewers"
+    }
+  ])("$id", ({ overrides, expectedValid, expectedReviewersDir }) => {
+    const res = resolveAgentsConfig(overrides);
+    expect(res.valid).toBe(expectedValid);
+    expect(res.error_code).toBe(
+      expectedValid ? "NONE" : "SECURITY_INVARIANT_VIOLATION"
+    );
+    expect(res.config.reviewers_dir).toBe(expectedReviewersDir);
+  });
+
+  it.each([
+    {
+      id: "llm-environment-defaults-to-epure-agent",
+      overrides: {},
+      expectedValid: true,
+      expectedLlmEnvironment: "epure-agent"
+    },
+    {
+      id: "llm-environment-accepts-custom-name-with-dots-dashes-underscores",
+      overrides: { llm_environment: "llm_prod-v2.eu" },
+      expectedValid: true,
+      expectedLlmEnvironment: "llm_prod-v2.eu"
+    },
+    {
+      id: "llm-environment-rejects-empty-value",
+      overrides: { llm_environment: "" },
+      expectedValid: false,
+      expectedLlmEnvironment: "epure-agent"
+    },
+    {
+      id: "llm-environment-rejects-whitespace-inside-name",
+      overrides: { llm_environment: "my env" },
+      expectedValid: false,
+      expectedLlmEnvironment: "epure-agent"
+    },
+    {
+      id: "llm-environment-rejects-yaml-injection-payload",
+      overrides: { llm_environment: "prod\n    permissions: write-all" },
+      expectedValid: false,
+      expectedLlmEnvironment: "epure-agent"
+    }
+  ])("$id", ({ overrides, expectedValid, expectedLlmEnvironment }) => {
+    const res = resolveAgentsConfig(overrides);
+    expect(res.valid).toBe(expectedValid);
+    expect(res.error_code).toBe(
+      expectedValid ? "NONE" : "SECURITY_INVARIANT_VIOLATION"
+    );
+    expect(res.config.llm_environment).toBe(expectedLlmEnvironment);
+  });
+});
+
+describe("2b. Configurable reviewers_dir, llm_environment and models (planAndApplyRepoSetup)", () => {
+  it.each([
+    {
+      id: "default-configuration-uses-agents-reviewers-epure-agent-and-provider-prefixed-models",
+      agentsOverrides: undefined,
+      expectedReviewersDir: ".agents/reviewers",
+      expectedLlmEnvironment: "epure-agent",
+      expectedModels: {
+        planning: "anthropic/claude-sonnet-4-20250514",
+        implementation: "anthropic/claude-sonnet-4-20250514",
+        review: "openai/gpt-4.1"
+      }
+    },
+    {
+      id: "custom-configuration-lands-in-agents-yml-workflow-environment-and-roster-paths",
+      agentsOverrides: {
+        reviewers_dir: ".cursor/agents",
+        llm_environment: "llm-prod",
+        models: {
+          planning: "google/gemini-2.5-pro",
+          implementation: "openai/gpt-5.4",
+          review: "anthropic/claude-3-7-sonnet"
+        }
+      },
+      expectedReviewersDir: ".cursor/agents",
+      expectedLlmEnvironment: "llm-prod",
+      expectedModels: {
+        planning: "google/gemini-2.5-pro",
+        implementation: "openai/gpt-5.4",
+        review: "anthropic/claude-3-7-sonnet"
+      }
+    }
+  ])(
+    "$id",
+    ({
+      agentsOverrides,
+      expectedReviewersDir,
+      expectedLlmEnvironment,
+      expectedModels
+    }) => {
+      const tempRepoDir = mkdtempSync(join(tmpdir(), "epure-setup-config-"));
+      try {
+        const firstPass = planAndApplyRepoSetup({
+          repository: "acme-org/payments",
+          repoRootDir: tempRepoDir,
+          dryRun: false,
+          agentsOverrides
+        });
+        expect(firstPass.status).toBe("applied");
+        expect(firstPass.agents_config.reviewers_dir).toBe(
+          expectedReviewersDir
+        );
+        expect(firstPass.agents_config.llm_environment).toBe(
+          expectedLlmEnvironment
+        );
+        expect(firstPass.agents_config.models).toEqual(expectedModels);
+        expect(
+          firstPass.planned_reviewer_roster.every((r) =>
+            r.path.startsWith(`${expectedReviewersDir}/`)
+          )
+        ).toBe(true);
+        expect(
+          existsSync(
+            join(tempRepoDir, expectedReviewersDir, "security-reviewer.md")
+          )
+        ).toBe(true);
+
+        const agentsYmlContent = readFileSync(
+          join(tempRepoDir, ".github", "agents.yml"),
+          "utf8"
+        );
+        expect(agentsYmlContent).toContain(
+          `reviewers_dir: ${expectedReviewersDir}`
+        );
+        expect(agentsYmlContent).toContain(
+          `llm_environment: ${expectedLlmEnvironment}`
+        );
+        expect(agentsYmlContent).toContain(
+          `planning: ${expectedModels.planning}`
+        );
+
+        const issueWorkflow = firstPass.planned_workflows.find(
+          (w) => w.path === ".github/workflows/epure-issue-command.yml"
+        );
+        expect(issueWorkflow?.content).toContain(
+          `    environment: ${expectedLlmEnvironment}\n`
+        );
+        const secondPass = planAndApplyRepoSetup({
+          repository: "acme-org/payments",
+          repoRootDir: tempRepoDir,
+          dryRun: false
+        });
+        expect(secondPass.mutated_files).toHaveLength(0);
+        expect(secondPass.agents_config_action).toBe("noop");
+        expect(secondPass.agents_config.reviewers_dir).toBe(
+          expectedReviewersDir
+        );
+        expect(secondPass.agents_config.llm_environment).toBe(
+          expectedLlmEnvironment
+        );
+        expect(secondPass.agents_config.models).toEqual(expectedModels);
+      } finally {
+        rmSync(tempRepoDir, { recursive: true, force: true });
+      }
+    }
+  );
+
+  it.each([
+    {
+      id: "rejects-unsafe-reviewers-dir-override",
+      agentsOverrides: { reviewers_dir: "../outside" }
+    },
+    {
+      id: "rejects-unsafe-llm-environment-override",
+      agentsOverrides: { llm_environment: "bad env" }
+    }
+  ])("$id", ({ agentsOverrides }) => {
+    const tempRepoDir = mkdtempSync(join(tmpdir(), "epure-setup-reject-"));
+    try {
+      const result = planAndApplyRepoSetup({
+        repository: "acme-org/payments",
+        repoRootDir: tempRepoDir,
+        dryRun: false,
+        agentsOverrides
+      });
+      expect(result.status).toBe("error");
+      expect(result.error_code).toBe("SECURITY_INVARIANT_VIOLATION");
+      expect(result.mutated_files).toHaveLength(0);
+    } finally {
+      rmSync(tempRepoDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    {
+      id: "falls-back-to-default-reviewers-dir-when-existing-agents-yml-has-absolute-path",
+      existingAgentsYml: "harness: pi\nreviewers_dir: /etc/reviewers\n"
+    },
+    {
+      id: "falls-back-to-default-llm-environment-when-existing-agents-yml-has-invalid-name",
+      existingAgentsYml: "harness: pi\nllm_environment: bad env\n"
+    }
+  ])("$id", ({ existingAgentsYml }) => {
+    const tempRepoDir = mkdtempSync(join(tmpdir(), "epure-setup-existing-"));
+    try {
+      mkdirSync(join(tempRepoDir, ".github"), { recursive: true });
+      writeFileSync(
+        join(tempRepoDir, ".github", "agents.yml"),
+        existingAgentsYml
+      );
+      const result = planAndApplyRepoSetup({
+        repository: "acme-org/payments",
+        repoRootDir: tempRepoDir,
+        dryRun: true
+      });
+      expect(result.agents_config.reviewers_dir).toBe(".agents/reviewers");
+      expect(result.agents_config.llm_environment).toBe("epure-agent");
+      expect(
+        result.planned_reviewer_roster.every((r) =>
+          r.path.startsWith(".agents/reviewers/")
+        )
+      ).toBe(true);
+    } finally {
+      rmSync(tempRepoDir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -472,6 +768,99 @@ describe("5. Pre-bundled CLI (dist/cli/setup-repo.mjs) & skill (.agents/skills/s
       "refs/tags/v*"
     ]);
   });
+
+  it.each([
+    {
+      id: "cli-without-flags-uses-agnostic-defaults",
+      extraArgs: [] as string[],
+      expectedReviewersDir: ".agents/reviewers",
+      expectedLlmEnvironment: "epure-agent",
+      expectedModels: {
+        planning: "anthropic/claude-sonnet-4-20250514",
+        implementation: "anthropic/claude-sonnet-4-20250514",
+        review: "openai/gpt-4.1"
+      }
+    },
+    {
+      id: "cli-reviewers-dir-llm-env-and-model-flags-set-all-phases",
+      extraArgs: [
+        "--reviewers-dir",
+        ".cursor/agents",
+        "--llm-env",
+        "llm-prod",
+        "--model",
+        "google/gemini-2.5-pro"
+      ],
+      expectedReviewersDir: ".cursor/agents",
+      expectedLlmEnvironment: "llm-prod",
+      expectedModels: {
+        planning: "google/gemini-2.5-pro",
+        implementation: "google/gemini-2.5-pro",
+        review: "google/gemini-2.5-pro"
+      }
+    },
+    {
+      id: "cli-per-phase-model-flags-override-model-flag",
+      extraArgs: [
+        "--model",
+        "google/gemini-2.5-pro",
+        "--planning-model",
+        "anthropic/claude-3-7-sonnet",
+        "--review-model",
+        "openai/gpt-5.4"
+      ],
+      expectedReviewersDir: ".agents/reviewers",
+      expectedLlmEnvironment: "epure-agent",
+      expectedModels: {
+        planning: "anthropic/claude-3-7-sonnet",
+        implementation: "google/gemini-2.5-pro",
+        review: "openai/gpt-5.4"
+      }
+    }
+  ])(
+    "$id",
+    ({
+      extraArgs,
+      expectedReviewersDir,
+      expectedLlmEnvironment,
+      expectedModels
+    }) => {
+      const output = execFileSync(
+        process.execPath,
+        [
+          BUNDLED_SETUP_REPO_CLI_PATH,
+          "--repo",
+          "acme-org/payments",
+          "--dry-run",
+          "--json",
+          ...extraArgs
+        ],
+        { encoding: "utf8" }
+      );
+      const parsed = JSON.parse(output) as {
+        agents_config: {
+          reviewers_dir: string;
+          llm_environment: string;
+          models: Record<string, string>;
+        };
+        planned_workflows: Array<{ path: string; content: string }>;
+        planned_reviewer_roster: Array<{ path: string }>;
+      };
+      expect(parsed.agents_config.reviewers_dir).toBe(expectedReviewersDir);
+      expect(parsed.agents_config.llm_environment).toBe(expectedLlmEnvironment);
+      expect(parsed.agents_config.models).toEqual(expectedModels);
+      expect(
+        parsed.planned_workflows.find(
+          (w) => w.path === ".github/workflows/epure-issue-command.yml"
+        )?.content
+      ).toContain(`    environment: ${expectedLlmEnvironment}\n`);
+      expect(
+        parsed.planned_reviewer_roster.every((r) =>
+          r.path.startsWith(`${expectedReviewersDir}/`)
+        )
+      ).toBe(true);
+    }
+  );
 
   it.each([
     {

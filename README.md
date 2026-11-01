@@ -20,13 +20,13 @@ Open-source framework of **GitHub Actions Reusable Workflows**, **TypeScript Cus
 
 ## Quickstart: Bootstrap a Repository with the `/setup-repo` Skill
 
-The preferred way to onboard a new or existing repository is to invoke the **`/setup-repo`** skill (`.agents/skills/setup-repo/SKILL.md`) inside your coding agent (Cursor, Claude Code, Pi, or Codex):
+The preferred way to onboard a new or existing repository is to invoke the **`/setup-repo`** skill (`.agents/skills/setup-repo/SKILL.md`) inside any Skills-compatible coding agent:
 
 ```text
 /setup-repo <owner>/<repo>
 ```
 
-The agent inspects your repository's stack and domain modules, guides you through creating the 2 GitHub Apps and environment-scoped secrets (`setup-github-apps-wizard.sh --repo <owner>/<repo> --llm-env <env-name>`), runs `dist/cli/setup-repo.mjs --dry-run` before `--apply --apply-github-settings` (3 Repository Rulesets + squash-only governance), and **dynamically designs your `.cursor/agents/*.md` multi-agent reviewer roster** tailored to your codebase.
+The agent inspects your repository's stack and domain modules, guides you through creating the 2 GitHub Apps and environment-scoped secrets (`setup-github-apps-wizard.sh --repo <owner>/<repo> --llm-env <env-name>`), runs `dist/cli/setup-repo.mjs --dry-run` before `--apply --apply-github-settings` (3 Repository Rulesets + squash-only governance), and **dynamically designs your multi-agent reviewer roster** (`.agents/reviewers/*.md` by default, configurable with `--reviewers-dir`) tailored to your codebase.
 
 ---
 

@@ -41,7 +41,7 @@ EPURE is built from the ground up around **Defense-in-Depth**, **Least Privilege
 ### How the Review Pipeline Works (Q92–Q96)
 
 1. **Trusted `dev` Roster Loading & Prompt-Injection Defense (OWASP LLM01)**:
-   - Reviewer prompts (`.cursor/agents/*.md`) are **always** loaded from the trusted `dev` branch (with fallback to EPURE's embedded canonical templates), never from the untrusted `task/*` branch under review.
+   - Reviewer prompts (`<reviewers_dir>/*.md`, default `.agents/reviewers/*.md`) are **always** loaded from the trusted `dev` branch (with fallback to EPURE's embedded canonical templates), never from the untrusted `task/*` branch under review.
    - All PR diffs, commit messages, and issue comments are wrapped inside `<untrusted_pr_diff>` XML delimiters with explicit instructions to ignore any embedded prompt-override directives.
 2. **Dynamic Selection (Up to 4 Specialists + `spec-parity-reviewer`)**:
    - Based on the files touched in the PR diff, EPURE selects up to 4 relevant reviewers from the roster (`domain-backend-reviewer`, `frontend-reviewer`, `infra-reviewer`, `architecture-reviewer`, `security-reviewer`, `standards-reviewer`, `accessibility-reviewer`, `design-reviewer`, `user-advocate`) alongside the mandatory `spec-parity-reviewer`.

@@ -5691,7 +5691,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <ul>
           <li>Multi-Provider LLMClient supports Gemini, OpenAI, Azure OpenAI, and Anthropic with credential scrubbing</li>
           <li>Phase A dependency install (controlled net, 0 secrets) -&gt; Phase B tests in bwrap/landrun --unshare-net + rtk</li>
-          <li>Read-only bind mounts protect .git, .github, and .cursor inside the sandbox</li>
+          <li>Workspace writes into .git are rejected; task/* changes to workflows, agents.yml, or reviewers_dir escalate to needs-human</li>
         </ul>
       </div>
 
@@ -5701,7 +5701,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <h3>Prompt-Injection Defense &amp; SSRF-Safe Web Tools</h3>
         </div>
         <ul>
-          <li>Reviewer prompts (.cursor/agents/*.md) load strictly from dev; diffs wrap in &lt;untrusted_pr_diff&gt;</li>
+          <li>Reviewer prompts (reviewers_dir, default .agents/reviewers/*.md) load strictly from dev; diffs wrap in &lt;untrusted_pr_diff&gt;</li>
           <li>Read-only web_search &amp; web_fetch block RFC1918/loopback/link-local/metadata IPs against SSRF</li>
           <li>Fetched web pages are sanitized and wrapped inside &lt;untrusted_web_content&gt; XML boundaries</li>
         </ul>

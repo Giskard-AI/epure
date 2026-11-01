@@ -3,7 +3,8 @@ import { execFileSync } from "node:child_process";
 import type { CustomDomainReviewerSpec } from "../review/reviewer-roster.js";
 import {
   applyGitHubRepositoryGovernance,
-  planAndApplyRepoSetup
+  planAndApplyRepoSetup,
+  type AgentsConfigOverrides
 } from "./setup-repo.js";
 
 function parseArgs(argv: readonly string[]): {
@@ -13,6 +14,7 @@ function parseArgs(argv: readonly string[]): {
   requirePrApprovalsOnDev: number | undefined;
   includeFrontendReviewers: boolean | undefined;
   customDomainSpecialists: readonly CustomDomainReviewerSpec[] | undefined;
+  agentsOverrides: AgentsConfigOverrides;
   applyGithubSettings: boolean;
   githubToken: string | undefined;
   agentAppIntegrationId: number | undefined;
@@ -26,6 +28,12 @@ function parseArgs(argv: readonly string[]): {
   let requirePrApprovalsOnDev: number | undefined;
   let includeFrontendReviewers: boolean | undefined;
   let customDomainSpecialists: CustomDomainReviewerSpec[] | undefined;
+  let reviewersDir: string | undefined;
+  let llmEnvironment: string | undefined;
+  let allPhasesModel: string | undefined;
+  let planningModel: string | undefined;
+  let implementationModel: string | undefined;
+  let reviewModel: string | undefined;
   let applyGithubSettings = false;
   let githubToken: string | undefined;
   let agentAppIntegrationId: number | undefined;
@@ -64,6 +72,24 @@ function parseArgs(argv: readonly string[]): {
             "Enforce alignment with GLOSSARY.md and docs/adr/*.md."
           ]
         }));
+    } else if (arg === "--reviewers-dir" && argv[i + 1]) {
+      reviewersDir = argv[i + 1];
+      i += 1;
+    } else if (arg === "--llm-env" && argv[i + 1]) {
+      llmEnvironment = argv[i + 1];
+      i += 1;
+    } else if (arg === "--model" && argv[i + 1]) {
+      allPhasesModel = argv[i + 1];
+      i += 1;
+    } else if (arg === "--planning-model" && argv[i + 1]) {
+      planningModel = argv[i + 1];
+      i += 1;
+    } else if (arg === "--implementation-model" && argv[i + 1]) {
+      implementationModel = argv[i + 1];
+      i += 1;
+    } else if (arg === "--review-model" && argv[i + 1]) {
+      reviewModel = argv[i + 1];
+      i += 1;
     } else if (arg === "--github-token" && argv[i + 1]) {
       githubToken = argv[i + 1];
       i += 1;
@@ -84,6 +110,19 @@ function parseArgs(argv: readonly string[]): {
     }
   }
 
+  const models = {
+    ...(allPhasesModel
+      ? {
+          planning: allPhasesModel,
+          implementation: allPhasesModel,
+          review: allPhasesModel
+        }
+      : {}),
+    ...(planningModel ? { planning: planningModel } : {}),
+    ...(implementationModel ? { implementation: implementationModel } : {}),
+    ...(reviewModel ? { review: reviewModel } : {})
+  };
+
   return {
     repository,
     repoRootDir,
@@ -91,6 +130,13 @@ function parseArgs(argv: readonly string[]): {
     requirePrApprovalsOnDev,
     includeFrontendReviewers,
     customDomainSpecialists,
+    agentsOverrides: {
+      ...(reviewersDir !== undefined ? { reviewers_dir: reviewersDir } : {}),
+      ...(llmEnvironment !== undefined
+        ? { llm_environment: llmEnvironment }
+        : {}),
+      ...(Object.keys(models).length > 0 ? { models } : {})
+    },
     applyGithubSettings,
     githubToken,
     agentAppIntegrationId,
@@ -124,6 +170,7 @@ async function main(): Promise<void> {
     requirePrApprovalsOnDev: args.requirePrApprovalsOnDev,
     includeFrontendReviewers: args.includeFrontendReviewers,
     customDomainSpecialists: args.customDomainSpecialists,
+    agentsOverrides: args.agentsOverrides,
     dryRun: args.dryRun
   });
 

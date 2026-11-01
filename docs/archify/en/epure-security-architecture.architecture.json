@@ -155,14 +155,14 @@
       "items": [
         "Multi-Provider LLMClient supports Gemini, OpenAI, Azure OpenAI, and Anthropic with credential scrubbing",
         "Phase A dependency install (controlled net, 0 secrets) -> Phase B tests in bwrap/landrun --unshare-net + rtk",
-        "Read-only bind mounts protect .git, .github, and .cursor inside the sandbox"
+        "Workspace writes into .git are rejected; task/* changes to workflows, agents.yml, or reviewers_dir escalate to needs-human"
       ]
     },
     {
       "dot": "emerald",
       "title": "Prompt-Injection Defense & SSRF-Safe Web Tools",
       "items": [
-        "Reviewer prompts (.cursor/agents/*.md) load strictly from dev; diffs wrap in <untrusted_pr_diff>",
+        "Reviewer prompts (reviewers_dir, default .agents/reviewers/*.md) load strictly from dev; diffs wrap in <untrusted_pr_diff>",
         "Read-only web_search & web_fetch block RFC1918/loopback/link-local/metadata IPs against SSRF",
         "Fetched web pages are sanitized and wrapped inside <untrusted_web_content> XML boundaries"
       ]

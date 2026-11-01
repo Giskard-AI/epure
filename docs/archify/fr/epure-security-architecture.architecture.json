@@ -164,14 +164,14 @@
       "items": [
         "LLMClient Multi-Provider supporte Gemini, OpenAI, Azure OpenAI et Anthropic avec purge des clés",
         "Phase A installation (réseau contrôlé, 0 secret) -> Phase B tests sous bwrap/landrun --unshare-net + rtk",
-        "Montages en lecture seule protégeant .git, .github et .cursor à l'intérieur de la sandbox"
+        "Écritures dans .git refusées ; modifications task/* des workflows, d'agents.yml ou de reviewers_dir escaladées en needs-human"
       ]
     },
     {
       "dot": "emerald",
       "title": "Défense Prompt-Injection & Outils Web Anti-SSRF",
       "items": [
-        "Prompts des reviewers (.cursor/agents/*.md) chargés depuis dev ; diffs isolés dans <untrusted_pr_diff>",
+        "Prompts des reviewers (reviewers_dir, .agents/reviewers/*.md par défaut) chargés depuis dev ; diffs isolés dans <untrusted_pr_diff>",
         "Outils lecture seule web_search & web_fetch bloquant les IP RFC1918/loopback/link-local/metadata (anti-SSRF)",
         "Contenus web nettoyés et encapsulés dans des balises XML <untrusted_web_content>"
       ]

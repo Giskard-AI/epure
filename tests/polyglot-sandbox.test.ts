@@ -374,27 +374,54 @@ describe("EPURE v1.4.0 — Polyglot Verification Discovery, Workspace Sandbox & 
         expectedSensitive: [] as string[]
       },
       {
-        id: "blocks-sensitive-paths-on-task-branch-before-stage1",
+        id: "blocks-sensitive-paths-and-default-reviewers-dir-on-task-branch-before-stage1",
         files: [
           ".github/agents.yml",
           ".github/workflows/ci.yml",
-          ".cursor/agents/security-reviewer.md",
+          ".agents/reviewers/security-reviewer.md",
           ".env.production"
         ],
         isTaskBranch: true,
+        reviewersDir: undefined as string | undefined,
         expectedAllowed: false,
         expectedTraversal: [] as string[],
         expectedSensitive: [
           ".github/agents.yml",
           ".github/workflows/ci.yml",
-          ".cursor/agents/security-reviewer.md",
+          ".agents/reviewers/security-reviewer.md",
           ".env.production"
         ]
+      },
+      {
+        id: "blocks-custom-reviewers-dir-and-default-reviewers-dir-on-task-branch",
+        files: [
+          ".cursor/agents/security-reviewer.md",
+          ".agents/reviewers/security-reviewer.md",
+          "src/index.ts"
+        ],
+        isTaskBranch: true,
+        reviewersDir: ".cursor/agents" as string | undefined,
+        expectedAllowed: false,
+        expectedTraversal: [] as string[],
+        expectedSensitive: [
+          ".cursor/agents/security-reviewer.md",
+          ".agents/reviewers/security-reviewer.md"
+        ]
+      },
+      {
+        id: "allows-unconfigured-custom-reviewers-dir-path-on-task-branch",
+        files: [".cursor/agents/security-reviewer.md"],
+        isTaskBranch: true,
+        reviewersDir: undefined as string | undefined,
+        expectedAllowed: true,
+        expectedTraversal: [] as string[],
+        expectedSensitive: [] as string[]
       },
       {
         id: "allows-normal-source-paths-on-task-branch",
         files: ["frontend/src/App.tsx", "backend/src/index.ts"],
         isTaskBranch: true,
+        reviewersDir: undefined as string | undefined,
         expectedAllowed: true,
         expectedTraversal: [] as string[],
         expectedSensitive: [] as string[]
@@ -404,6 +431,7 @@ describe("EPURE v1.4.0 — Polyglot Verification Discovery, Workspace Sandbox & 
       async ({
         files,
         isTaskBranch,
+        reviewersDir,
         expectedAllowed,
         expectedTraversal,
         expectedSensitive
@@ -412,7 +440,8 @@ describe("EPURE v1.4.0 — Polyglot Verification Discovery, Workspace Sandbox & 
           const res = validateWorkspaceFileOperations({
             workDir,
             files,
-            isTaskBranch
+            isTaskBranch,
+            ...(reviewersDir ? { reviewersDir } : {})
           });
           expect(res.allowed).toBe(expectedAllowed);
           expect(res.traversalPaths).toEqual(expectedTraversal);

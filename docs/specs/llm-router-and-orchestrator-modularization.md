@@ -67,12 +67,12 @@ Enfin, chaque commentaire d'issue, corps de ticket d'implémentation et descript
      * `errors.ts` : hiérarchie d'erreurs unifiée (`LLMError`, `AuthenticationError`, `QuotaExhaustedError`, `RateLimitError`, `ServerError`, `LLMTimeoutError`, `BadRequestError`) couplée à `executeLlmCallWithResilience` (`src/harness/llm-resilience.ts`).
      * `providers/google.ts`, `providers/openai.ts`, `providers/anthropic.ts` : traducteurs de requêtes/réponses, normalisation des schémas JSON et gestion des appels d'outils.
      * `client.ts` : classe `LLMClient` supportant `configure(name, config)`, `configureFromDict(dict)`, la résolution différée `"os.environ/VAR_NAME"`, le routage `"provider/model"` (`openai`, `azure`, `azure_ai`, `google`, `gemini`, `anthropic`) et l'inférence automatique du fournisseur pour les noms de modèles nus (`gemini-*` → `google`, `gpt-*`/`o1*`/`o3*`/`o4*` → `openai`, `claude-*` → `anthropic`).
-   * Le module `gemini-client.ts` existant est conservé comme simple adaptateur de compatibilité ascendante délégant à `LLMClient`.
+   * L'ancien module `gemini-client.ts`, renommé `src/orchestrator/llm-helper.ts` (`callLlmText`, `callLlmJson`), est conservé comme simple adaptateur délégant à `LLMClient`.
 
 2. **Schéma de configuration `.github/agents.yml` pour les fournisseurs LLM** :
    * Le parseur et le sérialiseur de `.github/agents.yml` supportent une section optionnelle `providers:` mappant un nom d'alias (ex. `azure-prod`, `openai`, `google`, `anthropic`) vers `{ provider?, api_key?, base_url?, api_version?, default_headers? }`.
    * Les valeurs préfixées par `os.environ/` sont résolues à l'exécution depuis `process.env`. Aucune clé secrète brute n'est écrite par `setup-repo`.
-   * Pour chaque phase (`planning`, `implementation`, `review`), l'orchestrateur sélectionne le modèle déclaré dans `agents.yml` (`config.models.<phase>`), ou à défaut le modèle passé en entrée de l'action (`input.model`, par défaut `google/gemini-3.8-flash`).
+   * Pour chaque phase (`planning`, `implementation`, `review`), l'orchestrateur sélectionne le modèle déclaré dans `agents.yml` (`config.models.<phase>`), sauf si l'entrée `model` de l'action est explicitement renseignée (`input.model`, vide par défaut).
 
 3. **Protocole de sortie structurée par schéma et boucle d'outils en 2 phases** :
    * Un contrat `ResponseSchemaSpec<T>` associe un objet `jsonSchema` (JSON Schema standard) et une fonction `validate(raw: unknown): T`.

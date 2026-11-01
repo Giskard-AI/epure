@@ -3,8 +3,9 @@ import {
   AuthenticationError,
   QuotaExhaustedError
 } from "../llm/errors.js";
+import { DEFAULT_FALLBACK_LLM_MODEL } from "../llm/client.js";
 import type { ProviderConfig } from "../llm/types.js";
-import { callGeminiJson } from "../orchestrator/gemini-client.js";
+import { callLlmJson } from "../orchestrator/llm-helper.js";
 import {
   SQUASH_COMMIT_SCHEMA,
   type SquashCommitPayload
@@ -181,9 +182,9 @@ export async function generateSemanticSquashCommitFromDiff(
       wrapUntrustedContent("untrusted_pr_diff", diffSnippet)
     ].join("\n");
 
-    const parsed = await callGeminiJson<SquashCommitPayload>({
+    const parsed = await callLlmJson<SquashCommitPayload>({
       apiKey: input.llmApiKey,
-      model: input.model ?? "gemini-3.8-flash",
+      model: input.model ?? DEFAULT_FALLBACK_LLM_MODEL,
       providers: input.providers,
       maxTransientRetries: input.maxTransientRetries,
       transientRetryBackoffSeconds: input.transientRetryBackoffSeconds,

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  type AgentsConfig,
   DEFAULT_AGENTS_CONFIG,
   parseAgentsYml,
   serializeAgentsYml
@@ -13,6 +14,7 @@ import {
   AuthenticationError,
   BadRequestError,
   classifyHttpError,
+  DEFAULT_FALLBACK_LLM_MODEL,
   DEFAULT_LLM_REQUEST_TIMEOUT_MS,
   GEMINI_SKIP_THOUGHT_SIGNATURE_SENTINEL,
   LLMClient,
@@ -996,6 +998,15 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
   });
 
   describe("6. Orchestrator Wired Bucket A Guards", () => {
+    const BARE_MODELS_AGENTS_CONFIG: AgentsConfig = {
+      ...DEFAULT_AGENTS_CONFIG,
+      models: {
+        planning: "claude-sonnet-4-20250514",
+        implementation: "claude-sonnet-4-20250514",
+        review: "gpt-4.1"
+      }
+    };
+
     it("detects cyclic ticket graph during /epure to-tickets, applies needs-human, posts escalation with spoiler, and creates 0 sub-issues", async () => {
       const store = createInMemoryGitRefStateStore();
       await updateIssueStateWithCas({
@@ -1459,29 +1470,84 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
       },
       {
         scenario:
+          "resolvePhaseModels honours provider-prefixed DEFAULT_AGENTS_CONFIG models when the action input model is empty",
+        inputModel: "" as string | undefined,
+        envVars: {
+          ANTHROPIC_API_KEY: undefined,
+          OPENAI_API_KEY: undefined,
+          LLM_API_KEY: undefined
+        } as Record<string, string | undefined>,
+        agentsConfig: DEFAULT_AGENTS_CONFIG,
+        expectedPlanning: "anthropic/claude-sonnet-4-20250514",
+        expectedImplementation: "anthropic/claude-sonnet-4-20250514",
+        expectedReview: "openai/gpt-4.1"
+      },
+      {
+        scenario:
+          "resolvePhaseModels lets an explicit action input model override every agents.yml phase model",
+        inputModel: "google/gemini-2.5-pro" as string | undefined,
+        envVars: {} as Record<string, string | undefined>,
+        agentsConfig: DEFAULT_AGENTS_CONFIG,
+        expectedPlanning: "google/gemini-2.5-pro",
+        expectedImplementation: "google/gemini-2.5-pro",
+        expectedReview: "google/gemini-2.5-pro"
+      },
+      {
+        scenario:
           "resolvePhaseModels honours bare claude-* and gpt-* models when ANTHROPIC_API_KEY and OPENAI_API_KEY are set in process.env",
         inputModel: undefined as string | undefined,
         envVars: {
           ANTHROPIC_API_KEY: "sk-ant-env",
-          OPENAI_API_KEY: "sk-openai-env"
+          OPENAI_API_KEY: "sk-openai-env",
+          LLM_API_KEY: undefined
         } as Record<string, string | undefined>,
-        agentsConfig: DEFAULT_AGENTS_CONFIG,
+        agentsConfig: BARE_MODELS_AGENTS_CONFIG,
         expectedPlanning: "claude-sonnet-4-20250514",
         expectedImplementation: "claude-sonnet-4-20250514",
         expectedReview: "gpt-4.1"
       },
       {
         scenario:
-          "resolvePhaseModels falls back to gemini-3.8-flash for bare default models when no provider config or provider env key is set",
+          "resolvePhaseModels honours bare claude-* and gpt-* models verbatim when the orchestrator passes an explicit LLM API key",
         inputModel: undefined as string | undefined,
         envVars: {
           ANTHROPIC_API_KEY: undefined,
-          OPENAI_API_KEY: undefined
+          OPENAI_API_KEY: undefined,
+          LLM_API_KEY: undefined
         } as Record<string, string | undefined>,
-        agentsConfig: DEFAULT_AGENTS_CONFIG,
-        expectedPlanning: "gemini-3.8-flash",
-        expectedImplementation: "gemini-3.8-flash",
-        expectedReview: "gemini-3.8-flash"
+        agentsConfig: BARE_MODELS_AGENTS_CONFIG,
+        llmApiKey: "sk-explicit-llm-key",
+        expectedPlanning: "claude-sonnet-4-20250514",
+        expectedImplementation: "claude-sonnet-4-20250514",
+        expectedReview: "gpt-4.1"
+      },
+      {
+        scenario:
+          "resolvePhaseModels honours bare claude-* and gpt-* models verbatim when LLM_API_KEY is set in process.env",
+        inputModel: undefined as string | undefined,
+        envVars: {
+          ANTHROPIC_API_KEY: undefined,
+          OPENAI_API_KEY: undefined,
+          LLM_API_KEY: "sk-env-llm-key"
+        } as Record<string, string | undefined>,
+        agentsConfig: BARE_MODELS_AGENTS_CONFIG,
+        expectedPlanning: "claude-sonnet-4-20250514",
+        expectedImplementation: "claude-sonnet-4-20250514",
+        expectedReview: "gpt-4.1"
+      },
+      {
+        scenario:
+          "resolvePhaseModels falls back to DEFAULT_FALLBACK_LLM_MODEL for bare models when no provider config or LLM API key is available",
+        inputModel: undefined as string | undefined,
+        envVars: {
+          ANTHROPIC_API_KEY: undefined,
+          OPENAI_API_KEY: undefined,
+          LLM_API_KEY: undefined
+        } as Record<string, string | undefined>,
+        agentsConfig: BARE_MODELS_AGENTS_CONFIG,
+        expectedPlanning: DEFAULT_FALLBACK_LLM_MODEL,
+        expectedImplementation: DEFAULT_FALLBACK_LLM_MODEL,
+        expectedReview: DEFAULT_FALLBACK_LLM_MODEL
       }
     ])(
       "$scenario",
@@ -1489,9 +1555,18 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
         inputModel,
         envVars,
         agentsConfig,
+        llmApiKey,
         expectedPlanning,
         expectedImplementation,
         expectedReview
+      }: {
+        inputModel: string | undefined;
+        envVars: Record<string, string | undefined>;
+        agentsConfig: AgentsConfig;
+        llmApiKey?: string;
+        expectedPlanning: string;
+        expectedImplementation: string;
+        expectedReview: string;
       }) => {
         const prevEnv: Record<string, string | undefined> = {};
         for (const [k, v] of Object.entries(envVars)) {
@@ -1503,7 +1578,11 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
           }
         }
         try {
-          const resolved = resolvePhaseModels(inputModel, agentsConfig);
+          const resolved = resolvePhaseModels(
+            inputModel,
+            agentsConfig,
+            llmApiKey
+          );
           expect(resolved.planningModel).toBe(expectedPlanning);
           expect(resolved.implementationModel).toBe(expectedImplementation);
           expect(resolved.reviewModel).toBe(expectedReview);

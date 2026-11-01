@@ -1,9 +1,9 @@
 import type { WebToolsConfig } from "../../bootstrap/setup-repo.js";
 import { wrapUntrustedContent } from "../../security/prompt-injection-guard.js";
 import type {
-  GeminiFunctionDeclaration,
-  GeminiToolHandler
-} from "../gemini-client.js";
+  LlmFunctionDeclaration,
+  LlmToolHandler
+} from "../llm-helper.js";
 
 export type WebToolsPhase = "plan" | "spec" | "implementation" | "review";
 
@@ -651,8 +651,8 @@ export function buildWebExplorationToolsAndHandlers(params?: {
   readonly webToolsConfig?: WebToolsConfig | undefined;
   readonly fetchImpl?: typeof fetch | undefined;
 }): {
-  readonly tools: readonly GeminiFunctionDeclaration[];
-  readonly toolHandlers: Readonly<Record<string, GeminiToolHandler>>;
+  readonly tools: readonly LlmFunctionDeclaration[];
+  readonly toolHandlers: Readonly<Record<string, LlmToolHandler>>;
 } {
   if (!isWebToolsEnabledForPhase(params?.phase, params?.webToolsConfig)) {
     return { tools: [], toolHandlers: {} };
@@ -669,7 +669,7 @@ export function buildWebExplorationToolsAndHandlers(params?: {
     DEFAULT_MAX_FETCH_BYTES;
   let requestsUsed = 0;
 
-  const tools: readonly GeminiFunctionDeclaration[] = [
+  const tools: readonly LlmFunctionDeclaration[] = [
     {
       name: "web_search",
       description:
@@ -707,7 +707,7 @@ export function buildWebExplorationToolsAndHandlers(params?: {
     }
   ];
 
-  const toolHandlers: Readonly<Record<string, GeminiToolHandler>> = {
+  const toolHandlers: Readonly<Record<string, LlmToolHandler>> = {
     web_search: async (args: Readonly<Record<string, unknown>>) => {
       if (requestsUsed >= maxRequests) {
         return {

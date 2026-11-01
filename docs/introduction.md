@@ -76,7 +76,7 @@ These steps run only when triggered by the nature of the change or by an explici
   - `/epure sync` (alias `/epure rebase`): Synchronize `dev -> feature/*` (and `feature/* -> task/*`) with 3-way conflict resolution and Stage 1 sandbox verification.
   - `/epure status`: Refresh and post the current orchestration state and ticket table.
   - `/epure cancel` (alias `/epure stop`): Immediately halt orchestration and mark the mandate `cancelled` in `refs/epure/state/<issue>`.
-- **Conditional Human Escalation (`needs-human`)**: Triggered automatically if a `task/*` branch touches sensitive paths (`.github/workflows/**`, `.cursor/agents/**`, `CODEOWNERS`) without an approved exception, or if a ticket still fails after `max_code_fix_attempts = 3` remediation rounds.
+- **Conditional Human Escalation (`needs-human`)**: Triggered automatically if a `task/*` branch touches sensitive paths (`.github/workflows/**`, `.github/agents.yml`, the reviewer roster directory `reviewers_dir/**` (default `.agents/reviewers/**`), `CODEOWNERS`) without an approved exception, or if a ticket still fails after `max_code_fix_attempts = 3` remediation rounds.
 
 ---
 

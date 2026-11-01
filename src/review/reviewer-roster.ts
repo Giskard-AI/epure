@@ -2,8 +2,9 @@ import {
   AuthenticationError,
   QuotaExhaustedError
 } from "../llm/errors.js";
+import { DEFAULT_FALLBACK_LLM_MODEL } from "../llm/client.js";
 import type { ProviderConfig } from "../llm/types.js";
-import { callGeminiJson } from "../orchestrator/gemini-client.js";
+import { callLlmJson } from "../orchestrator/llm-helper.js";
 import {
   USER_ADVOCATE_SCHEMA,
   type UserAdvocatePayload
@@ -37,6 +38,7 @@ export interface BuildReviewerRosterInput {
   readonly stackKind?: "node" | "python" | "rust" | "go" | "generic" | undefined;
   readonly includeFrontendReviewers?: boolean | undefined;
   readonly customDomainSpecialists?: readonly CustomDomainReviewerSpec[] | undefined;
+  readonly reviewersDir?: string | undefined;
 }
 
 export type UserAdvocateMode = "design-gate" | "implementation-review";
@@ -66,6 +68,7 @@ export interface AdaptReviewerRosterInput {
   readonly customDomainSpecialists?: readonly CustomDomainReviewerSpec[] | undefined;
   readonly personas?: readonly DomainPersonaSpec[] | undefined;
   readonly domainInvariants?: readonly string[] | undefined;
+  readonly reviewersDir?: string | undefined;
 }
 
 export interface AdaptedProjectRosterBundle {
@@ -105,11 +108,17 @@ export const ALL_REVIEWER_AGENT_NAMES: readonly ReviewerAgentName[] = [
   "user-advocate"
 ] as const;
 
-export const SENSITIVE_REVIEWER_ROSTER_PATH_PATTERN = /^\.cursor\/agents\//i;
+export const DEFAULT_REVIEWERS_DIR = ".agents/reviewers";
 
-export function isSensitiveReviewerRosterPath(filePath: string): boolean {
-  const clean = filePath.trim().replace(/^\/+/, "");
-  return SENSITIVE_REVIEWER_ROSTER_PATH_PATTERN.test(clean);
+export function isSensitiveReviewerRosterPath(
+  filePath: string,
+  reviewersDir: string = DEFAULT_REVIEWERS_DIR
+): boolean {
+  const clean = filePath.trim().replace(/^\/+/, "").toLowerCase();
+  return [reviewersDir, DEFAULT_REVIEWERS_DIR].some((dir) => {
+    const lowerDir = dir.toLowerCase();
+    return clean === lowerDir || clean.startsWith(`${lowerDir}/`);
+  });
 }
 
 const JSON_OUTPUT_CONTRACT_BLOCK = [
@@ -187,11 +196,12 @@ export function buildDefaultReviewerRosterFiles(
   const stackKind = params.stackKind ?? "node";
   const includeUi = params.includeFrontendReviewers !== false;
   const customSpecialists = params.customDomainSpecialists ?? [];
+  const reviewersDir = params.reviewersDir ?? DEFAULT_REVIEWERS_DIR;
 
   const files: ReviewerRosterFile[] = [
     {
       name: "domain-backend-reviewer",
-      path: ".cursor/agents/domain-backend-reviewer.md",
+      path: `${reviewersDir}/domain-backend-reviewer.md`,
       category: "specialist",
       content: [
         "---",
@@ -227,7 +237,7 @@ export function buildDefaultReviewerRosterFiles(
 
     files.push({
       name: reviewerName,
-      path: `.cursor/agents/${reviewerName}.md`,
+      path: `${reviewersDir}/${reviewerName}.md`,
       category: "specialist",
       content: [
         "---",
@@ -254,7 +264,7 @@ export function buildDefaultReviewerRosterFiles(
   if (includeUi) {
     files.push({
       name: "frontend-reviewer",
-      path: ".cursor/agents/frontend-reviewer.md",
+      path: `${reviewersDir}/frontend-reviewer.md`,
       category: "specialist",
       content: [
         "---",
@@ -278,7 +288,7 @@ export function buildDefaultReviewerRosterFiles(
   files.push(
     {
       name: "infra-reviewer",
-      path: ".cursor/agents/infra-reviewer.md",
+      path: `${reviewersDir}/infra-reviewer.md`,
       category: "specialist",
       content: [
         "---",
@@ -298,7 +308,7 @@ export function buildDefaultReviewerRosterFiles(
     },
     {
       name: "architecture-reviewer",
-      path: ".cursor/agents/architecture-reviewer.md",
+      path: `${reviewersDir}/architecture-reviewer.md`,
       category: "cross-cutting",
       content: [
         "---",
@@ -319,7 +329,7 @@ export function buildDefaultReviewerRosterFiles(
     },
     {
       name: "security-reviewer",
-      path: ".cursor/agents/security-reviewer.md",
+      path: `${reviewersDir}/security-reviewer.md`,
       category: "cross-cutting",
       content: [
         "---",
@@ -332,7 +342,7 @@ export function buildDefaultReviewerRosterFiles(
         "## Scope & Responsibilities",
         "- Detect XSS (`dangerouslySetInnerHTML`), command injection, prototype pollution, and unsafe deserialization.",
         "- Ensure no credentials, tokens, or private keys appear in code, tests, or logs.",
-        "- Flag any unauthorized modification of `.github/workflows/**`, `.github/agents.yml`, or `.cursor/agents/**`.",
+        `- Flag any unauthorized modification of \`.github/workflows/**\`, \`.github/agents.yml\`, or \`${reviewersDir}/**\`.`,
         "",
         JSON_OUTPUT_CONTRACT_BLOCK,
         ""
@@ -340,7 +350,7 @@ export function buildDefaultReviewerRosterFiles(
     },
     {
       name: "spec-parity-reviewer",
-      path: ".cursor/agents/spec-parity-reviewer.md",
+      path: `${reviewersDir}/spec-parity-reviewer.md`,
       category: "cross-cutting",
       content: [
         "---",
@@ -361,7 +371,7 @@ export function buildDefaultReviewerRosterFiles(
     },
     {
       name: "standards-reviewer",
-      path: ".cursor/agents/standards-reviewer.md",
+      path: `${reviewersDir}/standards-reviewer.md`,
       category: "cross-cutting",
       content: [
         "---",
@@ -384,7 +394,7 @@ export function buildDefaultReviewerRosterFiles(
     files.push(
       {
         name: "accessibility-reviewer",
-        path: ".cursor/agents/accessibility-reviewer.md",
+        path: `${reviewersDir}/accessibility-reviewer.md`,
         category: "cross-cutting",
         content: [
           "---",
@@ -405,7 +415,7 @@ export function buildDefaultReviewerRosterFiles(
       },
       {
         name: "design-reviewer",
-        path: ".cursor/agents/design-reviewer.md",
+        path: `${reviewersDir}/design-reviewer.md`,
         category: "cross-cutting",
         content: [
           "---",
@@ -429,7 +439,7 @@ export function buildDefaultReviewerRosterFiles(
 
   files.push({
     name: "user-advocate",
-    path: ".cursor/agents/user-advocate.md",
+    path: `${reviewersDir}/user-advocate.md`,
     category: "persona",
     content: [
       "---",
@@ -467,7 +477,8 @@ export function adaptReviewerRosterForDomain(
     repository: input.repository,
     stackKind: input.stackKind,
     includeFrontendReviewers: input.touchesFrontendUi,
-    customDomainSpecialists: input.customDomainSpecialists
+    customDomainSpecialists: input.customDomainSpecialists,
+    reviewersDir: input.reviewersDir
   });
   const personas: readonly DomainPersonaSpec[] =
     input.personas && input.personas.length > 0
@@ -705,9 +716,9 @@ export async function runUserAdvocateDesignGate(
       )
     ].join("\n");
 
-    const parsed = await callGeminiJson<UserAdvocatePayload>({
+    const parsed = await callLlmJson<UserAdvocatePayload>({
       apiKey: params.llmApiKey,
-      model: params.model ?? "gemini-3.8-flash",
+      model: params.model ?? DEFAULT_FALLBACK_LLM_MODEL,
       providers: params.providers,
       maxTransientRetries: params.maxTransientRetries,
       transientRetryBackoffSeconds: params.transientRetryBackoffSeconds,
@@ -790,11 +801,13 @@ export function resolveTrustedReviewerPrompt(params: {
   readonly reviewer: ReviewerAgentName;
   readonly repository: string;
   readonly trustedBaseBranchFiles?: ReadonlyMap<string, string> | Readonly<Record<string, string>> | undefined;
+  readonly reviewersDir?: string | undefined;
 }): {
   readonly promptContent: string;
   readonly source: "trusted_base_branch" | "epure_embedded_fallback";
 } {
-  const relPath = `.cursor/agents/${params.reviewer}.md`;
+  const reviewersDir = params.reviewersDir ?? DEFAULT_REVIEWERS_DIR;
+  const relPath = `${reviewersDir}/${params.reviewer}.md`;
   let fromBase: string | undefined;
 
   if (params.trustedBaseBranchFiles) {
@@ -814,7 +827,8 @@ export function resolveTrustedReviewerPrompt(params: {
   }
 
   const embedded = buildDefaultReviewerRosterFiles({
-    repository: params.repository
+    repository: params.repository,
+    reviewersDir
   }).find((r) => r.name === params.reviewer);
 
   return {

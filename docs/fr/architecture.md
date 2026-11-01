@@ -41,7 +41,7 @@ EPURE a été conçu dès l'origine autour de trois principes d'ingénierie : **
 ### Fonctionnement du Pipeline de Revue (Q92–Q96)
 
 1. **Chargement du Roster depuis `dev` & Défense Prompt-Injection (OWASP LLM01)** :
-   - Les définitions des reviewers (`.cursor/agents/*.md`) sont **toujours** lues depuis la branche de confiance `dev` (avec repli sur les templates canoniques embarqués d'EPURE), jamais depuis la branche non fiable `task/*` inspectée.
+   - Les définitions des reviewers (`<reviewers_dir>/*.md`, par défaut `.agents/reviewers/*.md`) sont **toujours** lues depuis la branche de confiance `dev` (avec repli sur les templates canoniques embarqués d'EPURE), jamais depuis la branche non fiable `task/*` inspectée.
    - Tous les diffs de PR, messages de commit et commentaires sont encapsulés dans des balises XML `<untrusted_pr_diff>` ordonnant explicitement au modèle d'ignorer toute instruction cachée dans le diff.
 2. **Sélection Dynamique (Jusqu'à 4 Spécialistes + `spec-parity-reviewer`)** :
    - Selon les fichiers modifiés par la PR, EPURE sélectionne jusqu'à 4 reviewers pertinents (`domain-backend-reviewer`, `frontend-reviewer`, `infra-reviewer`, `architecture-reviewer`, `security-reviewer`, `standards-reviewer`, `accessibility-reviewer`, `design-reviewer`, `user-advocate`) en plus du reviewer obligatoire `spec-parity-reviewer`.

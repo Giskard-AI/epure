@@ -1705,1342 +1705,6 @@ import {
 import { tmpdir } from "node:os";
 import { dirname as dirname2, join as join2, resolve as resolve2, sep } from "node:path";
 
-// src/sandbox/llm-sandbox.ts
-import { randomBytes } from "node:crypto";
-import { mkdirSync } from "node:fs";
-import { createServer } from "node:http";
-import { spawn, spawnSync } from "node:child_process";
-import { dirname, resolve } from "node:path";
-
-// src/auth/github-apps.ts
-var PRIVATE_KEY_DETECTION_PATTERN = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|EPURE_(?:AGENT|RELEASE)_APP_PRIVATE_KEY\s*=\s*\S+/i;
-function containsPrivateKeyMaterial(text) {
-  return PRIVATE_KEY_DETECTION_PATTERN.test(text);
-}
-
-// src/sandbox/llm-sandbox.ts
-var SECRET_ENV_NAME_PATTERN = /^(?:OPENAI_API_KEY|ANTHROPIC_API_KEY|GOOGLE_API_KEY|GEMINI_API_KEY|LLM_API_KEY|GITHUB_TOKEN|GH_TOKEN|GITHUB_PAT|EPURE_.*(?:KEY|TOKEN|SECRET)|AWS_.*|AZURE_.*|GCP_.*|NPM_TOKEN|NODE_AUTH_TOKEN|ACTIONS_RUNTIME_TOKEN|ACTIONS_ID_TOKEN_REQUEST_TOKEN)$/i;
-var ALLOWED_PROXY_PATHS = /* @__PURE__ */ new Set([
-  "/v1/chat/completions",
-  "/v1/responses",
-  "/v1/messages",
-  "/chat/completions",
-  "/responses",
-  "/messages"
-]);
-function buildSanitizedSandboxEnv(runnerEnv, proxy) {
-  const sanitized = {};
-  for (const [key, value] of Object.entries(runnerEnv)) {
-    if (typeof value !== "string") {
-      continue;
-    }
-    if (SECRET_ENV_NAME_PATTERN.test(key)) {
-      continue;
-    }
-    if (containsPrivateKeyMaterial(value)) {
-      continue;
-    }
-    sanitized[key] = value;
-  }
-  sanitized.EPURE_SANDBOX_ACTIVE = "true";
-  sanitized.EPURE_LLM_PROXY_URL = proxy.proxyUrl;
-  sanitized.EPURE_LLM_PROXY_NONCE = proxy.proxyNonce;
-  sanitized.GITHUB_TOKEN_PERMISSIONS = "none";
-  sanitized.RTK_TELEMETRY_DISABLED = "1";
-  sanitized.RTK_RECALL = "0";
-  sanitized.RTK_TEE = "0";
-  sanitized.RTK_SUPPRESS_HOOK_WARNING = "1";
-  sanitized.NO_COLOR = "1";
-  return sanitized;
-}
-function buildLandrunInvocation(params) {
-  const sanitizeLandrunPath = (p) => p.replace(/,/g, "");
-  const resolvedCwd = sanitizeLandrunPath(resolve(params.cwd));
-  const roxPaths = /* @__PURE__ */ new Set([
-    "/usr",
-    "/bin",
-    "/lib",
-    "/lib64",
-    "/etc",
-    "/opt",
-    "/run"
-  ]);
-  if (params.command.startsWith("/")) {
-    roxPaths.add(sanitizeLandrunPath(dirname(resolve(params.command))));
-  }
-  const rwxPaths = /* @__PURE__ */ new Set([resolvedCwd, "/tmp"]);
-  if (params.networkPolicy === "https_only") {
-    const home = sanitizeLandrunPath(params.sanitizedEnv.HOME?.trim() ?? "");
-    if (home) {
-      rwxPaths.add(`${home}/.npm`);
-      rwxPaths.add(`${home}/.cache`);
-      rwxPaths.add(`${home}/.cargo`);
-    }
-  }
-  const landrunArgs = [
-    "--rox",
-    Array.from(roxPaths).join(","),
-    "--ro",
-    "/dev,/proc",
-    "--rwx",
-    Array.from(rwxPaths).join(",")
-  ];
-  if (params.networkPolicy === "proxy_only") {
-    if (typeof params.proxyPort === "number" && params.proxyPort > 0) {
-      landrunArgs.push("--connect-tcp", String(params.proxyPort));
-    }
-  } else if (params.networkPolicy === "https_only") {
-    landrunArgs.push("--connect-tcp", "443");
-  }
-  for (const key of Object.keys(params.sanitizedEnv).sort()) {
-    landrunArgs.push("--env", key);
-  }
-  landrunArgs.push("--", params.command, ...params.args);
-  return landrunArgs;
-}
-function buildBubblewrapInvocation(params) {
-  const resolvedCwd = resolve(params.cwd);
-  return [
-    "--unshare-net",
-    "--unshare-pid",
-    "--unshare-ipc",
-    "--die-with-parent",
-    "--ro-bind",
-    "/",
-    "/",
-    "--dev",
-    "/dev",
-    "--proc",
-    "/proc",
-    "--tmpfs",
-    "/tmp",
-    "--bind",
-    resolvedCwd,
-    resolvedCwd,
-    "--chdir",
-    resolvedCwd,
-    "--",
-    params.command,
-    ...params.args
-  ];
-}
-function buildKernelSandboxedCommand(input) {
-  if (input.networkPolicy === "offline") {
-    if (input.capabilities.bubblewrapAvailable) {
-      return {
-        backend: "bubblewrap",
-        command: "bwrap",
-        args: buildBubblewrapInvocation({
-          command: input.command,
-          args: input.args,
-          cwd: input.cwd
-        })
-      };
-    }
-    if (input.capabilities.landrunAvailable) {
-      return {
-        backend: "landrun",
-        command: "landrun",
-        args: buildLandrunInvocation({
-          command: input.command,
-          args: input.args,
-          cwd: input.cwd,
-          sanitizedEnv: input.sanitizedEnv,
-          networkPolicy: "offline",
-          proxyPort: input.proxyPort
-        })
-      };
-    }
-    return {
-      backend: "none",
-      command: input.command,
-      args: input.args
-    };
-  }
-  if (input.capabilities.landrunAvailable) {
-    return {
-      backend: "landrun",
-      command: "landrun",
-      args: buildLandrunInvocation({
-        command: input.command,
-        args: input.args,
-        cwd: input.cwd,
-        sanitizedEnv: input.sanitizedEnv,
-        networkPolicy: input.networkPolicy,
-        proxyPort: input.proxyPort
-      })
-    };
-  }
-  return {
-    backend: "none",
-    command: input.command,
-    args: input.args
-  };
-}
-var cachedDefaultCapabilities = null;
-var cachedDefaultCapabilitiesPath = "";
-function probeKernelSandboxCapabilities(runnerEnv = process.env) {
-  if (process.platform !== "linux") {
-    return { landrunAvailable: false, bubblewrapAvailable: false };
-  }
-  const pathVal = runnerEnv.PATH ?? process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
-  if (cachedDefaultCapabilities !== null && cachedDefaultCapabilitiesPath === pathVal) {
-    return cachedDefaultCapabilities;
-  }
-  const probeEnv = {
-    PATH: pathVal
-  };
-  let landrunAvailable = false;
-  try {
-    const res = spawnSync(
-      "landrun",
-      ["--rox", "/usr,/bin,/lib,/lib64", "--", "/bin/true"],
-      {
-        env: probeEnv,
-        stdio: "ignore",
-        timeout: 3e3
-      }
-    );
-    landrunAvailable = res.status === 0;
-  } catch {
-    landrunAvailable = false;
-  }
-  let bubblewrapAvailable = false;
-  try {
-    const res = spawnSync("bwrap", ["--version"], {
-      env: probeEnv,
-      stdio: "ignore",
-      timeout: 3e3
-    });
-    bubblewrapAvailable = res.status === 0;
-  } catch {
-    bubblewrapAvailable = false;
-  }
-  const result = { landrunAvailable, bubblewrapAvailable };
-  cachedDefaultCapabilities = result;
-  cachedDefaultCapabilitiesPath = pathVal;
-  return result;
-}
-function readRequestBody(req) {
-  return new Promise((resolve3, reject) => {
-    const chunks = [];
-    req.on("data", (chunk) => chunks.push(chunk));
-    req.on("end", () => resolve3(Buffer.concat(chunks).toString("utf8")));
-    req.on("error", reject);
-  });
-}
-async function createLlmSandboxProxy(options) {
-  const realKey = options.llmApiKey.trim();
-  const proxyNonce = randomBytes(24).toString("hex");
-  const defaultUpstream = async (req) => ({
-    status: 200,
-    body: JSON.stringify({
-      id: "chatcmpl-epure-proxy",
-      object: "chat.completion",
-      path: req.path,
-      choices: [{ index: 0, message: { role: "assistant", content: "ok" } }]
-    })
-  });
-  const handler = options.upstreamHandler ?? defaultUpstream;
-  const server = createServer(
-    async (req, res) => {
-      const providedNonce = req.headers["x-epure-proxy-nonce"];
-      if (providedNonce !== proxyNonce) {
-        res.statusCode = 401;
-        res.setHeader("content-type", "application/json");
-        res.end(
-          JSON.stringify({
-            error_code: "PROXY_UNAUTHORIZED_NONCE",
-            error_message: "Missing or invalid x-epure-proxy-nonce header for local sandbox LLM proxy."
-          })
-        );
-        return;
-      }
-      const rawUrl = req.url ?? "/";
-      const normalizedPath = rawUrl.split("?")[0] ?? "/";
-      if (!ALLOWED_PROXY_PATHS.has(normalizedPath)) {
-        res.statusCode = 403;
-        res.setHeader("content-type", "application/json");
-        res.end(
-          JSON.stringify({
-            error_code: "PROXY_FORBIDDEN_ENDPOINT",
-            error_message: `Sandbox LLM proxy forbids access to '${normalizedPath}'.`
-          })
-        );
-        return;
-      }
-      const body = await readRequestBody(req);
-      const upstreamResp = await handler(
-        {
-          method: req.method ?? "POST",
-          path: normalizedPath,
-          body
-        },
-        realKey
-      );
-      res.statusCode = upstreamResp.status;
-      res.setHeader("content-type", "application/json");
-      res.end(redactSecrets(upstreamResp.body, [realKey]));
-    }
-  );
-  await new Promise((resolve3, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => resolve3());
-  });
-  const address = server.address();
-  const proxyUrl = `http://127.0.0.1:${address.port}`;
-  return {
-    proxyUrl,
-    proxyNonce,
-    close: () => new Promise((resolve3) => {
-      server.close(() => resolve3());
-    })
-  };
-}
-function collectRunnerSecretValues(runnerEnv) {
-  const values = [];
-  for (const [key, value] of Object.entries(runnerEnv)) {
-    if (typeof value === "string" && value.trim().length >= 8) {
-      if (SECRET_ENV_NAME_PATTERN.test(key) || containsPrivateKeyMaterial(value)) {
-        values.push(value.trim());
-      }
-    }
-  }
-  return values;
-}
-function parsePortFromProxyUrl(proxyUrl) {
-  const match = /:(\d+)(?:\/|$)/.exec(proxyUrl);
-  if (!match || !match[1]) {
-    return void 0;
-  }
-  const parsed = Number.parseInt(match[1], 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : void 0;
-}
-async function runInUntrustedCodeSandbox(input) {
-  const startMs = Date.now();
-  const networkPolicy = input.networkPolicy ?? "proxy_only";
-  if (!input.isolationAvailable) {
-    return {
-      isolated: false,
-      error_code: "SANDBOX_ISOLATION_UNAVAILABLE",
-      error_message: "Fail-closed: container/process sandbox isolation is unavailable on this runner (ADR-0011, ADR-0023).",
-      exit_code: 1,
-      stdout: "",
-      stderr: "",
-      duration_ms: Date.now() - startMs,
-      proxy_url: "",
-      kernel_backend: "none",
-      network_policy: networkPolicy
-    };
-  }
-  const llmApiKey = (input.runnerEnv.OPENAI_API_KEY ?? input.runnerEnv.ANTHROPIC_API_KEY ?? input.runnerEnv.GOOGLE_API_KEY ?? input.runnerEnv.GEMINI_API_KEY ?? input.runnerEnv.LLM_API_KEY ?? "").trim();
-  if (!llmApiKey) {
-    return {
-      isolated: false,
-      error_code: "LLM_API_KEY_MISSING",
-      error_message: "Fail-closed: runner is missing LLM API key (OPENAI_API_KEY, ANTHROPIC_API_KEY, or LLM_API_KEY) for the local proxy sidecar.",
-      exit_code: 1,
-      stdout: "",
-      stderr: "",
-      duration_ms: Date.now() - startMs,
-      proxy_url: "",
-      kernel_backend: "none",
-      network_policy: networkPolicy
-    };
-  }
-  const enforceKernelSandbox = input.enforceKernelSandbox === true || input.runnerEnv.EPURE_ENFORCE_KERNEL_SANDBOX === "true";
-  const secretValues = collectRunnerSecretValues(input.runnerEnv);
-  const proxy = await createLlmSandboxProxy({
-    llmApiKey,
-    upstreamHandler: input.upstreamHandler
-  });
-  try {
-    const sanitizedEnv = buildSanitizedSandboxEnv(input.runnerEnv, {
-      proxyUrl: proxy.proxyUrl,
-      proxyNonce: proxy.proxyNonce
-    });
-    const args = input.args ? [...input.args] : [];
-    const cwd = input.cwd ?? process.cwd();
-    const timeoutMs = input.timeoutMs ?? 60 * 60 * 1e3;
-    const proxyPort = parsePortFromProxyUrl(proxy.proxyUrl);
-    const capabilities = input.kernelCapabilities ?? probeKernelSandboxCapabilities(input.runnerEnv);
-    if (networkPolicy === "https_only") {
-      const home = sanitizedEnv.HOME?.trim() ?? "";
-      if (home) {
-        for (const sub of [".npm", ".cache", ".cargo"]) {
-          try {
-            mkdirSync(resolve(home, sub), { recursive: true });
-          } catch {
-          }
-        }
-      }
-    }
-    const wrapped = buildKernelSandboxedCommand({
-      command: input.command,
-      args,
-      cwd,
-      sanitizedEnv,
-      networkPolicy,
-      proxyPort,
-      capabilities
-    });
-    const kernelBackend = wrapped.backend;
-    if (wrapped.backend === "none" && enforceKernelSandbox) {
-      return {
-        isolated: false,
-        error_code: "SANDBOX_ISOLATION_UNAVAILABLE",
-        error_message: "Fail-closed: kernel sandbox backend (landrun/bubblewrap) is unavailable while EPURE_ENFORCE_KERNEL_SANDBOX=true (ADR-0030).",
-        exit_code: 1,
-        stdout: "",
-        stderr: "",
-        duration_ms: Date.now() - startMs,
-        proxy_url: "",
-        kernel_backend: "none",
-        network_policy: networkPolicy
-      };
-    }
-    const spawnCommand = wrapped.command;
-    const spawnArgs = wrapped.args;
-    const childResult = await new Promise((resolvePromise) => {
-      const child = spawn(spawnCommand, [...spawnArgs], {
-        cwd,
-        env: sanitizedEnv,
-        stdio: ["ignore", "pipe", "pipe"]
-      });
-      const stdoutChunks = [];
-      const stderrChunks = [];
-      const timer = setTimeout(() => {
-        child.kill("SIGKILL");
-      }, timeoutMs);
-      child.stdout.on("data", (chunk) => stdoutChunks.push(chunk));
-      child.stderr.on("data", (chunk) => stderrChunks.push(chunk));
-      child.on("error", (err) => {
-        clearTimeout(timer);
-        resolvePromise({
-          exitCode: 1,
-          stdout: Buffer.concat(stdoutChunks).toString("utf8"),
-          stderr: err.message
-        });
-      });
-      child.on("close", (code) => {
-        clearTimeout(timer);
-        resolvePromise({
-          exitCode: code ?? 1,
-          stdout: Buffer.concat(stdoutChunks).toString("utf8"),
-          stderr: Buffer.concat(stderrChunks).toString("utf8")
-        });
-      });
-    });
-    const cleanStdout = redactSecrets(childResult.stdout, secretValues);
-    const cleanStderr = redactSecrets(childResult.stderr, secretValues);
-    const ok = childResult.exitCode === 0;
-    return {
-      isolated: true,
-      error_code: ok ? "NONE" : "SANDBOX_COMMAND_FAILED",
-      error_message: ok ? "" : `Sandboxed command exited with code ${childResult.exitCode}.`,
-      exit_code: childResult.exitCode,
-      stdout: cleanStdout,
-      stderr: cleanStderr,
-      duration_ms: Date.now() - startMs,
-      proxy_url: proxy.proxyUrl,
-      kernel_backend: kernelBackend,
-      network_policy: networkPolicy
-    };
-  } finally {
-    await proxy.close();
-  }
-}
-
-// src/sandbox/polyglot-workspace-runner.ts
-var SENSITIVE_TASK_BRANCH_PATH_PATTERNS = [
-  /^\.github\/agents\.ya?ml$/i,
-  /^\.github\/workflows(?:\/|$)/i,
-  /^\.cursor\/agents(?:\/|$)/i,
-  /(?:^|\/)\.env(?:\.(?!example$|sample$|template$).+)?$/i
-];
-var SHELL_INJECTION_PATTERN = /[;|`><\r\n]|\$\(|\$\{\{/;
-var ANSI_ESCAPE_PATTERN = /\x1b\[[0-9;]*[A-Za-z]/g;
-var RTK_NOISE_LINE_PATTERN = /^(?:npm warn deprecated\b|npm notice\b|added \d+ packages\b|audited \d+ packages\b|found 0 vulnerabilities\b|Downloading https?:\/\/|Collecting [a-zA-Z0-9_.-]+\s*$|\s*\[[=>.\s-]{10,}\]\s*\d+%)/i;
-var RTK_IGNORED_PATH_NOISE_PATTERN = /(?:^|\s)(?:\.git\/|node_modules\/|dist\/|target\/|__pycache__\/|\.venv\/|[^\s]+\.lock|package-lock\.json|pnpm-lock\.yaml|[^\s]+\.min\.(?:js|css))(?:\s|$)/;
-var DIAGNOSTIC_PRESERVE_PATTERN = /\b(?:error|fail|failed|failure|err!|assertionerror|typeerror|referenceerror|syntaxerror|traceback|exception|panic)\b|^\s*at\s+/i;
-function formatAndCondenseStage1CommandOutput(input) {
-  const rawCombined = `${input.stdout}
-${input.stderr}`.replace(ANSI_ESCAPE_PATTERN, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
-  if (!rawCombined) {
-    return "";
-  }
-  const lines = rawCombined.split("\n");
-  const filteredLines = [];
-  let droppedLinesCount = 0;
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed) {
-      if (filteredLines.length > 0 && filteredLines[filteredLines.length - 1] !== "") {
-        filteredLines.push("");
-      }
-      continue;
-    }
-    const isDiagnosticLine = DIAGNOSTIC_PRESERVE_PATTERN.test(trimmed);
-    if (!isDiagnosticLine && (RTK_NOISE_LINE_PATTERN.test(trimmed) || RTK_IGNORED_PATH_NOISE_PATTERN.test(trimmed))) {
-      droppedLinesCount += 1;
-      continue;
-    }
-    filteredLines.push(line);
-  }
-  const condensed = filteredLines.join("\n").trim();
-  if (input.exitCode === 0) {
-    if (!condensed && droppedLinesCount > 0) {
-      return `[rtk stateless] ${input.rawCommand}: ok (${droppedLinesCount} noise lines filtered)`;
-    }
-    return condensed;
-  }
-  const maxTailChars = input.maxFailureRawTailChars ?? 4e3;
-  const rawTail = rawCombined.length > maxTailChars ? rawCombined.slice(-maxTailChars) : rawCombined;
-  if (droppedLinesCount === 0 && condensed === rawTail) {
-    return condensed;
-  }
-  return [
-    condensed,
-    `--- [raw failure tail (${rawTail.length} chars, stateless in-memory)] ---`,
-    rawTail
-  ].filter(Boolean).join("\n");
-}
-var ALLOWLISTED_BINARIES = /* @__PURE__ */ new Set([
-  "npm",
-  "npx",
-  "pnpm",
-  "yarn",
-  "node",
-  "tsc",
-  "vitest",
-  "jest",
-  "eslint",
-  "biome",
-  "prisma",
-  "python",
-  "python3",
-  "pytest",
-  "ruff",
-  "mypy",
-  "pyright",
-  "flake8",
-  "pip",
-  "pip3",
-  "uv",
-  "poetry",
-  "cargo",
-  "rustc",
-  "rustfmt",
-  "go",
-  "gofmt",
-  "golangci-lint",
-  "make",
-  "just",
-  "task",
-  "turbo",
-  "nx",
-  "sh",
-  "bash"
-]);
-function normalizeRelativeCandidate(rawPath) {
-  return rawPath.trim().replace(/\\/g, "/").replace(/^\.\/+/, "").replace(/^\/+/, "");
-}
-function isSensitiveTaskBranchPath(rawPath) {
-  const norm = normalizeRelativeCandidate(rawPath);
-  return SENSITIVE_TASK_BRANCH_PATH_PATTERNS.some((re) => re.test(norm));
-}
-function hasSymlinkEscapeAlongPath(resolvedRoot, rawRelPath) {
-  if (!existsSync2(resolvedRoot)) {
-    return false;
-  }
-  let realRoot = resolvedRoot;
-  try {
-    realRoot = realpathSync(resolvedRoot);
-  } catch {
-    return false;
-  }
-  const segments = rawRelPath.replace(/\\/g, "/").split("/").filter((s) => s.length > 0 && s !== ".");
-  let current = resolvedRoot;
-  for (const seg of segments) {
-    current = join2(current, seg);
-    if (!existsSync2(current)) {
-      break;
-    }
-    try {
-      const stat = lstatSync(current);
-      if (stat.isSymbolicLink()) {
-        const realTarget = realpathSync(current);
-        if (realTarget !== realRoot && !realTarget.startsWith(realRoot + sep)) {
-          return true;
-        }
-      }
-    } catch {
-      return true;
-    }
-  }
-  return false;
-}
-function isContainedRelativePath(resolvedRoot, rawPath, allowRootDot) {
-  const trimmed = rawPath.trim();
-  if (!trimmed) {
-    return false;
-  }
-  if (allowRootDot && trimmed === ".") {
-    return true;
-  }
-  if (trimmed.startsWith("/") || trimmed.startsWith("\\") || /^[A-Za-z]:[\\/]/.test(trimmed)) {
-    return false;
-  }
-  const normalizedSlashes = trimmed.replace(/\\/g, "/");
-  const segments = normalizedSlashes.split("/");
-  for (const seg of segments) {
-    if (seg === "..") {
-      return false;
-    }
-    if (seg.toLowerCase() === ".git") {
-      return false;
-    }
-  }
-  const resolvedTarget = resolve2(resolvedRoot, trimmed);
-  if (allowRootDot && resolvedTarget === resolvedRoot) {
-    return true;
-  }
-  if (!resolvedTarget.startsWith(resolvedRoot + sep)) {
-    return false;
-  }
-  if (hasSymlinkEscapeAlongPath(resolvedRoot, trimmed)) {
-    return false;
-  }
-  return true;
-}
-function validateWorkspaceFileOperations(input) {
-  const resolvedRoot = resolve2(input.workDir);
-  const sensitiveSet = /* @__PURE__ */ new Set();
-  const traversalSet = /* @__PURE__ */ new Set();
-  const filePaths = [];
-  for (const entry of input.files ?? []) {
-    const raw = typeof entry === "string" ? entry : entry.path;
-    filePaths.push(raw);
-  }
-  for (const del of input.deleted_files ?? []) {
-    filePaths.push(del);
-  }
-  for (const rawPath of filePaths) {
-    if (!isContainedRelativePath(resolvedRoot, rawPath, false)) {
-      traversalSet.add(rawPath);
-      continue;
-    }
-    if (input.isTaskBranch && isSensitiveTaskBranchPath(rawPath)) {
-      sensitiveSet.add(normalizeRelativeCandidate(rawPath));
-    }
-  }
-  for (const target of input.targets ?? []) {
-    if (!isContainedRelativePath(resolvedRoot, target.working_directory, true)) {
-      traversalSet.add(target.working_directory);
-    }
-  }
-  const sensitivePaths = Array.from(sensitiveSet);
-  const traversalPaths = Array.from(traversalSet);
-  const allowed = sensitivePaths.length === 0 && traversalPaths.length === 0;
-  const reasons = [];
-  if (traversalPaths.length > 0) {
-    reasons.push(
-      `Path containment violation (outside workspace or inside .git/): ${traversalPaths.join(", ")}`
-    );
-  }
-  if (sensitivePaths.length > 0) {
-    reasons.push(
-      `Forbidden modification of sensitive path(s) on task/* branch: ${sensitivePaths.join(", ")}`
-    );
-  }
-  return {
-    allowed,
-    sensitivePaths,
-    traversalPaths,
-    reason: reasons.join("; ")
-  };
-}
-function sanitizeGitConfigFile(workDir, cleanRemoteUrl) {
-  const gitDir = join2(workDir, ".git");
-  const gitConfigPath = join2(gitDir, "config");
-  if (!existsSync2(gitDir)) {
-    return;
-  }
-  if (!existsSync2(gitConfigPath)) {
-    if (cleanRemoteUrl) {
-      writeFileSync(
-        gitConfigPath,
-        [
-          "[core]",
-          "	repositoryformatversion = 0",
-          "	filemode = true",
-          "	bare = false",
-          "	hooksPath = /dev/null",
-          '[remote "origin"]',
-          `	url = ${cleanRemoteUrl}`,
-          "	fetch = +refs/heads/*:refs/remotes/origin/*",
-          ""
-        ].join("\n"),
-        "utf8"
-      );
-    }
-    return;
-  }
-  try {
-    const raw = readFileSync2(gitConfigPath, "utf8");
-    const cleanedLines = [];
-    let replacedUrl = false;
-    for (const line of raw.split(/\r?\n/)) {
-      if (/extraheader/i.test(line) || /x-access-token/i.test(line) || /Authorization:/i.test(line)) {
-        continue;
-      }
-      if (/^\s*url\s*=/i.test(line) && cleanRemoteUrl) {
-        cleanedLines.push(`	url = ${cleanRemoteUrl}`);
-        replacedUrl = true;
-        continue;
-      }
-      cleanedLines.push(line);
-    }
-    if (!replacedUrl && cleanRemoteUrl) {
-      cleanedLines.push('[remote "origin"]', `	url = ${cleanRemoteUrl}`);
-    }
-    writeFileSync(gitConfigPath, `${cleanedLines.join("\n").trim()}
-`, "utf8");
-  } catch {
-  }
-}
-function materializeSeedFilesIntoWorkspace(workDir, seedFiles) {
-  if (!seedFiles) {
-    return;
-  }
-  const resolvedRoot = resolve2(workDir);
-  const entries = [];
-  if (Array.isArray(seedFiles)) {
-    for (const item of seedFiles) {
-      entries.push([item.path, item.content]);
-    }
-  } else if (seedFiles instanceof Map || typeof seedFiles.entries === "function") {
-    for (const [k, v] of seedFiles.entries()) {
-      entries.push([k, v]);
-    }
-  } else {
-    for (const [k, v] of Object.entries(seedFiles)) {
-      if (typeof v === "string") {
-        entries.push([k, v]);
-      }
-    }
-  }
-  for (const [rawPath, content] of entries) {
-    const cleanRel = rawPath.replace(/^\/+/, "");
-    if (!isContainedRelativePath(resolvedRoot, cleanRel, false)) {
-      continue;
-    }
-    const targetPath = resolve2(resolvedRoot, cleanRel);
-    mkdirSync2(dirname2(targetPath), { recursive: true });
-    writeFileSync(targetPath, content, "utf8");
-  }
-}
-function prepareRepositorySandboxWorkspace(input) {
-  const workDir = input.workDir ?? mkdtempSync(join2(tmpdir(), "epure-polyglot-sandbox-"));
-  mkdirSync2(workDir, { recursive: true });
-  const repoSlug = (input.repository ?? "").trim();
-  const [owner, repo] = repoSlug.split("/");
-  const cleanRemoteUrl = owner && repo ? `https://github.com/${owner}/${repo}.git` : "";
-  let clonedFromRemote = false;
-  try {
-    if (input.localSourceRepoDir && existsSync2(input.localSourceRepoDir)) {
-      cpSync(input.localSourceRepoDir, workDir, { recursive: true });
-    }
-    const shouldAttemptClone = Boolean(cleanRemoteUrl && input.branch && input.githubToken) && (input.enableRemoteClone === true || Boolean(input.execGitImpl));
-    if (shouldAttemptClone && input.branch && input.githubToken) {
-      const basicAuth = Buffer.from(
-        `x-access-token:${input.githubToken.trim()}`,
-        "utf8"
-      ).toString("base64");
-      const cloneArgs = [
-        "-c",
-        "core.hooksPath=/dev/null",
-        "-c",
-        `http.extraHeader=Authorization: Basic ${basicAuth}`,
-        "clone",
-        "--depth=1",
-        "--single-branch",
-        "--branch",
-        input.branch,
-        cleanRemoteUrl,
-        workDir
-      ];
-      const gitRunner = input.execGitImpl ?? ((args, opts) => {
-        execFileSync("git", [...args], {
-          cwd: opts.cwd,
-          stdio: "pipe",
-          timeout: 12e4
-        });
-      });
-      try {
-        gitRunner(cloneArgs, {});
-        clonedFromRemote = true;
-      } catch {
-        clonedFromRemote = false;
-      }
-    }
-    if (input.seedFiles) {
-      materializeSeedFilesIntoWorkspace(workDir, input.seedFiles);
-    }
-  } finally {
-    if (cleanRemoteUrl) {
-      if (clonedFromRemote && !existsSync2(join2(workDir, ".git"))) {
-        mkdirSync2(join2(workDir, ".git"), { recursive: true });
-      }
-      sanitizeGitConfigFile(workDir, cleanRemoteUrl);
-    }
-  }
-  return {
-    workDir,
-    clonedFromRemote,
-    sanitizedGitConfigUrl: cleanRemoteUrl,
-    cleanup: () => {
-      rmSync(workDir, { recursive: true, force: true });
-    }
-  };
-}
-function splitCompoundCommands(rawCommand) {
-  const parts = [];
-  let current = "";
-  let inQuote = null;
-  let escaped = false;
-  for (let i = 0; i < rawCommand.length; i += 1) {
-    const ch = rawCommand[i] ?? "";
-    const next = rawCommand[i + 1] ?? "";
-    if (escaped) {
-      current += ch;
-      escaped = false;
-      continue;
-    }
-    if (ch === "\\" && inQuote === '"') {
-      current += ch;
-      escaped = true;
-      continue;
-    }
-    if ((ch === '"' || ch === "'") && !inQuote) {
-      inQuote = ch;
-      current += ch;
-      continue;
-    }
-    if (ch === inQuote) {
-      inQuote = null;
-      current += ch;
-      continue;
-    }
-    if (!inQuote && ch === "&" && next === "&") {
-      if (current.trim().length > 0) {
-        parts.push(current.trim());
-      }
-      current = "";
-      i += 1;
-      continue;
-    }
-    current += ch;
-  }
-  if (current.trim().length > 0) {
-    parts.push(current.trim());
-  }
-  return parts;
-}
-function tokenizeAllowlistedCommand(rawAtomicCommand) {
-  const trimmed = rawAtomicCommand.trim();
-  if (!trimmed) {
-    throw new Error("Sandbox command tokenizer rejected empty command.");
-  }
-  if (SHELL_INJECTION_PATTERN.test(trimmed)) {
-    throw new Error(
-      `Sandbox command tokenizer rejected unsafe shell metacharacters or expression in '${trimmed}'.`
-    );
-  }
-  const tokens = [];
-  let current = "";
-  let inQuote = null;
-  let escaped = false;
-  for (let i = 0; i < trimmed.length; i += 1) {
-    const ch = trimmed[i] ?? "";
-    if (escaped) {
-      current += ch;
-      escaped = false;
-      continue;
-    }
-    if (ch === "\\" && inQuote !== "'") {
-      escaped = true;
-      continue;
-    }
-    if ((ch === '"' || ch === "'") && !inQuote) {
-      inQuote = ch;
-      continue;
-    }
-    if (ch === inQuote) {
-      inQuote = null;
-      continue;
-    }
-    if (!inQuote && /\s/.test(ch)) {
-      if (current.length > 0) {
-        tokens.push(current);
-        current = "";
-      }
-      continue;
-    }
-    current += ch;
-  }
-  if (inQuote) {
-    throw new Error(
-      `Sandbox command tokenizer rejected unterminated quote in '${trimmed}'.`
-    );
-  }
-  if (current.length > 0) {
-    tokens.push(current);
-  }
-  const binary = tokens[0] ?? "";
-  const args = tokens.slice(1);
-  const isRelativeScript = /^\.\/scripts\/[A-Za-z0-9_./-]+$/.test(binary);
-  if (!isRelativeScript && !ALLOWLISTED_BINARIES.has(binary)) {
-    throw new Error(
-      `Sandbox command tokenizer rejected non-allowlisted binary '${binary}' in '${trimmed}'.`
-    );
-  }
-  if ((binary === "sh" || binary === "bash") && args.includes("-c")) {
-    throw new Error(
-      `Sandbox command tokenizer forbids '${binary} -c' shell execution in '${trimmed}'.`
-    );
-  }
-  return {
-    command: binary,
-    args,
-    raw: trimmed
-  };
-}
-function matchesPathPattern(filePath, pattern) {
-  const cleanFile = normalizeRelativeCandidate(filePath);
-  const cleanPattern = normalizeRelativeCandidate(pattern);
-  if (!cleanPattern || cleanPattern === "**" || cleanPattern === "**/*" || cleanPattern === "*") {
-    return true;
-  }
-  if (cleanPattern.endsWith("/**")) {
-    const prefix = cleanPattern.slice(0, -3);
-    return cleanFile === prefix || cleanFile.startsWith(`${prefix}/`);
-  }
-  let regexStr = "^";
-  for (let i = 0; i < cleanPattern.length; i += 1) {
-    const ch = cleanPattern[i] ?? "";
-    const next = cleanPattern[i + 1] ?? "";
-    const afterNext = cleanPattern[i + 2] ?? "";
-    if (ch === "*" && next === "*") {
-      if (afterNext === "/") {
-        regexStr += "(?:.+/)?";
-        i += 2;
-      } else {
-        regexStr += ".*";
-        i += 1;
-      }
-      continue;
-    }
-    if (ch === "*") {
-      regexStr += "[^/]*";
-      continue;
-    }
-    if (ch === "?") {
-      regexStr += "[^/]";
-      continue;
-    }
-    if (/[.+^${}()|[\]\\]/.test(ch)) {
-      regexStr += `\\${ch}`;
-      continue;
-    }
-    regexStr += ch;
-  }
-  regexStr += "$";
-  return new RegExp(regexStr, "i").test(cleanFile);
-}
-function selectAffectedVerificationTargets(targets, changedPaths) {
-  if (targets.length === 0) {
-    return [];
-  }
-  const cleanPaths = changedPaths.map(normalizeRelativeCandidate).filter((p) => p.length > 0);
-  if (cleanPaths.length === 0) {
-    return targets;
-  }
-  const matched = targets.filter((target) => {
-    const patterns = target.path_patterns.length > 0 ? target.path_patterns : ["**"];
-    return cleanPaths.some(
-      (filePath) => patterns.some((pat) => matchesPathPattern(filePath, pat))
-    );
-  });
-  return matched.length > 0 ? matched : targets;
-}
-function formatVerificationToolingGuideMarkdown(profile) {
-  const lines = [
-    "## Verification & Tooling Guide (Stage 1 Local Sandbox & Stage 3 External CI)",
-    "",
-    "### Stage 1 \u2014 Pre-Publication Local Sandbox Targets (`shell: false`, zero secrets)",
-    "| Target | Kind | Working Directory | Path Patterns | Install | Codegen | Typecheck | Lint | Unit Test |",
-    "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |"
-  ];
-  for (const t of profile.targets) {
-    const patterns = t.path_patterns.map((p) => `\`${p}\``).join(", ") || "`**`";
-    const fmt = (cmd) => cmd ? `\`${cmd}\`` : "\u2014";
-    lines.push(
-      `| \`${t.name}\` | \`${t.kind}\` | \`${t.working_directory}\` | ${patterns} | ${fmt(t.install_command)} | ${fmt(t.codegen_command)} | ${fmt(t.typecheck_command)} | ${fmt(t.lint_command)} | ${fmt(t.test_command)} |`
-    );
-  }
-  lines.push("");
-  lines.push("### Stage 3 \u2014 Post-PR External GitHub Actions CI Gate");
-  lines.push(
-    `- **Wait for External CI**: \`${profile.wait_for_external_ci}\` (timeout: \`${profile.external_ci_timeout_minutes}m\`, registration grace window: \`${profile.grace_window_seconds}s\` fail-closed)`
-  );
-  if (profile.deferred_external_workflows && profile.deferred_external_workflows.length > 0) {
-    lines.push(
-      `- **Deferred Service/Integration Workflows (Stage 3)**: ${profile.deferred_external_workflows.map((w) => `\`${w}\``).join(", ")} (executed automatically on GitHub Actions after PR creation/update; any failure logs & annotations will be fed back into the remediation loop).`
-    );
-  } else {
-    lines.push(
-      "- All non-EPURE `.github/workflows/*.{yml,yaml}` triggered by the PR on `dev` will be awaited in Stage 3 after PR publication."
-    );
-  }
-  return lines.join("\n");
-}
-function shouldSkipDefaultNodeStepInOfflineTempDir(params) {
-  if (params.hasCustomSandboxRunner) {
-    return { skip: false, skipEntireTarget: false };
-  }
-  const pkgJsonPath = join2(params.targetCwd, "package.json");
-  if (!existsSync2(pkgJsonPath)) {
-    return { skip: true, skipEntireTarget: true };
-  }
-  let scripts = {};
-  let depCount = 0;
-  try {
-    const parsed = JSON.parse(readFileSync2(pkgJsonPath, "utf8"));
-    scripts = parsed.scripts ?? {};
-    depCount = Object.keys(parsed.dependencies ?? {}).length + Object.keys(parsed.devDependencies ?? {}).length;
-  } catch {
-    return { skip: false, skipEntireTarget: false };
-  }
-  const hasLockfile = existsSync2(join2(params.targetCwd, "package-lock.json")) || existsSync2(join2(params.targetCwd, "pnpm-lock.yaml")) || existsSync2(join2(params.targetCwd, "yarn.lock"));
-  const hasNodeModules = existsSync2(join2(params.targetCwd, "node_modules"));
-  if (params.step === "install") {
-    if (depCount === 0 && !hasLockfile || hasNodeModules) {
-      return { skip: true, skipEntireTarget: false };
-    }
-  }
-  if (params.step === "typecheck") {
-    const hasTsconfig = existsSync2(join2(params.targetCwd, "tsconfig.json"));
-    if (!hasTsconfig && !scripts.typecheck) {
-      return { skip: true, skipEntireTarget: false };
-    }
-  }
-  if (params.step === "lint") {
-    if (params.rawCommand === "npm run lint" && !scripts.lint) {
-      return { skip: true, skipEntireTarget: false };
-    }
-  }
-  if (params.step === "test") {
-    if (params.rawCommand === "npm test" && !scripts.test) {
-      return { skip: true, skipEntireTarget: false };
-    }
-  }
-  return { skip: false, skipEntireTarget: false };
-}
-async function runPolyglotStage1Verification(input) {
-  const ownsTempWorkDir = !input.workDir;
-  const workDir = input.workDir ?? mkdtempSync(join2(tmpdir(), "epure-stage1-sandbox-"));
-  mkdirSync2(workDir, { recursive: true });
-  const hasCustomSandboxRunner = Boolean(input.sandboxRunner);
-  const sandboxRunner = input.sandboxRunner ?? runInUntrustedCodeSandbox;
-  const bootstrapped = input.bootstrappedTargets ?? /* @__PURE__ */ new Set();
-  try {
-    const validation = validateWorkspaceFileOperations({
-      workDir,
-      files: input.changedPaths && input.changedPaths.length > 0 ? input.changedPaths : input.files,
-      deleted_files: input.deleted_files,
-      targets: input.profile.targets,
-      isTaskBranch: input.isTaskBranch
-    });
-    const fullContainment = validateWorkspaceFileOperations({
-      workDir,
-      files: input.files,
-      deleted_files: input.deleted_files,
-      targets: input.profile.targets,
-      isTaskBranch: false
-    });
-    if (!validation.allowed || !fullContainment.allowed) {
-      const mergedTraversal = Array.from(
-        /* @__PURE__ */ new Set([
-          ...validation.traversalPaths,
-          ...fullContainment.traversalPaths
-        ])
-      );
-      return {
-        passed: false,
-        blocked_by_security_gate: true,
-        sensitive_paths: validation.sensitivePaths,
-        traversal_paths: mergedTraversal,
-        affected_targets: [],
-        target_results: [],
-        output: validation.reason || fullContainment.reason
-      };
-    }
-    const resolvedRoot = resolve2(workDir);
-    for (const file of input.files ?? []) {
-      const cleanRel = file.path.replace(/^\/+/, "");
-      const fullPath = resolve2(resolvedRoot, cleanRel);
-      mkdirSync2(dirname2(fullPath), { recursive: true });
-      writeFileSync(fullPath, file.content, "utf8");
-    }
-    for (const del of input.deleted_files ?? []) {
-      const cleanRel = del.replace(/^\/+/, "");
-      const fullPath = resolve2(resolvedRoot, cleanRel);
-      if (existsSync2(fullPath)) {
-        unlinkSync(fullPath);
-      }
-    }
-    const effectiveChangedPaths = input.changedPaths ?? [
-      ...(input.files ?? []).map((f) => f.path),
-      ...input.deleted_files ?? []
-    ];
-    const affectedTargets = selectAffectedVerificationTargets(
-      input.profile.targets,
-      effectiveChangedPaths
-    );
-    const targetResults = [];
-    const outputSections = [];
-    const baseRunnerEnv = {
-      PATH: process.env.PATH,
-      HOME: process.env.HOME,
-      ...input.runnerEnv ?? {},
-      LLM_API_KEY: input.llmApiKey
-    };
-    for (const target of affectedTargets) {
-      const targetCwd = target.working_directory === "." ? resolvedRoot : resolve2(resolvedRoot, target.working_directory);
-      if (!existsSync2(targetCwd)) {
-        if (!hasCustomSandboxRunner) {
-          targetResults.push({
-            target_name: target.name,
-            working_directory: target.working_directory,
-            kind: target.kind,
-            passed: true,
-            skipped: true,
-            steps: [],
-            output: `Skipped target '${target.name}': directory '${target.working_directory}' not present.`
-          });
-          continue;
-        }
-        mkdirSync2(targetCwd, { recursive: true });
-      }
-      if (target.kind === "node") {
-        const nodeCheck = shouldSkipDefaultNodeStepInOfflineTempDir({
-          targetCwd,
-          step: "test",
-          rawCommand: target.test_command ?? "npm test",
-          hasCustomSandboxRunner
-        });
-        if (nodeCheck.skipEntireTarget) {
-          targetResults.push({
-            target_name: target.name,
-            working_directory: target.working_directory,
-            kind: target.kind,
-            passed: true,
-            skipped: true,
-            steps: [],
-            output: "No package.json in workspace snapshot; syntax verified."
-          });
-          continue;
-        }
-      }
-      const candidateSteps = [
-        {
-          step: "install",
-          rawCommand: target.install_command,
-          bootstrapOnly: true
-        },
-        {
-          step: "codegen",
-          rawCommand: target.codegen_command,
-          bootstrapOnly: true
-        },
-        {
-          step: "typecheck",
-          rawCommand: target.typecheck_command,
-          bootstrapOnly: false
-        },
-        {
-          step: "lint",
-          rawCommand: target.lint_command,
-          bootstrapOnly: false
-        },
-        {
-          step: "test",
-          rawCommand: target.test_command,
-          bootstrapOnly: false
-        }
-      ];
-      const executedSteps = [];
-      let targetPassed = true;
-      let targetFailureOutput = "";
-      const isAlreadyBootstrapped = bootstrapped.has(target.name);
-      for (const candidate of candidateSteps) {
-        if (!candidate.rawCommand) {
-          continue;
-        }
-        if (candidate.bootstrapOnly && isAlreadyBootstrapped) {
-          continue;
-        }
-        if (target.kind === "node") {
-          const skipDecision = shouldSkipDefaultNodeStepInOfflineTempDir({
-            targetCwd,
-            step: candidate.step,
-            rawCommand: candidate.rawCommand,
-            hasCustomSandboxRunner
-          });
-          if (skipDecision.skip) {
-            continue;
-          }
-        }
-        let atomicCommands;
-        try {
-          atomicCommands = splitCompoundCommands(candidate.rawCommand);
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          targetPassed = false;
-          targetFailureOutput = `[Target: ${target.name}][${candidate.step}] ${msg}`;
-          break;
-        }
-        for (const atomicRaw of atomicCommands) {
-          let tokenized;
-          try {
-            tokenized = tokenizeAllowlistedCommand(atomicRaw);
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            targetPassed = false;
-            targetFailureOutput = `[Target: ${target.name}][${candidate.step}] ${msg}`;
-            executedSteps.push({
-              step: candidate.step,
-              raw_command: atomicRaw,
-              exit_code: 1,
-              passed: false,
-              stdout: "",
-              stderr: msg,
-              duration_ms: 0
-            });
-            break;
-          }
-          const stepNetworkPolicy = candidate.step === "install" ? "https_only" : "offline";
-          let execRes = await sandboxRunner({
-            isolationAvailable: true,
-            runnerEnv: baseRunnerEnv,
-            command: tokenized.command,
-            args: tokenized.args,
-            cwd: targetCwd,
-            networkPolicy: stepNetworkPolicy,
-            timeoutMs: candidate.step === "install" || candidate.step === "test" ? 3e5 : 18e4
-          });
-          if (!execRes.isolated || execRes.exit_code !== 0 && (tokenized.command === "pip" || tokenized.command === "pip3") && tokenized.args[0] === "install" && /externally-managed-environment/i.test(
-            `${execRes.stdout}
-${execRes.stderr}`
-          )) {
-            if (execRes.isolated && (tokenized.command === "pip" || tokenized.command === "pip3")) {
-              execRes = await sandboxRunner({
-                isolationAvailable: true,
-                runnerEnv: baseRunnerEnv,
-                command: tokenized.command,
-                args: [
-                  ...tokenized.args,
-                  "--break-system-packages",
-                  "--user"
-                ],
-                cwd: targetCwd,
-                networkPolicy: stepNetworkPolicy,
-                timeoutMs: 3e5
-              });
-            }
-          }
-          const stepPassed = execRes.isolated && execRes.exit_code === 0;
-          executedSteps.push({
-            step: candidate.step,
-            raw_command: tokenized.raw,
-            exit_code: execRes.exit_code,
-            passed: stepPassed,
-            stdout: execRes.stdout,
-            stderr: execRes.stderr,
-            duration_ms: execRes.duration_ms,
-            network_policy: stepNetworkPolicy
-          });
-          if (!stepPassed) {
-            const formattedOutput = formatAndCondenseStage1CommandOutput({
-              step: candidate.step,
-              rawCommand: tokenized.raw,
-              exitCode: execRes.exit_code,
-              stdout: execRes.stdout,
-              stderr: execRes.stderr
-            });
-            targetPassed = false;
-            targetFailureOutput = `[Target: ${target.name} (${target.working_directory})][${candidate.step}: ${tokenized.raw}] failed (exit ${execRes.exit_code}):
-${formattedOutput}`;
-            break;
-          }
-        }
-        if (!targetPassed) {
-          break;
-        }
-      }
-      if (targetPassed) {
-        bootstrapped.add(target.name);
-      }
-      const stepOutSummary = targetPassed ? executedSteps.map(
-        (s) => formatAndCondenseStage1CommandOutput({
-          step: s.step,
-          rawCommand: s.raw_command,
-          exitCode: s.exit_code,
-          stdout: s.stdout,
-          stderr: s.stderr
-        })
-      ).filter(Boolean).join("\n") : targetFailureOutput;
-      targetResults.push({
-        target_name: target.name,
-        working_directory: target.working_directory,
-        kind: target.kind,
-        passed: targetPassed,
-        skipped: false,
-        steps: executedSteps,
-        output: stepOutSummary
-      });
-      if (stepOutSummary) {
-        outputSections.push(stepOutSummary);
-      }
-      if (!targetPassed) {
-        return {
-          passed: false,
-          blocked_by_security_gate: false,
-          sensitive_paths: [],
-          traversal_paths: [],
-          affected_targets: affectedTargets.map((t) => t.name),
-          target_results: targetResults,
-          output: outputSections.join("\n\n").trim()
-        };
-      }
-    }
-    return {
-      passed: true,
-      blocked_by_security_gate: false,
-      sensitive_paths: [],
-      traversal_paths: [],
-      affected_targets: affectedTargets.map((t) => t.name),
-      target_results: targetResults,
-      output: outputSections.join("\n\n").trim() || "Stage 1 polyglot verification passed."
-    };
-  } finally {
-    if (ownsTempWorkDir) {
-      rmSync(workDir, { recursive: true, force: true });
-    }
-  }
-}
-
 // src/security/prompt-injection-guard.ts
 var PROMPT_INJECTION_IMMUNITY_CLAUSE = [
   "## Security & Prompt Injection Immunity (OWASP LLM01)",
@@ -3149,829 +1813,6 @@ function detectPromptInjectionInPrFiles(changedFiles) {
     }
   }
   return results;
-}
-
-// src/execution/external-ci-gate.ts
-function resolveLlmEscalationReason(err) {
-  if (err instanceof AuthenticationError || err instanceof QuotaExhaustedError) {
-    return "llm_quota_or_auth_failure";
-  }
-  if (isTransientLLMError(err)) {
-    return "transient_llm_api_exhausted";
-  }
-  return "llm_request_invalid";
-}
-var EPURE_SYNTHETIC_CHECK_NAMES = /* @__PURE__ */ new Set([
-  "ai-review",
-  "impeccable-gate",
-  "pr title",
-  "verify epure consumer contract",
-  "verify-contract / verify epure consumer contract",
-  "verify-contract",
-  "authorize /epure issue command",
-  "orchestrate authorized /epure lifecycle"
-]);
-var TEST_OR_CODE_FAILURE_PATTERNS = [
-  /(?:^|\n|\s)FAIL\s+\S+/m,
-  /---\s*FAIL:/,
-  /\bAssertionError\b/,
-  /\bTS\d{4}:/,
-  /Traceback \(most recent call last\)/,
-  /\bpanicked at\b/,
-  /\bSyntaxError:/,
-  /\bReferenceError:/,
-  /\bTypeError:/,
-  /\bexpect\(.*\)\.(?:to|not)/
-];
-var TRANSIENT_INFRA_PATTERNS = [
-  /\bETIMEDOUT\b/i,
-  /\bECONNRESET\b/i,
-  /\bEAI_AGAIN\b/i,
-  /\b502 Bad Gateway\b/i,
-  /\b503 Service Unavailable\b/i,
-  /\b504 Gateway Timeout\b/i,
-  /\bRunner\.Worker\b/i,
-  /The hosted runner lost communication/i,
-  /runner has received a shutdown signal/i,
-  /failed to fetch .* from registry/i,
-  /TLS handshake timeout/i,
-  /rate limit exceeded/i
-];
-var ANSI_ESCAPE_REGEX = /\x1B\[[0-?]*[ -/]*[@-~]/g;
-var ISO_TIMESTAMP_PREFIX_REGEX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s+/gm;
-var GHA_WORKFLOW_COMMAND_REGEX = /::(error|warning|notice|debug|group|endgroup|add-mask|set-env|set-output|save-state|stop-commands)\b/gi;
-var LOG_FAILURE_ANCHOR_REGEX = /(?:##\[error\]|:\[error\]|\bFAIL\s+\S+|---\s*FAIL:|^\s*(?:●|✕|×|❯)\s+|\b(?:AssertionError|RangeError|TypeError|ReferenceError|SyntaxError)\b|\bError:|\bTS\d{4}:|Traceback \(most recent call last\)|\bpanicked at\b)/i;
-var APP_LOGGER_NOISE_REGEX = /^\d{2}:\d{2}:\d{2}\s+\[(?:error|warn|info|debug)\]/i;
-var COVERAGE_TABLE_ROW_REGEX = /^(?:\s*[^|]+\|\s*[\d.]+\s*\|\s*[\d.]+\s*\|\s*[\d.]+\s*\|\s*[\d.]+|\s*[-|]{20,}\s*|\s*File\s*\|\s*% Stmts\s*\|)/;
-function unquoteYamlString(raw) {
-  const trimmed = raw.trim().replace(/\s+#.*$/, "").trim();
-  if (trimmed.startsWith('"') && trimmed.endsWith('"') || trimmed.startsWith("'") && trimmed.endsWith("'")) {
-    return trimmed.slice(1, -1);
-  }
-  return trimmed;
-}
-function parseInlineYamlList(raw) {
-  const trimmed = raw.trim();
-  if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) {
-    return [];
-  }
-  const inner = trimmed.slice(1, -1).trim();
-  if (!inner) {
-    return [];
-  }
-  return inner.split(",").map((s) => unquoteYamlString(s)).filter((s) => s.length > 0);
-}
-function parseWorkflowOnTriggersAndFilters(content) {
-  const lines = content.split(/\r?\n/);
-  let workflowName = "CI";
-  const triggersSet = /* @__PURE__ */ new Set();
-  const pathsInclude = [];
-  const pathsIgnore = [];
-  const branchesInclude = [];
-  const hasServices = /^\s+services:\s*(?:#.*)?$/m.test(content);
-  for (const line of lines) {
-    const nameMatch = /^name:\s*(.+)$/.exec(line);
-    if (nameMatch && nameMatch[1]) {
-      workflowName = unquoteYamlString(nameMatch[1]);
-      break;
-    }
-  }
-  let inOnBlock = false;
-  let activeEvent = null;
-  let activeFilterKey = null;
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) {
-      continue;
-    }
-    const indent = /^(\s*)/.exec(line)?.[1]?.length ?? 0;
-    if (indent === 0) {
-      activeEvent = null;
-      activeFilterKey = null;
-      const onMatch = /^(?:on|"on"|'on'):\s*(.*)$/.exec(trimmed);
-      if (onMatch) {
-        inOnBlock = true;
-        const rest = (onMatch[1] ?? "").replace(/\s+#.*$/, "").trim();
-        if (rest.startsWith("[")) {
-          for (const item of parseInlineYamlList(rest)) {
-            if (item === "pull_request" || item === "pull_request_target") {
-              triggersSet.add("pull_request");
-            } else if (item === "push") {
-              triggersSet.add("push");
-            }
-          }
-          inOnBlock = false;
-        } else if (rest === "pull_request") {
-          triggersSet.add("pull_request");
-          inOnBlock = false;
-        } else if (rest === "push") {
-          triggersSet.add("push");
-          inOnBlock = false;
-        }
-        continue;
-      }
-      if (inOnBlock) {
-        inOnBlock = false;
-      }
-      continue;
-    }
-    if (!inOnBlock) {
-      continue;
-    }
-    if (indent === 2) {
-      activeFilterKey = null;
-      const evMatch = /^([a-zA-Z0-9_-]+):\s*(.*)$/.exec(trimmed);
-      if (evMatch && evMatch[1]) {
-        const evName = evMatch[1];
-        if (evName === "pull_request" || evName === "pull_request_target") {
-          triggersSet.add("pull_request");
-          activeEvent = "pull_request";
-        } else if (evName === "push") {
-          triggersSet.add("push");
-          activeEvent = "push";
-        } else {
-          activeEvent = "other";
-        }
-      }
-      continue;
-    }
-    if (activeEvent === "pull_request" || activeEvent === "push") {
-      if (indent === 4) {
-        const filterMatch = /^(paths|paths-ignore|branches):\s*(.*)$/.exec(
-          trimmed
-        );
-        if (filterMatch && filterMatch[1]) {
-          const key = filterMatch[1];
-          const rest = (filterMatch[2] ?? "").replace(/\s+#.*$/, "").trim();
-          if (rest.startsWith("[")) {
-            const list = parseInlineYamlList(rest);
-            if (key === "paths") pathsInclude.push(...list);
-            else if (key === "paths-ignore") pathsIgnore.push(...list);
-            else if (key === "branches" && activeEvent === "pull_request") {
-              branchesInclude.push(...list);
-            }
-            activeFilterKey = null;
-          } else {
-            activeFilterKey = key;
-          }
-        } else {
-          activeFilterKey = null;
-        }
-        continue;
-      }
-      if (indent >= 6 && activeFilterKey && trimmed.startsWith("-")) {
-        const val = unquoteYamlString(trimmed.replace(/^-\s*/, ""));
-        if (val) {
-          if (activeFilterKey === "paths") pathsInclude.push(val);
-          else if (activeFilterKey === "paths-ignore") pathsIgnore.push(val);
-          else if (activeFilterKey === "branches" && activeEvent === "pull_request") {
-            branchesInclude.push(val);
-          }
-        }
-      }
-    }
-  }
-  return {
-    workflowName,
-    triggers: Array.from(triggersSet),
-    pathsInclude,
-    pathsIgnore,
-    branchesInclude,
-    hasServices
-  };
-}
-function isEpureManagedWorkflow(filePath, content) {
-  const fileName = basename2(filePath).toLowerCase();
-  if (fileName.startsWith("epure-") || fileName === "pr-title.yml" || fileName === "pr-title.yaml" || fileName === "release.yml" || fileName === "release.yaml") {
-    return true;
-  }
-  if (content.includes("Giskard-AI/epure/actions/") || content.includes("Giskard-AI/epure/.github/workflows/")) {
-    return true;
-  }
-  return false;
-}
-function isEpureSyntheticCheckOrRun(nameOrPath) {
-  const clean = nameOrPath.trim().toLowerCase();
-  const base = basename2(clean);
-  if (base.startsWith("epure-") || base === "pr-title.yml" || base === "release.yml") {
-    return true;
-  }
-  if (EPURE_SYNTHETIC_CHECK_NAMES.has(clean)) {
-    return true;
-  }
-  if (clean.startsWith("epure ") || clean.startsWith("verify-contract") || clean.includes("verify epure consumer contract")) {
-    return true;
-  }
-  return false;
-}
-function discoverExpectedExternalWorkflows(input) {
-  const entries = input.workflowFilesMap instanceof Map || typeof input.workflowFilesMap.entries === "function" ? Array.from(
-    input.workflowFilesMap.entries()
-  ) : Object.entries(
-    input.workflowFilesMap
-  );
-  const cleanChanged = input.changedPaths.map((p) => p.trim().replace(/^\/+/, "")).filter((p) => p.length > 0);
-  const expected = [];
-  for (const [rawPath, content] of entries) {
-    if (typeof content !== "string") {
-      continue;
-    }
-    const normalizedPath = rawPath.startsWith(".github/workflows/") ? rawPath : `.github/workflows/${rawPath.replace(/^\/+/, "")}`;
-    const fileName = basename2(normalizedPath);
-    if (!/\.ya?ml$/i.test(fileName)) {
-      continue;
-    }
-    if (isEpureManagedWorkflow(normalizedPath, content)) {
-      continue;
-    }
-    const parsed = parseWorkflowOnTriggersAndFilters(content);
-    if (parsed.triggers.length === 0) {
-      continue;
-    }
-    if (input.targetBranch && parsed.branchesInclude.length > 0 && !parsed.triggers.includes("push")) {
-      const branchMatched = parsed.branchesInclude.some(
-        (pat) => matchesPathPattern(input.targetBranch, pat)
-      );
-      if (!branchMatched) {
-        continue;
-      }
-    }
-    if (parsed.pathsInclude.length > 0 && cleanChanged.length > 0) {
-      const anyPathMatches = cleanChanged.some(
-        (filePath) => parsed.pathsInclude.some((pat) => matchesPathPattern(filePath, pat))
-      );
-      if (!anyPathMatches) {
-        continue;
-      }
-    }
-    if (parsed.pathsIgnore.length > 0 && cleanChanged.length > 0) {
-      const allIgnored = cleanChanged.every(
-        (filePath) => parsed.pathsIgnore.some((pat) => matchesPathPattern(filePath, pat))
-      );
-      if (allIgnored) {
-        continue;
-      }
-    }
-    expected.push({
-      path: normalizedPath,
-      fileName,
-      workflowName: parsed.workflowName,
-      triggers: parsed.triggers,
-      hasServices: parsed.hasServices
-    });
-  }
-  return expected;
-}
-function classifyCiFailure(input) {
-  const maxReruns = input.maxInfraRerunsPerSha ?? 1;
-  const combinedAnnotationText = (input.annotations ?? []).map((a) => `${a.title ?? ""} ${a.message ?? ""}`).join("\n");
-  const fullDiagnosticText = `${input.rawLog}
-${combinedAnnotationText}`;
-  const hasTestOrCodeFailure = TEST_OR_CODE_FAILURE_PATTERNS.some(
-    (re) => re.test(fullDiagnosticText)
-  );
-  if (hasTestOrCodeFailure) {
-    return {
-      classification: "code_or_test_failure",
-      shouldRerunWorkflow: false,
-      reason: "Test assertion or compiler failure marker detected in check logs/annotations."
-    };
-  }
-  const hasTransientInfraMarker = TRANSIENT_INFRA_PATTERNS.some((re) => re.test(fullDiagnosticText)) || input.conclusion === "timed_out" && fullDiagnosticText.trim().length === 0;
-  if (!hasTransientInfraMarker) {
-    return {
-      classification: "code_or_test_failure",
-      shouldRerunWorkflow: false,
-      reason: "Check run failed without transient infrastructure signature."
-    };
-  }
-  if (input.infraRerunsUsedForSha >= maxReruns) {
-    return {
-      classification: "code_or_test_failure",
-      shouldRerunWorkflow: false,
-      reason: `Transient infrastructure signature detected, but rerun quota (${input.infraRerunsUsedForSha}/${maxReruns}) is already exhausted for SHA ${input.headSha.slice(0, 7)}.`
-    };
-  }
-  return {
-    classification: "transient_infra",
-    shouldRerunWorkflow: true,
-    reason: `Transient infrastructure failure detected with zero test assertion failures (rerun ${input.infraRerunsUsedForSha + 1}/${maxReruns} for SHA ${input.headSha.slice(0, 7)}).`
-  };
-}
-function sanitizeAndFormatFailedCheckLogs(input) {
-  const maxBytes = input.maxBytes ?? 12288;
-  const secrets = input.extraSecrets ?? [];
-  let neutralizedCount = 0;
-  const neutralizeCommands = (text) => text.replace(GHA_WORKFLOW_COMMAND_REGEX, (_match, cmdName) => {
-    neutralizedCount += 1;
-    return `:[${cmdName.toLowerCase()}]`;
-  });
-  const annotationLines = [];
-  for (const ann of (input.annotations ?? []).slice(0, 25)) {
-    const loc = ann.path ? `${ann.path}${ann.start_line ? `:${ann.start_line}` : ""}` : "check";
-    const titlePart = ann.title ? `${ann.title}: ` : "";
-    const msgPart = ann.message ?? "";
-    const rawAnn = `[Annotation] ${loc} \u2014 ${titlePart}${msgPart}`.trim();
-    annotationLines.push(neutralizeCommands(rawAnn.replace(ANSI_ESCAPE_REGEX, "")));
-  }
-  const strippedLog = neutralizeCommands(
-    input.rawLog.replace(ANSI_ESCAPE_REGEX, "").replace(ISO_TIMESTAMP_PREFIX_REGEX, "")
-  );
-  const rawLines = strippedLog.split(/\r?\n/).filter((line) => !COVERAGE_TABLE_ROW_REGEX.test(line));
-  const postJobCleanupIdx = rawLines.findIndex(
-    (line) => /^(?:Post job cleanup\.|##\[group\]Stop containers\b|Stop and remove container:)/.test(
-      line.trim()
-    )
-  );
-  const allLines = postJobCleanupIdx > 0 ? rawLines.slice(0, postJobCleanupIdx) : rawLines;
-  const selectedIndices = /* @__PURE__ */ new Set();
-  for (let i = 0; i < allLines.length; i += 1) {
-    const line = allLines[i] ?? "";
-    if (APP_LOGGER_NOISE_REGEX.test(line)) {
-      continue;
-    }
-    if (LOG_FAILURE_ANCHOR_REGEX.test(line)) {
-      const start = Math.max(0, i - 5);
-      const end = Math.min(allLines.length - 1, i + 18);
-      for (let idx = start; idx <= end; idx += 1) {
-        selectedIndices.add(idx);
-      }
-    }
-  }
-  const tailStart = Math.max(0, allLines.length - 120);
-  for (let idx = tailStart; idx < allLines.length; idx += 1) {
-    selectedIndices.add(idx);
-  }
-  const sortedIndices = Array.from(selectedIndices).sort((a, b) => a - b);
-  const excerptLines = [];
-  let prevIdx = -1;
-  for (const idx of sortedIndices) {
-    if (prevIdx !== -1 && idx > prevIdx + 1) {
-      excerptLines.push("... [log lines omitted] ...");
-    }
-    excerptLines.push(allLines[idx] ?? "");
-    prevIdx = idx;
-  }
-  const header = `### External CI Failure: ${input.checkName}${input.htmlUrl ? ` (${input.htmlUrl})` : ""}`;
-  const sections = [header];
-  if (annotationLines.length > 0) {
-    sections.push("#### Check Annotations", ...annotationLines);
-  }
-  if (excerptLines.length > 0 && excerptLines.some((l) => l.trim().length > 0)) {
-    sections.push("#### Job Log Excerpt", ...excerptLines);
-  }
-  const combinedRaw = sections.join("\n");
-  const redacted = redactSecrets(combinedRaw, secrets);
-  const bounded = redacted.length > maxBytes ? redacted.slice(-maxBytes) : redacted;
-  const wrapped = wrapUntrustedContent(
-    "untrusted_test_output",
-    bounded,
-    maxBytes
-  );
-  return {
-    sanitizedExcerpt: bounded,
-    wrappedUntrustedOutput: wrapped,
-    neutralizedWorkflowCommands: neutralizedCount
-  };
-}
-function isFailedConclusion(conclusion) {
-  const norm = (conclusion ?? "").trim().toLowerCase();
-  return norm === "failure" || norm === "timed_out" || norm === "cancelled" || norm === "action_required" || norm === "startup_failure";
-}
-async function waitForExternalCiChecks(input) {
-  if (input.waitForExternalCi === false) {
-    return {
-      passed: true,
-      reason: "disabled_by_config",
-      infraRerunsTriggered: 0,
-      failedChecks: [],
-      formattedDiagnostics: "",
-      registeredWorkflowNames: [],
-      registeredCheckNames: []
-    };
-  }
-  const timeoutMs = (input.timeoutMinutes ?? 15) * 60 * 1e3;
-  const graceWindowMs = (input.graceWindowSeconds ?? 45) * 1e3;
-  const pollIntervalMs = input.pollIntervalMs ?? 5e3;
-  const sleepFn = input.sleepFn ?? ((ms) => new Promise((resolve3) => setTimeout(resolve3, ms)));
-  let simulatedElapsedMs = 0;
-  const startWallMs = input.nowFn ? input.nowFn() : Date.now();
-  const getElapsedMs = () => {
-    if (input.nowFn) {
-      return Math.max(simulatedElapsedMs, input.nowFn() - startWallMs);
-    }
-    return simulatedElapsedMs;
-  };
-  const infraRerunsMap = input.infraRerunsBySha ?? /* @__PURE__ */ new Map();
-  let infraRerunsTriggered = 0;
-  let pollIndex = 0;
-  while (true) {
-    pollIndex += 1;
-    const elapsedMs = getElapsedMs();
-    if (input.remainingWallClockMs !== void 0 && elapsedMs >= input.remainingWallClockMs) {
-      return {
-        passed: false,
-        reason: "wall_clock_budget_exhausted",
-        infraRerunsTriggered,
-        failedChecks: [],
-        formattedDiagnostics: `Runner wall-clock budget exhausted after ${Math.round(elapsedMs / 1e3)}s while waiting for external CI checks on ${input.headSha.slice(0, 7)}.`,
-        registeredWorkflowNames: [],
-        registeredCheckNames: []
-      };
-    }
-    const [allWorkflowRuns, allCheckRuns] = await Promise.all([
-      input.listWorkflowRunsForSha(input.headSha),
-      input.listCheckRunsForRef(input.headSha)
-    ]);
-    const externalWorkflowRuns = allWorkflowRuns.filter(
-      (r) => !isEpureSyntheticCheckOrRun(r.path ?? r.name ?? "")
-    );
-    const externalCheckRuns = allCheckRuns.filter(
-      (c) => !isEpureSyntheticCheckOrRun(c.name)
-    );
-    const registeredWorkflowNames = externalWorkflowRuns.map(
-      (r) => r.name ?? r.path ?? `run-${r.id}`
-    );
-    const registeredCheckNames = externalCheckRuns.map((c) => c.name);
-    const totalExternalRegistered = externalWorkflowRuns.length + externalCheckRuns.length;
-    if (input.expectedWorkflows.length === 0 && totalExternalRegistered === 0) {
-      return {
-        passed: true,
-        reason: "no_external_workflows",
-        infraRerunsTriggered,
-        failedChecks: [],
-        formattedDiagnostics: "",
-        registeredWorkflowNames: [],
-        registeredCheckNames: []
-      };
-    }
-    if (input.expectedWorkflows.length > 0 && totalExternalRegistered === 0) {
-      if (elapsedMs >= graceWindowMs) {
-        const expectedNames = input.expectedWorkflows.map(
-          (w) => typeof w === "string" ? w : w.path
-        );
-        return {
-          passed: false,
-          reason: "grace_window_timeout",
-          infraRerunsTriggered,
-          failedChecks: [],
-          formattedDiagnostics: `Fail-closed: 0 external workflow runs or check runs registered on SHA ${input.headSha.slice(0, 7)} after ${Math.round(graceWindowMs / 1e3)}s grace window (expected: ${expectedNames.join(", ")}).`,
-          registeredWorkflowNames: [],
-          registeredCheckNames: []
-        };
-      }
-      await sleepFn(pollIntervalMs);
-      simulatedElapsedMs += pollIntervalMs;
-      continue;
-    }
-    if (elapsedMs > timeoutMs) {
-      return {
-        passed: false,
-        reason: "poll_timeout",
-        infraRerunsTriggered,
-        failedChecks: [],
-        formattedDiagnostics: `External CI timed out after ${Math.round(timeoutMs / 6e4)} minutes on SHA ${input.headSha.slice(0, 7)}.`,
-        registeredWorkflowNames,
-        registeredCheckNames
-      };
-    }
-    const activeWorkflowRuns = externalWorkflowRuns.filter(
-      (r) => r.status !== "completed"
-    );
-    const activeCheckRuns = externalCheckRuns.filter(
-      (c) => c.status !== "completed"
-    );
-    if (input.onProgress) {
-      await input.onProgress({
-        pollIndex,
-        elapsedMs,
-        activeWorkflowRuns: activeWorkflowRuns.length,
-        completedWorkflowRuns: externalWorkflowRuns.length - activeWorkflowRuns.length,
-        activeCheckRuns: activeCheckRuns.length,
-        completedCheckRuns: externalCheckRuns.length - activeCheckRuns.length,
-        infraRerunsTriggered
-      });
-    }
-    const waitingOnMoreExpectedWorkflows = externalWorkflowRuns.length > 0 && externalWorkflowRuns.length < input.expectedWorkflows.length && elapsedMs < graceWindowMs;
-    if (activeWorkflowRuns.length > 0 || activeCheckRuns.length > 0 || waitingOnMoreExpectedWorkflows) {
-      await sleepFn(pollIntervalMs);
-      simulatedElapsedMs += pollIntervalMs;
-      continue;
-    }
-    const failedCheckRuns = externalCheckRuns.filter(
-      (c) => isFailedConclusion(c.conclusion)
-    );
-    const failedWorkflowRuns = externalWorkflowRuns.filter(
-      (r) => isFailedConclusion(r.conclusion)
-    );
-    if (failedCheckRuns.length === 0 && failedWorkflowRuns.length === 0) {
-      return {
-        passed: true,
-        reason: "all_passed",
-        infraRerunsTriggered,
-        failedChecks: [],
-        formattedDiagnostics: "",
-        registeredWorkflowNames,
-        registeredCheckNames
-      };
-    }
-    const failureItems = failedCheckRuns.length > 0 ? failedCheckRuns.map((c) => ({
-      id: c.id,
-      name: c.name,
-      conclusion: c.conclusion ?? "failure",
-      html_url: c.html_url ?? c.details_url ?? ""
-    })) : failedWorkflowRuns.map((r) => ({
-      id: r.id,
-      name: r.name ?? r.path ?? `workflow-${r.id}`,
-      conclusion: r.conclusion ?? "failure",
-      html_url: r.html_url ?? ""
-    }));
-    const fetchedFailureDetails = await Promise.all(
-      failureItems.map(async (item) => {
-        const [annotations, rawLog] = await Promise.all([
-          input.listCheckRunAnnotations ? input.listCheckRunAnnotations(item.id).catch(() => []) : Promise.resolve([]),
-          input.getJobLogs ? input.getJobLogs(item.id).catch(() => "") : Promise.resolve("")
-        ]);
-        const usedReruns = infraRerunsMap.get(input.headSha) ?? 0;
-        const classification = classifyCiFailure({
-          conclusion: item.conclusion,
-          checkName: item.name,
-          rawLog,
-          annotations,
-          headSha: input.headSha,
-          infraRerunsUsedForSha: usedReruns
-        });
-        return {
-          item,
-          annotations,
-          rawLog,
-          classification
-        };
-      })
-    );
-    const allTransientInfra = fetchedFailureDetails.length > 0 && fetchedFailureDetails.every(
-      (d) => d.classification.shouldRerunWorkflow
-    );
-    if (allTransientInfra && input.rerunFailedJobs) {
-      const currentUsed = infraRerunsMap.get(input.headSha) ?? 0;
-      infraRerunsMap.set(input.headSha, currentUsed + 1);
-      infraRerunsTriggered += 1;
-      const runIdsToRerun = failedWorkflowRuns.length > 0 ? failedWorkflowRuns.map((r) => r.id) : failureItems.map((f) => f.id);
-      for (const runId of runIdsToRerun) {
-        await input.rerunFailedJobs(runId);
-      }
-      await sleepFn(pollIntervalMs);
-      simulatedElapsedMs += pollIntervalMs;
-      continue;
-    }
-    const failedChecksSummary = [];
-    const diagnosticBlocks = [];
-    for (const detail of fetchedFailureDetails) {
-      const sanitized = sanitizeAndFormatFailedCheckLogs({
-        checkName: detail.item.name,
-        htmlUrl: detail.item.html_url,
-        annotations: detail.annotations,
-        rawLog: detail.rawLog,
-        extraSecrets: input.extraSecrets
-      });
-      failedChecksSummary.push({
-        id: detail.item.id,
-        name: detail.item.name,
-        conclusion: detail.item.conclusion,
-        html_url: detail.item.html_url,
-        sanitized_log: sanitized.sanitizedExcerpt,
-        wrapped_untrusted_output: sanitized.wrappedUntrustedOutput
-      });
-      diagnosticBlocks.push(sanitized.wrappedUntrustedOutput);
-    }
-    return {
-      passed: false,
-      reason: "check_failure",
-      infraRerunsTriggered,
-      failedChecks: failedChecksSummary,
-      formattedDiagnostics: diagnosticBlocks.join("\n\n"),
-      registeredWorkflowNames,
-      registeredCheckNames
-    };
-  }
-}
-async function evaluateSingleExternalCiSnapshot(params) {
-  const [allWorkflowRuns, allCheckRuns] = await Promise.all([
-    params.listWorkflowRunsForSha(params.headSha),
-    params.listCheckRunsForRef(params.headSha)
-  ]);
-  const aiReviewCheck = allCheckRuns.find(
-    (c) => c.name.trim().toLowerCase() === "ai-review"
-  );
-  const aiReviewPassed = !aiReviewCheck || aiReviewCheck.status === "completed" && aiReviewCheck.conclusion === "success";
-  const externalWorkflowRuns = allWorkflowRuns.filter(
-    (r) => !isEpureSyntheticCheckOrRun(r.path ?? r.name ?? "")
-  );
-  const externalCheckRuns = allCheckRuns.filter(
-    (c) => !isEpureSyntheticCheckOrRun(c.name)
-  );
-  const totalExternalRegistered = externalWorkflowRuns.length + externalCheckRuns.length;
-  if (totalExternalRegistered === 0 && params.expectedWorkflows.length > 0) {
-    return {
-      completed: false,
-      passed: false,
-      aiReviewPassed,
-      failedChecks: [],
-      formattedDiagnostics: ""
-    };
-  }
-  const activeWorkflowRuns = externalWorkflowRuns.filter(
-    (r) => r.status !== "completed"
-  );
-  const activeCheckRuns = externalCheckRuns.filter(
-    (c) => c.status !== "completed"
-  );
-  if (activeWorkflowRuns.length > 0 || activeCheckRuns.length > 0 || externalWorkflowRuns.length > 0 && externalWorkflowRuns.length < params.expectedWorkflows.length) {
-    return {
-      completed: false,
-      passed: false,
-      aiReviewPassed,
-      failedChecks: [],
-      formattedDiagnostics: ""
-    };
-  }
-  const failedCheckRuns = externalCheckRuns.filter(
-    (c) => isFailedConclusion(c.conclusion)
-  );
-  const failedWorkflowRuns = externalWorkflowRuns.filter(
-    (r) => isFailedConclusion(r.conclusion)
-  );
-  if (failedCheckRuns.length === 0 && failedWorkflowRuns.length === 0) {
-    return {
-      completed: true,
-      passed: true,
-      aiReviewPassed,
-      failedChecks: [],
-      formattedDiagnostics: ""
-    };
-  }
-  const failureItems = failedCheckRuns.length > 0 ? failedCheckRuns.map((c) => ({
-    id: c.id,
-    name: c.name,
-    conclusion: c.conclusion ?? "failure",
-    html_url: c.html_url ?? c.details_url ?? ""
-  })) : failedWorkflowRuns.map((r) => ({
-    id: r.id,
-    name: r.name ?? r.path ?? `workflow-${r.id}`,
-    conclusion: r.conclusion ?? "failure",
-    html_url: r.html_url ?? ""
-  }));
-  const failedChecksSummary = [];
-  const diagnosticBlocks = [];
-  for (const item of failureItems) {
-    const [annotations, rawLog] = await Promise.all([
-      params.listCheckRunAnnotations ? params.listCheckRunAnnotations(item.id).catch(() => []) : Promise.resolve([]),
-      params.getJobLogs ? params.getJobLogs(item.id).catch(() => "") : Promise.resolve("")
-    ]);
-    const sanitized = sanitizeAndFormatFailedCheckLogs({
-      checkName: item.name,
-      htmlUrl: item.html_url,
-      annotations,
-      rawLog,
-      extraSecrets: params.extraSecrets
-    });
-    failedChecksSummary.push({
-      id: item.id,
-      name: item.name,
-      conclusion: item.conclusion,
-      html_url: item.html_url,
-      sanitized_log: sanitized.sanitizedExcerpt,
-      wrapped_untrusted_output: sanitized.wrappedUntrustedOutput
-    });
-    diagnosticBlocks.push(sanitized.wrappedUntrustedOutput);
-  }
-  return {
-    completed: true,
-    passed: false,
-    aiReviewPassed,
-    failedChecks: failedChecksSummary,
-    formattedDiagnostics: diagnosticBlocks.join("\n\n")
-  };
-}
-function formatNeedsHumanEscalationComment(input) {
-  const ticketRef = input.ticketIssueNumber ? `Ticket #${input.ticketIssueNumber} (Plan #${input.issueNumber})` : `Issue #${input.issueNumber}`;
-  const prRef = input.prNumber && input.prUrl ? ` \u2014 [PR #${input.prNumber}](${input.prUrl})` : input.prNumber ? ` \u2014 PR #${input.prNumber}` : "";
-  let reasonHeadline = "";
-  if (input.reason === "remediation_exhausted") {
-    const used = input.codeFixAttemptsUsed ?? 3;
-    const max = input.maxCodeFixAttempts ?? 3;
-    reasonHeadline = `\`${used}/${max}\` remediation rounds exhausted (\`max_code_fix_attempts = ${max}\`)`;
-  } else if (input.reason === "epic_convergence_exhausted") {
-    const usedPhases = input.epicConvergenceDetails?.epicPhase ?? 2;
-    const maxPhases = input.epicConvergenceDetails?.maxEpicPhases ?? 2;
-    reasonHeadline = `Non-convergence de la fonctionnalit\xE9 apr\xE8s \`${usedPhases}/${maxPhases}\` phases de tickets (\`epic_convergence_exhausted\`, ADR-0032)`;
-  } else if (input.reason === "grace_window_timeout") {
-    const gw = input.graceWindowSeconds ?? 45;
-    reasonHeadline = `${gw}s external CI workflow registration timeout (fail-closed)`;
-  } else if (input.reason === "sensitive_path_violation") {
-    reasonHeadline = "Forbidden modification of sensitive path or path traversal blocked pre-Stage-1";
-  } else if (input.reason === "merge_conflict_unresolved") {
-    reasonHeadline = "Git 3-way merge conflict touched sensitive paths or exceeded automated resolution threshold (`MERGE_CONFLICT_UNRESOLVED`)";
-  } else if (input.reason === "merge_conflict_stage1_failed") {
-    reasonHeadline = "Automated 3-way conflict resolution failed Stage 1 Sandbox verification (`MERGE_CONFLICT_STAGE1_FAILED`)";
-  } else if (input.reason === "transient_llm_api_exhausted") {
-    reasonHeadline = "Transient LLM API retries or unitary request timeout exhausted (`max_transient_api_retries`) \u2014 code-fix budget preserved";
-  } else if (input.reason === "llm_quota_or_auth_failure") {
-    reasonHeadline = "LLM provider quota/billing exhaustion or authentication failure (ADR-0012: no automatic fallback)";
-  } else if (input.reason === "llm_request_invalid") {
-    reasonHeadline = "LLM request rejected or response invalid after structured-output retry (non-transient) \u2014 code-fix budget preserved";
-  } else if (input.reason === "internal_error") {
-    reasonHeadline = "Internal orchestrator error \u2014 code-fix budget preserved";
-  } else {
-    reasonHeadline = "Runner wall-clock timeout budget exhausted";
-  }
-  const lines = [];
-  if (input.stateMirrorMarkdown) {
-    lines.push(input.stateMirrorMarkdown, "");
-  }
-  lines.push(
-    `### \u26A0\uFE0F Escalade humaine (\`needs-human\`) \u2014 ${ticketRef}${prRef}`,
-    "",
-    `- **Branche active** : \`${input.branch}\``,
-    `- **Statut d'orchestration** : \`suspended\` (label \`needs-human\` appliqu\xE9)`,
-    `- **Cause de l'escalade** : ${reasonHeadline}`
-  );
-  if (input.prUrl) {
-    lines.push(`- **Pull Request** : ${input.prUrl}`);
-  }
-  if (input.sensitivePaths && input.sensitivePaths.length > 0) {
-    lines.push(
-      `- **Chemins sensibles bloqu\xE9s** : ${input.sensitivePaths.map((p) => `\`${p}\``).join(", ")}`
-    );
-  }
-  if (input.traversalPaths && input.traversalPaths.length > 0) {
-    lines.push(
-      `- **Chemins hors p\xE9rim\xE8tre bloqu\xE9s** : ${input.traversalPaths.map((p) => `\`${p}\``).join(", ")}`
-    );
-  }
-  if (input.expectedWorkflows && input.expectedWorkflows.length > 0 && input.reason === "grace_window_timeout") {
-    lines.push(
-      `- **Workflows externes attendus depuis \`dev\`** : ${input.expectedWorkflows.map((w) => `\`${w}\``).join(", ")}`
-    );
-  }
-  if (input.failedChecks && input.failedChecks.length > 0) {
-    lines.push("", "#### Checks CI externes en \xE9chec :");
-    for (const check of input.failedChecks) {
-      const link = check.html_url ? `[${check.name}](${check.html_url})` : `\`${check.name}\``;
-      lines.push(`- \u274C ${link} (\`${check.conclusion}\`)`);
-    }
-  }
-  if (input.mustFixFindings && input.mustFixFindings.length > 0) {
-    lines.push("", "#### Constats `must_fix` restants (Revue Multi-Agents) :");
-    for (const f of input.mustFixFindings) {
-      lines.push(
-        `- **[${f.reviewer}]** (\`${f.path}:${f.line}\`) **${f.title}** \u2014 ${f.rationale}`
-      );
-    }
-  }
-  if (input.epicConvergenceDetails) {
-    const details = input.epicConvergenceDetails;
-    lines.push(
-      "",
-      `#### \xC9carts de convergence restants apr\xE8s Phase ${details.epicPhase}/${details.maxEpicPhases} :`
-    );
-    if (details.summary) {
-      lines.push(`- **Synth\xE8se de l'audit Goldfish** : ${details.summary}`);
-    }
-    for (const mod of details.unwiredModules) {
-      lines.push(`- \u{1F50C} **Module non c\xE2bl\xE9** : ${mod}`);
-    }
-    for (const stub of details.stubViolations) {
-      lines.push(`- \u{1F6AB} **Simulacre interdit d\xE9tect\xE9** : ${stub}`);
-    }
-    for (const crit of details.unmetCriteria) {
-      lines.push(`- \u274C **Crit\xE8re de convergence non satisfait** : ${crit}`);
-    }
-  }
-  if (input.diagnosticExcerpt && input.diagnosticExcerpt.trim().length > 0) {
-    lines.push(
-      "",
-      "<details>",
-      "<summary>\u{1F4CB} Diagnostic CI & extrait des journaux assainis</summary>",
-      "",
-      "```text",
-      input.diagnosticExcerpt.trim().slice(0, 6e3),
-      "```",
-      "</details>"
-    );
-  }
-  lines.push(
-    "",
-    "#### \u{1F6E0}\uFE0F Playbook de reprise (`/epure approve`)",
-    "1. Inspectez les checks ou fichiers signal\xE9s ci-dessus (ou ajustez `verification.targets` dans `.github/agents.yml` sur `dev` si n\xE9cessaire).",
-    `2. Poussez un correctif sur \`${input.branch}\` ou mettez \xE0 jour la configuration sur \`dev\`.`,
-    `3. Postez \`/epure approve\` sur cette issue (#${input.issueNumber}) : l'orchestrateur r\xE9conciliera automatiquement la PR existante et reprendra la validation sans dupliquer le travail (ADR-0028, Q110).`
-  );
-  return appendEpureCommandsSpoiler(lines.join("\n"), {
-    phase: "suspended",
-    status: "suspended",
-    issueNumber: input.issueNumber
-  });
 }
 
 // src/llm/types.ts
@@ -4936,6 +2777,7 @@ Output ONLY a corrected, complete JSON object strictly matching the required sch
 }
 
 // src/llm/client.ts
+var DEFAULT_FALLBACK_LLM_MODEL = "google/gemini-3.8-flash";
 function resolveConfigValue(val, env = process.env) {
   if (val === void 0) {
     return void 0;
@@ -5006,7 +2848,7 @@ function normalizeProviderConfig(raw, env = process.env) {
   };
 }
 function parseModelIdentifier(modelId, configuredProviders, env = process.env) {
-  const effectiveModelId = modelId && modelId.trim().length > 0 ? modelId.trim() : "google/gemini-3.8-flash";
+  const effectiveModelId = modelId && modelId.trim().length > 0 ? modelId.trim() : DEFAULT_FALLBACK_LLM_MODEL;
   if (effectiveModelId.includes("/")) {
     const slashIndex = effectiveModelId.indexOf("/");
     const prefix = effectiveModelId.slice(0, slashIndex).trim();
@@ -5259,13 +3101,13 @@ var LLMClient = class {
   }
 };
 
-// src/orchestrator/gemini-client.ts
-async function callGeminiText(options) {
+// src/orchestrator/llm-helper.ts
+async function callLlmText(options) {
   const client = new LLMClient(options.providers);
   try {
     const res = await client.complete({
       apiKey: options.apiKey,
-      model: options.model ?? "gemini-3.8-flash",
+      model: options.model ?? DEFAULT_FALLBACK_LLM_MODEL,
       systemInstruction: options.systemInstruction ?? "",
       userPrompt: options.userPrompt ?? options.prompt ?? "",
       temperature: options.temperature,
@@ -5297,13 +3139,13 @@ async function callGeminiText(options) {
     throw err;
   }
 }
-async function callGeminiJson(options) {
+async function callLlmJson(options) {
   const client = new LLMClient(options.providers);
   if (options.responseSchema) {
     try {
       const res = await client.complete({
         apiKey: options.apiKey,
-        model: options.model ?? "gemini-3.8-flash",
+        model: options.model ?? DEFAULT_FALLBACK_LLM_MODEL,
         systemInstruction: options.systemInstruction ?? "",
         userPrompt: options.userPrompt ?? options.prompt ?? "",
         temperature: options.temperature,
@@ -5335,7 +3177,7 @@ async function callGeminiJson(options) {
       throw err;
     }
   }
-  const rawText = await callGeminiText({
+  const rawText = await callLlmText({
     ...options,
     responseMimeType: options.responseMimeType ?? "application/json"
   });
@@ -5343,6 +3185,12 @@ async function callGeminiJson(options) {
 }
 function extractJsonObject2(rawText, schemaSpec) {
   return parseAndValidateStructuredOutput(rawText, schemaSpec);
+}
+
+// src/auth/github-apps.ts
+var PRIVATE_KEY_DETECTION_PATTERN = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|EPURE_(?:AGENT|RELEASE)_APP_PRIVATE_KEY\s*=\s*\S+/i;
+function containsPrivateKeyMaterial(text) {
+  return PRIVATE_KEY_DETECTION_PATTERN.test(text);
 }
 
 // src/bootstrap/setup-repo.ts
@@ -5356,10 +3204,12 @@ var DEFAULT_VERIFICATION_PROFILE = {
 var DEFAULT_AGENTS_CONFIG = {
   harness: "pi",
   models: {
-    planning: "claude-sonnet-4-20250514",
-    implementation: "claude-sonnet-4-20250514",
-    review: "gpt-4.1"
+    planning: "anthropic/claude-sonnet-4-20250514",
+    implementation: "anthropic/claude-sonnet-4-20250514",
+    review: "openai/gpt-4.1"
   },
+  reviewers_dir: DEFAULT_REVIEWERS_DIR,
+  llm_environment: "epure-agent",
   merge_policy: "strict",
   max_code_fix_attempts: 3,
   max_transient_api_retries: 4,
@@ -5373,6 +3223,10 @@ var DEFAULT_AGENTS_CONFIG = {
   github_pages_previews: false,
   verification: DEFAULT_VERIFICATION_PROFILE
 };
+var LLM_ENVIRONMENT_NAME_PATTERN = /^[A-Za-z0-9._-]+$/;
+function isUnsafeReviewersDir(dir) {
+  return dir === "" || dir === "." || /^(?:[\\/]|[A-Za-z]:)/.test(dir) || dir.split(/[\\/]/).includes("..") || /^src(?:[\\/]|$)/i.test(dir);
+}
 function normalizeVerificationTarget(target) {
   return {
     name: target.name,
@@ -5492,6 +3346,24 @@ function resolveAgentsConfig(overrides = {}) {
       };
     }
   }
+  const reviewersDir = (overrides.reviewers_dir ?? DEFAULT_AGENTS_CONFIG.reviewers_dir).trim().replace(/^(?:\.\/)+/, "").replace(/\/+$/, "");
+  if (isUnsafeReviewersDir(reviewersDir)) {
+    return {
+      valid: false,
+      error_code: "SECURITY_INVARIANT_VIOLATION",
+      error_message: `Local .github/agents.yml reviewers_dir '${overrides.reviewers_dir ?? ""}' must be a relative directory outside 'src/' without '..' segments.`,
+      config: DEFAULT_AGENTS_CONFIG
+    };
+  }
+  const llmEnvironment = (overrides.llm_environment ?? DEFAULT_AGENTS_CONFIG.llm_environment).trim();
+  if (!LLM_ENVIRONMENT_NAME_PATTERN.test(llmEnvironment)) {
+    return {
+      valid: false,
+      error_code: "SECURITY_INVARIANT_VIOLATION",
+      error_message: `Local .github/agents.yml llm_environment '${overrides.llm_environment ?? ""}' must match ${LLM_ENVIRONMENT_NAME_PATTERN.source}.`,
+      config: DEFAULT_AGENTS_CONFIG
+    };
+  }
   const pagesPreviews = overrides.github_pages_previews ?? DEFAULT_AGENTS_CONFIG.github_pages_previews;
   if (pagesPreviews) {
     if (overrides.github_pages_human_consent !== true || overrides.preview_separate_origin !== true) {
@@ -5534,6 +3406,8 @@ function resolveAgentsConfig(overrides = {}) {
       review: overrides.models?.review ?? DEFAULT_AGENTS_CONFIG.models.review
     },
     ...normalizedProviders ? { providers: normalizedProviders } : {},
+    reviewers_dir: reviewersDir,
+    llm_environment: llmEnvironment,
     merge_policy: overrides.merge_policy ?? DEFAULT_AGENTS_CONFIG.merge_policy,
     max_code_fix_attempts: overrides.max_code_fix_attempts ?? DEFAULT_AGENTS_CONFIG.max_code_fix_attempts,
     ...overrides.max_epic_phases !== void 0 ? {
@@ -5624,6 +3498,8 @@ function parseYamlStringArrayInline(raw) {
 }
 function parseAgentsYaml(yamlContent) {
   let harness;
+  let reviewers_dir;
+  let llm_environment;
   const models = {};
   const providers = {};
   let currentProviderAlias = null;
@@ -5742,6 +3618,10 @@ function parseAgentsYaml(yamlContent) {
         if (h === "pi" || h === "codex") {
           harness = h;
         }
+      } else if (key === "reviewers_dir") {
+        reviewers_dir = unquoteYamlScalar(val);
+      } else if (key === "llm_environment") {
+        llm_environment = unquoteYamlScalar(val);
       } else if (key === "merge_policy") {
         const mp = unquoteYamlScalar(val);
         if (mp === "strict" || mp === "relaxed") {
@@ -6004,6 +3884,8 @@ function parseAgentsYaml(yamlContent) {
     ...harness ? { harness } : {},
     ...Object.keys(models).length > 0 ? { models } : {},
     ...Object.keys(providers).length > 0 ? { providers } : {},
+    ...reviewers_dir !== void 0 ? { reviewers_dir } : {},
+    ...llm_environment !== void 0 ? { llm_environment } : {},
     ...merge_policy ? { merge_policy } : {},
     ...max_code_fix_attempts !== void 0 ? { max_code_fix_attempts } : {},
     ...max_epic_phases !== void 0 ? { max_epic_phases } : {},
@@ -6512,7 +4394,7 @@ function createGitHubRestHelper(params) {
         return null;
       }
     },
-    async readBranchWorkspaceFiles(branch, hintText = "", pinnedPaths = []) {
+    async readBranchWorkspaceFiles(branch, hintText = "", pinnedPaths = [], reviewersDir = DEFAULT_REVIEWERS_DIR) {
       const filesMap = /* @__PURE__ */ new Map();
       try {
         const treeRes = await apiRequest(
@@ -6527,7 +4409,7 @@ function createGitHubRestHelper(params) {
             return false;
           }
           const p = entry.path;
-          if (p.startsWith(".github/") || p.startsWith(".cursor/") || p.startsWith(".agents/") || p.startsWith("docs/") || p === ".gitignore" || p === "renovate.json" || p === "GLOSSARY.md" || /(?:^|\/)(?:package-lock\.json|pnpm-lock\.yaml|yarn\.lock|Cargo\.lock)$/i.test(
+          if (p.startsWith(".github/") || p.startsWith(`${reviewersDir}/`) || p.startsWith(".agents/") || p.startsWith("docs/") || p === ".gitignore" || p === "renovate.json" || p === "GLOSSARY.md" || /(?:^|\/)(?:package-lock\.json|pnpm-lock\.yaml|yarn\.lock|Cargo\.lock)$/i.test(
             p
           ) || /\.(?:png|jpe?g|gif|webp|svg|ico|woff2?|ttf|eot|mp3|ogg|wav|mp4|webm|pdf|zip|tar|gz)$/i.test(
             p
@@ -6738,8 +4620,9 @@ function createGitHubRestHelper(params) {
       }
       return filesMap;
     },
-    async readTrustedBaseRosterFiles(branch) {
+    async readTrustedBaseRosterFiles(branch, reviewersDir = DEFAULT_REVIEWERS_DIR) {
       const filesMap = /* @__PURE__ */ new Map();
+      const dirPrefix = `${reviewersDir.toLowerCase()}/`;
       try {
         const treeRes = await apiRequest(
           "GET",
@@ -6753,7 +4636,8 @@ function createGitHubRestHelper(params) {
             continue;
           }
           const p = entry.path;
-          if (!/^\.cursor\/agents\/[a-z0-9-]+\.md$/i.test(p) && p !== "DESIGN.md") {
+          const isRosterFile = p.toLowerCase().startsWith(dirPrefix) && /^[a-z0-9-]+\.md$/i.test(p.slice(dirPrefix.length));
+          if (!isRosterFile && p !== "DESIGN.md") {
             continue;
           }
           const blobRes = await apiRequest(
@@ -8158,10 +6042,13 @@ var ALL_REVIEWER_AGENT_NAMES = [
   "design-reviewer",
   "user-advocate"
 ];
-var SENSITIVE_REVIEWER_ROSTER_PATH_PATTERN = /^\.cursor\/agents\//i;
-function isSensitiveReviewerRosterPath(filePath) {
-  const clean = filePath.trim().replace(/^\/+/, "");
-  return SENSITIVE_REVIEWER_ROSTER_PATH_PATTERN.test(clean);
+var DEFAULT_REVIEWERS_DIR = ".agents/reviewers";
+function isSensitiveReviewerRosterPath(filePath, reviewersDir = DEFAULT_REVIEWERS_DIR) {
+  const clean = filePath.trim().replace(/^\/+/, "").toLowerCase();
+  return [reviewersDir, DEFAULT_REVIEWERS_DIR].some((dir) => {
+    const lowerDir = dir.toLowerCase();
+    return clean === lowerDir || clean.startsWith(`${lowerDir}/`);
+  });
 }
 var JSON_OUTPUT_CONTRACT_BLOCK = [
   PROMPT_INJECTION_IMMUNITY_CLAUSE,
@@ -8232,10 +6119,11 @@ function buildDefaultReviewerRosterFiles(params) {
   const stackKind = params.stackKind ?? "node";
   const includeUi = params.includeFrontendReviewers !== false;
   const customSpecialists = params.customDomainSpecialists ?? [];
+  const reviewersDir = params.reviewersDir ?? DEFAULT_REVIEWERS_DIR;
   const files = [
     {
       name: "domain-backend-reviewer",
-      path: ".cursor/agents/domain-backend-reviewer.md",
+      path: `${reviewersDir}/domain-backend-reviewer.md`,
       category: "specialist",
       content: [
         "---",
@@ -8262,7 +6150,7 @@ function buildDefaultReviewerRosterFiles(params) {
     if (files.some((f) => f.name === reviewerName)) continue;
     files.push({
       name: reviewerName,
-      path: `.cursor/agents/${reviewerName}.md`,
+      path: `${reviewersDir}/${reviewerName}.md`,
       category: "specialist",
       content: [
         "---",
@@ -8286,7 +6174,7 @@ function buildDefaultReviewerRosterFiles(params) {
   if (includeUi) {
     files.push({
       name: "frontend-reviewer",
-      path: ".cursor/agents/frontend-reviewer.md",
+      path: `${reviewersDir}/frontend-reviewer.md`,
       category: "specialist",
       content: [
         "---",
@@ -8309,7 +6197,7 @@ function buildDefaultReviewerRosterFiles(params) {
   files.push(
     {
       name: "infra-reviewer",
-      path: ".cursor/agents/infra-reviewer.md",
+      path: `${reviewersDir}/infra-reviewer.md`,
       category: "specialist",
       content: [
         "---",
@@ -8329,7 +6217,7 @@ function buildDefaultReviewerRosterFiles(params) {
     },
     {
       name: "architecture-reviewer",
-      path: ".cursor/agents/architecture-reviewer.md",
+      path: `${reviewersDir}/architecture-reviewer.md`,
       category: "cross-cutting",
       content: [
         "---",
@@ -8350,7 +6238,7 @@ function buildDefaultReviewerRosterFiles(params) {
     },
     {
       name: "security-reviewer",
-      path: ".cursor/agents/security-reviewer.md",
+      path: `${reviewersDir}/security-reviewer.md`,
       category: "cross-cutting",
       content: [
         "---",
@@ -8363,7 +6251,7 @@ function buildDefaultReviewerRosterFiles(params) {
         "## Scope & Responsibilities",
         "- Detect XSS (`dangerouslySetInnerHTML`), command injection, prototype pollution, and unsafe deserialization.",
         "- Ensure no credentials, tokens, or private keys appear in code, tests, or logs.",
-        "- Flag any unauthorized modification of `.github/workflows/**`, `.github/agents.yml`, or `.cursor/agents/**`.",
+        `- Flag any unauthorized modification of \`.github/workflows/**\`, \`.github/agents.yml\`, or \`${reviewersDir}/**\`.`,
         "",
         JSON_OUTPUT_CONTRACT_BLOCK,
         ""
@@ -8371,7 +6259,7 @@ function buildDefaultReviewerRosterFiles(params) {
     },
     {
       name: "spec-parity-reviewer",
-      path: ".cursor/agents/spec-parity-reviewer.md",
+      path: `${reviewersDir}/spec-parity-reviewer.md`,
       category: "cross-cutting",
       content: [
         "---",
@@ -8392,7 +6280,7 @@ function buildDefaultReviewerRosterFiles(params) {
     },
     {
       name: "standards-reviewer",
-      path: ".cursor/agents/standards-reviewer.md",
+      path: `${reviewersDir}/standards-reviewer.md`,
       category: "cross-cutting",
       content: [
         "---",
@@ -8414,7 +6302,7 @@ function buildDefaultReviewerRosterFiles(params) {
     files.push(
       {
         name: "accessibility-reviewer",
-        path: ".cursor/agents/accessibility-reviewer.md",
+        path: `${reviewersDir}/accessibility-reviewer.md`,
         category: "cross-cutting",
         content: [
           "---",
@@ -8435,7 +6323,7 @@ function buildDefaultReviewerRosterFiles(params) {
       },
       {
         name: "design-reviewer",
-        path: ".cursor/agents/design-reviewer.md",
+        path: `${reviewersDir}/design-reviewer.md`,
         category: "cross-cutting",
         content: [
           "---",
@@ -8458,7 +6346,7 @@ function buildDefaultReviewerRosterFiles(params) {
   }
   files.push({
     name: "user-advocate",
-    path: ".cursor/agents/user-advocate.md",
+    path: `${reviewersDir}/user-advocate.md`,
     category: "persona",
     content: [
       "---",
@@ -8492,7 +6380,8 @@ function adaptReviewerRosterForDomain(input) {
     repository: input.repository,
     stackKind: input.stackKind,
     includeFrontendReviewers: input.touchesFrontendUi,
-    customDomainSpecialists: input.customDomainSpecialists
+    customDomainSpecialists: input.customDomainSpecialists,
+    reviewersDir: input.reviewersDir
   });
   const personas = input.personas && input.personas.length > 0 ? input.personas : [
     {
@@ -8695,9 +6584,9 @@ async function runUserAdvocateDesignGate(params) {
         params.specMarkdown
       )
     ].join("\n");
-    const parsed = await callGeminiJson({
+    const parsed = await callLlmJson({
       apiKey: params.llmApiKey,
-      model: params.model ?? "gemini-3.8-flash",
+      model: params.model ?? DEFAULT_FALLBACK_LLM_MODEL,
       providers: params.providers,
       maxTransientRetries: params.maxTransientRetries,
       transientRetryBackoffSeconds: params.transientRetryBackoffSeconds,
@@ -8757,7 +6646,8 @@ async function runUserAdvocateDesignGate(params) {
   }
 }
 function resolveTrustedReviewerPrompt(params) {
-  const relPath = `.cursor/agents/${params.reviewer}.md`;
+  const reviewersDir = params.reviewersDir ?? DEFAULT_REVIEWERS_DIR;
+  const relPath = `${reviewersDir}/${params.reviewer}.md`;
   let fromBase;
   if (params.trustedBaseBranchFiles) {
     if (params.trustedBaseBranchFiles instanceof Map) {
@@ -8774,12 +6664,2164 @@ function resolveTrustedReviewerPrompt(params) {
     };
   }
   const embedded = buildDefaultReviewerRosterFiles({
-    repository: params.repository
+    repository: params.repository,
+    reviewersDir
   }).find((r) => r.name === params.reviewer);
   return {
     promptContent: embedded?.content ?? `# Reviewer ${params.reviewer}`,
     source: "epure_embedded_fallback"
   };
+}
+
+// src/sandbox/llm-sandbox.ts
+import { randomBytes } from "node:crypto";
+import { mkdirSync } from "node:fs";
+import { createServer } from "node:http";
+import { spawn, spawnSync } from "node:child_process";
+import { dirname, resolve } from "node:path";
+var SECRET_ENV_NAME_PATTERN = /^(?:OPENAI_API_KEY|ANTHROPIC_API_KEY|GOOGLE_API_KEY|GEMINI_API_KEY|LLM_API_KEY|GITHUB_TOKEN|GH_TOKEN|GITHUB_PAT|EPURE_.*(?:KEY|TOKEN|SECRET)|AWS_.*|AZURE_.*|GCP_.*|NPM_TOKEN|NODE_AUTH_TOKEN|ACTIONS_RUNTIME_TOKEN|ACTIONS_ID_TOKEN_REQUEST_TOKEN)$/i;
+var ALLOWED_PROXY_PATHS = /* @__PURE__ */ new Set([
+  "/v1/chat/completions",
+  "/v1/responses",
+  "/v1/messages",
+  "/chat/completions",
+  "/responses",
+  "/messages"
+]);
+function buildSanitizedSandboxEnv(runnerEnv, proxy) {
+  const sanitized = {};
+  for (const [key, value] of Object.entries(runnerEnv)) {
+    if (typeof value !== "string") {
+      continue;
+    }
+    if (SECRET_ENV_NAME_PATTERN.test(key)) {
+      continue;
+    }
+    if (containsPrivateKeyMaterial(value)) {
+      continue;
+    }
+    sanitized[key] = value;
+  }
+  sanitized.EPURE_SANDBOX_ACTIVE = "true";
+  sanitized.EPURE_LLM_PROXY_URL = proxy.proxyUrl;
+  sanitized.EPURE_LLM_PROXY_NONCE = proxy.proxyNonce;
+  sanitized.GITHUB_TOKEN_PERMISSIONS = "none";
+  sanitized.RTK_TELEMETRY_DISABLED = "1";
+  sanitized.RTK_RECALL = "0";
+  sanitized.RTK_TEE = "0";
+  sanitized.RTK_SUPPRESS_HOOK_WARNING = "1";
+  sanitized.NO_COLOR = "1";
+  return sanitized;
+}
+function buildLandrunInvocation(params) {
+  const sanitizeLandrunPath = (p) => p.replace(/,/g, "");
+  const resolvedCwd = sanitizeLandrunPath(resolve(params.cwd));
+  const roxPaths = /* @__PURE__ */ new Set([
+    "/usr",
+    "/bin",
+    "/lib",
+    "/lib64",
+    "/etc",
+    "/opt",
+    "/run"
+  ]);
+  if (params.command.startsWith("/")) {
+    roxPaths.add(sanitizeLandrunPath(dirname(resolve(params.command))));
+  }
+  const rwxPaths = /* @__PURE__ */ new Set([resolvedCwd, "/tmp"]);
+  if (params.networkPolicy === "https_only") {
+    const home = sanitizeLandrunPath(params.sanitizedEnv.HOME?.trim() ?? "");
+    if (home) {
+      rwxPaths.add(`${home}/.npm`);
+      rwxPaths.add(`${home}/.cache`);
+      rwxPaths.add(`${home}/.cargo`);
+    }
+  }
+  const landrunArgs = [
+    "--rox",
+    Array.from(roxPaths).join(","),
+    "--ro",
+    "/dev,/proc",
+    "--rwx",
+    Array.from(rwxPaths).join(",")
+  ];
+  if (params.networkPolicy === "proxy_only") {
+    if (typeof params.proxyPort === "number" && params.proxyPort > 0) {
+      landrunArgs.push("--connect-tcp", String(params.proxyPort));
+    }
+  } else if (params.networkPolicy === "https_only") {
+    landrunArgs.push("--connect-tcp", "443");
+  }
+  for (const key of Object.keys(params.sanitizedEnv).sort()) {
+    landrunArgs.push("--env", key);
+  }
+  landrunArgs.push("--", params.command, ...params.args);
+  return landrunArgs;
+}
+function buildBubblewrapInvocation(params) {
+  const resolvedCwd = resolve(params.cwd);
+  return [
+    "--unshare-net",
+    "--unshare-pid",
+    "--unshare-ipc",
+    "--die-with-parent",
+    "--ro-bind",
+    "/",
+    "/",
+    "--dev",
+    "/dev",
+    "--proc",
+    "/proc",
+    "--tmpfs",
+    "/tmp",
+    "--bind",
+    resolvedCwd,
+    resolvedCwd,
+    "--chdir",
+    resolvedCwd,
+    "--",
+    params.command,
+    ...params.args
+  ];
+}
+function buildKernelSandboxedCommand(input) {
+  if (input.networkPolicy === "offline") {
+    if (input.capabilities.bubblewrapAvailable) {
+      return {
+        backend: "bubblewrap",
+        command: "bwrap",
+        args: buildBubblewrapInvocation({
+          command: input.command,
+          args: input.args,
+          cwd: input.cwd
+        })
+      };
+    }
+    if (input.capabilities.landrunAvailable) {
+      return {
+        backend: "landrun",
+        command: "landrun",
+        args: buildLandrunInvocation({
+          command: input.command,
+          args: input.args,
+          cwd: input.cwd,
+          sanitizedEnv: input.sanitizedEnv,
+          networkPolicy: "offline",
+          proxyPort: input.proxyPort
+        })
+      };
+    }
+    return {
+      backend: "none",
+      command: input.command,
+      args: input.args
+    };
+  }
+  if (input.capabilities.landrunAvailable) {
+    return {
+      backend: "landrun",
+      command: "landrun",
+      args: buildLandrunInvocation({
+        command: input.command,
+        args: input.args,
+        cwd: input.cwd,
+        sanitizedEnv: input.sanitizedEnv,
+        networkPolicy: input.networkPolicy,
+        proxyPort: input.proxyPort
+      })
+    };
+  }
+  return {
+    backend: "none",
+    command: input.command,
+    args: input.args
+  };
+}
+var cachedDefaultCapabilities = null;
+var cachedDefaultCapabilitiesPath = "";
+function probeKernelSandboxCapabilities(runnerEnv = process.env) {
+  if (process.platform !== "linux") {
+    return { landrunAvailable: false, bubblewrapAvailable: false };
+  }
+  const pathVal = runnerEnv.PATH ?? process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
+  if (cachedDefaultCapabilities !== null && cachedDefaultCapabilitiesPath === pathVal) {
+    return cachedDefaultCapabilities;
+  }
+  const probeEnv = {
+    PATH: pathVal
+  };
+  let landrunAvailable = false;
+  try {
+    const res = spawnSync(
+      "landrun",
+      ["--rox", "/usr,/bin,/lib,/lib64", "--", "/bin/true"],
+      {
+        env: probeEnv,
+        stdio: "ignore",
+        timeout: 3e3
+      }
+    );
+    landrunAvailable = res.status === 0;
+  } catch {
+    landrunAvailable = false;
+  }
+  let bubblewrapAvailable = false;
+  try {
+    const res = spawnSync("bwrap", ["--version"], {
+      env: probeEnv,
+      stdio: "ignore",
+      timeout: 3e3
+    });
+    bubblewrapAvailable = res.status === 0;
+  } catch {
+    bubblewrapAvailable = false;
+  }
+  const result = { landrunAvailable, bubblewrapAvailable };
+  cachedDefaultCapabilities = result;
+  cachedDefaultCapabilitiesPath = pathVal;
+  return result;
+}
+function readRequestBody(req) {
+  return new Promise((resolve3, reject) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => resolve3(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", reject);
+  });
+}
+async function createLlmSandboxProxy(options) {
+  const realKey = options.llmApiKey.trim();
+  const proxyNonce = randomBytes(24).toString("hex");
+  const defaultUpstream = async (req) => ({
+    status: 200,
+    body: JSON.stringify({
+      id: "chatcmpl-epure-proxy",
+      object: "chat.completion",
+      path: req.path,
+      choices: [{ index: 0, message: { role: "assistant", content: "ok" } }]
+    })
+  });
+  const handler = options.upstreamHandler ?? defaultUpstream;
+  const server = createServer(
+    async (req, res) => {
+      const providedNonce = req.headers["x-epure-proxy-nonce"];
+      if (providedNonce !== proxyNonce) {
+        res.statusCode = 401;
+        res.setHeader("content-type", "application/json");
+        res.end(
+          JSON.stringify({
+            error_code: "PROXY_UNAUTHORIZED_NONCE",
+            error_message: "Missing or invalid x-epure-proxy-nonce header for local sandbox LLM proxy."
+          })
+        );
+        return;
+      }
+      const rawUrl = req.url ?? "/";
+      const normalizedPath = rawUrl.split("?")[0] ?? "/";
+      if (!ALLOWED_PROXY_PATHS.has(normalizedPath)) {
+        res.statusCode = 403;
+        res.setHeader("content-type", "application/json");
+        res.end(
+          JSON.stringify({
+            error_code: "PROXY_FORBIDDEN_ENDPOINT",
+            error_message: `Sandbox LLM proxy forbids access to '${normalizedPath}'.`
+          })
+        );
+        return;
+      }
+      const body = await readRequestBody(req);
+      const upstreamResp = await handler(
+        {
+          method: req.method ?? "POST",
+          path: normalizedPath,
+          body
+        },
+        realKey
+      );
+      res.statusCode = upstreamResp.status;
+      res.setHeader("content-type", "application/json");
+      res.end(redactSecrets(upstreamResp.body, [realKey]));
+    }
+  );
+  await new Promise((resolve3, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => resolve3());
+  });
+  const address = server.address();
+  const proxyUrl = `http://127.0.0.1:${address.port}`;
+  return {
+    proxyUrl,
+    proxyNonce,
+    close: () => new Promise((resolve3) => {
+      server.close(() => resolve3());
+    })
+  };
+}
+function collectRunnerSecretValues(runnerEnv) {
+  const values = [];
+  for (const [key, value] of Object.entries(runnerEnv)) {
+    if (typeof value === "string" && value.trim().length >= 8) {
+      if (SECRET_ENV_NAME_PATTERN.test(key) || containsPrivateKeyMaterial(value)) {
+        values.push(value.trim());
+      }
+    }
+  }
+  return values;
+}
+function parsePortFromProxyUrl(proxyUrl) {
+  const match = /:(\d+)(?:\/|$)/.exec(proxyUrl);
+  if (!match || !match[1]) {
+    return void 0;
+  }
+  const parsed = Number.parseInt(match[1], 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : void 0;
+}
+async function runInUntrustedCodeSandbox(input) {
+  const startMs = Date.now();
+  const networkPolicy = input.networkPolicy ?? "proxy_only";
+  if (!input.isolationAvailable) {
+    return {
+      isolated: false,
+      error_code: "SANDBOX_ISOLATION_UNAVAILABLE",
+      error_message: "Fail-closed: container/process sandbox isolation is unavailable on this runner (ADR-0011, ADR-0023).",
+      exit_code: 1,
+      stdout: "",
+      stderr: "",
+      duration_ms: Date.now() - startMs,
+      proxy_url: "",
+      kernel_backend: "none",
+      network_policy: networkPolicy
+    };
+  }
+  const llmApiKey = (input.runnerEnv.OPENAI_API_KEY ?? input.runnerEnv.ANTHROPIC_API_KEY ?? input.runnerEnv.GOOGLE_API_KEY ?? input.runnerEnv.GEMINI_API_KEY ?? input.runnerEnv.LLM_API_KEY ?? "").trim();
+  if (!llmApiKey) {
+    return {
+      isolated: false,
+      error_code: "LLM_API_KEY_MISSING",
+      error_message: "Fail-closed: runner is missing LLM API key (OPENAI_API_KEY, ANTHROPIC_API_KEY, or LLM_API_KEY) for the local proxy sidecar.",
+      exit_code: 1,
+      stdout: "",
+      stderr: "",
+      duration_ms: Date.now() - startMs,
+      proxy_url: "",
+      kernel_backend: "none",
+      network_policy: networkPolicy
+    };
+  }
+  const enforceKernelSandbox = input.enforceKernelSandbox === true || input.runnerEnv.EPURE_ENFORCE_KERNEL_SANDBOX === "true";
+  const secretValues = collectRunnerSecretValues(input.runnerEnv);
+  const proxy = await createLlmSandboxProxy({
+    llmApiKey,
+    upstreamHandler: input.upstreamHandler
+  });
+  try {
+    const sanitizedEnv = buildSanitizedSandboxEnv(input.runnerEnv, {
+      proxyUrl: proxy.proxyUrl,
+      proxyNonce: proxy.proxyNonce
+    });
+    const args = input.args ? [...input.args] : [];
+    const cwd = input.cwd ?? process.cwd();
+    const timeoutMs = input.timeoutMs ?? 60 * 60 * 1e3;
+    const proxyPort = parsePortFromProxyUrl(proxy.proxyUrl);
+    const capabilities = input.kernelCapabilities ?? probeKernelSandboxCapabilities(input.runnerEnv);
+    if (networkPolicy === "https_only") {
+      const home = sanitizedEnv.HOME?.trim() ?? "";
+      if (home) {
+        for (const sub of [".npm", ".cache", ".cargo"]) {
+          try {
+            mkdirSync(resolve(home, sub), { recursive: true });
+          } catch {
+          }
+        }
+      }
+    }
+    const wrapped = buildKernelSandboxedCommand({
+      command: input.command,
+      args,
+      cwd,
+      sanitizedEnv,
+      networkPolicy,
+      proxyPort,
+      capabilities
+    });
+    const kernelBackend = wrapped.backend;
+    if (wrapped.backend === "none" && enforceKernelSandbox) {
+      return {
+        isolated: false,
+        error_code: "SANDBOX_ISOLATION_UNAVAILABLE",
+        error_message: "Fail-closed: kernel sandbox backend (landrun/bubblewrap) is unavailable while EPURE_ENFORCE_KERNEL_SANDBOX=true (ADR-0030).",
+        exit_code: 1,
+        stdout: "",
+        stderr: "",
+        duration_ms: Date.now() - startMs,
+        proxy_url: "",
+        kernel_backend: "none",
+        network_policy: networkPolicy
+      };
+    }
+    const spawnCommand = wrapped.command;
+    const spawnArgs = wrapped.args;
+    const childResult = await new Promise((resolvePromise) => {
+      const child = spawn(spawnCommand, [...spawnArgs], {
+        cwd,
+        env: sanitizedEnv,
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+      const stdoutChunks = [];
+      const stderrChunks = [];
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+      }, timeoutMs);
+      child.stdout.on("data", (chunk) => stdoutChunks.push(chunk));
+      child.stderr.on("data", (chunk) => stderrChunks.push(chunk));
+      child.on("error", (err) => {
+        clearTimeout(timer);
+        resolvePromise({
+          exitCode: 1,
+          stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+          stderr: err.message
+        });
+      });
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        resolvePromise({
+          exitCode: code ?? 1,
+          stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+          stderr: Buffer.concat(stderrChunks).toString("utf8")
+        });
+      });
+    });
+    const cleanStdout = redactSecrets(childResult.stdout, secretValues);
+    const cleanStderr = redactSecrets(childResult.stderr, secretValues);
+    const ok = childResult.exitCode === 0;
+    return {
+      isolated: true,
+      error_code: ok ? "NONE" : "SANDBOX_COMMAND_FAILED",
+      error_message: ok ? "" : `Sandboxed command exited with code ${childResult.exitCode}.`,
+      exit_code: childResult.exitCode,
+      stdout: cleanStdout,
+      stderr: cleanStderr,
+      duration_ms: Date.now() - startMs,
+      proxy_url: proxy.proxyUrl,
+      kernel_backend: kernelBackend,
+      network_policy: networkPolicy
+    };
+  } finally {
+    await proxy.close();
+  }
+}
+
+// src/sandbox/polyglot-workspace-runner.ts
+var SENSITIVE_TASK_BRANCH_PATH_PATTERNS = [
+  /^\.github\/agents\.ya?ml$/i,
+  /^\.github\/workflows(?:\/|$)/i,
+  /(?:^|\/)\.env(?:\.(?!example$|sample$|template$).+)?$/i
+];
+var SHELL_INJECTION_PATTERN = /[;|`><\r\n]|\$\(|\$\{\{/;
+var ANSI_ESCAPE_PATTERN = /\x1b\[[0-9;]*[A-Za-z]/g;
+var RTK_NOISE_LINE_PATTERN = /^(?:npm warn deprecated\b|npm notice\b|added \d+ packages\b|audited \d+ packages\b|found 0 vulnerabilities\b|Downloading https?:\/\/|Collecting [a-zA-Z0-9_.-]+\s*$|\s*\[[=>.\s-]{10,}\]\s*\d+%)/i;
+var RTK_IGNORED_PATH_NOISE_PATTERN = /(?:^|\s)(?:\.git\/|node_modules\/|dist\/|target\/|__pycache__\/|\.venv\/|[^\s]+\.lock|package-lock\.json|pnpm-lock\.yaml|[^\s]+\.min\.(?:js|css))(?:\s|$)/;
+var DIAGNOSTIC_PRESERVE_PATTERN = /\b(?:error|fail|failed|failure|err!|assertionerror|typeerror|referenceerror|syntaxerror|traceback|exception|panic)\b|^\s*at\s+/i;
+function formatAndCondenseStage1CommandOutput(input) {
+  const rawCombined = `${input.stdout}
+${input.stderr}`.replace(ANSI_ESCAPE_PATTERN, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+  if (!rawCombined) {
+    return "";
+  }
+  const lines = rawCombined.split("\n");
+  const filteredLines = [];
+  let droppedLinesCount = 0;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      if (filteredLines.length > 0 && filteredLines[filteredLines.length - 1] !== "") {
+        filteredLines.push("");
+      }
+      continue;
+    }
+    const isDiagnosticLine = DIAGNOSTIC_PRESERVE_PATTERN.test(trimmed);
+    if (!isDiagnosticLine && (RTK_NOISE_LINE_PATTERN.test(trimmed) || RTK_IGNORED_PATH_NOISE_PATTERN.test(trimmed))) {
+      droppedLinesCount += 1;
+      continue;
+    }
+    filteredLines.push(line);
+  }
+  const condensed = filteredLines.join("\n").trim();
+  if (input.exitCode === 0) {
+    if (!condensed && droppedLinesCount > 0) {
+      return `[rtk stateless] ${input.rawCommand}: ok (${droppedLinesCount} noise lines filtered)`;
+    }
+    return condensed;
+  }
+  const maxTailChars = input.maxFailureRawTailChars ?? 4e3;
+  const rawTail = rawCombined.length > maxTailChars ? rawCombined.slice(-maxTailChars) : rawCombined;
+  if (droppedLinesCount === 0 && condensed === rawTail) {
+    return condensed;
+  }
+  return [
+    condensed,
+    `--- [raw failure tail (${rawTail.length} chars, stateless in-memory)] ---`,
+    rawTail
+  ].filter(Boolean).join("\n");
+}
+var ALLOWLISTED_BINARIES = /* @__PURE__ */ new Set([
+  "npm",
+  "npx",
+  "pnpm",
+  "yarn",
+  "node",
+  "tsc",
+  "vitest",
+  "jest",
+  "eslint",
+  "biome",
+  "prisma",
+  "python",
+  "python3",
+  "pytest",
+  "ruff",
+  "mypy",
+  "pyright",
+  "flake8",
+  "pip",
+  "pip3",
+  "uv",
+  "poetry",
+  "cargo",
+  "rustc",
+  "rustfmt",
+  "go",
+  "gofmt",
+  "golangci-lint",
+  "make",
+  "just",
+  "task",
+  "turbo",
+  "nx",
+  "sh",
+  "bash"
+]);
+function normalizeRelativeCandidate(rawPath) {
+  return rawPath.trim().replace(/\\/g, "/").replace(/^\.\/+/, "").replace(/^\/+/, "");
+}
+function isSensitiveTaskBranchPath(rawPath, reviewersDir = DEFAULT_REVIEWERS_DIR) {
+  const norm = normalizeRelativeCandidate(rawPath);
+  return SENSITIVE_TASK_BRANCH_PATH_PATTERNS.some((re) => re.test(norm)) || isSensitiveReviewerRosterPath(norm, reviewersDir);
+}
+function hasSymlinkEscapeAlongPath(resolvedRoot, rawRelPath) {
+  if (!existsSync2(resolvedRoot)) {
+    return false;
+  }
+  let realRoot = resolvedRoot;
+  try {
+    realRoot = realpathSync(resolvedRoot);
+  } catch {
+    return false;
+  }
+  const segments = rawRelPath.replace(/\\/g, "/").split("/").filter((s) => s.length > 0 && s !== ".");
+  let current = resolvedRoot;
+  for (const seg of segments) {
+    current = join2(current, seg);
+    if (!existsSync2(current)) {
+      break;
+    }
+    try {
+      const stat = lstatSync(current);
+      if (stat.isSymbolicLink()) {
+        const realTarget = realpathSync(current);
+        if (realTarget !== realRoot && !realTarget.startsWith(realRoot + sep)) {
+          return true;
+        }
+      }
+    } catch {
+      return true;
+    }
+  }
+  return false;
+}
+function isContainedRelativePath(resolvedRoot, rawPath, allowRootDot) {
+  const trimmed = rawPath.trim();
+  if (!trimmed) {
+    return false;
+  }
+  if (allowRootDot && trimmed === ".") {
+    return true;
+  }
+  if (trimmed.startsWith("/") || trimmed.startsWith("\\") || /^[A-Za-z]:[\\/]/.test(trimmed)) {
+    return false;
+  }
+  const normalizedSlashes = trimmed.replace(/\\/g, "/");
+  const segments = normalizedSlashes.split("/");
+  for (const seg of segments) {
+    if (seg === "..") {
+      return false;
+    }
+    if (seg.toLowerCase() === ".git") {
+      return false;
+    }
+  }
+  const resolvedTarget = resolve2(resolvedRoot, trimmed);
+  if (allowRootDot && resolvedTarget === resolvedRoot) {
+    return true;
+  }
+  if (!resolvedTarget.startsWith(resolvedRoot + sep)) {
+    return false;
+  }
+  if (hasSymlinkEscapeAlongPath(resolvedRoot, trimmed)) {
+    return false;
+  }
+  return true;
+}
+function validateWorkspaceFileOperations(input) {
+  const resolvedRoot = resolve2(input.workDir);
+  const sensitiveSet = /* @__PURE__ */ new Set();
+  const traversalSet = /* @__PURE__ */ new Set();
+  const filePaths = [];
+  for (const entry of input.files ?? []) {
+    const raw = typeof entry === "string" ? entry : entry.path;
+    filePaths.push(raw);
+  }
+  for (const del of input.deleted_files ?? []) {
+    filePaths.push(del);
+  }
+  for (const rawPath of filePaths) {
+    if (!isContainedRelativePath(resolvedRoot, rawPath, false)) {
+      traversalSet.add(rawPath);
+      continue;
+    }
+    if (input.isTaskBranch && isSensitiveTaskBranchPath(rawPath, input.reviewersDir)) {
+      sensitiveSet.add(normalizeRelativeCandidate(rawPath));
+    }
+  }
+  for (const target of input.targets ?? []) {
+    if (!isContainedRelativePath(resolvedRoot, target.working_directory, true)) {
+      traversalSet.add(target.working_directory);
+    }
+  }
+  const sensitivePaths = Array.from(sensitiveSet);
+  const traversalPaths = Array.from(traversalSet);
+  const allowed = sensitivePaths.length === 0 && traversalPaths.length === 0;
+  const reasons = [];
+  if (traversalPaths.length > 0) {
+    reasons.push(
+      `Path containment violation (outside workspace or inside .git/): ${traversalPaths.join(", ")}`
+    );
+  }
+  if (sensitivePaths.length > 0) {
+    reasons.push(
+      `Forbidden modification of sensitive path(s) on task/* branch: ${sensitivePaths.join(", ")}`
+    );
+  }
+  return {
+    allowed,
+    sensitivePaths,
+    traversalPaths,
+    reason: reasons.join("; ")
+  };
+}
+function sanitizeGitConfigFile(workDir, cleanRemoteUrl) {
+  const gitDir = join2(workDir, ".git");
+  const gitConfigPath = join2(gitDir, "config");
+  if (!existsSync2(gitDir)) {
+    return;
+  }
+  if (!existsSync2(gitConfigPath)) {
+    if (cleanRemoteUrl) {
+      writeFileSync(
+        gitConfigPath,
+        [
+          "[core]",
+          "	repositoryformatversion = 0",
+          "	filemode = true",
+          "	bare = false",
+          "	hooksPath = /dev/null",
+          '[remote "origin"]',
+          `	url = ${cleanRemoteUrl}`,
+          "	fetch = +refs/heads/*:refs/remotes/origin/*",
+          ""
+        ].join("\n"),
+        "utf8"
+      );
+    }
+    return;
+  }
+  try {
+    const raw = readFileSync2(gitConfigPath, "utf8");
+    const cleanedLines = [];
+    let replacedUrl = false;
+    for (const line of raw.split(/\r?\n/)) {
+      if (/extraheader/i.test(line) || /x-access-token/i.test(line) || /Authorization:/i.test(line)) {
+        continue;
+      }
+      if (/^\s*url\s*=/i.test(line) && cleanRemoteUrl) {
+        cleanedLines.push(`	url = ${cleanRemoteUrl}`);
+        replacedUrl = true;
+        continue;
+      }
+      cleanedLines.push(line);
+    }
+    if (!replacedUrl && cleanRemoteUrl) {
+      cleanedLines.push('[remote "origin"]', `	url = ${cleanRemoteUrl}`);
+    }
+    writeFileSync(gitConfigPath, `${cleanedLines.join("\n").trim()}
+`, "utf8");
+  } catch {
+  }
+}
+function materializeSeedFilesIntoWorkspace(workDir, seedFiles) {
+  if (!seedFiles) {
+    return;
+  }
+  const resolvedRoot = resolve2(workDir);
+  const entries = [];
+  if (Array.isArray(seedFiles)) {
+    for (const item of seedFiles) {
+      entries.push([item.path, item.content]);
+    }
+  } else if (seedFiles instanceof Map || typeof seedFiles.entries === "function") {
+    for (const [k, v] of seedFiles.entries()) {
+      entries.push([k, v]);
+    }
+  } else {
+    for (const [k, v] of Object.entries(seedFiles)) {
+      if (typeof v === "string") {
+        entries.push([k, v]);
+      }
+    }
+  }
+  for (const [rawPath, content] of entries) {
+    const cleanRel = rawPath.replace(/^\/+/, "");
+    if (!isContainedRelativePath(resolvedRoot, cleanRel, false)) {
+      continue;
+    }
+    const targetPath = resolve2(resolvedRoot, cleanRel);
+    mkdirSync2(dirname2(targetPath), { recursive: true });
+    writeFileSync(targetPath, content, "utf8");
+  }
+}
+function prepareRepositorySandboxWorkspace(input) {
+  const workDir = input.workDir ?? mkdtempSync(join2(tmpdir(), "epure-polyglot-sandbox-"));
+  mkdirSync2(workDir, { recursive: true });
+  const repoSlug = (input.repository ?? "").trim();
+  const [owner, repo] = repoSlug.split("/");
+  const cleanRemoteUrl = owner && repo ? `https://github.com/${owner}/${repo}.git` : "";
+  let clonedFromRemote = false;
+  try {
+    if (input.localSourceRepoDir && existsSync2(input.localSourceRepoDir)) {
+      cpSync(input.localSourceRepoDir, workDir, { recursive: true });
+    }
+    const shouldAttemptClone = Boolean(cleanRemoteUrl && input.branch && input.githubToken) && (input.enableRemoteClone === true || Boolean(input.execGitImpl));
+    if (shouldAttemptClone && input.branch && input.githubToken) {
+      const basicAuth = Buffer.from(
+        `x-access-token:${input.githubToken.trim()}`,
+        "utf8"
+      ).toString("base64");
+      const cloneArgs = [
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        `http.extraHeader=Authorization: Basic ${basicAuth}`,
+        "clone",
+        "--depth=1",
+        "--single-branch",
+        "--branch",
+        input.branch,
+        cleanRemoteUrl,
+        workDir
+      ];
+      const gitRunner = input.execGitImpl ?? ((args, opts) => {
+        execFileSync("git", [...args], {
+          cwd: opts.cwd,
+          stdio: "pipe",
+          timeout: 12e4
+        });
+      });
+      try {
+        gitRunner(cloneArgs, {});
+        clonedFromRemote = true;
+      } catch {
+        clonedFromRemote = false;
+      }
+    }
+    if (input.seedFiles) {
+      materializeSeedFilesIntoWorkspace(workDir, input.seedFiles);
+    }
+  } finally {
+    if (cleanRemoteUrl) {
+      if (clonedFromRemote && !existsSync2(join2(workDir, ".git"))) {
+        mkdirSync2(join2(workDir, ".git"), { recursive: true });
+      }
+      sanitizeGitConfigFile(workDir, cleanRemoteUrl);
+    }
+  }
+  return {
+    workDir,
+    clonedFromRemote,
+    sanitizedGitConfigUrl: cleanRemoteUrl,
+    cleanup: () => {
+      rmSync(workDir, { recursive: true, force: true });
+    }
+  };
+}
+function splitCompoundCommands(rawCommand) {
+  const parts = [];
+  let current = "";
+  let inQuote = null;
+  let escaped = false;
+  for (let i = 0; i < rawCommand.length; i += 1) {
+    const ch = rawCommand[i] ?? "";
+    const next = rawCommand[i + 1] ?? "";
+    if (escaped) {
+      current += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\" && inQuote === '"') {
+      current += ch;
+      escaped = true;
+      continue;
+    }
+    if ((ch === '"' || ch === "'") && !inQuote) {
+      inQuote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === inQuote) {
+      inQuote = null;
+      current += ch;
+      continue;
+    }
+    if (!inQuote && ch === "&" && next === "&") {
+      if (current.trim().length > 0) {
+        parts.push(current.trim());
+      }
+      current = "";
+      i += 1;
+      continue;
+    }
+    current += ch;
+  }
+  if (current.trim().length > 0) {
+    parts.push(current.trim());
+  }
+  return parts;
+}
+function tokenizeAllowlistedCommand(rawAtomicCommand) {
+  const trimmed = rawAtomicCommand.trim();
+  if (!trimmed) {
+    throw new Error("Sandbox command tokenizer rejected empty command.");
+  }
+  if (SHELL_INJECTION_PATTERN.test(trimmed)) {
+    throw new Error(
+      `Sandbox command tokenizer rejected unsafe shell metacharacters or expression in '${trimmed}'.`
+    );
+  }
+  const tokens = [];
+  let current = "";
+  let inQuote = null;
+  let escaped = false;
+  for (let i = 0; i < trimmed.length; i += 1) {
+    const ch = trimmed[i] ?? "";
+    if (escaped) {
+      current += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\" && inQuote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if ((ch === '"' || ch === "'") && !inQuote) {
+      inQuote = ch;
+      continue;
+    }
+    if (ch === inQuote) {
+      inQuote = null;
+      continue;
+    }
+    if (!inQuote && /\s/.test(ch)) {
+      if (current.length > 0) {
+        tokens.push(current);
+        current = "";
+      }
+      continue;
+    }
+    current += ch;
+  }
+  if (inQuote) {
+    throw new Error(
+      `Sandbox command tokenizer rejected unterminated quote in '${trimmed}'.`
+    );
+  }
+  if (current.length > 0) {
+    tokens.push(current);
+  }
+  const binary = tokens[0] ?? "";
+  const args = tokens.slice(1);
+  const isRelativeScript = /^\.\/scripts\/[A-Za-z0-9_./-]+$/.test(binary);
+  if (!isRelativeScript && !ALLOWLISTED_BINARIES.has(binary)) {
+    throw new Error(
+      `Sandbox command tokenizer rejected non-allowlisted binary '${binary}' in '${trimmed}'.`
+    );
+  }
+  if ((binary === "sh" || binary === "bash") && args.includes("-c")) {
+    throw new Error(
+      `Sandbox command tokenizer forbids '${binary} -c' shell execution in '${trimmed}'.`
+    );
+  }
+  return {
+    command: binary,
+    args,
+    raw: trimmed
+  };
+}
+function matchesPathPattern(filePath, pattern) {
+  const cleanFile = normalizeRelativeCandidate(filePath);
+  const cleanPattern = normalizeRelativeCandidate(pattern);
+  if (!cleanPattern || cleanPattern === "**" || cleanPattern === "**/*" || cleanPattern === "*") {
+    return true;
+  }
+  if (cleanPattern.endsWith("/**")) {
+    const prefix = cleanPattern.slice(0, -3);
+    return cleanFile === prefix || cleanFile.startsWith(`${prefix}/`);
+  }
+  let regexStr = "^";
+  for (let i = 0; i < cleanPattern.length; i += 1) {
+    const ch = cleanPattern[i] ?? "";
+    const next = cleanPattern[i + 1] ?? "";
+    const afterNext = cleanPattern[i + 2] ?? "";
+    if (ch === "*" && next === "*") {
+      if (afterNext === "/") {
+        regexStr += "(?:.+/)?";
+        i += 2;
+      } else {
+        regexStr += ".*";
+        i += 1;
+      }
+      continue;
+    }
+    if (ch === "*") {
+      regexStr += "[^/]*";
+      continue;
+    }
+    if (ch === "?") {
+      regexStr += "[^/]";
+      continue;
+    }
+    if (/[.+^${}()|[\]\\]/.test(ch)) {
+      regexStr += `\\${ch}`;
+      continue;
+    }
+    regexStr += ch;
+  }
+  regexStr += "$";
+  return new RegExp(regexStr, "i").test(cleanFile);
+}
+function selectAffectedVerificationTargets(targets, changedPaths) {
+  if (targets.length === 0) {
+    return [];
+  }
+  const cleanPaths = changedPaths.map(normalizeRelativeCandidate).filter((p) => p.length > 0);
+  if (cleanPaths.length === 0) {
+    return targets;
+  }
+  const matched = targets.filter((target) => {
+    const patterns = target.path_patterns.length > 0 ? target.path_patterns : ["**"];
+    return cleanPaths.some(
+      (filePath) => patterns.some((pat) => matchesPathPattern(filePath, pat))
+    );
+  });
+  return matched.length > 0 ? matched : targets;
+}
+function formatVerificationToolingGuideMarkdown(profile) {
+  const lines = [
+    "## Verification & Tooling Guide (Stage 1 Local Sandbox & Stage 3 External CI)",
+    "",
+    "### Stage 1 \u2014 Pre-Publication Local Sandbox Targets (`shell: false`, zero secrets)",
+    "| Target | Kind | Working Directory | Path Patterns | Install | Codegen | Typecheck | Lint | Unit Test |",
+    "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |"
+  ];
+  for (const t of profile.targets) {
+    const patterns = t.path_patterns.map((p) => `\`${p}\``).join(", ") || "`**`";
+    const fmt = (cmd) => cmd ? `\`${cmd}\`` : "\u2014";
+    lines.push(
+      `| \`${t.name}\` | \`${t.kind}\` | \`${t.working_directory}\` | ${patterns} | ${fmt(t.install_command)} | ${fmt(t.codegen_command)} | ${fmt(t.typecheck_command)} | ${fmt(t.lint_command)} | ${fmt(t.test_command)} |`
+    );
+  }
+  lines.push("");
+  lines.push("### Stage 3 \u2014 Post-PR External GitHub Actions CI Gate");
+  lines.push(
+    `- **Wait for External CI**: \`${profile.wait_for_external_ci}\` (timeout: \`${profile.external_ci_timeout_minutes}m\`, registration grace window: \`${profile.grace_window_seconds}s\` fail-closed)`
+  );
+  if (profile.deferred_external_workflows && profile.deferred_external_workflows.length > 0) {
+    lines.push(
+      `- **Deferred Service/Integration Workflows (Stage 3)**: ${profile.deferred_external_workflows.map((w) => `\`${w}\``).join(", ")} (executed automatically on GitHub Actions after PR creation/update; any failure logs & annotations will be fed back into the remediation loop).`
+    );
+  } else {
+    lines.push(
+      "- All non-EPURE `.github/workflows/*.{yml,yaml}` triggered by the PR on `dev` will be awaited in Stage 3 after PR publication."
+    );
+  }
+  return lines.join("\n");
+}
+function shouldSkipDefaultNodeStepInOfflineTempDir(params) {
+  if (params.hasCustomSandboxRunner) {
+    return { skip: false, skipEntireTarget: false };
+  }
+  const pkgJsonPath = join2(params.targetCwd, "package.json");
+  if (!existsSync2(pkgJsonPath)) {
+    return { skip: true, skipEntireTarget: true };
+  }
+  let scripts = {};
+  let depCount = 0;
+  try {
+    const parsed = JSON.parse(readFileSync2(pkgJsonPath, "utf8"));
+    scripts = parsed.scripts ?? {};
+    depCount = Object.keys(parsed.dependencies ?? {}).length + Object.keys(parsed.devDependencies ?? {}).length;
+  } catch {
+    return { skip: false, skipEntireTarget: false };
+  }
+  const hasLockfile = existsSync2(join2(params.targetCwd, "package-lock.json")) || existsSync2(join2(params.targetCwd, "pnpm-lock.yaml")) || existsSync2(join2(params.targetCwd, "yarn.lock"));
+  const hasNodeModules = existsSync2(join2(params.targetCwd, "node_modules"));
+  if (params.step === "install") {
+    if (depCount === 0 && !hasLockfile || hasNodeModules) {
+      return { skip: true, skipEntireTarget: false };
+    }
+  }
+  if (params.step === "typecheck") {
+    const hasTsconfig = existsSync2(join2(params.targetCwd, "tsconfig.json"));
+    if (!hasTsconfig && !scripts.typecheck) {
+      return { skip: true, skipEntireTarget: false };
+    }
+  }
+  if (params.step === "lint") {
+    if (params.rawCommand === "npm run lint" && !scripts.lint) {
+      return { skip: true, skipEntireTarget: false };
+    }
+  }
+  if (params.step === "test") {
+    if (params.rawCommand === "npm test" && !scripts.test) {
+      return { skip: true, skipEntireTarget: false };
+    }
+  }
+  return { skip: false, skipEntireTarget: false };
+}
+async function runPolyglotStage1Verification(input) {
+  const ownsTempWorkDir = !input.workDir;
+  const workDir = input.workDir ?? mkdtempSync(join2(tmpdir(), "epure-stage1-sandbox-"));
+  mkdirSync2(workDir, { recursive: true });
+  const hasCustomSandboxRunner = Boolean(input.sandboxRunner);
+  const sandboxRunner = input.sandboxRunner ?? runInUntrustedCodeSandbox;
+  const bootstrapped = input.bootstrappedTargets ?? /* @__PURE__ */ new Set();
+  try {
+    const validation = validateWorkspaceFileOperations({
+      workDir,
+      files: input.changedPaths && input.changedPaths.length > 0 ? input.changedPaths : input.files,
+      deleted_files: input.deleted_files,
+      targets: input.profile.targets,
+      isTaskBranch: input.isTaskBranch,
+      reviewersDir: input.reviewersDir
+    });
+    const fullContainment = validateWorkspaceFileOperations({
+      workDir,
+      files: input.files,
+      deleted_files: input.deleted_files,
+      targets: input.profile.targets,
+      isTaskBranch: false
+    });
+    if (!validation.allowed || !fullContainment.allowed) {
+      const mergedTraversal = Array.from(
+        /* @__PURE__ */ new Set([
+          ...validation.traversalPaths,
+          ...fullContainment.traversalPaths
+        ])
+      );
+      return {
+        passed: false,
+        blocked_by_security_gate: true,
+        sensitive_paths: validation.sensitivePaths,
+        traversal_paths: mergedTraversal,
+        affected_targets: [],
+        target_results: [],
+        output: validation.reason || fullContainment.reason
+      };
+    }
+    const resolvedRoot = resolve2(workDir);
+    for (const file of input.files ?? []) {
+      const cleanRel = file.path.replace(/^\/+/, "");
+      const fullPath = resolve2(resolvedRoot, cleanRel);
+      mkdirSync2(dirname2(fullPath), { recursive: true });
+      writeFileSync(fullPath, file.content, "utf8");
+    }
+    for (const del of input.deleted_files ?? []) {
+      const cleanRel = del.replace(/^\/+/, "");
+      const fullPath = resolve2(resolvedRoot, cleanRel);
+      if (existsSync2(fullPath)) {
+        unlinkSync(fullPath);
+      }
+    }
+    const effectiveChangedPaths = input.changedPaths ?? [
+      ...(input.files ?? []).map((f) => f.path),
+      ...input.deleted_files ?? []
+    ];
+    const affectedTargets = selectAffectedVerificationTargets(
+      input.profile.targets,
+      effectiveChangedPaths
+    );
+    const targetResults = [];
+    const outputSections = [];
+    const baseRunnerEnv = {
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+      ...input.runnerEnv ?? {},
+      LLM_API_KEY: input.llmApiKey
+    };
+    for (const target of affectedTargets) {
+      const targetCwd = target.working_directory === "." ? resolvedRoot : resolve2(resolvedRoot, target.working_directory);
+      if (!existsSync2(targetCwd)) {
+        if (!hasCustomSandboxRunner) {
+          targetResults.push({
+            target_name: target.name,
+            working_directory: target.working_directory,
+            kind: target.kind,
+            passed: true,
+            skipped: true,
+            steps: [],
+            output: `Skipped target '${target.name}': directory '${target.working_directory}' not present.`
+          });
+          continue;
+        }
+        mkdirSync2(targetCwd, { recursive: true });
+      }
+      if (target.kind === "node") {
+        const nodeCheck = shouldSkipDefaultNodeStepInOfflineTempDir({
+          targetCwd,
+          step: "test",
+          rawCommand: target.test_command ?? "npm test",
+          hasCustomSandboxRunner
+        });
+        if (nodeCheck.skipEntireTarget) {
+          targetResults.push({
+            target_name: target.name,
+            working_directory: target.working_directory,
+            kind: target.kind,
+            passed: true,
+            skipped: true,
+            steps: [],
+            output: "No package.json in workspace snapshot; syntax verified."
+          });
+          continue;
+        }
+      }
+      const candidateSteps = [
+        {
+          step: "install",
+          rawCommand: target.install_command,
+          bootstrapOnly: true
+        },
+        {
+          step: "codegen",
+          rawCommand: target.codegen_command,
+          bootstrapOnly: true
+        },
+        {
+          step: "typecheck",
+          rawCommand: target.typecheck_command,
+          bootstrapOnly: false
+        },
+        {
+          step: "lint",
+          rawCommand: target.lint_command,
+          bootstrapOnly: false
+        },
+        {
+          step: "test",
+          rawCommand: target.test_command,
+          bootstrapOnly: false
+        }
+      ];
+      const executedSteps = [];
+      let targetPassed = true;
+      let targetFailureOutput = "";
+      const isAlreadyBootstrapped = bootstrapped.has(target.name);
+      for (const candidate of candidateSteps) {
+        if (!candidate.rawCommand) {
+          continue;
+        }
+        if (candidate.bootstrapOnly && isAlreadyBootstrapped) {
+          continue;
+        }
+        if (target.kind === "node") {
+          const skipDecision = shouldSkipDefaultNodeStepInOfflineTempDir({
+            targetCwd,
+            step: candidate.step,
+            rawCommand: candidate.rawCommand,
+            hasCustomSandboxRunner
+          });
+          if (skipDecision.skip) {
+            continue;
+          }
+        }
+        let atomicCommands;
+        try {
+          atomicCommands = splitCompoundCommands(candidate.rawCommand);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          targetPassed = false;
+          targetFailureOutput = `[Target: ${target.name}][${candidate.step}] ${msg}`;
+          break;
+        }
+        for (const atomicRaw of atomicCommands) {
+          let tokenized;
+          try {
+            tokenized = tokenizeAllowlistedCommand(atomicRaw);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            targetPassed = false;
+            targetFailureOutput = `[Target: ${target.name}][${candidate.step}] ${msg}`;
+            executedSteps.push({
+              step: candidate.step,
+              raw_command: atomicRaw,
+              exit_code: 1,
+              passed: false,
+              stdout: "",
+              stderr: msg,
+              duration_ms: 0
+            });
+            break;
+          }
+          const stepNetworkPolicy = candidate.step === "install" ? "https_only" : "offline";
+          let execRes = await sandboxRunner({
+            isolationAvailable: true,
+            runnerEnv: baseRunnerEnv,
+            command: tokenized.command,
+            args: tokenized.args,
+            cwd: targetCwd,
+            networkPolicy: stepNetworkPolicy,
+            timeoutMs: candidate.step === "install" || candidate.step === "test" ? 3e5 : 18e4
+          });
+          if (!execRes.isolated || execRes.exit_code !== 0 && (tokenized.command === "pip" || tokenized.command === "pip3") && tokenized.args[0] === "install" && /externally-managed-environment/i.test(
+            `${execRes.stdout}
+${execRes.stderr}`
+          )) {
+            if (execRes.isolated && (tokenized.command === "pip" || tokenized.command === "pip3")) {
+              execRes = await sandboxRunner({
+                isolationAvailable: true,
+                runnerEnv: baseRunnerEnv,
+                command: tokenized.command,
+                args: [
+                  ...tokenized.args,
+                  "--break-system-packages",
+                  "--user"
+                ],
+                cwd: targetCwd,
+                networkPolicy: stepNetworkPolicy,
+                timeoutMs: 3e5
+              });
+            }
+          }
+          const stepPassed = execRes.isolated && execRes.exit_code === 0;
+          executedSteps.push({
+            step: candidate.step,
+            raw_command: tokenized.raw,
+            exit_code: execRes.exit_code,
+            passed: stepPassed,
+            stdout: execRes.stdout,
+            stderr: execRes.stderr,
+            duration_ms: execRes.duration_ms,
+            network_policy: stepNetworkPolicy
+          });
+          if (!stepPassed) {
+            const formattedOutput = formatAndCondenseStage1CommandOutput({
+              step: candidate.step,
+              rawCommand: tokenized.raw,
+              exitCode: execRes.exit_code,
+              stdout: execRes.stdout,
+              stderr: execRes.stderr
+            });
+            targetPassed = false;
+            targetFailureOutput = `[Target: ${target.name} (${target.working_directory})][${candidate.step}: ${tokenized.raw}] failed (exit ${execRes.exit_code}):
+${formattedOutput}`;
+            break;
+          }
+        }
+        if (!targetPassed) {
+          break;
+        }
+      }
+      if (targetPassed) {
+        bootstrapped.add(target.name);
+      }
+      const stepOutSummary = targetPassed ? executedSteps.map(
+        (s) => formatAndCondenseStage1CommandOutput({
+          step: s.step,
+          rawCommand: s.raw_command,
+          exitCode: s.exit_code,
+          stdout: s.stdout,
+          stderr: s.stderr
+        })
+      ).filter(Boolean).join("\n") : targetFailureOutput;
+      targetResults.push({
+        target_name: target.name,
+        working_directory: target.working_directory,
+        kind: target.kind,
+        passed: targetPassed,
+        skipped: false,
+        steps: executedSteps,
+        output: stepOutSummary
+      });
+      if (stepOutSummary) {
+        outputSections.push(stepOutSummary);
+      }
+      if (!targetPassed) {
+        return {
+          passed: false,
+          blocked_by_security_gate: false,
+          sensitive_paths: [],
+          traversal_paths: [],
+          affected_targets: affectedTargets.map((t) => t.name),
+          target_results: targetResults,
+          output: outputSections.join("\n\n").trim()
+        };
+      }
+    }
+    return {
+      passed: true,
+      blocked_by_security_gate: false,
+      sensitive_paths: [],
+      traversal_paths: [],
+      affected_targets: affectedTargets.map((t) => t.name),
+      target_results: targetResults,
+      output: outputSections.join("\n\n").trim() || "Stage 1 polyglot verification passed."
+    };
+  } finally {
+    if (ownsTempWorkDir) {
+      rmSync(workDir, { recursive: true, force: true });
+    }
+  }
+}
+
+// src/execution/external-ci-gate.ts
+function resolveLlmEscalationReason(err) {
+  if (err instanceof AuthenticationError || err instanceof QuotaExhaustedError) {
+    return "llm_quota_or_auth_failure";
+  }
+  if (isTransientLLMError(err)) {
+    return "transient_llm_api_exhausted";
+  }
+  return "llm_request_invalid";
+}
+var EPURE_SYNTHETIC_CHECK_NAMES = /* @__PURE__ */ new Set([
+  "ai-review",
+  "impeccable-gate",
+  "pr title",
+  "verify epure consumer contract",
+  "verify-contract / verify epure consumer contract",
+  "verify-contract",
+  "authorize /epure issue command",
+  "orchestrate authorized /epure lifecycle"
+]);
+var TEST_OR_CODE_FAILURE_PATTERNS = [
+  /(?:^|\n|\s)FAIL\s+\S+/m,
+  /---\s*FAIL:/,
+  /\bAssertionError\b/,
+  /\bTS\d{4}:/,
+  /Traceback \(most recent call last\)/,
+  /\bpanicked at\b/,
+  /\bSyntaxError:/,
+  /\bReferenceError:/,
+  /\bTypeError:/,
+  /\bexpect\(.*\)\.(?:to|not)/
+];
+var TRANSIENT_INFRA_PATTERNS = [
+  /\bETIMEDOUT\b/i,
+  /\bECONNRESET\b/i,
+  /\bEAI_AGAIN\b/i,
+  /\b502 Bad Gateway\b/i,
+  /\b503 Service Unavailable\b/i,
+  /\b504 Gateway Timeout\b/i,
+  /\bRunner\.Worker\b/i,
+  /The hosted runner lost communication/i,
+  /runner has received a shutdown signal/i,
+  /failed to fetch .* from registry/i,
+  /TLS handshake timeout/i,
+  /rate limit exceeded/i
+];
+var ANSI_ESCAPE_REGEX = /\x1B\[[0-?]*[ -/]*[@-~]/g;
+var ISO_TIMESTAMP_PREFIX_REGEX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s+/gm;
+var GHA_WORKFLOW_COMMAND_REGEX = /::(error|warning|notice|debug|group|endgroup|add-mask|set-env|set-output|save-state|stop-commands)\b/gi;
+var LOG_FAILURE_ANCHOR_REGEX = /(?:##\[error\]|:\[error\]|\bFAIL\s+\S+|---\s*FAIL:|^\s*(?:●|✕|×|❯)\s+|\b(?:AssertionError|RangeError|TypeError|ReferenceError|SyntaxError)\b|\bError:|\bTS\d{4}:|Traceback \(most recent call last\)|\bpanicked at\b)/i;
+var APP_LOGGER_NOISE_REGEX = /^\d{2}:\d{2}:\d{2}\s+\[(?:error|warn|info|debug)\]/i;
+var COVERAGE_TABLE_ROW_REGEX = /^(?:\s*[^|]+\|\s*[\d.]+\s*\|\s*[\d.]+\s*\|\s*[\d.]+\s*\|\s*[\d.]+|\s*[-|]{20,}\s*|\s*File\s*\|\s*% Stmts\s*\|)/;
+function unquoteYamlString(raw) {
+  const trimmed = raw.trim().replace(/\s+#.*$/, "").trim();
+  if (trimmed.startsWith('"') && trimmed.endsWith('"') || trimmed.startsWith("'") && trimmed.endsWith("'")) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+function parseInlineYamlList(raw) {
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) {
+    return [];
+  }
+  const inner = trimmed.slice(1, -1).trim();
+  if (!inner) {
+    return [];
+  }
+  return inner.split(",").map((s) => unquoteYamlString(s)).filter((s) => s.length > 0);
+}
+function parseWorkflowOnTriggersAndFilters(content) {
+  const lines = content.split(/\r?\n/);
+  let workflowName = "CI";
+  const triggersSet = /* @__PURE__ */ new Set();
+  const pathsInclude = [];
+  const pathsIgnore = [];
+  const branchesInclude = [];
+  const hasServices = /^\s+services:\s*(?:#.*)?$/m.test(content);
+  for (const line of lines) {
+    const nameMatch = /^name:\s*(.+)$/.exec(line);
+    if (nameMatch && nameMatch[1]) {
+      workflowName = unquoteYamlString(nameMatch[1]);
+      break;
+    }
+  }
+  let inOnBlock = false;
+  let activeEvent = null;
+  let activeFilterKey = null;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+    const indent = /^(\s*)/.exec(line)?.[1]?.length ?? 0;
+    if (indent === 0) {
+      activeEvent = null;
+      activeFilterKey = null;
+      const onMatch = /^(?:on|"on"|'on'):\s*(.*)$/.exec(trimmed);
+      if (onMatch) {
+        inOnBlock = true;
+        const rest = (onMatch[1] ?? "").replace(/\s+#.*$/, "").trim();
+        if (rest.startsWith("[")) {
+          for (const item of parseInlineYamlList(rest)) {
+            if (item === "pull_request" || item === "pull_request_target") {
+              triggersSet.add("pull_request");
+            } else if (item === "push") {
+              triggersSet.add("push");
+            }
+          }
+          inOnBlock = false;
+        } else if (rest === "pull_request") {
+          triggersSet.add("pull_request");
+          inOnBlock = false;
+        } else if (rest === "push") {
+          triggersSet.add("push");
+          inOnBlock = false;
+        }
+        continue;
+      }
+      if (inOnBlock) {
+        inOnBlock = false;
+      }
+      continue;
+    }
+    if (!inOnBlock) {
+      continue;
+    }
+    if (indent === 2) {
+      activeFilterKey = null;
+      const evMatch = /^([a-zA-Z0-9_-]+):\s*(.*)$/.exec(trimmed);
+      if (evMatch && evMatch[1]) {
+        const evName = evMatch[1];
+        if (evName === "pull_request" || evName === "pull_request_target") {
+          triggersSet.add("pull_request");
+          activeEvent = "pull_request";
+        } else if (evName === "push") {
+          triggersSet.add("push");
+          activeEvent = "push";
+        } else {
+          activeEvent = "other";
+        }
+      }
+      continue;
+    }
+    if (activeEvent === "pull_request" || activeEvent === "push") {
+      if (indent === 4) {
+        const filterMatch = /^(paths|paths-ignore|branches):\s*(.*)$/.exec(
+          trimmed
+        );
+        if (filterMatch && filterMatch[1]) {
+          const key = filterMatch[1];
+          const rest = (filterMatch[2] ?? "").replace(/\s+#.*$/, "").trim();
+          if (rest.startsWith("[")) {
+            const list = parseInlineYamlList(rest);
+            if (key === "paths") pathsInclude.push(...list);
+            else if (key === "paths-ignore") pathsIgnore.push(...list);
+            else if (key === "branches" && activeEvent === "pull_request") {
+              branchesInclude.push(...list);
+            }
+            activeFilterKey = null;
+          } else {
+            activeFilterKey = key;
+          }
+        } else {
+          activeFilterKey = null;
+        }
+        continue;
+      }
+      if (indent >= 6 && activeFilterKey && trimmed.startsWith("-")) {
+        const val = unquoteYamlString(trimmed.replace(/^-\s*/, ""));
+        if (val) {
+          if (activeFilterKey === "paths") pathsInclude.push(val);
+          else if (activeFilterKey === "paths-ignore") pathsIgnore.push(val);
+          else if (activeFilterKey === "branches" && activeEvent === "pull_request") {
+            branchesInclude.push(val);
+          }
+        }
+      }
+    }
+  }
+  return {
+    workflowName,
+    triggers: Array.from(triggersSet),
+    pathsInclude,
+    pathsIgnore,
+    branchesInclude,
+    hasServices
+  };
+}
+function isEpureManagedWorkflow(filePath, content) {
+  const fileName = basename2(filePath).toLowerCase();
+  if (fileName.startsWith("epure-") || fileName === "pr-title.yml" || fileName === "pr-title.yaml" || fileName === "release.yml" || fileName === "release.yaml") {
+    return true;
+  }
+  if (content.includes("Giskard-AI/epure/actions/") || content.includes("Giskard-AI/epure/.github/workflows/")) {
+    return true;
+  }
+  return false;
+}
+function isEpureSyntheticCheckOrRun(nameOrPath) {
+  const clean = nameOrPath.trim().toLowerCase();
+  const base = basename2(clean);
+  if (base.startsWith("epure-") || base === "pr-title.yml" || base === "release.yml") {
+    return true;
+  }
+  if (EPURE_SYNTHETIC_CHECK_NAMES.has(clean)) {
+    return true;
+  }
+  if (clean.startsWith("epure ") || clean.startsWith("verify-contract") || clean.includes("verify epure consumer contract")) {
+    return true;
+  }
+  return false;
+}
+function discoverExpectedExternalWorkflows(input) {
+  const entries = input.workflowFilesMap instanceof Map || typeof input.workflowFilesMap.entries === "function" ? Array.from(
+    input.workflowFilesMap.entries()
+  ) : Object.entries(
+    input.workflowFilesMap
+  );
+  const cleanChanged = input.changedPaths.map((p) => p.trim().replace(/^\/+/, "")).filter((p) => p.length > 0);
+  const expected = [];
+  for (const [rawPath, content] of entries) {
+    if (typeof content !== "string") {
+      continue;
+    }
+    const normalizedPath = rawPath.startsWith(".github/workflows/") ? rawPath : `.github/workflows/${rawPath.replace(/^\/+/, "")}`;
+    const fileName = basename2(normalizedPath);
+    if (!/\.ya?ml$/i.test(fileName)) {
+      continue;
+    }
+    if (isEpureManagedWorkflow(normalizedPath, content)) {
+      continue;
+    }
+    const parsed = parseWorkflowOnTriggersAndFilters(content);
+    if (parsed.triggers.length === 0) {
+      continue;
+    }
+    if (input.targetBranch && parsed.branchesInclude.length > 0 && !parsed.triggers.includes("push")) {
+      const branchMatched = parsed.branchesInclude.some(
+        (pat) => matchesPathPattern(input.targetBranch, pat)
+      );
+      if (!branchMatched) {
+        continue;
+      }
+    }
+    if (parsed.pathsInclude.length > 0 && cleanChanged.length > 0) {
+      const anyPathMatches = cleanChanged.some(
+        (filePath) => parsed.pathsInclude.some((pat) => matchesPathPattern(filePath, pat))
+      );
+      if (!anyPathMatches) {
+        continue;
+      }
+    }
+    if (parsed.pathsIgnore.length > 0 && cleanChanged.length > 0) {
+      const allIgnored = cleanChanged.every(
+        (filePath) => parsed.pathsIgnore.some((pat) => matchesPathPattern(filePath, pat))
+      );
+      if (allIgnored) {
+        continue;
+      }
+    }
+    expected.push({
+      path: normalizedPath,
+      fileName,
+      workflowName: parsed.workflowName,
+      triggers: parsed.triggers,
+      hasServices: parsed.hasServices
+    });
+  }
+  return expected;
+}
+function classifyCiFailure(input) {
+  const maxReruns = input.maxInfraRerunsPerSha ?? 1;
+  const combinedAnnotationText = (input.annotations ?? []).map((a) => `${a.title ?? ""} ${a.message ?? ""}`).join("\n");
+  const fullDiagnosticText = `${input.rawLog}
+${combinedAnnotationText}`;
+  const hasTestOrCodeFailure = TEST_OR_CODE_FAILURE_PATTERNS.some(
+    (re) => re.test(fullDiagnosticText)
+  );
+  if (hasTestOrCodeFailure) {
+    return {
+      classification: "code_or_test_failure",
+      shouldRerunWorkflow: false,
+      reason: "Test assertion or compiler failure marker detected in check logs/annotations."
+    };
+  }
+  const hasTransientInfraMarker = TRANSIENT_INFRA_PATTERNS.some((re) => re.test(fullDiagnosticText)) || input.conclusion === "timed_out" && fullDiagnosticText.trim().length === 0;
+  if (!hasTransientInfraMarker) {
+    return {
+      classification: "code_or_test_failure",
+      shouldRerunWorkflow: false,
+      reason: "Check run failed without transient infrastructure signature."
+    };
+  }
+  if (input.infraRerunsUsedForSha >= maxReruns) {
+    return {
+      classification: "code_or_test_failure",
+      shouldRerunWorkflow: false,
+      reason: `Transient infrastructure signature detected, but rerun quota (${input.infraRerunsUsedForSha}/${maxReruns}) is already exhausted for SHA ${input.headSha.slice(0, 7)}.`
+    };
+  }
+  return {
+    classification: "transient_infra",
+    shouldRerunWorkflow: true,
+    reason: `Transient infrastructure failure detected with zero test assertion failures (rerun ${input.infraRerunsUsedForSha + 1}/${maxReruns} for SHA ${input.headSha.slice(0, 7)}).`
+  };
+}
+function sanitizeAndFormatFailedCheckLogs(input) {
+  const maxBytes = input.maxBytes ?? 12288;
+  const secrets = input.extraSecrets ?? [];
+  let neutralizedCount = 0;
+  const neutralizeCommands = (text) => text.replace(GHA_WORKFLOW_COMMAND_REGEX, (_match, cmdName) => {
+    neutralizedCount += 1;
+    return `:[${cmdName.toLowerCase()}]`;
+  });
+  const annotationLines = [];
+  for (const ann of (input.annotations ?? []).slice(0, 25)) {
+    const loc = ann.path ? `${ann.path}${ann.start_line ? `:${ann.start_line}` : ""}` : "check";
+    const titlePart = ann.title ? `${ann.title}: ` : "";
+    const msgPart = ann.message ?? "";
+    const rawAnn = `[Annotation] ${loc} \u2014 ${titlePart}${msgPart}`.trim();
+    annotationLines.push(neutralizeCommands(rawAnn.replace(ANSI_ESCAPE_REGEX, "")));
+  }
+  const strippedLog = neutralizeCommands(
+    input.rawLog.replace(ANSI_ESCAPE_REGEX, "").replace(ISO_TIMESTAMP_PREFIX_REGEX, "")
+  );
+  const rawLines = strippedLog.split(/\r?\n/).filter((line) => !COVERAGE_TABLE_ROW_REGEX.test(line));
+  const postJobCleanupIdx = rawLines.findIndex(
+    (line) => /^(?:Post job cleanup\.|##\[group\]Stop containers\b|Stop and remove container:)/.test(
+      line.trim()
+    )
+  );
+  const allLines = postJobCleanupIdx > 0 ? rawLines.slice(0, postJobCleanupIdx) : rawLines;
+  const selectedIndices = /* @__PURE__ */ new Set();
+  for (let i = 0; i < allLines.length; i += 1) {
+    const line = allLines[i] ?? "";
+    if (APP_LOGGER_NOISE_REGEX.test(line)) {
+      continue;
+    }
+    if (LOG_FAILURE_ANCHOR_REGEX.test(line)) {
+      const start = Math.max(0, i - 5);
+      const end = Math.min(allLines.length - 1, i + 18);
+      for (let idx = start; idx <= end; idx += 1) {
+        selectedIndices.add(idx);
+      }
+    }
+  }
+  const tailStart = Math.max(0, allLines.length - 120);
+  for (let idx = tailStart; idx < allLines.length; idx += 1) {
+    selectedIndices.add(idx);
+  }
+  const sortedIndices = Array.from(selectedIndices).sort((a, b) => a - b);
+  const excerptLines = [];
+  let prevIdx = -1;
+  for (const idx of sortedIndices) {
+    if (prevIdx !== -1 && idx > prevIdx + 1) {
+      excerptLines.push("... [log lines omitted] ...");
+    }
+    excerptLines.push(allLines[idx] ?? "");
+    prevIdx = idx;
+  }
+  const header = `### External CI Failure: ${input.checkName}${input.htmlUrl ? ` (${input.htmlUrl})` : ""}`;
+  const sections = [header];
+  if (annotationLines.length > 0) {
+    sections.push("#### Check Annotations", ...annotationLines);
+  }
+  if (excerptLines.length > 0 && excerptLines.some((l) => l.trim().length > 0)) {
+    sections.push("#### Job Log Excerpt", ...excerptLines);
+  }
+  const combinedRaw = sections.join("\n");
+  const redacted = redactSecrets(combinedRaw, secrets);
+  const bounded = redacted.length > maxBytes ? redacted.slice(-maxBytes) : redacted;
+  const wrapped = wrapUntrustedContent(
+    "untrusted_test_output",
+    bounded,
+    maxBytes
+  );
+  return {
+    sanitizedExcerpt: bounded,
+    wrappedUntrustedOutput: wrapped,
+    neutralizedWorkflowCommands: neutralizedCount
+  };
+}
+function isFailedConclusion(conclusion) {
+  const norm = (conclusion ?? "").trim().toLowerCase();
+  return norm === "failure" || norm === "timed_out" || norm === "cancelled" || norm === "action_required" || norm === "startup_failure";
+}
+async function waitForExternalCiChecks(input) {
+  if (input.waitForExternalCi === false) {
+    return {
+      passed: true,
+      reason: "disabled_by_config",
+      infraRerunsTriggered: 0,
+      failedChecks: [],
+      formattedDiagnostics: "",
+      registeredWorkflowNames: [],
+      registeredCheckNames: []
+    };
+  }
+  const timeoutMs = (input.timeoutMinutes ?? 15) * 60 * 1e3;
+  const graceWindowMs = (input.graceWindowSeconds ?? 45) * 1e3;
+  const pollIntervalMs = input.pollIntervalMs ?? 5e3;
+  const sleepFn = input.sleepFn ?? ((ms) => new Promise((resolve3) => setTimeout(resolve3, ms)));
+  let simulatedElapsedMs = 0;
+  const startWallMs = input.nowFn ? input.nowFn() : Date.now();
+  const getElapsedMs = () => {
+    if (input.nowFn) {
+      return Math.max(simulatedElapsedMs, input.nowFn() - startWallMs);
+    }
+    return simulatedElapsedMs;
+  };
+  const infraRerunsMap = input.infraRerunsBySha ?? /* @__PURE__ */ new Map();
+  let infraRerunsTriggered = 0;
+  let pollIndex = 0;
+  while (true) {
+    pollIndex += 1;
+    const elapsedMs = getElapsedMs();
+    if (input.remainingWallClockMs !== void 0 && elapsedMs >= input.remainingWallClockMs) {
+      return {
+        passed: false,
+        reason: "wall_clock_budget_exhausted",
+        infraRerunsTriggered,
+        failedChecks: [],
+        formattedDiagnostics: `Runner wall-clock budget exhausted after ${Math.round(elapsedMs / 1e3)}s while waiting for external CI checks on ${input.headSha.slice(0, 7)}.`,
+        registeredWorkflowNames: [],
+        registeredCheckNames: []
+      };
+    }
+    const [allWorkflowRuns, allCheckRuns] = await Promise.all([
+      input.listWorkflowRunsForSha(input.headSha),
+      input.listCheckRunsForRef(input.headSha)
+    ]);
+    const externalWorkflowRuns = allWorkflowRuns.filter(
+      (r) => !isEpureSyntheticCheckOrRun(r.path ?? r.name ?? "")
+    );
+    const externalCheckRuns = allCheckRuns.filter(
+      (c) => !isEpureSyntheticCheckOrRun(c.name)
+    );
+    const registeredWorkflowNames = externalWorkflowRuns.map(
+      (r) => r.name ?? r.path ?? `run-${r.id}`
+    );
+    const registeredCheckNames = externalCheckRuns.map((c) => c.name);
+    const totalExternalRegistered = externalWorkflowRuns.length + externalCheckRuns.length;
+    if (input.expectedWorkflows.length === 0 && totalExternalRegistered === 0) {
+      return {
+        passed: true,
+        reason: "no_external_workflows",
+        infraRerunsTriggered,
+        failedChecks: [],
+        formattedDiagnostics: "",
+        registeredWorkflowNames: [],
+        registeredCheckNames: []
+      };
+    }
+    if (input.expectedWorkflows.length > 0 && totalExternalRegistered === 0) {
+      if (elapsedMs >= graceWindowMs) {
+        const expectedNames = input.expectedWorkflows.map(
+          (w) => typeof w === "string" ? w : w.path
+        );
+        return {
+          passed: false,
+          reason: "grace_window_timeout",
+          infraRerunsTriggered,
+          failedChecks: [],
+          formattedDiagnostics: `Fail-closed: 0 external workflow runs or check runs registered on SHA ${input.headSha.slice(0, 7)} after ${Math.round(graceWindowMs / 1e3)}s grace window (expected: ${expectedNames.join(", ")}).`,
+          registeredWorkflowNames: [],
+          registeredCheckNames: []
+        };
+      }
+      await sleepFn(pollIntervalMs);
+      simulatedElapsedMs += pollIntervalMs;
+      continue;
+    }
+    if (elapsedMs > timeoutMs) {
+      return {
+        passed: false,
+        reason: "poll_timeout",
+        infraRerunsTriggered,
+        failedChecks: [],
+        formattedDiagnostics: `External CI timed out after ${Math.round(timeoutMs / 6e4)} minutes on SHA ${input.headSha.slice(0, 7)}.`,
+        registeredWorkflowNames,
+        registeredCheckNames
+      };
+    }
+    const activeWorkflowRuns = externalWorkflowRuns.filter(
+      (r) => r.status !== "completed"
+    );
+    const activeCheckRuns = externalCheckRuns.filter(
+      (c) => c.status !== "completed"
+    );
+    if (input.onProgress) {
+      await input.onProgress({
+        pollIndex,
+        elapsedMs,
+        activeWorkflowRuns: activeWorkflowRuns.length,
+        completedWorkflowRuns: externalWorkflowRuns.length - activeWorkflowRuns.length,
+        activeCheckRuns: activeCheckRuns.length,
+        completedCheckRuns: externalCheckRuns.length - activeCheckRuns.length,
+        infraRerunsTriggered
+      });
+    }
+    const waitingOnMoreExpectedWorkflows = externalWorkflowRuns.length > 0 && externalWorkflowRuns.length < input.expectedWorkflows.length && elapsedMs < graceWindowMs;
+    if (activeWorkflowRuns.length > 0 || activeCheckRuns.length > 0 || waitingOnMoreExpectedWorkflows) {
+      await sleepFn(pollIntervalMs);
+      simulatedElapsedMs += pollIntervalMs;
+      continue;
+    }
+    const failedCheckRuns = externalCheckRuns.filter(
+      (c) => isFailedConclusion(c.conclusion)
+    );
+    const failedWorkflowRuns = externalWorkflowRuns.filter(
+      (r) => isFailedConclusion(r.conclusion)
+    );
+    if (failedCheckRuns.length === 0 && failedWorkflowRuns.length === 0) {
+      return {
+        passed: true,
+        reason: "all_passed",
+        infraRerunsTriggered,
+        failedChecks: [],
+        formattedDiagnostics: "",
+        registeredWorkflowNames,
+        registeredCheckNames
+      };
+    }
+    const failureItems = failedCheckRuns.length > 0 ? failedCheckRuns.map((c) => ({
+      id: c.id,
+      name: c.name,
+      conclusion: c.conclusion ?? "failure",
+      html_url: c.html_url ?? c.details_url ?? ""
+    })) : failedWorkflowRuns.map((r) => ({
+      id: r.id,
+      name: r.name ?? r.path ?? `workflow-${r.id}`,
+      conclusion: r.conclusion ?? "failure",
+      html_url: r.html_url ?? ""
+    }));
+    const fetchedFailureDetails = await Promise.all(
+      failureItems.map(async (item) => {
+        const [annotations, rawLog] = await Promise.all([
+          input.listCheckRunAnnotations ? input.listCheckRunAnnotations(item.id).catch(() => []) : Promise.resolve([]),
+          input.getJobLogs ? input.getJobLogs(item.id).catch(() => "") : Promise.resolve("")
+        ]);
+        const usedReruns = infraRerunsMap.get(input.headSha) ?? 0;
+        const classification = classifyCiFailure({
+          conclusion: item.conclusion,
+          checkName: item.name,
+          rawLog,
+          annotations,
+          headSha: input.headSha,
+          infraRerunsUsedForSha: usedReruns
+        });
+        return {
+          item,
+          annotations,
+          rawLog,
+          classification
+        };
+      })
+    );
+    const allTransientInfra = fetchedFailureDetails.length > 0 && fetchedFailureDetails.every(
+      (d) => d.classification.shouldRerunWorkflow
+    );
+    if (allTransientInfra && input.rerunFailedJobs) {
+      const currentUsed = infraRerunsMap.get(input.headSha) ?? 0;
+      infraRerunsMap.set(input.headSha, currentUsed + 1);
+      infraRerunsTriggered += 1;
+      const runIdsToRerun = failedWorkflowRuns.length > 0 ? failedWorkflowRuns.map((r) => r.id) : failureItems.map((f) => f.id);
+      for (const runId of runIdsToRerun) {
+        await input.rerunFailedJobs(runId);
+      }
+      await sleepFn(pollIntervalMs);
+      simulatedElapsedMs += pollIntervalMs;
+      continue;
+    }
+    const failedChecksSummary = [];
+    const diagnosticBlocks = [];
+    for (const detail of fetchedFailureDetails) {
+      const sanitized = sanitizeAndFormatFailedCheckLogs({
+        checkName: detail.item.name,
+        htmlUrl: detail.item.html_url,
+        annotations: detail.annotations,
+        rawLog: detail.rawLog,
+        extraSecrets: input.extraSecrets
+      });
+      failedChecksSummary.push({
+        id: detail.item.id,
+        name: detail.item.name,
+        conclusion: detail.item.conclusion,
+        html_url: detail.item.html_url,
+        sanitized_log: sanitized.sanitizedExcerpt,
+        wrapped_untrusted_output: sanitized.wrappedUntrustedOutput
+      });
+      diagnosticBlocks.push(sanitized.wrappedUntrustedOutput);
+    }
+    return {
+      passed: false,
+      reason: "check_failure",
+      infraRerunsTriggered,
+      failedChecks: failedChecksSummary,
+      formattedDiagnostics: diagnosticBlocks.join("\n\n"),
+      registeredWorkflowNames,
+      registeredCheckNames
+    };
+  }
+}
+async function evaluateSingleExternalCiSnapshot(params) {
+  const [allWorkflowRuns, allCheckRuns] = await Promise.all([
+    params.listWorkflowRunsForSha(params.headSha),
+    params.listCheckRunsForRef(params.headSha)
+  ]);
+  const aiReviewCheck = allCheckRuns.find(
+    (c) => c.name.trim().toLowerCase() === "ai-review"
+  );
+  const aiReviewPassed = !aiReviewCheck || aiReviewCheck.status === "completed" && aiReviewCheck.conclusion === "success";
+  const externalWorkflowRuns = allWorkflowRuns.filter(
+    (r) => !isEpureSyntheticCheckOrRun(r.path ?? r.name ?? "")
+  );
+  const externalCheckRuns = allCheckRuns.filter(
+    (c) => !isEpureSyntheticCheckOrRun(c.name)
+  );
+  const totalExternalRegistered = externalWorkflowRuns.length + externalCheckRuns.length;
+  if (totalExternalRegistered === 0 && params.expectedWorkflows.length > 0) {
+    return {
+      completed: false,
+      passed: false,
+      aiReviewPassed,
+      failedChecks: [],
+      formattedDiagnostics: ""
+    };
+  }
+  const activeWorkflowRuns = externalWorkflowRuns.filter(
+    (r) => r.status !== "completed"
+  );
+  const activeCheckRuns = externalCheckRuns.filter(
+    (c) => c.status !== "completed"
+  );
+  if (activeWorkflowRuns.length > 0 || activeCheckRuns.length > 0 || externalWorkflowRuns.length > 0 && externalWorkflowRuns.length < params.expectedWorkflows.length) {
+    return {
+      completed: false,
+      passed: false,
+      aiReviewPassed,
+      failedChecks: [],
+      formattedDiagnostics: ""
+    };
+  }
+  const failedCheckRuns = externalCheckRuns.filter(
+    (c) => isFailedConclusion(c.conclusion)
+  );
+  const failedWorkflowRuns = externalWorkflowRuns.filter(
+    (r) => isFailedConclusion(r.conclusion)
+  );
+  if (failedCheckRuns.length === 0 && failedWorkflowRuns.length === 0) {
+    return {
+      completed: true,
+      passed: true,
+      aiReviewPassed,
+      failedChecks: [],
+      formattedDiagnostics: ""
+    };
+  }
+  const failureItems = failedCheckRuns.length > 0 ? failedCheckRuns.map((c) => ({
+    id: c.id,
+    name: c.name,
+    conclusion: c.conclusion ?? "failure",
+    html_url: c.html_url ?? c.details_url ?? ""
+  })) : failedWorkflowRuns.map((r) => ({
+    id: r.id,
+    name: r.name ?? r.path ?? `workflow-${r.id}`,
+    conclusion: r.conclusion ?? "failure",
+    html_url: r.html_url ?? ""
+  }));
+  const failedChecksSummary = [];
+  const diagnosticBlocks = [];
+  for (const item of failureItems) {
+    const [annotations, rawLog] = await Promise.all([
+      params.listCheckRunAnnotations ? params.listCheckRunAnnotations(item.id).catch(() => []) : Promise.resolve([]),
+      params.getJobLogs ? params.getJobLogs(item.id).catch(() => "") : Promise.resolve("")
+    ]);
+    const sanitized = sanitizeAndFormatFailedCheckLogs({
+      checkName: item.name,
+      htmlUrl: item.html_url,
+      annotations,
+      rawLog,
+      extraSecrets: params.extraSecrets
+    });
+    failedChecksSummary.push({
+      id: item.id,
+      name: item.name,
+      conclusion: item.conclusion,
+      html_url: item.html_url,
+      sanitized_log: sanitized.sanitizedExcerpt,
+      wrapped_untrusted_output: sanitized.wrappedUntrustedOutput
+    });
+    diagnosticBlocks.push(sanitized.wrappedUntrustedOutput);
+  }
+  return {
+    completed: true,
+    passed: false,
+    aiReviewPassed,
+    failedChecks: failedChecksSummary,
+    formattedDiagnostics: diagnosticBlocks.join("\n\n")
+  };
+}
+function formatNeedsHumanEscalationComment(input) {
+  const ticketRef = input.ticketIssueNumber ? `Ticket #${input.ticketIssueNumber} (Plan #${input.issueNumber})` : `Issue #${input.issueNumber}`;
+  const prRef = input.prNumber && input.prUrl ? ` \u2014 [PR #${input.prNumber}](${input.prUrl})` : input.prNumber ? ` \u2014 PR #${input.prNumber}` : "";
+  let reasonHeadline = "";
+  if (input.reason === "remediation_exhausted") {
+    const used = input.codeFixAttemptsUsed ?? 3;
+    const max = input.maxCodeFixAttempts ?? 3;
+    reasonHeadline = `\`${used}/${max}\` remediation rounds exhausted (\`max_code_fix_attempts = ${max}\`)`;
+  } else if (input.reason === "epic_convergence_exhausted") {
+    const usedPhases = input.epicConvergenceDetails?.epicPhase ?? 2;
+    const maxPhases = input.epicConvergenceDetails?.maxEpicPhases ?? 2;
+    reasonHeadline = `Non-convergence de la fonctionnalit\xE9 apr\xE8s \`${usedPhases}/${maxPhases}\` phases de tickets (\`epic_convergence_exhausted\`, ADR-0032)`;
+  } else if (input.reason === "grace_window_timeout") {
+    const gw = input.graceWindowSeconds ?? 45;
+    reasonHeadline = `${gw}s external CI workflow registration timeout (fail-closed)`;
+  } else if (input.reason === "sensitive_path_violation") {
+    reasonHeadline = "Forbidden modification of sensitive path or path traversal blocked pre-Stage-1";
+  } else if (input.reason === "merge_conflict_unresolved") {
+    reasonHeadline = "Git 3-way merge conflict touched sensitive paths or exceeded automated resolution threshold (`MERGE_CONFLICT_UNRESOLVED`)";
+  } else if (input.reason === "merge_conflict_stage1_failed") {
+    reasonHeadline = "Automated 3-way conflict resolution failed Stage 1 Sandbox verification (`MERGE_CONFLICT_STAGE1_FAILED`)";
+  } else if (input.reason === "transient_llm_api_exhausted") {
+    reasonHeadline = "Transient LLM API retries or unitary request timeout exhausted (`max_transient_api_retries`) \u2014 code-fix budget preserved";
+  } else if (input.reason === "llm_quota_or_auth_failure") {
+    reasonHeadline = "LLM provider quota/billing exhaustion or authentication failure (ADR-0012: no automatic fallback)";
+  } else if (input.reason === "llm_request_invalid") {
+    reasonHeadline = "LLM request rejected or response invalid after structured-output retry (non-transient) \u2014 code-fix budget preserved";
+  } else if (input.reason === "internal_error") {
+    reasonHeadline = "Internal orchestrator error \u2014 code-fix budget preserved";
+  } else {
+    reasonHeadline = "Runner wall-clock timeout budget exhausted";
+  }
+  const lines = [];
+  if (input.stateMirrorMarkdown) {
+    lines.push(input.stateMirrorMarkdown, "");
+  }
+  lines.push(
+    `### \u26A0\uFE0F Escalade humaine (\`needs-human\`) \u2014 ${ticketRef}${prRef}`,
+    "",
+    `- **Branche active** : \`${input.branch}\``,
+    `- **Statut d'orchestration** : \`suspended\` (label \`needs-human\` appliqu\xE9)`,
+    `- **Cause de l'escalade** : ${reasonHeadline}`
+  );
+  if (input.prUrl) {
+    lines.push(`- **Pull Request** : ${input.prUrl}`);
+  }
+  if (input.sensitivePaths && input.sensitivePaths.length > 0) {
+    lines.push(
+      `- **Chemins sensibles bloqu\xE9s** : ${input.sensitivePaths.map((p) => `\`${p}\``).join(", ")}`
+    );
+  }
+  if (input.traversalPaths && input.traversalPaths.length > 0) {
+    lines.push(
+      `- **Chemins hors p\xE9rim\xE8tre bloqu\xE9s** : ${input.traversalPaths.map((p) => `\`${p}\``).join(", ")}`
+    );
+  }
+  if (input.expectedWorkflows && input.expectedWorkflows.length > 0 && input.reason === "grace_window_timeout") {
+    lines.push(
+      `- **Workflows externes attendus depuis \`dev\`** : ${input.expectedWorkflows.map((w) => `\`${w}\``).join(", ")}`
+    );
+  }
+  if (input.failedChecks && input.failedChecks.length > 0) {
+    lines.push("", "#### Checks CI externes en \xE9chec :");
+    for (const check of input.failedChecks) {
+      const link = check.html_url ? `[${check.name}](${check.html_url})` : `\`${check.name}\``;
+      lines.push(`- \u274C ${link} (\`${check.conclusion}\`)`);
+    }
+  }
+  if (input.mustFixFindings && input.mustFixFindings.length > 0) {
+    lines.push("", "#### Constats `must_fix` restants (Revue Multi-Agents) :");
+    for (const f of input.mustFixFindings) {
+      lines.push(
+        `- **[${f.reviewer}]** (\`${f.path}:${f.line}\`) **${f.title}** \u2014 ${f.rationale}`
+      );
+    }
+  }
+  if (input.epicConvergenceDetails) {
+    const details = input.epicConvergenceDetails;
+    lines.push(
+      "",
+      `#### \xC9carts de convergence restants apr\xE8s Phase ${details.epicPhase}/${details.maxEpicPhases} :`
+    );
+    if (details.summary) {
+      lines.push(`- **Synth\xE8se de l'audit Goldfish** : ${details.summary}`);
+    }
+    for (const mod of details.unwiredModules) {
+      lines.push(`- \u{1F50C} **Module non c\xE2bl\xE9** : ${mod}`);
+    }
+    for (const stub of details.stubViolations) {
+      lines.push(`- \u{1F6AB} **Simulacre interdit d\xE9tect\xE9** : ${stub}`);
+    }
+    for (const crit of details.unmetCriteria) {
+      lines.push(`- \u274C **Crit\xE8re de convergence non satisfait** : ${crit}`);
+    }
+  }
+  if (input.diagnosticExcerpt && input.diagnosticExcerpt.trim().length > 0) {
+    lines.push(
+      "",
+      "<details>",
+      "<summary>\u{1F4CB} Diagnostic CI & extrait des journaux assainis</summary>",
+      "",
+      "```text",
+      input.diagnosticExcerpt.trim().slice(0, 6e3),
+      "```",
+      "</details>"
+    );
+  }
+  lines.push(
+    "",
+    "#### \u{1F6E0}\uFE0F Playbook de reprise (`/epure approve`)",
+    "1. Inspectez les checks ou fichiers signal\xE9s ci-dessus (ou ajustez `verification.targets` dans `.github/agents.yml` sur `dev` si n\xE9cessaire).",
+    `2. Poussez un correctif sur \`${input.branch}\` ou mettez \xE0 jour la configuration sur \`dev\`.`,
+    `3. Postez \`/epure approve\` sur cette issue (#${input.issueNumber}) : l'orchestrateur r\xE9conciliera automatiquement la PR existante et reprendra la validation sans dupliquer le travail (ADR-0028, Q110).`
+  );
+  return appendEpureCommandsSpoiler(lines.join("\n"), {
+    phase: "suspended",
+    status: "suspended",
+    issueNumber: input.issueNumber
+  });
 }
 
 // src/review/squash-commit-generator.ts
@@ -8871,9 +8913,9 @@ ${snippet}`;
       "Fichiers modifi\xE9s (diff non fiable) :",
       wrapUntrustedContent("untrusted_pr_diff", diffSnippet)
     ].join("\n");
-    const parsed = await callGeminiJson({
+    const parsed = await callLlmJson({
       apiKey: input.llmApiKey,
-      model: input.model ?? "gemini-3.8-flash",
+      model: input.model ?? DEFAULT_FALLBACK_LLM_MODEL,
       providers: input.providers,
       maxTransientRetries: input.maxTransientRetries,
       transientRetryBackoffSeconds: input.transientRetryBackoffSeconds,
@@ -9865,6 +9907,7 @@ async function runTestsInIsolatedWorkspace(params) {
       deleted_files: params.deleted_files,
       changedPaths: params.changedPaths,
       isTaskBranch: params.isTaskBranch,
+      reviewersDir: params.reviewersDir,
       llmApiKey: params.llmApiKey,
       bootstrappedTargets: params.bootstrappedTargets,
       sandboxRunner: params.sandboxRunner,
@@ -9987,7 +10030,7 @@ function buildCompactWorkspaceFilesContext(input) {
   );
   for (const [rawPath, content] of sortedEntries) {
     const cleanPath = rawPath.trim().replace(/^\/+/, "");
-    if (!cleanPath || isSensitiveTaskBranchPath(cleanPath)) {
+    if (!cleanPath || isSensitiveTaskBranchPath(cleanPath, input.reviewersDir)) {
       continue;
     }
     const lineCount = content.split("\n").length;
@@ -10068,7 +10111,7 @@ function buildRepoExplorationToolsAndHandlers(params) {
       }
       const crossFileMatches = [];
       for (const [filePath, fileContent] of combinedFiles.entries()) {
-        if (isEffectiveDeleted(filePath) || isSensitiveTaskBranchPath(filePath)) {
+        if (isEffectiveDeleted(filePath) || isSensitiveTaskBranchPath(filePath, params.reviewersDir)) {
           continue;
         }
         const fileLines = fileContent.split("\n");
@@ -10093,7 +10136,7 @@ function buildRepoExplorationToolsAndHandlers(params) {
       }
       return { query: q, matches: crossFileMatches };
     }
-    if (p.includes("..") || isSensitiveTaskBranchPath(p)) {
+    if (p.includes("..") || isSensitiveTaskBranchPath(p, params.reviewersDir)) {
       return { error: `Access denied or invalid path: ${p}` };
     }
     if (isEffectiveDeleted(p)) {
@@ -10197,7 +10240,7 @@ function buildRepoExplorationToolsAndHandlers(params) {
   const mutationToolHandlers = params.stagedImplementation ? {
     write_repo_file: async (args) => {
       const p = String(args.path ?? "").trim().replace(/^\/+/, "");
-      if (!p || p.includes("..") || isSensitiveTaskBranchPath(p)) {
+      if (!p || p.includes("..") || isSensitiveTaskBranchPath(p, params.reviewersDir)) {
         return { error: `Access denied or invalid path: ${p}` };
       }
       if (typeof args.content !== "string") {
@@ -10214,7 +10257,7 @@ function buildRepoExplorationToolsAndHandlers(params) {
     },
     patch_repo_file: async (args) => {
       const p = String(args.path ?? "").trim().replace(/^\/+/, "");
-      if (!p || p.includes("..") || isSensitiveTaskBranchPath(p)) {
+      if (!p || p.includes("..") || isSensitiveTaskBranchPath(p, params.reviewersDir)) {
         return { error: `Access denied or invalid path: ${p}` };
       }
       const rawEdits = Array.isArray(args.edits) ? args.edits : [];
@@ -10267,7 +10310,7 @@ function buildRepoExplorationToolsAndHandlers(params) {
     },
     delete_repo_file: async (args) => {
       const p = String(args.path ?? "").trim().replace(/^\/+/, "");
-      if (!p || p.includes("..") || isSensitiveTaskBranchPath(p)) {
+      if (!p || p.includes("..") || isSensitiveTaskBranchPath(p, params.reviewersDir)) {
         return { error: `Access denied or invalid path: ${p}` };
       }
       await params.stagedImplementation.ensureBaselineLoaded?.([p]);
@@ -10399,7 +10442,7 @@ function buildRepoExplorationToolsAndHandlers(params) {
       search_repo_code: searchInRepoHandler,
       read_repo_file: async (args) => {
         const p = String(args.path ?? "").trim().replace(/^\/+/, "");
-        if (!p || p.includes("..") || isSensitiveTaskBranchPath(p)) {
+        if (!p || p.includes("..") || isSensitiveTaskBranchPath(p, params.reviewersDir)) {
           return { error: `Access denied or invalid path: ${p}` };
         }
         if (isEffectiveDeleted(p)) {
@@ -10817,16 +10860,16 @@ ${wrapUntrustedContent("untrusted_workspace_files", s.content)}`
   try {
     if (input.llmClient) {
       return await input.llmClient.completeStructured({
-        model: input.model ?? "gemini-3.8-flash",
+        model: input.model ?? DEFAULT_FALLBACK_LLM_MODEL,
         systemInstruction,
         userPrompt,
         responseSchema: ADR_COHERENCE_RECONCILIATION_SCHEMA,
         temperature: 0.1
       });
     }
-    return await callGeminiJson({
+    return await callLlmJson({
       apiKey: input.llmApiKey ?? "",
-      model: input.model ?? "gemini-3.8-flash",
+      model: input.model ?? DEFAULT_FALLBACK_LLM_MODEL,
       systemInstruction,
       prompt: userPrompt,
       temperature: 0.1,
@@ -11160,7 +11203,8 @@ async function syncBranchWithBase(input) {
       path
     })),
     targets: [],
-    isTaskBranch: true
+    isTaskBranch: true,
+    reviewersDir: input.reviewersDir
   });
   if (!pathGuard.allowed) {
     const diag = `3-way conflict touched forbidden sensitive or traversal paths: ${[...pathGuard.sensitivePaths, ...pathGuard.traversalPaths].join(", ")}`;
@@ -11271,16 +11315,16 @@ async function syncBranchWithBase(input) {
     let resolutionData;
     if (input.llmClient) {
       resolutionData = await input.llmClient.completeStructured({
-        model: input.model ?? "gemini-3.8-flash",
+        model: input.model ?? DEFAULT_FALLBACK_LLM_MODEL,
         systemInstruction,
         userPrompt,
         responseSchema: CONFLICT_RESOLUTION_SCHEMA,
         temperature: 0.1
       });
     } else {
-      resolutionData = await callGeminiJson({
+      resolutionData = await callLlmJson({
         apiKey: input.llmApiKey ?? "",
-        model: input.model ?? "gemini-3.8-flash",
+        model: input.model ?? DEFAULT_FALLBACK_LLM_MODEL,
         systemInstruction,
         prompt: userPrompt,
         temperature: 0.1,
@@ -11318,7 +11362,8 @@ async function syncBranchWithBase(input) {
       workDir: process.cwd(),
       files: returnedNormalizedPaths.map((path) => ({ path })),
       targets: [],
-      isTaskBranch: true
+      isTaskBranch: true,
+      reviewersDir: input.reviewersDir
     });
     if (!resolvedPathGuard.allowed) {
       const diag = `LLM conflict resolution returned forbidden paths: ${[...resolvedPathGuard.sensitivePaths, ...resolvedPathGuard.traversalPaths].join(", ")}`;
@@ -11369,7 +11414,9 @@ async function syncBranchWithBase(input) {
   if (input.sandboxRunner && allFilesToCommit.length > 0) {
     const workspaceFiles = await input.gh.readBranchWorkspaceFiles(
       input.targetBranch,
-      allFilesToCommit.map((f) => f.path).join(" ")
+      allFilesToCommit.map((f) => f.path).join(" "),
+      [],
+      input.reviewersDir
     );
     for (const deletedPath of baseDeletedFiles) {
       workspaceFiles.delete(deletedPath);
@@ -11384,6 +11431,7 @@ async function syncBranchWithBase(input) {
       })),
       changedPaths: allFilesToCommit.map((f) => f.path),
       isTaskBranch: true,
+      reviewersDir: input.reviewersDir,
       sandboxRunner: input.sandboxRunner,
       llmApiKey: input.llmApiKey ?? "",
       label: `3-way conflict resolution (${input.baseBranch} -> ${input.targetBranch})`
@@ -11422,12 +11470,12 @@ ${stage1Result.output.slice(0, 4e3)}`;
 }
 
 // src/orchestrator/types.ts
-function canUsePhaseModelFromConfig(candidateModel, hasProvidersMap) {
+function canUsePhaseModelFromConfig(candidateModel, hasProvidersMap, hasLlmApiKey) {
   if (!candidateModel || candidateModel.trim().length === 0) {
     return false;
   }
   const clean = candidateModel.trim();
-  if (hasProvidersMap || clean.includes("/")) {
+  if (hasProvidersMap || hasLlmApiKey || clean.includes("/")) {
     return true;
   }
   const lower = clean.toLowerCase();
@@ -11442,8 +11490,8 @@ function canUsePhaseModelFromConfig(candidateModel, hasProvidersMap) {
   }
   return false;
 }
-function resolvePhaseModels(inputModel, agentsConfig) {
-  const fallbackModel = inputModel?.trim() || "gemini-3.8-flash";
+function resolvePhaseModels(inputModel, agentsConfig, llmApiKey) {
+  const fallbackModel = inputModel?.trim() || DEFAULT_FALLBACK_LLM_MODEL;
   const explicitOverride = Boolean(inputModel && inputModel.trim().length > 0);
   const providers = agentsConfig?.providers;
   const maxTransientRetries = agentsConfig?.max_transient_api_retries;
@@ -11451,6 +11499,9 @@ function resolvePhaseModels(inputModel, agentsConfig) {
   const requestTimeoutMs = agentsConfig?.llm_request_timeout_seconds !== void 0 && agentsConfig.llm_request_timeout_seconds > 0 ? agentsConfig.llm_request_timeout_seconds * 1e3 : 9e5;
   const hasProvidersMap = Boolean(
     providers && Object.keys(providers).length > 0
+  );
+  const hasLlmApiKey = Boolean(
+    llmApiKey?.trim() || process.env.LLM_API_KEY?.trim()
   );
   if (explicitOverride || !agentsConfig) {
     return {
@@ -11463,7 +11514,7 @@ function resolvePhaseModels(inputModel, agentsConfig) {
       ...transientRetryBackoffSeconds !== void 0 ? { transientRetryBackoffSeconds } : {}
     };
   }
-  const pickModel = (phaseCandidate) => canUsePhaseModelFromConfig(phaseCandidate, hasProvidersMap) ? phaseCandidate.trim() : fallbackModel;
+  const pickModel = (phaseCandidate) => canUsePhaseModelFromConfig(phaseCandidate, hasProvidersMap, hasLlmApiKey) ? phaseCandidate.trim() : fallbackModel;
   return {
     planningModel: pickModel(agentsConfig.models?.planning),
     implementationModel: pickModel(agentsConfig.models?.implementation),
@@ -11771,7 +11822,7 @@ ${a.content}`).join("\n\n");
       )
     ] : []
   ].join("\n");
-  return await callGeminiJson({
+  return await callLlmJson({
     apiKey: params.apiKey,
     model: params.model,
     providers: params.providers,
@@ -11829,6 +11880,7 @@ async function runGrillAndPlanPhase(params) {
     store,
     llmApiKey,
     phaseModels,
+    reviewersDir = DEFAULT_REVIEWERS_DIR,
     onTransientRetriesUsed,
     fetchImpl
   } = params;
@@ -11843,6 +11895,7 @@ async function runGrillAndPlanPhase(params) {
     accumulatedFiles: grillExplorationCache,
     devBranchPaths: [],
     phase: command === "to-spec" ? "spec" : "plan",
+    reviewersDir,
     fetchImpl
   });
   if (command === "plan") {
@@ -11878,7 +11931,7 @@ Corps :
 ${issue.body}`
       )
     ].join("\n");
-    const grillQuestions = await callGeminiText({
+    const grillQuestions = await callLlmText({
       apiKey: llmApiKey,
       model: phaseModels.planningModel,
       providers: phaseModels.providers,
@@ -11965,7 +12018,7 @@ ${issue.body}`
         fullConversationHistory
       )
     ].join("\n");
-    const evalResult = await callGeminiJson({
+    const evalResult = await callLlmJson({
       apiKey: llmApiKey,
       model: phaseModels.planningModel,
       providers: phaseModels.providers,
@@ -12133,7 +12186,7 @@ ${issue.body}`
         fullConversationHistory || humanContext
       )
     ].join("\n");
-    let specArtifacts = await callGeminiJson({
+    let specArtifacts = await callLlmJson({
       apiKey: llmApiKey,
       model: phaseModels.planningModel,
       providers: phaseModels.providers,
@@ -12188,7 +12241,7 @@ ${issue.body}`
         "Produis la version amend\xE9e et auto-suffisante du JSON de sp\xE9cification."
       ].join("\n");
       try {
-        specArtifacts = await callGeminiJson({
+        specArtifacts = await callLlmJson({
           apiKey: llmApiKey,
           model: phaseModels.planningModel,
           providers: phaseModels.providers,
@@ -12306,7 +12359,8 @@ ${issue.body}`
       touchesFrontendUi: touchesFrontendUi2,
       stackKind: plannedStack2.kind,
       personas: designGate2?.personas,
-      domainInvariants: designGate2?.domain_invariants
+      domainInvariants: designGate2?.domain_invariants,
+      reviewersDir
     });
     const zizmorFile2 = buildZizmorConfigYaml();
     const renovateFile2 = buildRenovateConfigJson(plannedStack2);
@@ -12314,7 +12368,10 @@ ${issue.body}`
       pinnedSha: "main",
       stack: plannedStack2
     });
-    const existingBaseRoster2 = await gh.readTrustedBaseRosterFiles("dev");
+    const existingBaseRoster2 = await gh.readTrustedBaseRosterFiles(
+      "dev",
+      reviewersDir
+    );
     const hasExistingConfiguredRoster2 = existingBaseRoster2.size > 0;
     const corePlanningDocs2 = [
       ...specArtifacts.glossary_markdown.trim().length > 0 ? [{ path: "GLOSSARY.md", content: specArtifacts.glossary_markdown }] : [],
@@ -12361,7 +12418,7 @@ ${issue.body}`
         "- **Glossaire** : `GLOSSARY.md`",
         `- **ADRs** : ${specArtifacts.adrs.map((a) => `\`${a.path}\``).join(", ")}`,
         `- **Sp\xE9cification** : \`${specArtifacts.spec_path}\``,
-        `- **Roster Multi-Agents adapt\xE9** : \`.cursor/agents/*.md\` (${adaptedRoster2.files.length} fichiers)`,
+        `- **Roster Multi-Agents adapt\xE9** : \`${reviewersDir}/*.md\` (${adaptedRoster2.files.length} fichiers)`,
         ...impeccableSession2.impeccable_invoked ? [
           "- **Design Gate Impeccable & `user-advocate` (`design-gate`)** : `DESIGN.md` g\xE9n\xE9r\xE9"
         ] : [],
@@ -12454,7 +12511,7 @@ ${issue.body}`
         fullConversationHistory || humanContext
       )
     ].join("\n");
-    const ticketDag = await callGeminiJson({
+    const ticketDag = await callLlmJson({
       apiKey: llmApiKey,
       model: phaseModels.planningModel,
       providers: phaseModels.providers,
@@ -12535,7 +12592,7 @@ ${issue.body}`
         fullConversationHistory || humanContext
       )
     ].join("\n");
-    bundle = await callGeminiJson({
+    bundle = await callLlmJson({
       apiKey: llmApiKey,
       model: phaseModels.planningModel,
       providers: phaseModels.providers,
@@ -12655,7 +12712,8 @@ ${issue.body}`
     touchesFrontendUi,
     stackKind: plannedStack.kind,
     personas: designGate?.personas,
-    domainInvariants: designGate?.domain_invariants
+    domainInvariants: designGate?.domain_invariants,
+    reviewersDir
   });
   const zizmorFile = buildZizmorConfigYaml();
   const renovateFile = buildRenovateConfigJson(plannedStack);
@@ -12663,7 +12721,10 @@ ${issue.body}`
     pinnedSha: "main",
     stack: plannedStack
   });
-  const existingBaseRoster = await gh.readTrustedBaseRosterFiles("dev");
+  const existingBaseRoster = await gh.readTrustedBaseRosterFiles(
+    "dev",
+    reviewersDir
+  );
   const hasExistingConfiguredRoster = existingBaseRoster.size > 0;
   const corePlanningDocs = [
     ...bundle.glossary_markdown.trim().length > 0 ? [{ path: "GLOSSARY.md", content: bundle.glossary_markdown }] : [],
@@ -12748,7 +12809,7 @@ ${issue.body}`
       "- **Glossaire** : `GLOSSARY.md`",
       `- **ADRs** : ${bundle.adrs.map((a) => `\`${a.path}\``).join(", ")}`,
       `- **Sp\xE9cification** : \`${bundle.spec_path}\``,
-      `- **Roster Multi-Agents adapt\xE9** : \`.cursor/agents/*.md\` (${adaptedRoster.files.length} fichiers)`,
+      `- **Roster Multi-Agents adapt\xE9** : \`${reviewersDir}/*.md\` (${adaptedRoster.files.length} fichiers)`,
       ...impeccableSession.impeccable_invoked ? [
         "- **Design Gate Impeccable & `user-advocate` (`design-gate`)** : `DESIGN.md` g\xE9n\xE9r\xE9 et crit\xE8res UX inject\xE9s dans les tickets UI"
       ] : [],
@@ -12861,7 +12922,7 @@ ${content}`
       wrapUntrustedContent("untrusted_test_output", params.stage1Summary)
     ] : []
   ].join("\n");
-  return await callGeminiJson({
+  return await callLlmJson({
     apiKey: params.llmApiKey,
     model: params.phaseModels.reviewModel || params.phaseModels.planningModel,
     providers: params.phaseModels.providers,
@@ -13084,9 +13145,9 @@ function evaluateImpeccableFrontendPr(input) {
 var UI_FILE_PATTERN = /(?:\.(?:tsx|jsx|css|scss|html)$|^(?:src\/)?(?:components|pages|ui|views|styles)\/|^(?:src\/)?App\.[tj]sx?$)/i;
 var DOMAIN_BACKEND_FILE_PATTERN = /(?:^(?:src\/)?(?:domain|services|api|server|backend|models|engine|core)\/|\.(?:ts|js)$)/i;
 var INFRA_FILE_PATTERN = /(?:^\.github\/|(?:^|\/)(?:package\.json|tsconfig.*\.json|vite\.config\.[a-z]+|Dockerfile|Makefile)$)/i;
-var SENSITIVE_TASK_PATH_PATTERN = /^(?:\.github\/workflows\/|\.github\/agents\.ya?ml$|\.cursor\/agents\/|\.env)/i;
+var SENSITIVE_TASK_PATH_PATTERN = /^(?:\.github\/workflows\/|\.github\/agents\.ya?ml$|\.env)/i;
 var BUILTIN_REVIEWER_NAMES = new Set(ALL_REVIEWER_AGENT_NAMES);
-function extractCustomReviewersFromTrustedFiles(trustedBaseBranchFiles, cleanChangedPaths) {
+function extractCustomReviewersFromTrustedFiles(trustedBaseBranchFiles, cleanChangedPaths, reviewersDir) {
   if (!trustedBaseBranchFiles) {
     return [];
   }
@@ -13096,9 +13157,10 @@ function extractCustomReviewersFromTrustedFiles(trustedBaseBranchFiles, cleanCha
     trustedBaseBranchFiles
   );
   const matchedCustom = [];
+  const dirPrefix = `${reviewersDir.toLowerCase()}/`;
   for (const [rawPath, content] of entries) {
     const normPath = rawPath.trim().replace(/^\/+/, "");
-    const match = /^\.cursor\/agents\/([a-z0-9-]+)\.md$/i.exec(normPath);
+    const match = normPath.toLowerCase().startsWith(dirPrefix) ? /^([a-z0-9-]+)\.md$/i.exec(normPath.slice(dirPrefix.length)) : null;
     if (!match || !match[1]) {
       continue;
     }
@@ -13138,11 +13200,12 @@ function extractCustomReviewersFromTrustedFiles(trustedBaseBranchFiles, cleanCha
 }
 function selectReviewersForDiff(input) {
   const maxReviewers = input.maxReviewers ?? 4;
+  const reviewersDir = input.reviewersDir ?? DEFAULT_REVIEWERS_DIR;
   const cleanPaths = input.changedFiles.map(
     (f) => f.trim().replace(/^\/+/, "")
   );
   const sensitivePathsTouched = cleanPaths.filter(
-    (p) => SENSITIVE_TASK_PATH_PATTERN.test(p) || isSensitiveReviewerRosterPath(p)
+    (p) => SENSITIVE_TASK_PATH_PATTERN.test(p) || isSensitiveReviewerRosterPath(p, reviewersDir)
   );
   const touchesSensitivePaths = sensitivePathsTouched.length > 0;
   const touchesFrontendUi = cleanPaths.some((p) => UI_FILE_PATTERN.test(p));
@@ -13174,7 +13237,8 @@ function selectReviewersForDiff(input) {
   }
   const customMatched = extractCustomReviewersFromTrustedFiles(
     input.trustedBaseBranchFiles,
-    cleanPaths
+    cleanPaths,
+    reviewersDir
   );
   for (const customReviewer of customMatched) {
     addCandidate(customReviewer);
@@ -13429,7 +13493,8 @@ async function executeSingleReviewerPass(params) {
   const trustedPrompt = resolveTrustedReviewerPrompt({
     reviewer,
     repository: input.repository,
-    trustedBaseBranchFiles: input.trustedBaseBranchFiles
+    trustedBaseBranchFiles: input.trustedBaseBranchFiles,
+    reviewersDir: input.reviewersDir
   });
   if (!input.llmApiKey || !input.llmApiKey.trim()) {
     return {
@@ -13483,9 +13548,9 @@ ${wrapUntrustedContent("untrusted_spec_content", input.designMarkdown)}` : "",
     wrapUntrustedContent("untrusted_pr_diff", fullFilesDump)
   ].join("\n");
   try {
-    const parsed = await callGeminiJson({
+    const parsed = await callLlmJson({
       apiKey: input.llmApiKey,
-      model: input.model ?? "gemini-3.8-flash",
+      model: input.model ?? DEFAULT_FALLBACK_LLM_MODEL,
       providers: input.providers,
       maxTransientRetries: input.maxTransientRetries,
       transientRetryBackoffSeconds: input.transientRetryBackoffSeconds,
@@ -13537,7 +13602,8 @@ async function runMultiAgentPrReviewPass(input) {
     changedFiles: filePaths,
     isReReviewPass: input.isReReviewPass,
     previousFailedReviewers: input.previousFailedReviewers,
-    trustedBaseBranchFiles: input.trustedBaseBranchFiles
+    trustedBaseBranchFiles: input.trustedBaseBranchFiles,
+    reviewersDir: input.reviewersDir
   });
   if (isGha) {
     process.stdout.write(
@@ -13562,7 +13628,7 @@ async function runMultiAgentPrReviewPass(input) {
         path: sensitivePath,
         line: 1,
         title: `Forbidden modification of sensitive path '${sensitivePath}' on task branch`,
-        rationale: "Per ADR-0004, ADR-0017 and Q92, task/* branches must never modify .cursor/agents/**, .github/workflows/**, or .github/agents.yml.",
+        rationale: `Per ADR-0004, ADR-0017 and Q92, task/* branches must never modify ${input.reviewersDir ?? DEFAULT_REVIEWERS_DIR}/**, .github/workflows/**, or .github/agents.yml.`,
         suggested_action: `Revert changes to '${sensitivePath}' and keep reviewer prompts exclusively on the trusted base branch.`
       });
     }
@@ -13697,6 +13763,7 @@ async function runMultiAgentPrReviewPass(input) {
 
 // src/orchestrator/phases/feature-integration.ts
 async function runFeatureIntegrationPhase(params) {
+  const reviewersDir = params.parsedDevAgentsConfig?.reviewers_dir ?? DEFAULT_REVIEWERS_DIR;
   let verificationProfile = params.initialVerificationProfile;
   let verificationGuideMarkdown = params.initialVerificationGuideMarkdown;
   const featurePrGate = prepareFeatureToDevPullRequest({
@@ -13733,7 +13800,8 @@ async function runFeatureIntegrationPhase(params) {
     llmApiKey: params.llmApiKey,
     fetchImpl: params.fetchImpl,
     model: params.phaseModels.implementationModel,
-    sandboxRunner: params.sandboxRunner
+    sandboxRunner: params.sandboxRunner,
+    reviewersDir
   });
   if (featureSync.status === "escalated") {
     return await params.escalateToNeedsHuman({
@@ -13850,6 +13918,7 @@ async function runFeatureIntegrationPhase(params) {
       deletedFiles: Array.from(params.featureDeletedFilesSet),
       workspaceFiles: params.accumulatedFiles,
       trustedBaseBranchFiles: params.trustedBaseFilesMap,
+      reviewersDir,
       isReReviewPass: passParams.isReReviewPass,
       previousFailedReviewers: passParams.previousFailedReviewers,
       llmApiKey: params.llmApiKey,
@@ -14044,7 +14113,7 @@ ${c}`).join("\n\n");
         "Tu es un ing\xE9nieur TDD EPURE corrigeant les constats bloquants ('must_fix') et/ou \xE9checs CI sur la PR finale de feature.",
         PROMPT_INJECTION_IMMUNITY_CLAUSE,
         "Corrige pr\xE9cis\xE9ment chaque anomalie tout en maintenant 100% des cibles Stage 1 au vert.",
-        "Ne modifie JAMAIS .cursor/agents/**, .github/workflows/**, .github/agents.yml ou .env*.",
+        `Ne modifie JAMAIS ${reviewersDir}/**, .github/workflows/**, .github/agents.yml ou .env*.`,
         "Utilise les outils `list_repo_files`, `search_in_repo_file` et `read_repo_file` pour inspecter les fichiers pertinents du d\xE9p\xF4t avant de coder.",
         "",
         verificationGuideMarkdown,
@@ -14086,7 +14155,7 @@ ${c}`).join("\n\n");
         "Fichiers actuels du workspace :",
         wrapUntrustedContent("untrusted_workspace_files", currentFilesContext)
       );
-      const parsedFeatureFix = await callGeminiJson({
+      const parsedFeatureFix = await callLlmJson({
         apiKey: params.llmApiKey,
         model: params.phaseModels.implementationModel,
         providers: params.phaseModels.providers,
@@ -14105,6 +14174,7 @@ ${c}`).join("\n\n");
           accumulatedFiles: params.accumulatedFiles,
           deletedFilesSet: params.featureDeletedFilesSet,
           devBranchPaths: params.devBranchPaths,
+          reviewersDir,
           gh: params.gh
         }),
         responseSchema: GENERATED_TICKET_IMPLEMENTATION_SCHEMA,
@@ -14120,7 +14190,8 @@ ${c}`).join("\n\n");
         ],
         deleted_files: parsedFeatureFix.deleted_files,
         targets: verificationProfile.targets,
-        isTaskBranch: true
+        isTaskBranch: true,
+        reviewersDir
       });
       if (!featureFixPreCheck.allowed) {
         return await params.escalateToNeedsHuman({
@@ -14161,6 +14232,7 @@ ${c}`).join("\n\n");
           ])
         ),
         isTaskBranch: true,
+        reviewersDir,
         verificationProfile,
         sandboxRunner: params.sandboxRunner,
         llmApiKey: params.llmApiKey,
@@ -14173,7 +14245,7 @@ ${c}`).join("\n\n");
           params.accumulatedFiles.entries()
         ).map(([p, c]) => `--- FILE: ${p} ---
 ${c}`).join("\n\n");
-        const retryParsed = await callGeminiJson({
+        const retryParsed = await callLlmJson({
           apiKey: params.llmApiKey,
           model: params.phaseModels.implementationModel,
           providers: params.phaseModels.providers,
@@ -14212,6 +14284,7 @@ ${c}`).join("\n\n");
             accumulatedFiles: params.accumulatedFiles,
             deletedFilesSet: params.featureDeletedFilesSet,
             devBranchPaths: params.devBranchPaths,
+            reviewersDir,
             gh: params.gh
           }),
           responseSchema: GENERATED_TICKET_IMPLEMENTATION_SCHEMA,
@@ -14225,7 +14298,8 @@ ${c}`).join("\n\n");
           ],
           deleted_files: retryParsed.deleted_files,
           targets: verificationProfile.targets,
-          isTaskBranch: true
+          isTaskBranch: true,
+          reviewersDir
         });
         if (!retryPreCheck.allowed) {
           return await params.escalateToNeedsHuman({
@@ -14264,6 +14338,7 @@ ${c}`).join("\n\n");
             ])
           ),
           isTaskBranch: true,
+          reviewersDir,
           verificationProfile,
           sandboxRunner: params.sandboxRunner,
           llmApiKey: params.llmApiKey,
@@ -14712,7 +14787,7 @@ async function generateTicketImplementationWithFallback(params) {
     hasStagedMutations: () => stagedBuffer.hasMutations()
   });
   try {
-    const parsedPrimary = await callGeminiJson({
+    const parsedPrimary = await callLlmJson({
       apiKey: params.llmApiKey,
       model: params.phaseModels.implementationModel,
       providers: params.phaseModels.providers,
@@ -14733,6 +14808,7 @@ async function generateTicketImplementationWithFallback(params) {
         deletedFilesSet: params.deletedFilesSet,
         stagedImplementation: stagedBuffer,
         devBranchPaths: params.devBranchPaths,
+        reviewersDir: params.reviewersDir,
         gh: params.gh
       }),
       responseSchema: schemaWithStaged,
@@ -14798,7 +14874,7 @@ ${sc}`
           ...stagedSummary ? [stagedSummary, ""] : [],
           isTestBatch ? `REPLI SEGMENT\xC9 (Lot de tests unitaires) : G\xE9n\xE8re UNIQUEMENT le(s) fichier(s) de tests param\xE9tr\xE9s couvrant les crit\xE8res d'acceptation du Ticket #${params.ticket.ticketIssueNumber}. Ne r\xE9\xE9cris pas les fichiers d'impl\xE9mentation d\xE9j\xE0 pr\xE9sents dans le tampon.` : `REPLI SEGMENT\xC9 (Fichier cible unique : \`${batchTarget}\`) : G\xE9n\xE8re ou patche UNIQUEMENT le fichier \`${batchTarget}\` requis par le Ticket #${params.ticket.ticketIssueNumber}. Ne g\xE9n\xE8re aucun autre fichier dans cet appel.`
         ].join("\n");
-        const batchImpl = await callGeminiJson({
+        const batchImpl = await callLlmJson({
           apiKey: params.llmApiKey,
           model: params.phaseModels.implementationModel,
           providers: params.phaseModels.providers,
@@ -14819,6 +14895,7 @@ ${sc}`
             deletedFilesSet: params.deletedFilesSet,
             stagedImplementation: stagedBuffer,
             devBranchPaths: params.devBranchPaths,
+            reviewersDir: params.reviewersDir,
             gh: params.gh
           }),
           responseSchema: schemaWithStaged,
@@ -14870,6 +14947,7 @@ ${sc}`
   }
 }
 async function runTicketExecutionLoop(params) {
+  const reviewersDir = params.parsedDevAgentsConfig?.reviewers_dir ?? DEFAULT_REVIEWERS_DIR;
   let verificationProfile = params.initialVerificationProfile;
   let verificationGuideMarkdown = params.initialVerificationGuideMarkdown;
   const completedTicketNumbers = /* @__PURE__ */ new Set();
@@ -15026,7 +15104,8 @@ async function runTicketExecutionLoop(params) {
       llmApiKey: params.llmApiKey,
       fetchImpl: params.fetchImpl,
       model: params.phaseModels.implementationModel,
-      sandboxRunner: params.sandboxRunner
+      sandboxRunner: params.sandboxRunner,
+      reviewersDir
     });
     if (featureSync.status === "escalated") {
       const escalated = await params.escalateToNeedsHuman({
@@ -15051,7 +15130,8 @@ async function runTicketExecutionLoop(params) {
       llmApiKey: params.llmApiKey,
       fetchImpl: params.fetchImpl,
       model: params.phaseModels.implementationModel,
-      sandboxRunner: params.sandboxRunner
+      sandboxRunner: params.sandboxRunner,
+      reviewersDir
     });
     if (taskSync.status === "escalated") {
       const escalated = await params.escalateToNeedsHuman({
@@ -15162,6 +15242,7 @@ ${ticket.acceptanceCriteria.join("\n")}`
             ...Array.from(ticketDeletedFilesSet)
           ],
           isTaskBranch: true,
+          reviewersDir,
           verificationProfile,
           bootstrappedTargets,
           sandboxRunner: params.sandboxRunner,
@@ -15201,7 +15282,9 @@ ${ticket.acceptanceCriteria.join("\n")}`
         } else {
           const taskBranchFiles = await params.gh.readBranchWorkspaceFiles(
             taskBranch,
-            params.hintForWorkspace
+            params.hintForWorkspace,
+            [],
+            reviewersDir
           );
           for (const [p, c] of taskBranchFiles.entries()) {
             params.accumulatedFiles.set(p, c);
@@ -15216,7 +15299,8 @@ ${ticket.acceptanceCriteria.join("\n")}`
           })),
           deleted_files: Array.from(ticketDeletedFilesSet),
           targets: verificationProfile.targets,
-          isTaskBranch: true
+          isTaskBranch: true,
+          reviewersDir
         });
         if (!existingPreCheck.allowed) {
           const escalated = await params.escalateToNeedsHuman({
@@ -15246,6 +15330,7 @@ ${ticket.acceptanceCriteria.join("\n")}`
         currentPrHeadSha = existingTaskPr.head_sha;
       } else {
         const existingFilesContext = buildCompactWorkspaceFilesContext({
+          reviewersDir,
           accumulatedFiles: params.accumulatedFiles,
           priorityPaths: [
             ...ticket.filesToTouch,
@@ -15264,7 +15349,7 @@ ${ticket.acceptanceCriteria.join("\n")}`
           "1. \xC9cris des tests couvrant tous les crit\xE8res d'acceptation et cas limites.",
           "2. Impl\xE9mente le code propre et complet faisant passer 100% des tests.",
           "3. N'utilise aucune d\xE9pendance externe exotique non d\xE9clar\xE9e.",
-          "4. Ne modifie JAMAIS .cursor/agents/**, .github/workflows/**, .github/agents.yml ou .env*.",
+          `4. Ne modifie JAMAIS ${reviewersDir}/**, .github/workflows/**, .github/agents.yml ou .env*.`,
           "",
           verificationGuideMarkdown,
           "",
@@ -15337,6 +15422,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
           accumulatedFiles: params.accumulatedFiles,
           deletedFilesSet: ticketDeletedFilesSet,
           devBranchPaths: params.devBranchPaths,
+          reviewersDir,
           ensureBaselineLoaded: ensureBaselineFilesLoaded,
           gh: params.gh,
           llmApiKey: params.llmApiKey,
@@ -15352,7 +15438,8 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
           ],
           deleted_files: parsedImpl.deleted_files,
           targets: verificationProfile.targets,
-          isTaskBranch: true
+          isTaskBranch: true,
+          reviewersDir
         });
         if (!preStage1Check.allowed) {
           const escalated = await params.escalateToNeedsHuman({
@@ -15403,6 +15490,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
           fixAttempt += 1;
           restoreViolatedBaselineFiles(integrityCheck);
           const currentFilesContext = buildCompactWorkspaceFilesContext({
+            reviewersDir,
             accumulatedFiles: params.accumulatedFiles,
             priorityPaths: [
               ...ticket.filesToTouch,
@@ -15413,7 +15501,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
             "Tu es un ing\xE9nieur TDD EPURE corrigeant un \xE9chec de v\xE9rification Stage 1 en sandbox isol\xE9e.",
             PROMPT_INJECTION_IMMUNITY_CLAUSE,
             "Corrige les fichiers en d\xE9faut (code ou assertions de test) pour que 100% des cibles Stage 1 passent.",
-            "Ne modifie JAMAIS .cursor/agents/**, .github/workflows/**, .github/agents.yml ou .env*.",
+            `Ne modifie JAMAIS ${reviewersDir}/**, .github/workflows/**, .github/agents.yml ou .env*.`,
             "Tu peux utiliser les outils `list_repo_files`, `search_in_repo_file`, `read_repo_file`, `write_repo_file`, `patch_repo_file` et `delete_repo_file` pour inspecter et modifier les fichiers du d\xE9p\xF4t.",
             "Pour modifier un fichier existant volumineux, utilise de pr\xE9f\xE9rence `patch_repo_file` ou `patches` (`old_string` -> `new_string` exact). Pour supprimer un fichier obsol\xE8te, utilise `delete_repo_file` ou `deleted_files`.",
             "",
@@ -15456,6 +15544,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
             accumulatedFiles: params.accumulatedFiles,
             deletedFilesSet: ticketDeletedFilesSet,
             devBranchPaths: params.devBranchPaths,
+            reviewersDir,
             ensureBaselineLoaded: ensureBaselineFilesLoaded,
             gh: params.gh,
             llmApiKey: params.llmApiKey,
@@ -15471,7 +15560,8 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
             ],
             deleted_files: fixedImpl.deleted_files,
             targets: verificationProfile.targets,
-            isTaskBranch: true
+            isTaskBranch: true,
+            reviewersDir
           });
           if (!fixPreCheck.allowed) {
             const escalated = await params.escalateToNeedsHuman({
@@ -15599,6 +15689,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
           deletedFiles: Array.from(ticketDeletedFilesSet),
           workspaceFiles: params.accumulatedFiles,
           trustedBaseBranchFiles: params.trustedBaseFilesMap,
+          reviewersDir,
           isReReviewPass: passParams.isReReviewPass,
           previousFailedReviewers: passParams.previousFailedReviewers,
           llmApiKey: params.llmApiKey,
@@ -15790,6 +15881,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
           (f, idx) => `${idx + 1}. [${f.reviewer}] (${f.path}:${f.line}) ${f.title} \u2014 ${f.rationale} -> Action: ${f.suggested_action}`
         ).join("\n");
         const currentFilesContext = buildCompactWorkspaceFilesContext({
+          reviewersDir,
           accumulatedFiles: params.accumulatedFiles,
           priorityPaths: [
             ...ticket.filesToTouch,
@@ -15801,7 +15893,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
           "Tu es un ing\xE9nieur TDD EPURE corrigeant les constats bloquants ('must_fix') de revue multi-agents et/ou les \xE9checs CI externes.",
           PROMPT_INJECTION_IMMUNITY_CLAUSE,
           "Corrige pr\xE9cis\xE9ment chaque anomalie tout en maintenant 100% des cibles Stage 1 au vert.",
-          "Ne modifie JAMAIS .cursor/agents/**, .github/workflows/**, .github/agents.yml ou .env*.",
+          `Ne modifie JAMAIS ${reviewersDir}/**, .github/workflows/**, .github/agents.yml ou .env*.`,
           "Utilise les outils `list_repo_files`, `search_in_repo_file`, `read_repo_file`, `write_repo_file`, `patch_repo_file` et `delete_repo_file` pour inspecter et modifier les fichiers pertinents du d\xE9p\xF4t.",
           "",
           verificationGuideMarkdown,
@@ -15854,6 +15946,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
           accumulatedFiles: params.accumulatedFiles,
           deletedFilesSet: ticketDeletedFilesSet,
           devBranchPaths: params.devBranchPaths,
+          reviewersDir,
           ensureBaselineLoaded: ensureBaselineFilesLoaded,
           gh: params.gh,
           llmApiKey: params.llmApiKey,
@@ -15871,7 +15964,8 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
           ],
           deleted_files: reviewFixedImpl.deleted_files,
           targets: verificationProfile.targets,
-          isTaskBranch: true
+          isTaskBranch: true,
+          reviewersDir
         });
         if (!remediationPreCheck.allowed) {
           const escalated = await params.escalateToNeedsHuman({
@@ -15922,6 +16016,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
           reviewTestRetry += 1;
           restoreViolatedBaselineFiles(reviewIntegrityCheck);
           const retryFilesContext = buildCompactWorkspaceFilesContext({
+            reviewersDir,
             accumulatedFiles: params.accumulatedFiles,
             priorityPaths: [
               ...ticket.filesToTouch,
@@ -15960,6 +16055,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
             accumulatedFiles: params.accumulatedFiles,
             deletedFilesSet: ticketDeletedFilesSet,
             devBranchPaths: params.devBranchPaths,
+            reviewersDir,
             ensureBaselineLoaded: ensureBaselineFilesLoaded,
             gh: params.gh,
             llmApiKey: params.llmApiKey,
@@ -15975,7 +16071,8 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
             ],
             deleted_files: retryImpl.deleted_files,
             targets: verificationProfile.targets,
-            isTaskBranch: true
+            isTaskBranch: true,
+            reviewersDir
           });
           if (!retryPreCheck.allowed) {
             const escalated = await params.escalateToNeedsHuman({
@@ -16336,10 +16433,12 @@ async function orchestrateIssueCommand(input) {
       featureBranch = `feature/${effectiveInput.issueNumber}-${planSlug}`;
       const parsedDevAgentsConfig = await loadRepoAgentsConfig(gh, "dev") ?? await loadRepoAgentsConfig(gh, "main");
       const phaseModels = resolvePhaseModels(
-        effectiveInput.model ?? effectiveInput.geminiModel,
-        parsedDevAgentsConfig
+        effectiveInput.model,
+        parsedDevAgentsConfig,
+        effectiveInput.llmApiKey
       );
       maxCodeFixAttempts = parsedDevAgentsConfig?.max_code_fix_attempts ?? 3;
+      const reviewersDir = parsedDevAgentsConfig?.reviewers_dir ?? DEFAULT_REVIEWERS_DIR;
       if (effectiveInput.command === "plan" || effectiveInput.command === "to-spec" || effectiveInput.command === "to-tickets" || effectiveInput.command === "reply" && (currentState?.phase === "grilling" || currentState?.phase === "spec") && currentState?.status !== "cancelled") {
         try {
           return await runGrillAndPlanPhase({
@@ -16357,6 +16456,7 @@ async function orchestrateIssueCommand(input) {
             store,
             llmApiKey: effectiveInput.llmApiKey,
             phaseModels,
+            reviewersDir,
             onTransientRetriesUsed: (used) => {
               totalTransientRetriesUsed += used;
             },
@@ -16439,7 +16539,8 @@ async function orchestrateIssueCommand(input) {
           llmApiKey: effectiveInput.llmApiKey,
           fetchImpl: effectiveInput.fetchImpl,
           model: phaseModels.implementationModel,
-          sandboxRunner: effectiveInput.sandboxRunner
+          sandboxRunner: effectiveInput.sandboxRunner,
+          reviewersDir
         });
         if (syncRes.status === "escalated") {
           await gh.ensureLabel(
@@ -16497,7 +16598,8 @@ async function orchestrateIssueCommand(input) {
             llmApiKey: effectiveInput.llmApiKey,
             fetchImpl: effectiveInput.fetchImpl,
             model: phaseModels.implementationModel,
-            sandboxRunner: effectiveInput.sandboxRunner
+            sandboxRunner: effectiveInput.sandboxRunner,
+            reviewersDir
           });
           if (taskSyncRes.status === "escalated") {
             await gh.ensureLabel(
@@ -16797,7 +16899,8 @@ async function orchestrateIssueCommand(input) {
           planTitle: issue.title,
           glossaryMarkdown: issue.body,
           specMarkdown: issue.body,
-          touchesFrontendUi: true
+          touchesFrontendUi: true,
+          reviewersDir
         });
         const trustedBaseFilesMap = /* @__PURE__ */ new Map();
         for (const f of trustedBaseRoster.files) {
@@ -16818,7 +16921,10 @@ async function orchestrateIssueCommand(input) {
             fetchImpl: effectiveInput.fetchImpl
           });
         }
-        const remoteTrustedRoster = await gh.readTrustedBaseRosterFiles("dev");
+        const remoteTrustedRoster = await gh.readTrustedBaseRosterFiles(
+          "dev",
+          reviewersDir
+        );
         for (const [relPath, content] of remoteTrustedRoster.entries()) {
           trustedBaseFilesMap.set(relPath, content);
         }
@@ -16937,7 +17043,8 @@ ${t.filesToTouch.join(" ")}`
         const accumulatedFiles = await gh.readBranchWorkspaceFiles(
           featureBranch,
           hintForWorkspace,
-          pinnedWorkspacePaths
+          pinnedWorkspacePaths,
+          reviewersDir
         );
         const featureChangedFilesMap = /* @__PURE__ */ new Map();
         const featureDeletedFilesSet = /* @__PURE__ */ new Set();
@@ -17352,7 +17459,7 @@ async function run() {
   const agentAppPrivateKey = (process.env.INPUT_AGENT_APP_PRIVATE_KEY ?? process.env.EPURE_AGENT_APP_PRIVATE_KEY ?? "").trim();
   const fallbackGithubToken = (process.env.INPUT_GITHUB_TOKEN ?? process.env.GITHUB_TOKEN ?? "").trim();
   const llmApiKey = (process.env.INPUT_LLM_API_KEY ?? process.env.LLM_API_KEY ?? "").trim();
-  const model = (process.env.INPUT_MODEL ?? "gemini-3.8-flash").trim();
+  const model = (process.env.INPUT_MODEL ?? "").trim();
   const triggerHeadSha = (process.env.INPUT_TRIGGER_HEAD_SHA ?? "").trim();
   const triggerBranch = (process.env.INPUT_TRIGGER_BRANCH ?? "").trim();
   const asyncCiContinuation = (process.env.INPUT_ASYNC_CI_CONTINUATION ?? "").trim().toLowerCase() === "true";
@@ -17371,7 +17478,7 @@ async function run() {
       agentAppPrivateKey,
       fallbackGithubToken,
       llmApiKey,
-      model,
+      model: model || void 0,
       ...triggerHeadSha ? { triggerHeadSha } : {},
       ...triggerBranch ? { triggerBranch } : {},
       ...asyncCiContinuation ? { asyncCiContinuation } : {}

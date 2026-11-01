@@ -1,5 +1,6 @@
 import { containsPrivateKeyMaterial } from "../auth/github-apps.js";
 import { redactSecrets } from "../auth/issue-command-gate.js";
+import { isSensitiveReviewerRosterPath } from "../review/reviewer-roster.js";
 
 export type PublisherOperation =
   | "comment_issue"
@@ -70,6 +71,7 @@ export interface ProposalScopePolicy {
   readonly assignedBranchPrefix: string;
   readonly allowedTargetFeatureBranch: string;
   readonly allowWorkflowOrConfigEdits?: boolean | undefined;
+  readonly reviewersDir?: string | undefined;
 }
 
 export interface ValidatedProposalResult {
@@ -141,7 +143,7 @@ const PROTECTED_BRANCH_PATTERN =
   /^(?:refs\/heads\/)?(?:main|master|dev|release\/.*)$/i;
 
 const SENSITIVE_FILE_PATH_PATTERN =
-  /^(?:\.github\/workflows\/|\.github\/agents\.ya?ml$|\.cursor\/agents\/|\.env)/i;
+  /^(?:\.github\/workflows\/|\.github\/agents\.ya?ml$|\.env)/i;
 
 function normalizeBranchName(ref: string): string {
   return ref.trim().replace(/^refs\/heads\//, "");
@@ -347,7 +349,10 @@ export function validateAgentProposal(
     if (scope.allowWorkflowOrConfigEdits !== true) {
       for (const filePath of changedFiles) {
         const normalizedPath = filePath.trim().replace(/^\/+/, "");
-        if (SENSITIVE_FILE_PATH_PATTERN.test(normalizedPath)) {
+        if (
+          SENSITIVE_FILE_PATH_PATTERN.test(normalizedPath) ||
+          isSensitiveReviewerRosterPath(normalizedPath, scope.reviewersDir)
+        ) {
           return {
             valid: false,
             error_code: "SENSITIVE_PATH_OUT_OF_SCOPE",

@@ -45,10 +45,10 @@ on:
         type: string
         default: ""
       llm_environment:
-        description: "GitHub Environment holding LLM_API_KEY (defaults to 'gemini')"
+        description: "GitHub Environment holding LLM_API_KEY (defaults to 'epure-agent')"
         required: false
         type: string
-        default: "gemini"
+        default: "epure-agent"
     secrets:
       EPURE_AGENT_APP_ID:
         description: "Consumer Agent App ID"
@@ -132,7 +132,7 @@ jobs:
     if: ${{ needs.authorize-command.outputs.authorized == 'true' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 60
-    environment: ${{ inputs.llm_environment || 'gemini' }}
+    environment: ${{ inputs.llm_environment || 'epure-agent' }}
     concurrency:
       group: epure-issue-${{ inputs.issue_number }}
       cancel-in-progress: false

@@ -1,4 +1,4 @@
-import { LLMClient } from "../llm/client.js";
+import { DEFAULT_FALLBACK_LLM_MODEL, LLMClient } from "../llm/client.js";
 import { parseAndValidateStructuredOutput } from "../llm/errors.js";
 import {
   PROMPT_INJECTION_IMMUNITY_CLAUSE,
@@ -17,13 +17,13 @@ export {
   type ResponseSchemaSpec
 };
 
-export type GeminiToolParameterProperty = ToolParameterProperty;
-export type GeminiToolParameterSchema = ToolParameterProperty;
-export type GeminiToolDeclaration = ToolDeclaration;
-export type GeminiFunctionDeclaration = ToolDeclaration;
-export type GeminiToolHandler = ToolHandler;
+export type LlmToolParameterProperty = ToolParameterProperty;
+export type LlmToolParameterSchema = ToolParameterProperty;
+export type LlmToolDeclaration = ToolDeclaration;
+export type LlmFunctionDeclaration = ToolDeclaration;
+export type LlmToolHandler = ToolHandler;
 
-export interface GeminiCallOptions<T = unknown> {
+export interface LlmCallOptions<T = unknown> {
   readonly apiKey?: string | undefined;
   readonly model?: string | undefined;
   readonly thinkingLevel?: "MINIMAL" | "LOW" | "MEDIUM" | "HIGH" | undefined;
@@ -35,8 +35,8 @@ export interface GeminiCallOptions<T = unknown> {
   readonly responseSchema?: ResponseSchemaSpec<T> | undefined;
   readonly providers?: Readonly<Record<string, ProviderConfig>> | undefined;
   readonly temperature?: number | undefined;
-  readonly tools?: readonly GeminiToolDeclaration[] | undefined;
-  readonly toolHandlers?: Readonly<Record<string, GeminiToolHandler>> | undefined;
+  readonly tools?: readonly LlmToolDeclaration[] | undefined;
+  readonly toolHandlers?: Readonly<Record<string, LlmToolHandler>> | undefined;
   readonly maxToolRounds?: number | undefined;
   readonly maxTransientRetries?: number | undefined;
   readonly transientRetryBackoffSeconds?: readonly number[] | undefined;
@@ -47,16 +47,16 @@ export interface GeminiCallOptions<T = unknown> {
   readonly sleepMs?: ((ms: number) => Promise<void>) | undefined;
 }
 
-export type GeminiGenerateOptions<T = unknown> = GeminiCallOptions<T>;
+export type LlmGenerateOptions<T = unknown> = LlmCallOptions<T>;
 
-export async function callGeminiText(
-  options: GeminiCallOptions
+export async function callLlmText(
+  options: LlmCallOptions
 ): Promise<string> {
   const client = new LLMClient(options.providers);
   try {
     const res = await client.complete({
       apiKey: options.apiKey,
-      model: options.model ?? "gemini-3.8-flash",
+      model: options.model ?? DEFAULT_FALLBACK_LLM_MODEL,
       systemInstruction: options.systemInstruction ?? "",
       userPrompt: options.userPrompt ?? options.prompt ?? "",
       temperature: options.temperature,
@@ -92,15 +92,15 @@ export async function callGeminiText(
   }
 }
 
-export async function callGeminiJson<T = unknown>(
-  options: GeminiCallOptions<T>
+export async function callLlmJson<T = unknown>(
+  options: LlmCallOptions<T>
 ): Promise<T> {
   const client = new LLMClient(options.providers);
   if (options.responseSchema) {
     try {
       const res = await client.complete<T>({
         apiKey: options.apiKey,
-        model: options.model ?? "gemini-3.8-flash",
+        model: options.model ?? DEFAULT_FALLBACK_LLM_MODEL,
         systemInstruction: options.systemInstruction ?? "",
         userPrompt: options.userPrompt ?? options.prompt ?? "",
         temperature: options.temperature,
@@ -137,7 +137,7 @@ export async function callGeminiJson<T = unknown>(
     }
   }
 
-  const rawText = await callGeminiText({
+  const rawText = await callLlmText({
     ...options,
     responseMimeType: options.responseMimeType ?? "application/json"
   });

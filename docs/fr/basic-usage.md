@@ -131,7 +131,7 @@ EPURE exécute alors les tickets du DAG dans l'ordre topologique (`#25`, puis `#
    - Persiste `subphase: "waiting_ticket_ci"` dans `refs/epure/state/16` et termine immédiatement (`exit 0`) afin de libérer le runner pendant que GitHub Actions exécute la CI externe sur la PR #28.
    - Se réveille automatiquement à la réception de l'événement `check_suite.completed` / `workflow_run.completed` sur `task/25-markov-solver`.
 3. **Stage 3 — Revue Multi-Agents (chargée depuis `dev`) & Squash Sémantique IA** :
-   - Charge `.cursor/agents/*.md` exclusivement depuis la branche de confiance `dev` (jamais depuis `task/25-*`).
+   - Charge les prompts des reviewers (`<reviewers_dir>/*.md`, par défaut `.agents/reviewers/*.md`) exclusivement depuis la branche de confiance `dev` (jamais depuis `task/25-*`).
    - Sélectionne jusqu'à 4 reviewers pertinents (ex. `domain-backend-reviewer`, `standards-reviewer`, `security-reviewer`) + `spec-parity-reviewer`.
    - Pour le **Ticket #27** (qui touche des fichiers `.tsx` et `.css`), active automatiquement `frontend-reviewer`, `accessibility-reviewer`, `design-reviewer`, `user-advocate` (`implementation-review`) et le check **`impeccable-gate`**.
    - Si la CI externe ou un reviewer émet un `must_fix`, EPURE lance un tour d'auto-remédiation ciblé (jusqu'à `max_code_fix_attempts = 3`).

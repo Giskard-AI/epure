@@ -234,6 +234,7 @@ function createGeneratedTicketImplementationSchema(options) {
 var GENERATED_TICKET_IMPLEMENTATION_SCHEMA = createGeneratedTicketImplementationSchema();
 
 // src/review/reviewer-roster.ts
+var DEFAULT_REVIEWERS_DIR = ".agents/reviewers";
 var JSON_OUTPUT_CONTRACT_BLOCK = [
   PROMPT_INJECTION_IMMUNITY_CLAUSE,
   "",
@@ -303,10 +304,11 @@ function buildDefaultReviewerRosterFiles(params) {
   const stackKind = params.stackKind ?? "node";
   const includeUi = params.includeFrontendReviewers !== false;
   const customSpecialists = params.customDomainSpecialists ?? [];
+  const reviewersDir = params.reviewersDir ?? DEFAULT_REVIEWERS_DIR;
   const files = [
     {
       name: "domain-backend-reviewer",
-      path: ".cursor/agents/domain-backend-reviewer.md",
+      path: `${reviewersDir}/domain-backend-reviewer.md`,
       category: "specialist",
       content: [
         "---",
@@ -333,7 +335,7 @@ function buildDefaultReviewerRosterFiles(params) {
     if (files.some((f) => f.name === reviewerName)) continue;
     files.push({
       name: reviewerName,
-      path: `.cursor/agents/${reviewerName}.md`,
+      path: `${reviewersDir}/${reviewerName}.md`,
       category: "specialist",
       content: [
         "---",
@@ -357,7 +359,7 @@ function buildDefaultReviewerRosterFiles(params) {
   if (includeUi) {
     files.push({
       name: "frontend-reviewer",
-      path: ".cursor/agents/frontend-reviewer.md",
+      path: `${reviewersDir}/frontend-reviewer.md`,
       category: "specialist",
       content: [
         "---",
@@ -380,7 +382,7 @@ function buildDefaultReviewerRosterFiles(params) {
   files.push(
     {
       name: "infra-reviewer",
-      path: ".cursor/agents/infra-reviewer.md",
+      path: `${reviewersDir}/infra-reviewer.md`,
       category: "specialist",
       content: [
         "---",
@@ -400,7 +402,7 @@ function buildDefaultReviewerRosterFiles(params) {
     },
     {
       name: "architecture-reviewer",
-      path: ".cursor/agents/architecture-reviewer.md",
+      path: `${reviewersDir}/architecture-reviewer.md`,
       category: "cross-cutting",
       content: [
         "---",
@@ -421,7 +423,7 @@ function buildDefaultReviewerRosterFiles(params) {
     },
     {
       name: "security-reviewer",
-      path: ".cursor/agents/security-reviewer.md",
+      path: `${reviewersDir}/security-reviewer.md`,
       category: "cross-cutting",
       content: [
         "---",
@@ -434,7 +436,7 @@ function buildDefaultReviewerRosterFiles(params) {
         "## Scope & Responsibilities",
         "- Detect XSS (`dangerouslySetInnerHTML`), command injection, prototype pollution, and unsafe deserialization.",
         "- Ensure no credentials, tokens, or private keys appear in code, tests, or logs.",
-        "- Flag any unauthorized modification of `.github/workflows/**`, `.github/agents.yml`, or `.cursor/agents/**`.",
+        `- Flag any unauthorized modification of \`.github/workflows/**\`, \`.github/agents.yml\`, or \`${reviewersDir}/**\`.`,
         "",
         JSON_OUTPUT_CONTRACT_BLOCK,
         ""
@@ -442,7 +444,7 @@ function buildDefaultReviewerRosterFiles(params) {
     },
     {
       name: "spec-parity-reviewer",
-      path: ".cursor/agents/spec-parity-reviewer.md",
+      path: `${reviewersDir}/spec-parity-reviewer.md`,
       category: "cross-cutting",
       content: [
         "---",
@@ -463,7 +465,7 @@ function buildDefaultReviewerRosterFiles(params) {
     },
     {
       name: "standards-reviewer",
-      path: ".cursor/agents/standards-reviewer.md",
+      path: `${reviewersDir}/standards-reviewer.md`,
       category: "cross-cutting",
       content: [
         "---",
@@ -485,7 +487,7 @@ function buildDefaultReviewerRosterFiles(params) {
     files.push(
       {
         name: "accessibility-reviewer",
-        path: ".cursor/agents/accessibility-reviewer.md",
+        path: `${reviewersDir}/accessibility-reviewer.md`,
         category: "cross-cutting",
         content: [
           "---",
@@ -506,7 +508,7 @@ function buildDefaultReviewerRosterFiles(params) {
       },
       {
         name: "design-reviewer",
-        path: ".cursor/agents/design-reviewer.md",
+        path: `${reviewersDir}/design-reviewer.md`,
         category: "cross-cutting",
         content: [
           "---",
@@ -529,7 +531,7 @@ function buildDefaultReviewerRosterFiles(params) {
   }
   files.push({
     name: "user-advocate",
-    path: ".cursor/agents/user-advocate.md",
+    path: `${reviewersDir}/user-advocate.md`,
     category: "persona",
     content: [
       "---",
@@ -1712,10 +1714,12 @@ var DEFAULT_VERIFICATION_PROFILE = {
 var DEFAULT_AGENTS_CONFIG = {
   harness: "pi",
   models: {
-    planning: "claude-sonnet-4-20250514",
-    implementation: "claude-sonnet-4-20250514",
-    review: "gpt-4.1"
+    planning: "anthropic/claude-sonnet-4-20250514",
+    implementation: "anthropic/claude-sonnet-4-20250514",
+    review: "openai/gpt-4.1"
   },
+  reviewers_dir: DEFAULT_REVIEWERS_DIR,
+  llm_environment: "epure-agent",
   merge_policy: "strict",
   max_code_fix_attempts: 3,
   max_transient_api_retries: 4,
@@ -1738,6 +1742,10 @@ var DEFAULT_REPOSITORY_MERGE_SETTINGS = {
   squash_merge_commit_message: "PR_BODY"
 };
 var REPO_SLUG_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+var LLM_ENVIRONMENT_NAME_PATTERN = /^[A-Za-z0-9._-]+$/;
+function isUnsafeReviewersDir(dir) {
+  return dir === "" || dir === "." || /^(?:[\\/]|[A-Za-z]:)/.test(dir) || dir.split(/[\\/]/).includes("..") || /^src(?:[\\/]|$)/i.test(dir);
+}
 function normalizeVerificationTarget(target) {
   return {
     name: target.name,
@@ -1857,6 +1865,24 @@ function resolveAgentsConfig(overrides = {}) {
       };
     }
   }
+  const reviewersDir = (overrides.reviewers_dir ?? DEFAULT_AGENTS_CONFIG.reviewers_dir).trim().replace(/^(?:\.\/)+/, "").replace(/\/+$/, "");
+  if (isUnsafeReviewersDir(reviewersDir)) {
+    return {
+      valid: false,
+      error_code: "SECURITY_INVARIANT_VIOLATION",
+      error_message: `Local .github/agents.yml reviewers_dir '${overrides.reviewers_dir ?? ""}' must be a relative directory outside 'src/' without '..' segments.`,
+      config: DEFAULT_AGENTS_CONFIG
+    };
+  }
+  const llmEnvironment = (overrides.llm_environment ?? DEFAULT_AGENTS_CONFIG.llm_environment).trim();
+  if (!LLM_ENVIRONMENT_NAME_PATTERN.test(llmEnvironment)) {
+    return {
+      valid: false,
+      error_code: "SECURITY_INVARIANT_VIOLATION",
+      error_message: `Local .github/agents.yml llm_environment '${overrides.llm_environment ?? ""}' must match ${LLM_ENVIRONMENT_NAME_PATTERN.source}.`,
+      config: DEFAULT_AGENTS_CONFIG
+    };
+  }
   const pagesPreviews = overrides.github_pages_previews ?? DEFAULT_AGENTS_CONFIG.github_pages_previews;
   if (pagesPreviews) {
     if (overrides.github_pages_human_consent !== true || overrides.preview_separate_origin !== true) {
@@ -1899,6 +1925,8 @@ function resolveAgentsConfig(overrides = {}) {
       review: overrides.models?.review ?? DEFAULT_AGENTS_CONFIG.models.review
     },
     ...normalizedProviders ? { providers: normalizedProviders } : {},
+    reviewers_dir: reviewersDir,
+    llm_environment: llmEnvironment,
     merge_policy: overrides.merge_policy ?? DEFAULT_AGENTS_CONFIG.merge_policy,
     max_code_fix_attempts: overrides.max_code_fix_attempts ?? DEFAULT_AGENTS_CONFIG.max_code_fix_attempts,
     ...overrides.max_epic_phases !== void 0 ? {
@@ -2072,6 +2100,8 @@ function serializeAgentsConfigYaml(config, taskAutoMergeEnabled = false) {
     `  implementation: ${config.models.implementation}`,
     `  review: ${config.models.review}`,
     ...providerLines,
+    `reviewers_dir: ${formatYamlProviderScalar(config.reviewers_dir)}`,
+    `llm_environment: ${config.llm_environment}`,
     `merge_policy: ${config.merge_policy}`,
     `task_auto_merge_enabled: ${taskAutoMergeEnabled}`,
     `max_code_fix_attempts: ${config.max_code_fix_attempts}`,
@@ -2158,6 +2188,8 @@ function parseYamlStringArrayInline(raw) {
 }
 function parseAgentsYaml(yamlContent) {
   let harness;
+  let reviewers_dir;
+  let llm_environment;
   const models = {};
   const providers = {};
   let currentProviderAlias = null;
@@ -2276,6 +2308,10 @@ function parseAgentsYaml(yamlContent) {
         if (h === "pi" || h === "codex") {
           harness = h;
         }
+      } else if (key === "reviewers_dir") {
+        reviewers_dir = unquoteYamlScalar(val);
+      } else if (key === "llm_environment") {
+        llm_environment = unquoteYamlScalar(val);
       } else if (key === "merge_policy") {
         const mp = unquoteYamlScalar(val);
         if (mp === "strict" || mp === "relaxed") {
@@ -2538,6 +2574,8 @@ function parseAgentsYaml(yamlContent) {
     ...harness ? { harness } : {},
     ...Object.keys(models).length > 0 ? { models } : {},
     ...Object.keys(providers).length > 0 ? { providers } : {},
+    ...reviewers_dir !== void 0 ? { reviewers_dir } : {},
+    ...llm_environment !== void 0 ? { llm_environment } : {},
     ...merge_policy ? { merge_policy } : {},
     ...max_code_fix_attempts !== void 0 ? { max_code_fix_attempts } : {},
     ...max_epic_phases !== void 0 ? { max_epic_phases } : {},
@@ -2574,7 +2612,7 @@ function parseAgentsYaml(yamlContent) {
     ...Object.keys(securityOverrides).length > 0 ? { security_overrides: securityOverrides } : {}
   };
 }
-function buildCallerWorkflows(pinnedSha, stack, jobTimeoutMinutes = DEFAULT_AGENTS_CONFIG.job_timeout_minutes) {
+function buildCallerWorkflows(pinnedSha, stack, jobTimeoutMinutes = DEFAULT_AGENTS_CONFIG.job_timeout_minutes, llmEnvironment = DEFAULT_AGENTS_CONFIG.llm_environment) {
   const ciWorkflow = buildStackAwareCiWorkflowYaml({ pinnedSha, stack });
   return [
     {
@@ -2626,7 +2664,7 @@ function buildCallerWorkflows(pinnedSha, stack, jobTimeoutMinutes = DEFAULT_AGEN
         "    if: ${{ always() && (needs.authorize-command.outputs.authorized == 'true' || ((github.event_name == 'check_suite' || github.event_name == 'workflow_run') && (startsWith(github.event.check_suite.head_branch, 'task/') || startsWith(github.event.check_suite.head_branch, 'feature/') || startsWith(github.event.workflow_run.head_branch, 'task/') || startsWith(github.event.workflow_run.head_branch, 'feature/')))) }}",
         "    runs-on: ubuntu-26.04",
         `    timeout-minutes: ${jobTimeoutMinutes}`,
-        "    environment: gemini",
+        `    environment: ${llmEnvironment}`,
         "    concurrency:",
         "      group: epure-issue-${{ github.event.issue.number || github.event.check_suite.head_branch || github.event.workflow_run.head_branch || github.run_id }}",
         "      cancel-in-progress: false",
@@ -2956,6 +2994,9 @@ function planAndApplyRepoSetup(input) {
   let existingVerification;
   let existingProviders;
   let existingLlmRequestTimeoutSeconds;
+  let existingReviewersDir;
+  let existingLlmEnvironment;
+  let existingModels;
   if (input.repoRootDir && existsSync2(join2(input.repoRootDir, ".github", "agents.yml"))) {
     try {
       const existingRaw = readFileSync2(
@@ -2966,10 +3007,16 @@ function planAndApplyRepoSetup(input) {
       existingVerification = parsedExisting.verification;
       existingProviders = parsedExisting.providers;
       existingLlmRequestTimeoutSeconds = parsedExisting.llm_request_timeout_seconds;
+      existingReviewersDir = parsedExisting.reviewers_dir;
+      existingLlmEnvironment = parsedExisting.llm_environment;
+      existingModels = parsedExisting.models;
     } catch {
       existingVerification = void 0;
       existingProviders = void 0;
       existingLlmRequestTimeoutSeconds = void 0;
+      existingReviewersDir = void 0;
+      existingLlmEnvironment = void 0;
+      existingModels = void 0;
     }
   }
   const resetTargets = input.agentsOverrides?.reset_verification_targets === true;
@@ -3033,8 +3080,16 @@ function planAndApplyRepoSetup(input) {
   };
   const effectiveProviders = resolvedConfig.config.providers ?? existingProviders;
   const effectiveLlmRequestTimeoutSeconds = input.agentsOverrides?.llm_request_timeout_seconds !== void 0 ? resolvedConfig.config.llm_request_timeout_seconds : existingLlmRequestTimeoutSeconds ?? resolvedConfig.config.llm_request_timeout_seconds;
+  const overrideModels = input.agentsOverrides?.models;
   const effectiveAgentsConfig = {
     ...resolvedConfig.config,
+    models: {
+      planning: overrideModels?.planning ?? existingModels?.planning ?? resolvedConfig.config.models.planning,
+      implementation: overrideModels?.implementation ?? existingModels?.implementation ?? resolvedConfig.config.models.implementation,
+      review: overrideModels?.review ?? existingModels?.review ?? resolvedConfig.config.models.review
+    },
+    reviewers_dir: input.agentsOverrides?.reviewers_dir !== void 0 ? resolvedConfig.config.reviewers_dir : existingReviewersDir ?? resolvedConfig.config.reviewers_dir,
+    llm_environment: input.agentsOverrides?.llm_environment !== void 0 ? resolvedConfig.config.llm_environment : existingLlmEnvironment ?? resolvedConfig.config.llm_environment,
     llm_request_timeout_seconds: effectiveLlmRequestTimeoutSeconds,
     ...effectiveProviders ? { providers: effectiveProviders } : {},
     verification: effectiveVerification
@@ -3063,7 +3118,8 @@ function planAndApplyRepoSetup(input) {
   const workflowTemplates = buildCallerWorkflows(
     pinnedSha,
     detectedStack,
-    effectiveAgentsConfig.job_timeout_minutes
+    effectiveAgentsConfig.job_timeout_minutes,
+    effectiveAgentsConfig.llm_environment
   );
   const plannedWorkflows = workflowTemplates.map((wf) => ({
     path: wf.path,
@@ -3074,7 +3130,8 @@ function planAndApplyRepoSetup(input) {
     repository,
     stackKind: detectedStack.kind,
     includeFrontendReviewers: input.includeFrontendReviewers,
-    customDomainSpecialists: input.customDomainSpecialists
+    customDomainSpecialists: input.customDomainSpecialists,
+    reviewersDir: effectiveAgentsConfig.reviewers_dir
   });
   const plannedReviewerRoster = rosterTemplates.map(
     (item) => ({
@@ -3164,7 +3221,7 @@ function planAndApplyRepoSetup(input) {
     `- **Repository**: \`${repository}\``,
     `- **Merge Governance**: \`squash-only\` (\`allow_merge_commit=false\`, \`allow_rebase_merge=false\`, \`delete_branch_on_merge=true\`)`,
     `- **Agents Config (\`.github/agents.yml\`)**: \`${agentsConfigAction}\` (harness=\`${effectiveAgentsConfig.harness}\`, merge_policy=\`${effectiveAgentsConfig.merge_policy}\`)`,
-    `- **Reviewer Roster (\`.cursor/agents/*.md\`)**: \`${plannedReviewerRoster.length}\` agents (specialists + cross-cutting + \`user-advocate\`)`,
+    `- **Reviewer Roster (\`${effectiveAgentsConfig.reviewers_dir}/*.md\`)**: \`${plannedReviewerRoster.length}\` agents (specialists + cross-cutting + \`user-advocate\`)`,
     `- **Task Auto-Merge Enabled**: \`${taskAutoMergeEnabled}\` (${autoMergeWarningCode})`,
     `- **Governance Rulesets**: ${governanceRulesets.map((r) => `\`${r.name}\``).join(", ")}`,
     `- **Deferred External Workflows**: ${deferredWorkflowsList.length > 0 ? deferredWorkflowsList.map((w) => `\`${w}\``).join(", ") : "none"}`,
@@ -3367,6 +3424,12 @@ function parseArgs(argv) {
   let requirePrApprovalsOnDev;
   let includeFrontendReviewers;
   let customDomainSpecialists;
+  let reviewersDir;
+  let llmEnvironment;
+  let allPhasesModel;
+  let planningModel;
+  let implementationModel;
+  let reviewModel;
   let applyGithubSettings = false;
   let githubToken;
   let agentAppIntegrationId;
@@ -3400,6 +3463,24 @@ function parseArgs(argv) {
           "Enforce alignment with GLOSSARY.md and docs/adr/*.md."
         ]
       }));
+    } else if (arg === "--reviewers-dir" && argv[i + 1]) {
+      reviewersDir = argv[i + 1];
+      i += 1;
+    } else if (arg === "--llm-env" && argv[i + 1]) {
+      llmEnvironment = argv[i + 1];
+      i += 1;
+    } else if (arg === "--model" && argv[i + 1]) {
+      allPhasesModel = argv[i + 1];
+      i += 1;
+    } else if (arg === "--planning-model" && argv[i + 1]) {
+      planningModel = argv[i + 1];
+      i += 1;
+    } else if (arg === "--implementation-model" && argv[i + 1]) {
+      implementationModel = argv[i + 1];
+      i += 1;
+    } else if (arg === "--review-model" && argv[i + 1]) {
+      reviewModel = argv[i + 1];
+      i += 1;
     } else if (arg === "--github-token" && argv[i + 1]) {
       githubToken = argv[i + 1];
       i += 1;
@@ -3419,6 +3500,16 @@ function parseArgs(argv) {
       json = true;
     }
   }
+  const models = {
+    ...allPhasesModel ? {
+      planning: allPhasesModel,
+      implementation: allPhasesModel,
+      review: allPhasesModel
+    } : {},
+    ...planningModel ? { planning: planningModel } : {},
+    ...implementationModel ? { implementation: implementationModel } : {},
+    ...reviewModel ? { review: reviewModel } : {}
+  };
   return {
     repository,
     repoRootDir,
@@ -3426,6 +3517,11 @@ function parseArgs(argv) {
     requirePrApprovalsOnDev,
     includeFrontendReviewers,
     customDomainSpecialists,
+    agentsOverrides: {
+      ...reviewersDir !== void 0 ? { reviewers_dir: reviewersDir } : {},
+      ...llmEnvironment !== void 0 ? { llm_environment: llmEnvironment } : {},
+      ...Object.keys(models).length > 0 ? { models } : {}
+    },
     applyGithubSettings,
     githubToken,
     agentAppIntegrationId,
@@ -3457,6 +3553,7 @@ async function main() {
     requirePrApprovalsOnDev: args.requirePrApprovalsOnDev,
     includeFrontendReviewers: args.includeFrontendReviewers,
     customDomainSpecialists: args.customDomainSpecialists,
+    agentsOverrides: args.agentsOverrides,
     dryRun: args.dryRun
   });
   if (result.status !== "error" && !args.dryRun && args.applyGithubSettings) {

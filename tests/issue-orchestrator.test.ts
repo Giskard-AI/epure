@@ -8,7 +8,7 @@ import {
   evaluateIssueCommandGate,
   parseEpureCommand
 } from "../src/auth/issue-command-gate.js";
-import { extractJsonObject } from "../src/orchestrator/gemini-client.js";
+import { extractJsonObject } from "../src/orchestrator/llm-helper.js";
 import { orchestrateIssueCommand } from "../src/orchestrator/issue-orchestrator.js";
 import {
   createInMemoryGitRefStateStore,
@@ -783,7 +783,8 @@ describe("EPURE v1.1.0 — Real Orchestration Wiring (Q84–Q90, ADR-0026)", () 
 
             // Reviewer pass or squash commit synthesis
             if (
-              sysText.includes("reviewer") ||
+              (sysText.includes("reviewer") &&
+                !sysText.includes("kill-slop")) ||
               sysText.includes("Revue") ||
               userPrompt.includes("findings") ||
               userPrompt.includes("Rédige un message de commit")

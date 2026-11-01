@@ -14,8 +14,8 @@ Voici le fichier `.github/agents.yml` canonique plat généré par `setup-repo` 
 harness: pi
 models:
   planning: anthropic/claude-sonnet-4-20250514
-  implementation: openai/gpt-5.4
-  review: google/gemini-3.8-flash
+  implementation: anthropic/claude-sonnet-4-20250514
+  review: openai/gpt-4.1
 providers:
   azure-prod:
     provider: azure
@@ -39,6 +39,8 @@ max_concurrent_tasks_per_feature: 3
 trace_retention_days: 30
 preview_retention_days: 14
 github_pages_previews: false
+reviewers_dir: .agents/reviewers
+llm_environment: epure-agent
 verification:
   wait_for_external_ci: true
   external_ci_timeout_minutes: 15
@@ -75,7 +77,7 @@ security_invariants:
 
 Dans `.github/workflows/epure-issue-command.yml`, le job `orchestrate-command` s'exécute au sein d'un environnement GitHub dédié (`environment: <llm-env>`) **uniquement après** que le job sans secret `authorize-command` a validé la permission effective `write` ou `admin` :
 
-- **Nommage libre et agnostique du fournisseur** : le nom de l'environnement `<llm-env>` est entièrement configurable via `setup-github-apps-wizard.sh --llm-env <nom-env>` et agnostique du fournisseur LLM utilisé (par exemple : `epure-agent`, `llm`, `openai`, `anthropic` ou `gemini`).
+- **Nommage libre et agnostique du fournisseur** : le nom de l'environnement `<llm-env>` vaut **`epure-agent`** par défaut (`llm_environment` dans `.github/agents.yml`) et est entièrement configurable via `setup-repo --llm-env <nom-env>` et `setup-github-apps-wizard.sh --llm-env <nom-env>` (utilisez la même valeur pour les deux). Il est agnostique du fournisseur LLM utilisé (autres exemples : `llm`, `openai`, `anthropic` ou `gemini`) et ne doit contenir que des caractères `[A-Za-z0-9._-]`.
 - **Cloisonnement des secrets conforme Zizmor** : `EPURE_AGENT_APP_ID`, `EPURE_AGENT_APP_PRIVATE_KEY` et `LLM_API_KEY` (ou la variable fournisseur référencée par `os.environ/VAR_NAME`) sont attachés exclusivement à `--env <llm-env>`, tandis que `EPURE_RELEASE_APP_ID` et `EPURE_RELEASE_APP_PRIVATE_KEY` sont attachés à l'environnement `--env release` avec approbation humaine obligatoire. Les workflows publics de Pull Request et `authorize-command` n'ont accès à aucun secret.
 
 ---
@@ -100,6 +102,8 @@ Dans `.github/workflows/epure-issue-command.yml`, le job `orchestrate-command` s
 | `trace_retention_days` | `integer` | `30` | Durée de conservation en jours des trajectoires d'audit minimisées (`iFixAi`). |
 | `preview_retention_days` | `integer` | `14` | Durée de conservation en jours avant purge automatique des previews `/prototype` hébergées (Q71). |
 | `github_pages_previews` | `boolean` | `false` | Option sur consentement (alias historique `enable_pages_preview: false`) pour publier des previews statiques `/prototype` sur une origine GitHub Pages isolée ; exige `github_pages_human_consent: true` et `preview_separate_origin: true` (Q70, Q73). |
+| `reviewers_dir` | `string` (chemin relatif) | `".agents/reviewers"` | Répertoire du roster de reviewers dans lequel `setup-repo` écrit et l'orchestrateur lit les prompts `<nom>.md` (toujours depuis la branche de confiance `dev`, avec repli sur les templates embarqués d'EPURE). Configurable via `setup-repo --reviewers-dir <chemin>` (par exemple `.cursor/agents` pour une équipe souhaitant que Cursor charge les reviewers comme sous-agents). Les chemins absolus, les chemins comportant un segment `.` ou `..` et les chemins sous `src/` sont rejetés en mode *fail-closed* avec `SECURITY_INVARIANT_VIOLATION`. |
+| `llm_environment` | `string` (`[A-Za-z0-9._-]`) | `"epure-agent"` | Nom de l'environnement GitHub utilisé par le job `orchestrate-command` du workflow généré `.github/workflows/epure-issue-command.yml` (`environment: <llm-env>`). Configurable via `setup-repo --llm-env <nom>` ; doit correspondre à l'environnement créé par `setup-github-apps-wizard.sh --llm-env <nom>`. |
 
 ### `models` & `providers` (Routage Multi-Fournisseurs — ADR-0029)
 
@@ -107,9 +111,9 @@ EPURE intègre un client `LLMClient` multi-fournisseurs sans dépendance externe
 
 | Clé | Type | Défaut | Description |
 | --- | --- | --- | --- |
-| `models.planning` | `string` | `"claude-sonnet-4-20250514"` | Modèle utilisé pour l'entretien `/epure plan`, `runGoldfishSpecAudit` et `/epure to-spec` / `/epure to-tickets` (`<fournisseur>/<modèle>` ou nom court). |
-| `models.implementation` | `string` | `"claude-sonnet-4-20250514"` | Modèle utilisé pour la boucle d'outils incrémentaux (`write_repo_file`, `patch_repo_file`), la résolution de conflits 3-way et les boucles d'auto-remédiation Stage 1/2/3. |
-| `models.review` | `string` | `"gpt-4.1"` | Modèle utilisé pour le roster de revue multi-agents, `runEpicConvergenceAudit`, `user-advocate` et la synthèse du message de squash à température `0.0`. |
+| `models.planning` | `string` | `"anthropic/claude-sonnet-4-20250514"` | Modèle utilisé pour l'entretien `/epure plan`, `runGoldfishSpecAudit` et `/epure to-spec` / `/epure to-tickets` (`<fournisseur>/<modèle>` ou nom court). Surchargeable via `setup-repo --planning-model` (ou `--model` pour toutes les phases). |
+| `models.implementation` | `string` | `"anthropic/claude-sonnet-4-20250514"` | Modèle utilisé pour la boucle d'outils incrémentaux (`write_repo_file`, `patch_repo_file`), la résolution de conflits 3-way et les boucles d'auto-remédiation Stage 1/2/3. Surchargeable via `setup-repo --implementation-model` (ou `--model`). |
+| `models.review` | `string` | `"openai/gpt-4.1"` | Modèle utilisé pour le roster de revue multi-agents, `runEpicConvergenceAudit`, `user-advocate` et la synthèse du message de squash à température `0.0`. Surchargeable via `setup-repo --review-model` (ou `--model`). |
 | `providers.<alias>.provider` | `"google" \| "openai" \| "azure" \| "azure_ai" \| "anthropic"` | *(Optionnel)* | Famille de protocole associée à un alias personnalisé référencé dans `models.*` (`<alias>/<modèle>`). |
 | `providers.<alias>.api_key` | `string` | `os.environ/<VAR>` | Référence de variable d'environnement (`os.environ/VAR_NAME`) résolue à l'exécution depuis `process.env`. Ne commitez jamais de clé API en clair dans `.github/agents.yml`. |
 | `providers.<alias>.base_url` | `string` | Défaut du fournisseur | URL de base personnalisée ou `os.environ/VAR_NAME`. |
@@ -142,7 +146,7 @@ Toujours chargé à l'exécution depuis la branche de confiance `dev` afin qu'un
 
 ### `security_invariants` & Chemins Sensibles
 
-Toute tentative dans `.github/agents.yml` d'abaisser `security_invariants` (`require_write_permission: false`, `sandbox_isolation: false`, `allow_agent_release: true`, `auto_merge_dev: true`, `auto_merge_main: true`) est rejetée en mode *fail-closed* avec l'erreur `SECURITY_INVARIANT_VIOLATION`. De plus, toute modification de `.github/workflows/**`, `.github/agents.yml`, `.cursor/agents/**` ou `CODEOWNERS` sur une branche `task/*` déclenche une **Escalade sur Chemin Sensible** (`needs-human`) tant qu'un mainteneur n'a pas explicitement accordé le label `approved-sensitive-change` (Q81, Q93).
+Toute tentative dans `.github/agents.yml` d'abaisser `security_invariants` (`require_write_permission: false`, `sandbox_isolation: false`, `allow_agent_release: true`, `auto_merge_dev: true`, `auto_merge_main: true`) est rejetée en mode *fail-closed* avec l'erreur `SECURITY_INVARIANT_VIOLATION`. De plus, toute modification de `.github/workflows/**`, `.github/agents.yml`, du répertoire du roster de reviewers (le `reviewers_dir/**` configuré ainsi que `.agents/reviewers/**` par défaut) ou `CODEOWNERS` sur une branche `task/*` déclenche une **Escalade sur Chemin Sensible** (`needs-human`) tant qu'un mainteneur n'a pas explicitement accordé le label `approved-sensitive-change` (Q81, Q93).
 
 ---
 

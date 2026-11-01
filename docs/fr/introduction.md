@@ -76,7 +76,7 @@ Ces opérations ne s'activent que selon la nature du changement ou sur demande e
   - `/epure sync` (alias `/epure rebase`) : synchronise `dev -> feature/*` (et `feature/* -> task/*`) avec résolution de conflits 3-way et validation Sandbox Stage 1.
   - `/epure status` : rafraîchit et affiche l'état d'orchestration et la table d'avancement des tickets.
   - `/epure cancel` (alias `/epure stop`) : interrompt immédiatement l'orchestration et marque le mandat `cancelled` dans `refs/epure/state/<issue>`.
-- **Escalade Humaine Conditionnelle (`needs-human`)** : déclenchée automatiquement si une branche `task/*` modifie un chemin sensible (`.github/workflows/**`, `.cursor/agents/**`, `CODEOWNERS`) sans exception approuvée, ou si un ticket échoue encore après `max_code_fix_attempts = 3` tours d'auto-remédiation.
+- **Escalade Humaine Conditionnelle (`needs-human`)** : déclenchée automatiquement si une branche `task/*` modifie un chemin sensible (`.github/workflows/**`, `.github/agents.yml`, le répertoire du roster de reviewers `reviewers_dir/**` (par défaut `.agents/reviewers/**`), `CODEOWNERS`) sans exception approuvée, ou si un ticket échoue encore après `max_code_fix_attempts = 3` tours d'auto-remédiation.
 
 ---
 
