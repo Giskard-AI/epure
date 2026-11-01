@@ -176,14 +176,17 @@ pause "Press Enter to continue"
 stage "Create the test GitHub App"
 OWNER_TYPE="User"
 _gh_ready && OWNER_TYPE=$(gh api "users/${SANDBOX_OWNER}" --jq '.type' 2>/dev/null || echo "User")
+APP_NAME="$(printf '%s' "$SANDBOX_OWNER" | tr '[:upper:]' '[:lower:]')-epure-live-test"
+APP_QUERY="name=${APP_NAME}&url=https://github.com/${SANDBOX_REPO}&public=false&webhook_active=false&contents=write&pull_requests=write&metadata=read"
 if [[ "$OWNER_TYPE" == "Organization" ]]; then
-  open_url "https://github.com/organizations/${SANDBOX_OWNER}/settings/apps/new"
+  open_url "https://github.com/organizations/${SANDBOX_OWNER}/settings/apps/new?${APP_QUERY}"
 else
-  open_url "https://github.com/settings/apps/new"
+  open_url "https://github.com/settings/apps/new?${APP_QUERY}"
 fi
-step "GitHub App name: $(printf '%s' "$SANDBOX_OWNER" | tr '[:upper:]' '[:lower:]')-epure-live-test (must be globally unique)."
+step "The form opens prefilled; check these values:"
+step "GitHub App name: ${APP_NAME} (must be globally unique)."
 step "Homepage URL: https://github.com/${SANDBOX_REPO}"
-step "Webhook: untick 'Active'."
+step "Webhook: 'Active' unticked."
 step "Repository permissions (nothing else):"
 note "  - Contents: Read and write"
 note "  - Pull requests: Read and write"
