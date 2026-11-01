@@ -13,6 +13,7 @@ import {
   PROMPT_INJECTION_IMMUNITY_CLAUSE,
   wrapUntrustedContent
 } from "../security/prompt-injection-guard.js";
+import { DEFAULT_REVIEWERS_DIR } from "./reviewers-dir.js";
 
 export type ReviewerAgentName =
   | "domain-backend-reviewer"
@@ -108,7 +109,7 @@ export const ALL_REVIEWER_AGENT_NAMES: readonly ReviewerAgentName[] = [
   "user-advocate"
 ] as const;
 
-export const DEFAULT_REVIEWERS_DIR = ".agents/reviewers";
+export { DEFAULT_REVIEWERS_DIR };
 
 export function isSensitiveReviewerRosterPath(
   filePath: string,

@@ -233,8 +233,10 @@ function createGeneratedTicketImplementationSchema(options) {
 }
 var GENERATED_TICKET_IMPLEMENTATION_SCHEMA = createGeneratedTicketImplementationSchema();
 
-// src/review/reviewer-roster.ts
+// src/review/reviewers-dir.ts
 var DEFAULT_REVIEWERS_DIR = ".agents/reviewers";
+
+// src/review/reviewer-roster.ts
 var JSON_OUTPUT_CONTRACT_BLOCK = [
   PROMPT_INJECTION_IMMUNITY_CLAUSE,
   "",

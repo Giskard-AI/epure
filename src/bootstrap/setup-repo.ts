@@ -5,10 +5,10 @@ import { EPURE_PUBLIC_VERSION } from "../contract/epure-contract.js";
 import type { ProviderConfig, ProviderKind } from "../llm/types.js";
 import {
   buildDefaultReviewerRosterFiles,
-  DEFAULT_REVIEWERS_DIR,
   type CustomDomainReviewerSpec,
   type ReviewerAgentName
 } from "../review/reviewer-roster.js";
+import { DEFAULT_REVIEWERS_DIR } from "../review/reviewers-dir.js";
 import {
   buildRenovateConfigJson,
   buildSandboxToolingSetupSteps,
