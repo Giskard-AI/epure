@@ -2,7 +2,6 @@ import {
   AuthenticationError,
   QuotaExhaustedError
 } from "../llm/errors.js";
-import { DEFAULT_FALLBACK_LLM_MODEL } from "../llm/client.js";
 import type { ProviderConfig } from "../llm/types.js";
 import { callLlmJson } from "../orchestrator/llm-helper.js";
 import {
@@ -622,7 +621,7 @@ export interface RunUserAdvocateDesignGateInput {
   readonly glossaryMarkdown: string;
   readonly specMarkdown: string;
   readonly llmApiKey?: string | undefined;
-  readonly model?: string | undefined;
+  readonly model: string;
   readonly providers?: Readonly<Record<string, ProviderConfig>> | undefined;
   readonly maxTransientRetries?: number | undefined;
   readonly transientRetryBackoffSeconds?: readonly number[] | undefined;
@@ -719,7 +718,7 @@ export async function runUserAdvocateDesignGate(
 
     const parsed = await callLlmJson<UserAdvocatePayload>({
       apiKey: params.llmApiKey,
-      model: params.model ?? DEFAULT_FALLBACK_LLM_MODEL,
+      model: params.model,
       providers: params.providers,
       maxTransientRetries: params.maxTransientRetries,
       transientRetryBackoffSeconds: params.transientRetryBackoffSeconds,

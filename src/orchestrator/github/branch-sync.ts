@@ -1,7 +1,5 @@
-import {
-  DEFAULT_FALLBACK_LLM_MODEL,
-  type LLMClient
-} from "../../llm/client.js";
+import type { LLMClient } from "../../llm/client.js";
+import type { LLMCallOptions } from "../../llm/types.js";
 import type {
   SandboxExecutionInput,
   SandboxExecutionResult
@@ -483,7 +481,24 @@ export function renumberCollidingAdrs(
   };
 }
 
-export interface ReconcileAdrsWithLlmInput {
+type LlmRequestTuning = Pick<
+  LLMCallOptions,
+  | "providers"
+  | "maxTransientRetries"
+  | "transientRetryBackoffSeconds"
+  | "requestTimeoutMs"
+>;
+
+function pickLlmRequestTuning(source: LlmRequestTuning): LlmRequestTuning {
+  return {
+    providers: source.providers,
+    maxTransientRetries: source.maxTransientRetries,
+    transientRetryBackoffSeconds: source.transientRetryBackoffSeconds,
+    requestTimeoutMs: source.requestTimeoutMs
+  };
+}
+
+export interface ReconcileAdrsWithLlmInput extends LlmRequestTuning {
   readonly devAdrs: ReadonlyArray<{
     readonly path: string;
     readonly content: string;
@@ -499,7 +514,7 @@ export interface ReconcileAdrsWithLlmInput {
   readonly glossaryContent?: string | undefined;
   readonly llmClient?: LLMClient | undefined;
   readonly llmApiKey?: string | undefined;
-  readonly model?: string | undefined;
+  readonly model: string;
   readonly fetchImpl?: typeof fetch | undefined;
 }
 
@@ -556,7 +571,8 @@ export async function reconcileAdrsWithLlm(
   try {
     if (input.llmClient) {
       return await input.llmClient.completeStructured({
-        model: input.model ?? DEFAULT_FALLBACK_LLM_MODEL,
+        model: input.model,
+        ...pickLlmRequestTuning(input),
         systemInstruction,
         userPrompt,
         responseSchema: ADR_COHERENCE_RECONCILIATION_SCHEMA,
@@ -565,7 +581,8 @@ export async function reconcileAdrsWithLlm(
     }
     return await callLlmJson<AdrCoherenceReconciliationPayload>({
       apiKey: input.llmApiKey ?? "",
-      model: input.model ?? DEFAULT_FALLBACK_LLM_MODEL,
+      model: input.model,
+      ...pickLlmRequestTuning(input),
       systemInstruction,
       prompt: userPrompt,
       temperature: 0.1,
@@ -598,9 +615,9 @@ async function applyAdrLlmReconciliation(params: {
   readonly deletedAdrPaths: string[];
   readonly llmClient?: LLMClient | undefined;
   readonly llmApiKey?: string | undefined;
-  readonly model?: string | undefined;
+  readonly model: string;
   readonly fetchImpl?: typeof fetch | undefined;
-}): Promise<void> {
+} & LlmRequestTuning): Promise<void> {
   if (!params.llmClient && !params.llmApiKey) {
     return;
   }
@@ -619,6 +636,7 @@ async function applyAdrLlmReconciliation(params: {
     llmClient: params.llmClient,
     llmApiKey: params.llmApiKey,
     model: params.model,
+    ...pickLlmRequestTuning(params),
     fetchImpl: params.fetchImpl
   });
   if (!llmReconciled) {
@@ -664,9 +682,9 @@ export async function integratePlanBranchIntoFeature(params: {
   readonly baseBranch?: string | undefined;
   readonly llmClient?: LLMClient | undefined;
   readonly llmApiKey?: string | undefined;
-  readonly model?: string | undefined;
+  readonly model: string;
   readonly fetchImpl?: typeof fetch | undefined;
-}): Promise<IntegratePlanBranchIntoFeatureResult> {
+} & LlmRequestTuning): Promise<IntegratePlanBranchIntoFeatureResult> {
   const baseBranch = params.baseBranch ?? "dev";
   const featureInitialSha = await params.gh.ensureBranch(
     params.featureBranch,
@@ -810,6 +828,7 @@ export async function integratePlanBranchIntoFeature(params: {
       llmClient: params.llmClient,
       llmApiKey: params.llmApiKey,
       model: params.model,
+      ...pickLlmRequestTuning(params),
       fetchImpl: params.fetchImpl
     });
   }
@@ -845,7 +864,7 @@ export async function integratePlanBranchIntoFeature(params: {
   };
 }
 
-export interface SyncBranchWithBaseInput {
+export interface SyncBranchWithBaseInput extends LlmRequestTuning {
   readonly gh: Pick<
     GitHubRestHelper,
     | "mergeBranches"
@@ -862,7 +881,7 @@ export interface SyncBranchWithBaseInput {
   readonly llmClient?: LLMClient | undefined;
   readonly llmApiKey?: string | undefined;
   readonly fetchImpl?: typeof fetch | undefined;
-  readonly model?: string | undefined;
+  readonly model: string;
   readonly sandboxRunner?:
     | ((input: SandboxExecutionInput) => Promise<SandboxExecutionResult>)
     | undefined;
@@ -990,6 +1009,7 @@ export async function syncBranchWithBase(
           llmClient: input.llmClient,
           llmApiKey: input.llmApiKey,
           model: input.model,
+          ...pickLlmRequestTuning(input),
           fetchImpl: input.fetchImpl
         });
         if (adrFilesToUpdate.length > 0 || adrDeletedPaths.length > 0) {
@@ -1195,7 +1215,8 @@ export async function syncBranchWithBase(
     let resolutionData: ConflictResolutionPayload;
     if (input.llmClient) {
       resolutionData = await input.llmClient.completeStructured({
-        model: input.model ?? DEFAULT_FALLBACK_LLM_MODEL,
+        model: input.model,
+        ...pickLlmRequestTuning(input),
         systemInstruction,
         userPrompt,
         responseSchema: CONFLICT_RESOLUTION_SCHEMA,
@@ -1204,7 +1225,8 @@ export async function syncBranchWithBase(
     } else {
       resolutionData = await callLlmJson<ConflictResolutionPayload>({
         apiKey: input.llmApiKey ?? "",
-        model: input.model ?? DEFAULT_FALLBACK_LLM_MODEL,
+        model: input.model,
+        ...pickLlmRequestTuning(input),
         systemInstruction,
         prompt: userPrompt,
         temperature: 0.1,

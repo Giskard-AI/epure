@@ -141,7 +141,7 @@ export async function runEpicConvergenceAudit(
 
   return await callLlmJson<EpicConvergenceAuditPayload>({
     apiKey: params.llmApiKey,
-    model: params.phaseModels.reviewModel || params.phaseModels.planningModel,
+    model: params.phaseModels.reviewModel,
     providers: params.phaseModels.providers,
     maxTransientRetries: params.phaseModels.maxTransientRetries,
     transientRetryBackoffSeconds:

@@ -68,6 +68,16 @@ export type ProviderKind =
   | "azure_ai"
   | "anthropic";
 
+export const PROVIDER_EFFORTS = [
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max"
+] as const;
+
+export type ProviderEffort = (typeof PROVIDER_EFFORTS)[number];
+
 export interface ProviderConfig {
   readonly provider?: ProviderKind | undefined;
   readonly apiKey?: string | undefined;
@@ -78,11 +88,12 @@ export interface ProviderConfig {
   readonly base_url?: string | undefined;
   readonly api_version?: string | undefined;
   readonly default_headers?: Readonly<Record<string, string>> | undefined;
+  readonly effort?: ProviderEffort | undefined;
 }
 
 export interface LLMCallOptions<T = unknown> {
   readonly apiKey?: string | undefined;
-  readonly model?: string | undefined;
+  readonly model: string;
   readonly systemInstruction: string;
   readonly userPrompt: string;
   readonly temperature?: number | undefined;

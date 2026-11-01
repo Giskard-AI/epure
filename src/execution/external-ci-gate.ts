@@ -162,6 +162,8 @@ export type NeedsHumanEscalationReason =
   | "transient_llm_api_exhausted"
   | "llm_quota_or_auth_failure"
   | "llm_request_invalid"
+  | "llm_refusal"
+  | "model_config_missing"
   | "internal_error";
 
 /**
@@ -177,6 +179,9 @@ export function resolveLlmEscalationReason(
   }
   if (isTransientLLMError(err)) {
     return "transient_llm_api_exhausted";
+  }
+  if (err.reasonCode === "REFUSAL") {
+    return "llm_refusal";
   }
   return "llm_request_invalid";
 }
@@ -222,6 +227,7 @@ export interface FormatNeedsHumanEscalationInput {
   readonly diagnosticExcerpt?: string | undefined;
   readonly stateMirrorMarkdown?: string | undefined;
   readonly epicConvergenceDetails?: EpicConvergenceEscalationDetails | undefined;
+  readonly missingModelKeys?: readonly string[] | undefined;
 }
 
 const EPURE_SYNTHETIC_CHECK_NAMES = new Set([
@@ -1235,6 +1241,16 @@ export function formatNeedsHumanEscalationComment(
   } else if (input.reason === "llm_request_invalid") {
     reasonHeadline =
       "LLM request rejected or response invalid after structured-output retry (non-transient) — code-fix budget preserved";
+  } else if (input.reason === "llm_refusal") {
+    reasonHeadline =
+      "LLM model refused the request (`stop_reason: refusal`) — code-fix budget preserved";
+  } else if (input.reason === "model_config_missing") {
+    const keys = (input.missingModelKeys ?? [])
+      .map((k) => `\`${k}\``)
+      .join(", ");
+    reasonHeadline =
+      `LLM model configuration missing — set ${keys} in \`.github/agents.yml\` ` +
+      "(or the action `model` input); no fallback model";
   } else if (input.reason === "internal_error") {
     reasonHeadline =
       "Internal orchestrator error — code-fix budget preserved";
@@ -1254,6 +1270,12 @@ export function formatNeedsHumanEscalationComment(
     `- **Statut d'orchestration** : \`suspended\` (label \`needs-human\` appliqué)`,
     `- **Cause de l'escalade** : ${reasonHeadline}`
   );
+
+  if (input.reason === "model_config_missing") {
+    lines.push(
+      "- **Reprise** : ajoutez les clés manquantes dans `.github/agents.yml` sur `dev` (ou relancez `setup-repo`), puis republiez la commande `/epure` d'origine (`/epure continue` ne reprend que les exécutions en phase d'implémentation)."
+    );
+  }
 
   if (input.prUrl) {
     lines.push(`- **Pull Request** : ${input.prUrl}`);

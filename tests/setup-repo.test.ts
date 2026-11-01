@@ -22,8 +22,10 @@ import {
 import {
   DEFAULT_AGENTS_CONFIG,
   DEFAULT_EPURE_PINNED_SHA,
+  parseAgentsYaml,
   planAndApplyRepoSetup,
   resolveAgentsConfig,
+  serializeAgentsYml,
   validateOrgSecretSharingScope
 } from "../src/bootstrap/setup-repo.js";
 
@@ -232,6 +234,60 @@ describe("2. .github/agents.yml defaults (Q78) and non-weakenable security invar
       preview_retention_days: 14,
       github_pages_previews: false
     });
+  });
+
+  it.each([
+    {
+      id: "agents-yml-with-only-models-planning-yields-only-planning",
+      yaml: "models:\n  planning: anthropic/claude-haiku-5-5\nproviders:\n  anthropic:\n    api_key: os.environ/ANTHROPIC_API_KEY\n",
+      expectedModels: { planning: "anthropic/claude-haiku-5-5" }
+    },
+    {
+      id: "agents-yml-without-models-section-yields-no-models",
+      yaml: "harness: pi\nmerge_policy: strict\n",
+      expectedModels: {}
+    },
+    {
+      id: "agents-yml-with-all-three-models-yields-them-verbatim",
+      yaml: "models:\n  planning: anthropic/claude-haiku-5-5\n  implementation: anthropic/claude-sonnet-5\n  review: openai/gpt-5.4\n",
+      expectedModels: {
+        planning: "anthropic/claude-haiku-5-5",
+        implementation: "anthropic/claude-sonnet-5",
+        review: "openai/gpt-5.4"
+      }
+    }
+  ])("parseAgentsYaml never injects default models: $id", ({ yaml, expectedModels }) => {
+    expect(parseAgentsYaml(yaml).models).toEqual(expectedModels);
+  });
+
+  it("setup-repo serializes provider effort and parses it back unchanged", () => {
+    const yaml = serializeAgentsYml(
+      {
+        ...DEFAULT_AGENTS_CONFIG,
+        providers: {
+          anthropic: {
+            provider: "anthropic",
+            api_key: "os.environ/ANTHROPIC_API_KEY",
+            effort: "max"
+          }
+        }
+      },
+      false
+    );
+
+    expect(yaml).toContain("    effort: max");
+    expect(parseAgentsYaml(yaml).providers?.anthropic?.effort).toBe("max");
+  });
+
+  it.each([
+    { id: "unknown-effort-word", effort: "extreme" },
+    { id: "wrong-case-effort", effort: "High" },
+    { id: "empty-effort", effort: '""' }
+  ])("parseAgentsYaml fails closed on invalid providers.<alias>.effort: $id", ({ effort }) => {
+    const yaml = `providers:\n  anthropic:\n    provider: anthropic\n    effort: ${effort}\n`;
+    expect(() => parseAgentsYaml(yaml)).toThrowError(
+      "providers.anthropic.effort"
+    );
   });
 
   it.each([

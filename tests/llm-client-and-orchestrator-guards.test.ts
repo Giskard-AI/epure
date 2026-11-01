@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { createGitHubMockRouter, json } from "./fixtures/github-mock-router.js";
+import type { EpureCommandName } from "../src/auth/issue-command-gate.js";
 import {
   type AgentsConfig,
   DEFAULT_AGENTS_CONFIG,
+  type ParsedAgentsConfig,
   parseAgentsYml,
   serializeAgentsYml
 } from "../src/bootstrap/setup-repo.js";
@@ -15,7 +17,6 @@ import {
   AuthenticationError,
   BadRequestError,
   classifyHttpError,
-  DEFAULT_FALLBACK_LLM_MODEL,
   DEFAULT_LLM_REQUEST_TIMEOUT_MS,
   GEMINI_SKIP_THOUGHT_SIGNATURE_SENTINEL,
   LLMClient,
@@ -41,6 +42,7 @@ import {
   createGitHubRestHelper,
   createStagedTicketImplementationBuffer,
   mergeStagedBufferIntoImplementationPayload,
+  MissingModelConfigError,
   orchestrateIssueCommand,
   resolvePhaseModels
 } from "../src/orchestrator/issue-orchestrator.js";
@@ -59,6 +61,7 @@ import { generateSemanticSquashCommitFromDiff } from "../src/review/squash-commi
 import { detectPromptInjectionInPrFiles } from "../src/security/prompt-injection-guard.js";
 import {
   createInMemoryGitRefStateStore,
+  type EpureIssueState,
   updateIssueStateWithCas
 } from "../src/state/git-ref-state.js";
 
@@ -1135,6 +1138,7 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
         issueNumber: 30,
         command: "to-tickets",
         commandArgs: "",
+        model: "google/gemini-3.8-flash",
         commentId: 201,
         actor: "Maintainer",
         fallbackGithubToken: "ghs_test",
@@ -1359,6 +1363,7 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
           issueNumber: 50,
           command: "approve",
           commandArgs: "",
+          model: "google/gemini-3.8-flash",
           commentId: 500,
           actor: "Maintainer",
           fallbackGithubToken: "ghs_test",
@@ -1445,12 +1450,18 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
       );
     });
 
-    it.each([
+    it.each<{
+      scenario: string;
+      inputModel: string | undefined;
+      agentsConfig: ParsedAgentsConfig | null;
+      expectedPlanning: string;
+      expectedImplementation: string;
+      expectedReview: string;
+    }>([
       {
         scenario:
-          "resolvePhaseModels honours provider/model identifiers and providers dictionary from .github/agents.yml",
-        inputModel: undefined as string | undefined,
-        envVars: {} as Record<string, string | undefined>,
+          "resolvePhaseModels honours provider/model identifiers per phase from .github/agents.yml",
+        inputModel: undefined,
         agentsConfig: {
           ...DEFAULT_AGENTS_CONFIG,
           models: {
@@ -1460,7 +1471,7 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
           },
           providers: {
             azure: {
-              provider: "azure" as const,
+              provider: "azure",
               base_url: "https://epure.openai.azure.com"
             }
           }
@@ -1471,13 +1482,8 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
       },
       {
         scenario:
-          "resolvePhaseModels honours provider-prefixed DEFAULT_AGENTS_CONFIG models when the action input model is empty",
-        inputModel: "" as string | undefined,
-        envVars: {
-          ANTHROPIC_API_KEY: undefined,
-          OPENAI_API_KEY: undefined,
-          LLM_API_KEY: undefined
-        } as Record<string, string | undefined>,
+          "resolvePhaseModels uses agents.yml models when the action input model is empty",
+        inputModel: "",
         agentsConfig: DEFAULT_AGENTS_CONFIG,
         expectedPlanning: "anthropic/claude-sonnet-4-20250514",
         expectedImplementation: "anthropic/claude-sonnet-4-20250514",
@@ -1486,8 +1492,7 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
       {
         scenario:
           "resolvePhaseModels lets an explicit action input model override every agents.yml phase model",
-        inputModel: "google/gemini-2.5-pro" as string | undefined,
-        envVars: {} as Record<string, string | undefined>,
+        inputModel: "google/gemini-2.5-pro",
         agentsConfig: DEFAULT_AGENTS_CONFIG,
         expectedPlanning: "google/gemini-2.5-pro",
         expectedImplementation: "google/gemini-2.5-pro",
@@ -1495,109 +1500,103 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
       },
       {
         scenario:
-          "resolvePhaseModels honours bare claude-* and gpt-* models when ANTHROPIC_API_KEY and OPENAI_API_KEY are set in process.env",
-        inputModel: undefined as string | undefined,
-        envVars: {
-          ANTHROPIC_API_KEY: "sk-ant-env",
-          OPENAI_API_KEY: "sk-openai-env",
-          LLM_API_KEY: undefined
-        } as Record<string, string | undefined>,
+          "resolvePhaseModels lets an explicit action input model cover every phase when agents.yml is absent",
+        inputModel: "anthropic/claude-haiku-5-5",
+        agentsConfig: null,
+        expectedPlanning: "anthropic/claude-haiku-5-5",
+        expectedImplementation: "anthropic/claude-haiku-5-5",
+        expectedReview: "anthropic/claude-haiku-5-5"
+      },
+      {
+        scenario:
+          "resolvePhaseModels keeps bare claude-* and gpt-* models verbatim without any provider API key in the environment",
+        inputModel: undefined,
         agentsConfig: BARE_MODELS_AGENTS_CONFIG,
         expectedPlanning: "claude-sonnet-4-20250514",
         expectedImplementation: "claude-sonnet-4-20250514",
         expectedReview: "gpt-4.1"
-      },
-      {
-        scenario:
-          "resolvePhaseModels honours bare claude-* and gpt-* models verbatim when the orchestrator passes an explicit LLM API key",
-        inputModel: undefined as string | undefined,
-        envVars: {
-          ANTHROPIC_API_KEY: undefined,
-          OPENAI_API_KEY: undefined,
-          LLM_API_KEY: undefined
-        } as Record<string, string | undefined>,
-        agentsConfig: BARE_MODELS_AGENTS_CONFIG,
-        llmApiKey: "sk-explicit-llm-key",
-        expectedPlanning: "claude-sonnet-4-20250514",
-        expectedImplementation: "claude-sonnet-4-20250514",
-        expectedReview: "gpt-4.1"
-      },
-      {
-        scenario:
-          "resolvePhaseModels honours bare claude-* and gpt-* models verbatim when LLM_API_KEY is set in process.env",
-        inputModel: undefined as string | undefined,
-        envVars: {
-          ANTHROPIC_API_KEY: undefined,
-          OPENAI_API_KEY: undefined,
-          LLM_API_KEY: "sk-env-llm-key"
-        } as Record<string, string | undefined>,
-        agentsConfig: BARE_MODELS_AGENTS_CONFIG,
-        expectedPlanning: "claude-sonnet-4-20250514",
-        expectedImplementation: "claude-sonnet-4-20250514",
-        expectedReview: "gpt-4.1"
-      },
-      {
-        scenario:
-          "resolvePhaseModels falls back to DEFAULT_FALLBACK_LLM_MODEL for bare models when no provider config or LLM API key is available",
-        inputModel: undefined as string | undefined,
-        envVars: {
-          ANTHROPIC_API_KEY: undefined,
-          OPENAI_API_KEY: undefined,
-          LLM_API_KEY: undefined
-        } as Record<string, string | undefined>,
-        agentsConfig: BARE_MODELS_AGENTS_CONFIG,
-        expectedPlanning: DEFAULT_FALLBACK_LLM_MODEL,
-        expectedImplementation: DEFAULT_FALLBACK_LLM_MODEL,
-        expectedReview: DEFAULT_FALLBACK_LLM_MODEL
       }
     ])(
       "$scenario",
       ({
         inputModel,
-        envVars,
         agentsConfig,
-        llmApiKey,
         expectedPlanning,
         expectedImplementation,
         expectedReview
-      }: {
-        inputModel: string | undefined;
-        envVars: Record<string, string | undefined>;
-        agentsConfig: AgentsConfig;
-        llmApiKey?: string;
-        expectedPlanning: string;
-        expectedImplementation: string;
-        expectedReview: string;
       }) => {
-        const prevEnv: Record<string, string | undefined> = {};
-        for (const [k, v] of Object.entries(envVars)) {
-          prevEnv[k] = process.env[k];
-          if (v === undefined) {
-            delete process.env[k];
-          } else {
-            process.env[k] = v;
-          }
-        }
-        try {
-          const resolved = resolvePhaseModels(
-            inputModel,
-            agentsConfig,
-            llmApiKey
-          );
-          expect(resolved.planningModel).toBe(expectedPlanning);
-          expect(resolved.implementationModel).toBe(expectedImplementation);
-          expect(resolved.reviewModel).toBe(expectedReview);
-        } finally {
-          for (const [k, v] of Object.entries(prevEnv)) {
-            if (v === undefined) {
-              delete process.env[k];
-            } else {
-              process.env[k] = v;
-            }
-          }
-        }
+        const resolved = resolvePhaseModels(inputModel, agentsConfig);
+        expect(resolved.planningModel).toBe(expectedPlanning);
+        expect(resolved.implementationModel).toBe(expectedImplementation);
+        expect(resolved.reviewModel).toBe(expectedReview);
       }
     );
+
+    it.each<{
+      scenario: string;
+      inputModel: string | undefined;
+      agentsConfig: ParsedAgentsConfig | null;
+      expectedMissingKeys: readonly string[];
+    }>([
+      {
+        scenario:
+          "resolvePhaseModels rejects a run with neither an action input model nor .github/agents.yml",
+        inputModel: undefined,
+        agentsConfig: null,
+        expectedMissingKeys: [
+          "models.planning",
+          "models.implementation",
+          "models.review"
+        ]
+      },
+      {
+        scenario:
+          "resolvePhaseModels rejects agents.yml missing models.planning",
+        inputModel: undefined,
+        agentsConfig: parseAgentsYml(
+          "models:\n  implementation: anthropic/claude-sonnet-5\n  review: anthropic/claude-sonnet-5\n"
+        ),
+        expectedMissingKeys: ["models.planning"]
+      },
+      {
+        scenario:
+          "resolvePhaseModels rejects agents.yml missing models.implementation",
+        inputModel: undefined,
+        agentsConfig: parseAgentsYml(
+          "models:\n  planning: anthropic/claude-haiku-5-5\n  review: anthropic/claude-sonnet-5\n"
+        ),
+        expectedMissingKeys: ["models.implementation"]
+      },
+      {
+        scenario:
+          "resolvePhaseModels rejects agents.yml missing models.review",
+        inputModel: undefined,
+        agentsConfig: parseAgentsYml(
+          "models:\n  planning: anthropic/claude-haiku-5-5\n  implementation: anthropic/claude-sonnet-5\n"
+        ),
+        expectedMissingKeys: ["models.review"]
+      },
+      {
+        scenario:
+          "resolvePhaseModels treats a whitespace-only action input model as absent",
+        inputModel: "   ",
+        agentsConfig: parseAgentsYml(
+          "models:\n  planning: anthropic/claude-haiku-5-5\n"
+        ),
+        expectedMissingKeys: ["models.implementation", "models.review"]
+      }
+    ])("$scenario", ({ inputModel, agentsConfig, expectedMissingKeys }) => {
+      const resolve = (): unknown => resolvePhaseModels(inputModel, agentsConfig);
+      expect(resolve).toThrowError(MissingModelConfigError);
+      expect(resolve).toThrowError(
+        expect.objectContaining({
+          missingKeys: expectedMissingKeys,
+          message: expect.stringContaining(
+            expectedMissingKeys.map((k) => `'${k}'`).join(", ")
+          )
+        })
+      );
+    });
   });
 
   describe("7. extractJsonObject and parseAndValidateStructuredOutput with embedded markdown code fences", () => {
@@ -2073,6 +2072,7 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
         issueNumber: 123,
         command: "reply",
         commandArgs: "",
+        model: "google/gemini-3.8-flash",
         actor: "maintainer",
         commentId: 901,
         fallbackGithubToken: "ghs_testToken1234567890",
@@ -2100,6 +2100,7 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
         issueNumber: 123,
         command: "reply",
         commandArgs: "",
+        model: "google/gemini-3.8-flash",
         actor: "maintainer",
         commentId: 903,
         fallbackGithubToken: "ghs_testToken1234567890",
@@ -2390,6 +2391,16 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
         expectedReason: "llm_request_invalid" as NeedsHumanEscalationReason,
         expectedHeadlineSubstring:
           "LLM request rejected or response invalid after structured-output retry (non-transient)"
+      },
+      {
+        id: "anthropic-refusal-maps-to-llm-refusal",
+        err: new LLMError(
+          "Anthropic model 'claude-haiku-5-5' refused the request (stop_reason: refusal).",
+          { provider: "anthropic", reasonCode: "REFUSAL" }
+        ),
+        expectedReason: "llm_refusal" as NeedsHumanEscalationReason,
+        expectedHeadlineSubstring:
+          "LLM model refused the request (`stop_reason: refusal`)"
       }
     ])("$id", ({ err, expectedReason, expectedHeadlineSubstring }) => {
       const reason = resolveLlmEscalationReason(err);
@@ -2407,16 +2418,28 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
       {
         id: "escalates-unhandled-non-llm-internal-error-to-suspended-with-internal-error-reason",
         failureMode: "non_llm_internal_error" as const,
+        model: "google/gemini-3.8-flash" as string | undefined,
+        expectsLlmCall: false,
         expectedHeadline:
           "Internal orchestrator error — code-fix budget preserved"
       },
       {
         id: "escalates-persistent-structured-output-validation-error-with-llm-request-invalid-reason",
         failureMode: "persistent_structured_validation_error" as const,
+        model: "google/gemini-3.8-flash" as string | undefined,
+        expectsLlmCall: true,
         expectedHeadline:
           "LLM request rejected or response invalid after structured-output retry (non-transient) — code-fix budget preserved"
+      },
+      {
+        id: "escalates-missing-model-input-and-agents-yml-with-model-config-missing-reason-before-any-llm-call",
+        failureMode: "missing_model_config" as const,
+        model: undefined as string | undefined,
+        expectsLlmCall: false,
+        expectedHeadline:
+          "LLM model configuration missing — set `models.planning`, `models.implementation`, `models.review` in `.github/agents.yml`"
       }
-    ])("$id", async ({ failureMode, expectedHeadline }) => {
+    ])("$id", async ({ failureMode, model, expectsLlmCall, expectedHeadline }) => {
       const stateStore = createInMemoryGitRefStateStore();
       await updateIssueStateWithCas({
         issueNumber: 123,
@@ -2432,12 +2455,14 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
 
       const postedComments: string[] = [];
       const addedLabels: string[][] = [];
+      let llmCalls = 0;
 
       const mockFetch: typeof fetch = async (inputUrl, init) => {
         const url = String(inputUrl);
         const method = init?.method ?? "GET";
 
         if (url.includes("generativelanguage.googleapis.com")) {
+          llmCalls += 1;
           return new Response(
             JSON.stringify({
               candidates: [
@@ -2524,6 +2549,7 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
         commentId: 950,
         fallbackGithubToken: "ghs_testToken1234567890",
         llmApiKey: "gm_testKey1234567890",
+        model,
         stateStore,
         fetchImpl: mockFetch
       });
@@ -2532,11 +2558,281 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
       expect(res.status).toBe("suspended");
       expect(addedLabels).toContainEqual(["needs-human"]);
       expect(postedComments.at(-1)).toContain(expectedHeadline);
+      expect(postedComments.at(-1)).not.toContain(
+        "LLM provider quota/billing exhaustion"
+      );
+      expect(llmCalls > 0).toBe(expectsLlmCall);
 
       const snap = await stateStore.readRef("refs/epure/state/123");
       expect(snap.state?.status).toBe("suspended");
       expect(snap.state?.code_fix_attempts_used).toBe(2);
     });
+
+    const INVALID_EFFORT_AGENTS_YAML = [
+      "models:",
+      "  planning: anthropic/claude-haiku-5-5",
+      "  implementation: anthropic/claude-haiku-5-5",
+      "  review: anthropic/claude-haiku-5-5",
+      "providers:",
+      "  anthropic:",
+      "    provider: anthropic",
+      "    effort: extreme",
+      ""
+    ].join("\n");
+
+    async function runModelGatedCommand(params: {
+      readonly command: EpureCommandName;
+      readonly commentId: number | undefined;
+      readonly initialState: Partial<EpureIssueState> | undefined;
+      readonly devAgentsYaml: string | undefined;
+    }) {
+      const stateStore = createInMemoryGitRefStateStore();
+      if (params.initialState) {
+        await updateIssueStateWithCas({
+          issueNumber: 123,
+          store: stateStore,
+          mutator: (prev) => ({ ...prev, ...params.initialState })
+        });
+      }
+      const stateBefore = await stateStore.readRef("refs/epure/state/123");
+
+      const postedComments: string[] = [];
+      const addedLabels: string[][] = [];
+      const treeBranchesRead: string[] = [];
+      let llmCalls = 0;
+
+      const mockFetch: typeof fetch = async (inputUrl, init) => {
+        const url = String(inputUrl);
+        const method = init?.method ?? "GET";
+
+        if (!url.includes("api.github.com")) {
+          llmCalls += 1;
+          return new Response(JSON.stringify({}), { status: 500 });
+        }
+        const treeMatch = url.match(/\/git\/trees\/([^?]+)\?recursive=1/);
+        if (treeMatch && method === "GET") {
+          const branch = decodeURIComponent(treeMatch[1]!);
+          treeBranchesRead.push(branch);
+          const tree =
+            branch === "dev" && params.devAgentsYaml !== undefined
+              ? [{ path: ".github/agents.yml", type: "blob", sha: "agentsdev" }]
+              : [];
+          return new Response(JSON.stringify({ tree }), { status: 200 });
+        }
+        if (url.endsWith("/git/blobs/agentsdev") && method === "GET") {
+          return new Response(
+            JSON.stringify({
+              content: Buffer.from(params.devAgentsYaml ?? "", "utf8").toString(
+                "base64"
+              ),
+              encoding: "base64"
+            }),
+            { status: 200 }
+          );
+        }
+        if (url.endsWith("/issues/123") && method === "GET") {
+          return new Response(
+            JSON.stringify({
+              number: 123,
+              title: "Check markdown links",
+              body: "Plan body"
+            }),
+            { status: 200 }
+          );
+        }
+        if (url.includes("/issues/123/comments") && method === "GET") {
+          return new Response(JSON.stringify([]), { status: 200 });
+        }
+        if (url.includes("/issues/123/comments") && method === "POST") {
+          const parsed = JSON.parse(String(init?.body ?? "{}")) as {
+            body?: string;
+          };
+          postedComments.push(parsed.body ?? "");
+          return new Response(JSON.stringify({ id: 951 }), { status: 201 });
+        }
+        if (url.includes("/issues/123/labels") && method === "POST") {
+          const parsed = JSON.parse(String(init?.body ?? "{}")) as {
+            labels?: string[];
+          };
+          addedLabels.push(parsed.labels ?? []);
+          return new Response(JSON.stringify([]), { status: 200 });
+        }
+        return new Response(JSON.stringify({}), { status: 200 });
+      };
+
+      const res = await orchestrateIssueCommand({
+        repository: "Hartorn-Inc/CozyVTT",
+        issueNumber: 123,
+        command: params.command,
+        commandArgs: "",
+        actor: "maintainer",
+        commentId: params.commentId,
+        fallbackGithubToken: "ghs_testToken1234567890",
+        llmApiKey: "gm_testKey1234567890",
+        model: undefined,
+        stateStore,
+        fetchImpl: mockFetch
+      });
+      const stateAfter = await stateStore.readRef("refs/epure/state/123");
+
+      return {
+        res,
+        stateBefore,
+        stateAfter,
+        postedComments,
+        addedLabels,
+        treeBranchesRead,
+        llmCalls
+      };
+    }
+
+    it.each<{
+      id: string;
+      command: EpureCommandName;
+      commentId: number | undefined;
+      initialState: Partial<EpureIssueState> | undefined;
+      devAgentsYaml: string | undefined;
+    }>([
+      {
+        id: "reply-on-idle-issue-without-models-is-a-silent-no-op",
+        command: "reply",
+        commentId: 950,
+        initialState: undefined,
+        devAgentsYaml: undefined
+      },
+      {
+        id: "reply-on-active-implementation-issue-without-models-is-a-silent-no-op",
+        command: "reply",
+        commentId: 950,
+        initialState: { phase: "implementation", status: "active" },
+        devAgentsYaml: undefined
+      },
+      {
+        id: "continue-with-nothing-waiting-without-models-is-a-silent-no-op",
+        command: "continue",
+        commentId: undefined,
+        initialState: {
+          phase: "implementation",
+          status: "active",
+          subphase: "idle"
+        },
+        devAgentsYaml: undefined
+      },
+      {
+        id: "reply-on-idle-issue-with-invalid-agents-yml-is-a-silent-no-op",
+        command: "reply",
+        commentId: 950,
+        initialState: undefined,
+        devAgentsYaml: INVALID_EFFORT_AGENTS_YAML
+      }
+    ])("$id", async (testCase) => {
+      const out = await runModelGatedCommand(testCase);
+
+      expect(out.res.executed).toBe(false);
+      expect(out.addedLabels).toEqual([]);
+      expect(out.postedComments).toEqual([]);
+      expect(out.stateAfter).toEqual(out.stateBefore);
+      expect(out.llmCalls).toBe(0);
+    });
+
+    it.each<{
+      id: string;
+      command: EpureCommandName;
+      initialState: Partial<EpureIssueState> | undefined;
+      devAgentsYaml: string | undefined;
+      expectedCommentSubstring: string;
+      expectMainBranchConfigRead: boolean;
+    }>([
+      {
+        id: "plan-without-models-escalates-model-config-missing",
+        command: "plan",
+        initialState: undefined,
+        devAgentsYaml: undefined,
+        expectedCommentSubstring:
+          "LLM model configuration missing — set `models.planning`, `models.implementation`, `models.review`",
+        expectMainBranchConfigRead: true
+      },
+      {
+        id: "reply-during-grilling-without-models-escalates-model-config-missing",
+        command: "reply",
+        initialState: {
+          phase: "grilling",
+          status: "active",
+          active_branch: "plan/123-links"
+        },
+        devAgentsYaml: undefined,
+        expectedCommentSubstring: "LLM model configuration missing",
+        expectMainBranchConfigRead: true
+      },
+      {
+        id: "approve-without-models-escalates-model-config-missing",
+        command: "approve",
+        initialState: { phase: "review", status: "awaiting_human_approval" },
+        devAgentsYaml: undefined,
+        expectedCommentSubstring: "LLM model configuration missing",
+        expectMainBranchConfigRead: true
+      },
+      {
+        id: "sync-without-models-escalates-model-config-missing",
+        command: "sync",
+        initialState: { phase: "implementation", status: "active" },
+        devAgentsYaml: undefined,
+        expectedCommentSubstring: "LLM model configuration missing",
+        expectMainBranchConfigRead: true
+      },
+      {
+        id: "plan-with-partial-dev-agents-yml-names-only-the-missing-keys",
+        command: "plan",
+        initialState: undefined,
+        devAgentsYaml: "models:\n  planning: anthropic/claude-haiku-5-5\n",
+        expectedCommentSubstring:
+          "LLM model configuration missing — set `models.implementation`, `models.review`",
+        expectMainBranchConfigRead: false
+      },
+      {
+        id: "model-config-missing-escalation-tells-the-maintainer-to-reissue-the-original-command",
+        command: "plan",
+        initialState: undefined,
+        devAgentsYaml: undefined,
+        expectedCommentSubstring:
+          "puis republiez la commande `/epure` d'origine",
+        expectMainBranchConfigRead: true
+      },
+      {
+        id: "plan-with-invalid-dev-agents-yml-escalates-the-parse-error-without-falling-back-to-main",
+        command: "plan",
+        initialState: undefined,
+        devAgentsYaml: INVALID_EFFORT_AGENTS_YAML,
+        expectedCommentSubstring:
+          "Invalid .github/agents.yml on 'dev': providers.anthropic.effort 'extreme' must be one of",
+        expectMainBranchConfigRead: false
+      }
+    ])(
+      "$id",
+      async ({
+        command,
+        initialState,
+        devAgentsYaml,
+        expectedCommentSubstring,
+        expectMainBranchConfigRead
+      }) => {
+        const out = await runModelGatedCommand({
+          command,
+          commentId: 950,
+          initialState,
+          devAgentsYaml
+        });
+
+        expect(out.res.status).toBe("suspended");
+        expect(out.addedLabels).toContainEqual(["needs-human"]);
+        expect(out.postedComments.at(-1)).toContain(expectedCommentSubstring);
+        expect(out.stateAfter.state?.status).toBe("suspended");
+        expect(out.llmCalls).toBe(0);
+        expect(out.treeBranchesRead.includes("main")).toBe(
+          expectMainBranchConfigRead
+        );
+      }
+    );
 
     it.each([
       {
@@ -2596,6 +2892,7 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
 
     it("excludes deletedFiles from reviewer inspection tools and reports DELETED status on read_file / read_line_range", async () => {
       const tools = buildReviewerInspectionTools({
+        model: "google/gemini-3.8-flash",
         repository: "Hartorn-Inc/CozyVTT",
         prNumber: 146,
         headBranch: "task/137-triage",
@@ -3472,6 +3769,7 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
           issueNumber: 70,
           command: "approve",
           commandArgs: "",
+          model: "google/gemini-3.8-flash",
           commentId: 999,
           actor: "Maintainer",
           fallbackGithubToken: "ghs_mock_token",

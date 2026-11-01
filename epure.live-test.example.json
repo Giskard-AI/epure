@@ -11,6 +11,19 @@
           "api_key": "os.environ/GEMINI_API_KEY"
         }
       }
+    },
+    {
+      "id": "claude-haiku-target",
+      "planningModel": "anthropic/claude-haiku-5-5",
+      "executionModel": "anthropic/claude-haiku-5-5",
+      "reviewModel": "anthropic/claude-haiku-5-5",
+      "providers": {
+        "anthropic": {
+          "provider": "anthropic",
+          "api_key": "os.environ/ANTHROPIC_API_KEY",
+          "effort": "high"
+        }
+      }
     }
   ]
 }

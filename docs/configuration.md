@@ -109,16 +109,19 @@ In `.github/workflows/epure-issue-command.yml`, the `orchestrate-command` job ru
 
 EPURE includes a zero-dependency multi-provider `LLMClient` supporting **Google Gemini** (`google/` or `gemini/`), **OpenAI** (`openai/`), **Azure OpenAI** (`azure/`), **Azure AI Foundry** (`azure_ai/`), and **Anthropic** (`anthropic/`).
 
+`models.planning`, `models.implementation`, and `models.review` are **required**: EPURE has no fallback model, consistent with ADR-0012's no-automatic-fallback principle. A non-empty `model` input on the `orchestrate-issue` action overrides all three phases; otherwise each phase uses its `models.<phase>` value verbatim. When a command that calls an LLM finds a key missing, it suspends with a `needs-human` escalation (`model_config_missing`) naming the key to set, before any LLM call; commands that make no LLM call (`status`, `cancel`, replies outside grilling/spec, `continue` with nothing waiting) are unaffected.
+
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `models.planning` | `string` | `"anthropic/claude-sonnet-4-20250514"` | Model used for `/epure plan` Grill interviews, `runGoldfishSpecAudit`, and `/epure to-spec` / `/epure to-tickets` (`<provider>/<model>` or bare model). Override with `setup-repo --planning-model` (or `--model` for all phases). |
-| `models.implementation` | `string` | `"anthropic/claude-sonnet-4-20250514"` | Model used for incremental workspace tool loops (`write_repo_file`, `patch_repo_file`), 3-way conflict resolution, and Stage 1/2/3 auto-remediation. Override with `setup-repo --implementation-model` (or `--model`). |
-| `models.review` | `string` | `"openai/gpt-4.1"` | Model used for the multi-agent PR review roster, `runEpicConvergenceAudit`, `user-advocate`, and zero-temperature squash commit synthesis. Override with `setup-repo --review-model` (or `--model`). |
+| `models.planning` | `string` | *(Required; `setup-repo` writes `"anthropic/claude-sonnet-4-20250514"`)* | Model used for `/epure plan` Grill interviews, `/epure to-spec` / `/epure to-tickets`, and plan-to-feature ADR reconciliation (`<provider>/<model>` or bare model). Override with `setup-repo --planning-model` (or `--model` for all phases). |
+| `models.implementation` | `string` | *(Required; `setup-repo` writes `"anthropic/claude-sonnet-4-20250514"`)* | Model used for incremental workspace tool loops (`write_repo_file`, `patch_repo_file`), 3-way conflict resolution, and Stage 1/2/3 auto-remediation. Override with `setup-repo --implementation-model` (or `--model`). |
+| `models.review` | `string` | *(Required; `setup-repo` writes `"openai/gpt-4.1"`)* | Model used for the multi-agent PR review roster, `runGoldfishSpecAudit`, `runEpicConvergenceAudit`, `user-advocate`, and squash commit synthesis (requested at temperature `0.0`; no temperature is sent to Claude Opus 4.7+ / Claude 5.x+). Override with `setup-repo --review-model` (or `--model`). |
 | `providers.<alias>.provider` | `"google" \| "openai" \| "azure" \| "azure_ai" \| "anthropic"` | *(Optional)* | Underlying protocol family for a custom provider alias referenced in `models.*` (`<alias>/<model>`). |
 | `providers.<alias>.api_key` | `string` | `os.environ/<VAR>` | Secret-free environment variable reference (`os.environ/VAR_NAME`) resolved at runtime from `process.env`. Never commit literal API keys in `.github/agents.yml`. |
 | `providers.<alias>.base_url` | `string` | Provider default | Custom base URL or `os.environ/VAR_NAME`. |
 | `providers.<alias>.api_version` | `string` | `"2024-10-21"` | Azure OpenAI deployment API version (`?api-version=...`). |
 | `providers.<alias>.default_headers` | `Record<string, string>` | `{}` | Optional custom HTTP headers attached to every request for this provider alias. |
+| `providers.<alias>.effort` | `"low" \| "medium" \| "high" \| "xhigh" \| "max"` | *(Optional, model default)* | Anthropic only: sent as `output_config.effort` on every request for every model routed through this alias (e.g. `effort: high` for `anthropic/claude-haiku-5-5`). Omitted when unset. Any other value makes `.github/agents.yml` invalid: commands that call an LLM escalate to `needs-human` with the parse error. `temperature` is automatically omitted for Claude Opus 4.7+ and Claude 5.x+ models, which reject sampling parameters. |
 
 ### `verification` & `verification.targets` (Polyglot Stage 1 & Stage 2 CI — ADR-0028, ADR-0030)
 

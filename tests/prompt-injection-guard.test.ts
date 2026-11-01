@@ -145,6 +145,7 @@ describe("OWASP LLM01 — Prompt Injection Guard & Spotlighting Defenses", () =>
       }
     ])("$id", async ({ fileContent, expectedPatternSubstring }) => {
       const review = await runMultiAgentPrReviewPass({
+        model: "google/gemini-3.8-flash",
         repository: "Hartorn-Inc/enclume-astrale",
         prNumber: 42,
         headBranch: "task/21-forge",
@@ -212,6 +213,7 @@ describe("OWASP LLM01 — Prompt Injection Guard & Spotlighting Defenses", () =>
       };
 
       await generateSemanticSquashCommitFromDiff({
+        model: "google/gemini-3.8-flash",
         prNumber: 12,
         targetBranch: "feature/10-test",
         planIssueNumber: 10,
@@ -259,6 +261,7 @@ describe("OWASP LLM01 — Prompt Injection Guard & Spotlighting Defenses", () =>
       };
 
       await callLlmText({
+        model: "google/gemini-3.8-flash",
         apiKey: "test-key",
         prompt: "Hello",
         fetchImpl: mockFetch

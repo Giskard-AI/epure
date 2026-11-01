@@ -1,6 +1,9 @@
 import type { EpureCommandName } from "../auth/issue-command-gate.js";
-import type { AgentsConfig } from "../bootstrap/setup-repo.js";
-import { DEFAULT_FALLBACK_LLM_MODEL } from "../llm/client.js";
+import type {
+  AgentsConfig,
+  AgentsModelsConfig,
+  ParsedAgentsConfig
+} from "../bootstrap/setup-repo.js";
 import type {
   CheckRunAnnotationRecord,
   EpicConvergenceEscalationDetails,
@@ -319,43 +322,45 @@ export interface ResolvedPhaseModels {
   readonly requestTimeoutMs?: number | undefined;
 }
 
-function canUsePhaseModelFromConfig(
-  candidateModel: string | undefined,
-  hasProvidersMap: boolean,
-  hasLlmApiKey: boolean
-): boolean {
-  if (!candidateModel || candidateModel.trim().length === 0) {
-    return false;
+export type ModelConfigKey = `models.${keyof AgentsModelsConfig}`;
+
+export class MissingModelConfigError extends Error {
+  readonly missingKeys: readonly ModelConfigKey[];
+
+  constructor(missingKeys: readonly ModelConfigKey[]) {
+    super(
+      `Missing LLM model configuration: set ${missingKeys.map((k) => `'${k}'`).join(", ")} in .github/agents.yml (or the action 'model' input). EPURE has no fallback model.`
+    );
+    this.name = "MissingModelConfigError";
+    this.missingKeys = missingKeys;
   }
-  const clean = candidateModel.trim();
-  if (hasProvidersMap || hasLlmApiKey || clean.includes("/")) {
-    return true;
-  }
-  const lower = clean.toLowerCase();
-  if (lower.startsWith("gemini-")) {
-    return true;
-  }
-  if (lower.startsWith("claude-")) {
-    return Boolean(process.env.ANTHROPIC_API_KEY?.trim());
-  }
-  if (
-    lower.startsWith("gpt-") ||
-    lower.startsWith("o1") ||
-    lower.startsWith("o3") ||
-    lower.startsWith("o4")
-  ) {
-    return Boolean(process.env.OPENAI_API_KEY?.trim());
-  }
-  return false;
 }
+
+const MODEL_PHASES = [
+  "planning",
+  "implementation",
+  "review"
+] as const satisfies readonly (keyof AgentsModelsConfig)[];
 
 export function resolvePhaseModels(
   inputModel: string | undefined,
-  agentsConfig: AgentsConfig | null | undefined,
-  llmApiKey?: string | undefined
+  agentsConfig: ParsedAgentsConfig | null | undefined
 ): ResolvedPhaseModels {
-  const fallbackModel = inputModel?.trim() || DEFAULT_FALLBACK_LLM_MODEL;
-  const explicitOverride = Boolean(inputModel && inputModel.trim().length > 0);
+  const override = inputModel?.trim();
+  const pickModel = (phase: keyof AgentsModelsConfig): string =>
+    override || agentsConfig?.models[phase]?.trim() || "";
+  const models: AgentsModelsConfig = {
+    planning: pickModel("planning"),
+    implementation: pickModel("implementation"),
+    review: pickModel("review")
+  };
+  const missingKeys = MODEL_PHASES.filter((phase) => !models[phase]).map(
+    (phase) => `models.${phase}` as const
+  );
+  if (missingKeys.length > 0) {
+    throw new MissingModelConfigError(missingKeys);
+  }
+
   const providers = agentsConfig?.providers;
   const maxTransientRetries = agentsConfig?.max_transient_api_retries;
   const transientRetryBackoffSeconds =
@@ -365,36 +370,11 @@ export function resolvePhaseModels(
     agentsConfig.llm_request_timeout_seconds > 0
       ? agentsConfig.llm_request_timeout_seconds * 1000
       : 900_000;
-  const hasProvidersMap = Boolean(
-    providers && Object.keys(providers).length > 0
-  );
-  const hasLlmApiKey = Boolean(
-    llmApiKey?.trim() || process.env.LLM_API_KEY?.trim()
-  );
-
-  if (explicitOverride || !agentsConfig) {
-    return {
-      planningModel: fallbackModel,
-      implementationModel: fallbackModel,
-      reviewModel: fallbackModel,
-      requestTimeoutMs,
-      ...(providers ? { providers } : {}),
-      ...(maxTransientRetries !== undefined ? { maxTransientRetries } : {}),
-      ...(transientRetryBackoffSeconds !== undefined
-        ? { transientRetryBackoffSeconds }
-        : {})
-    };
-  }
-
-  const pickModel = (phaseCandidate: string | undefined): string =>
-    canUsePhaseModelFromConfig(phaseCandidate, hasProvidersMap, hasLlmApiKey)
-      ? phaseCandidate!.trim()
-      : fallbackModel;
 
   return {
-    planningModel: pickModel(agentsConfig.models?.planning),
-    implementationModel: pickModel(agentsConfig.models?.implementation),
-    reviewModel: pickModel(agentsConfig.models?.review),
+    planningModel: models.planning,
+    implementationModel: models.implementation,
+    reviewModel: models.review,
     requestTimeoutMs,
     ...(providers ? { providers } : {}),
     ...(maxTransientRetries !== undefined ? { maxTransientRetries } : {}),

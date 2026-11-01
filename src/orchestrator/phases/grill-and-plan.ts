@@ -757,7 +757,7 @@ export async function runGrillAndPlanPhase(params: {
       goldfishAudit = await runGoldfishSpecAudit({
         specArtifacts,
         apiKey: llmApiKey,
-        model: phaseModels.reviewModel || phaseModels.planningModel,
+        model: phaseModels.reviewModel,
         providers: phaseModels.providers,
         maxTransientRetries: phaseModels.maxTransientRetries,
         transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,

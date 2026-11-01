@@ -1829,6 +1829,13 @@ function buildProtectedSystemInstruction(systemInstruction) {
 
 ${trimmed}`;
 }
+var PROVIDER_EFFORTS = [
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max"
+];
 
 // src/llm/providers/schema-utils.ts
 var GEMINI_SUPPORTED_SCHEMA_KEYS = /* @__PURE__ */ new Set([
@@ -1975,11 +1982,24 @@ function buildAnthropicMessagesUrl(baseUrl) {
   }
   return `${rawBase}/v1/messages`;
 }
+var SAMPLING_PARAMS_MODEL_PATTERN = /^claude-(?:3-|(?:opus|sonnet|haiku)-4(?:-[0-6])?(?:-\d{8})?$)/;
+function throwIfRefused(stopReason, model) {
+  if (stopReason === "refusal") {
+    throw new LLMError(
+      `Anthropic model '${model}' refused the request (stop_reason: refusal).`,
+      { provider: "anthropic", reasonCode: "REFUSAL" }
+    );
+  }
+}
 async function executeAnthropicProvider(input) {
   const { model, apiKey, providerConfig, options, executeRequest } = input;
   const rawBaseUrl = providerConfig?.baseUrl ?? providerConfig?.base_url;
   const apiVersion = providerConfig?.apiVersion ?? providerConfig?.api_version ?? "2023-06-01";
   const defaultHeaders = providerConfig?.defaultHeaders ?? providerConfig?.default_headers ?? {};
+  const effort = providerConfig?.effort;
+  const acceptsSamplingParams = SAMPLING_PARAMS_MODEL_PATTERN.test(
+    model.trim().toLowerCase()
+  );
   const url = buildAnthropicMessagesUrl(rawBaseUrl);
   const headers = {
     "x-api-key": apiKey.trim(),
@@ -2008,7 +2028,7 @@ async function executeAnthropicProvider(input) {
     const body = {
       model,
       max_tokens: options.maxOutputTokens ?? 64e3,
-      temperature: options.temperature ?? 0.2,
+      ...acceptsSamplingParams ? { temperature: options.temperature ?? 0.2 } : {},
       system: effectiveSystemInstruction,
       messages
     };
@@ -2020,12 +2040,17 @@ async function executeAnthropicProvider(input) {
         body.tool_choice = { type: "none" };
       }
     }
-    if (options.responseSchema) {
+    if (options.responseSchema || effort) {
       body.output_config = {
-        format: {
-          type: "json_schema",
-          schema: closeObjectSchemasForOpenAI(options.responseSchema.schema)
-        }
+        ...effort ? { effort } : {},
+        ...options.responseSchema ? {
+          format: {
+            type: "json_schema",
+            schema: closeObjectSchemasForOpenAI(
+              options.responseSchema.schema
+            )
+          }
+        } : {}
       };
     }
     const response = await executeRequest(url, {
@@ -2044,6 +2069,7 @@ async function executeAnthropicProvider(input) {
       });
     }
     const data = await response.json();
+    throwIfRefused(data.stop_reason, model);
     const contentBlocks = data.content ?? [];
     const toolUseBlocks = contentBlocks.filter(
       (b) => b.type === "tool_use" && Boolean(b.id && b.name)
@@ -2133,6 +2159,7 @@ Output ONLY a corrected, complete JSON object strictly matching the required sch
               });
             }
             const retryData = await retryResponse.json();
+            throwIfRefused(retryData.stop_reason, model);
             currentText = (retryData.content ?? []).filter((b) => b.type === "text").map((b) => b.text ?? "").join("").trim();
             continue;
           }
@@ -2777,7 +2804,6 @@ Output ONLY a corrected, complete JSON object strictly matching the required sch
 }
 
 // src/llm/client.ts
-var DEFAULT_FALLBACK_LLM_MODEL = "google/gemini-3.8-flash";
 function resolveConfigValue(val, env = process.env) {
   if (val === void 0) {
     return void 0;
@@ -2844,11 +2870,12 @@ function normalizeProviderConfig(raw, env = process.env) {
     ...resolvedApiKey ? { apiKey: resolvedApiKey, api_key: apiKeyRaw } : apiKeyRaw ? { api_key: apiKeyRaw } : {},
     ...resolvedBaseUrl ? { baseUrl: resolvedBaseUrl, base_url: baseUrlRaw } : baseUrlRaw ? { base_url: baseUrlRaw } : {},
     ...resolvedApiVersion ? { apiVersion: resolvedApiVersion, api_version: apiVersionRaw } : apiVersionRaw ? { api_version: apiVersionRaw } : {},
-    ...defaultHeaders ? { defaultHeaders: { ...defaultHeaders }, default_headers: { ...defaultHeaders } } : {}
+    ...defaultHeaders ? { defaultHeaders: { ...defaultHeaders }, default_headers: { ...defaultHeaders } } : {},
+    ...raw.effort ? { effort: raw.effort } : {}
   };
 }
 function parseModelIdentifier(modelId, configuredProviders, env = process.env) {
-  const effectiveModelId = modelId && modelId.trim().length > 0 ? modelId.trim() : DEFAULT_FALLBACK_LLM_MODEL;
+  const effectiveModelId = modelId.trim();
   if (effectiveModelId.includes("/")) {
     const slashIndex = effectiveModelId.indexOf("/");
     const prefix = effectiveModelId.slice(0, slashIndex).trim();
@@ -3107,7 +3134,7 @@ async function callLlmText(options) {
   try {
     const res = await client.complete({
       apiKey: options.apiKey,
-      model: options.model ?? DEFAULT_FALLBACK_LLM_MODEL,
+      model: options.model,
       systemInstruction: options.systemInstruction ?? "",
       userPrompt: options.userPrompt ?? options.prompt ?? "",
       temperature: options.temperature,
@@ -3145,7 +3172,7 @@ async function callLlmJson(options) {
     try {
       const res = await client.complete({
         apiKey: options.apiKey,
-        model: options.model ?? DEFAULT_FALLBACK_LLM_MODEL,
+        model: options.model,
         systemInstruction: options.systemInstruction ?? "",
         userPrompt: options.userPrompt ?? options.prompt ?? "",
         temperature: options.temperature,
@@ -3308,6 +3335,9 @@ function normalizeAgentsProvidersMap(providers, preferSnakeCase = false) {
       entry[useSnake ? "default_headers" : "defaultHeaders"] = {
         ...defaultHeadersVal
       };
+    }
+    if (raw.effort !== void 0) {
+      entry.effort = raw.effort;
     }
     out[cleanAlias] = attachDualProviderConfigGetters(entry);
   }
@@ -3715,6 +3745,14 @@ function parseAgentsYaml(yamlContent) {
               currentObj.base_url = v;
             } else if (k === "api_version" || k === "apiVersion") {
               currentObj.api_version = v;
+            } else if (k === "effort") {
+              const effort = PROVIDER_EFFORTS.find((e) => e === v);
+              if (!effort) {
+                throw new Error(
+                  `providers.${currentProviderAlias}.effort '${v}' must be one of: ${PROVIDER_EFFORTS.join(", ")}.`
+                );
+              }
+              currentObj.effort = effort;
             }
           }
           providers[currentProviderAlias] = attachDualProviderConfigGetters(currentObj);
@@ -3918,6 +3956,7 @@ function parseAgentsYaml(yamlContent) {
   const resolved = resolveAgentsConfig(overrides);
   return {
     ...resolved.config,
+    models,
     max_epic_phases: resolved.config.max_epic_phases ?? 2,
     ...task_auto_merge_enabled !== void 0 ? { task_auto_merge_enabled } : {},
     ...github_pages_human_consent !== void 0 ? { github_pages_human_consent } : {},
@@ -5098,8 +5137,11 @@ async function loadRepoAgentsConfig(gh, branch = "dev") {
   }
   try {
     return parseAgentsYaml(rawYaml);
-  } catch {
-    return null;
+  } catch (err) {
+    throw new Error(
+      `Invalid .github/agents.yml on '${branch}': ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err }
+    );
   }
 }
 async function loadOrchestratorStateFromGitRef(store, issueNumber) {
@@ -6588,7 +6630,7 @@ async function runUserAdvocateDesignGate(params) {
     ].join("\n");
     const parsed = await callLlmJson({
       apiKey: params.llmApiKey,
-      model: params.model ?? DEFAULT_FALLBACK_LLM_MODEL,
+      model: params.model,
       providers: params.providers,
       maxTransientRetries: params.maxTransientRetries,
       transientRetryBackoffSeconds: params.transientRetryBackoffSeconds,
@@ -8011,6 +8053,9 @@ function resolveLlmEscalationReason(err) {
   if (isTransientLLMError(err)) {
     return "transient_llm_api_exhausted";
   }
+  if (err.reasonCode === "REFUSAL") {
+    return "llm_refusal";
+  }
   return "llm_request_invalid";
 }
 var EPURE_SYNTHETIC_CHECK_NAMES = /* @__PURE__ */ new Set([
@@ -8732,6 +8777,11 @@ function formatNeedsHumanEscalationComment(input) {
     reasonHeadline = "LLM provider quota/billing exhaustion or authentication failure (ADR-0012: no automatic fallback)";
   } else if (input.reason === "llm_request_invalid") {
     reasonHeadline = "LLM request rejected or response invalid after structured-output retry (non-transient) \u2014 code-fix budget preserved";
+  } else if (input.reason === "llm_refusal") {
+    reasonHeadline = "LLM model refused the request (`stop_reason: refusal`) \u2014 code-fix budget preserved";
+  } else if (input.reason === "model_config_missing") {
+    const keys = (input.missingModelKeys ?? []).map((k) => `\`${k}\``).join(", ");
+    reasonHeadline = `LLM model configuration missing \u2014 set ${keys} in \`.github/agents.yml\` (or the action \`model\` input); no fallback model`;
   } else if (input.reason === "internal_error") {
     reasonHeadline = "Internal orchestrator error \u2014 code-fix budget preserved";
   } else {
@@ -8748,6 +8798,11 @@ function formatNeedsHumanEscalationComment(input) {
     `- **Statut d'orchestration** : \`suspended\` (label \`needs-human\` appliqu\xE9)`,
     `- **Cause de l'escalade** : ${reasonHeadline}`
   );
+  if (input.reason === "model_config_missing") {
+    lines.push(
+      "- **Reprise** : ajoutez les cl\xE9s manquantes dans `.github/agents.yml` sur `dev` (ou relancez `setup-repo`), puis republiez la commande `/epure` d'origine (`/epure continue` ne reprend que les ex\xE9cutions en phase d'impl\xE9mentation)."
+    );
+  }
   if (input.prUrl) {
     lines.push(`- **Pull Request** : ${input.prUrl}`);
   }
@@ -8917,7 +8972,7 @@ ${snippet}`;
     ].join("\n");
     const parsed = await callLlmJson({
       apiKey: input.llmApiKey,
-      model: input.model ?? DEFAULT_FALLBACK_LLM_MODEL,
+      model: input.model,
       providers: input.providers,
       maxTransientRetries: input.maxTransientRetries,
       transientRetryBackoffSeconds: input.transientRetryBackoffSeconds,
@@ -10816,6 +10871,14 @@ function renumberCollidingAdrs(input) {
     deletedAdrPaths: Array.from(deletedAdrPathsSet)
   };
 }
+function pickLlmRequestTuning(source) {
+  return {
+    providers: source.providers,
+    maxTransientRetries: source.maxTransientRetries,
+    transientRetryBackoffSeconds: source.transientRetryBackoffSeconds,
+    requestTimeoutMs: source.requestTimeoutMs
+  };
+}
 async function reconcileAdrsWithLlm(input) {
   if (!input.llmClient && !input.llmApiKey) {
     return null;
@@ -10862,7 +10925,8 @@ ${wrapUntrustedContent("untrusted_workspace_files", s.content)}`
   try {
     if (input.llmClient) {
       return await input.llmClient.completeStructured({
-        model: input.model ?? DEFAULT_FALLBACK_LLM_MODEL,
+        model: input.model,
+        ...pickLlmRequestTuning(input),
         systemInstruction,
         userPrompt,
         responseSchema: ADR_COHERENCE_RECONCILIATION_SCHEMA,
@@ -10871,7 +10935,8 @@ ${wrapUntrustedContent("untrusted_workspace_files", s.content)}`
     }
     return await callLlmJson({
       apiKey: input.llmApiKey ?? "",
-      model: input.model ?? DEFAULT_FALLBACK_LLM_MODEL,
+      model: input.model,
+      ...pickLlmRequestTuning(input),
       systemInstruction,
       prompt: userPrompt,
       temperature: 0.1,
@@ -10901,6 +10966,7 @@ async function applyAdrLlmReconciliation(params) {
     llmClient: params.llmClient,
     llmApiKey: params.llmApiKey,
     model: params.model,
+    ...pickLlmRequestTuning(params),
     fetchImpl: params.fetchImpl
   });
   if (!llmReconciled) {
@@ -11033,6 +11099,7 @@ async function integratePlanBranchIntoFeature(params) {
       llmClient: params.llmClient,
       llmApiKey: params.llmApiKey,
       model: params.model,
+      ...pickLlmRequestTuning(params),
       fetchImpl: params.fetchImpl
     });
   }
@@ -11132,6 +11199,7 @@ async function syncBranchWithBase(input) {
           llmClient: input.llmClient,
           llmApiKey: input.llmApiKey,
           model: input.model,
+          ...pickLlmRequestTuning(input),
           fetchImpl: input.fetchImpl
         });
         if (adrFilesToUpdate.length > 0 || adrDeletedPaths.length > 0) {
@@ -11317,7 +11385,8 @@ async function syncBranchWithBase(input) {
     let resolutionData;
     if (input.llmClient) {
       resolutionData = await input.llmClient.completeStructured({
-        model: input.model ?? DEFAULT_FALLBACK_LLM_MODEL,
+        model: input.model,
+        ...pickLlmRequestTuning(input),
         systemInstruction,
         userPrompt,
         responseSchema: CONFLICT_RESOLUTION_SCHEMA,
@@ -11326,7 +11395,8 @@ async function syncBranchWithBase(input) {
     } else {
       resolutionData = await callLlmJson({
         apiKey: input.llmApiKey ?? "",
-        model: input.model ?? DEFAULT_FALLBACK_LLM_MODEL,
+        model: input.model,
+        ...pickLlmRequestTuning(input),
         systemInstruction,
         prompt: userPrompt,
         temperature: 0.1,
@@ -11472,55 +11542,43 @@ ${stage1Result.output.slice(0, 4e3)}`;
 }
 
 // src/orchestrator/types.ts
-function canUsePhaseModelFromConfig(candidateModel, hasProvidersMap, hasLlmApiKey) {
-  if (!candidateModel || candidateModel.trim().length === 0) {
-    return false;
+var MissingModelConfigError = class extends Error {
+  missingKeys;
+  constructor(missingKeys) {
+    super(
+      `Missing LLM model configuration: set ${missingKeys.map((k) => `'${k}'`).join(", ")} in .github/agents.yml (or the action 'model' input). EPURE has no fallback model.`
+    );
+    this.name = "MissingModelConfigError";
+    this.missingKeys = missingKeys;
   }
-  const clean = candidateModel.trim();
-  if (hasProvidersMap || hasLlmApiKey || clean.includes("/")) {
-    return true;
+};
+var MODEL_PHASES = [
+  "planning",
+  "implementation",
+  "review"
+];
+function resolvePhaseModels(inputModel, agentsConfig) {
+  const override = inputModel?.trim();
+  const pickModel = (phase) => override || agentsConfig?.models[phase]?.trim() || "";
+  const models = {
+    planning: pickModel("planning"),
+    implementation: pickModel("implementation"),
+    review: pickModel("review")
+  };
+  const missingKeys = MODEL_PHASES.filter((phase) => !models[phase]).map(
+    (phase) => `models.${phase}`
+  );
+  if (missingKeys.length > 0) {
+    throw new MissingModelConfigError(missingKeys);
   }
-  const lower = clean.toLowerCase();
-  if (lower.startsWith("gemini-")) {
-    return true;
-  }
-  if (lower.startsWith("claude-")) {
-    return Boolean(process.env.ANTHROPIC_API_KEY?.trim());
-  }
-  if (lower.startsWith("gpt-") || lower.startsWith("o1") || lower.startsWith("o3") || lower.startsWith("o4")) {
-    return Boolean(process.env.OPENAI_API_KEY?.trim());
-  }
-  return false;
-}
-function resolvePhaseModels(inputModel, agentsConfig, llmApiKey) {
-  const fallbackModel = inputModel?.trim() || DEFAULT_FALLBACK_LLM_MODEL;
-  const explicitOverride = Boolean(inputModel && inputModel.trim().length > 0);
   const providers = agentsConfig?.providers;
   const maxTransientRetries = agentsConfig?.max_transient_api_retries;
   const transientRetryBackoffSeconds = agentsConfig?.transient_retry_backoff_seconds;
   const requestTimeoutMs = agentsConfig?.llm_request_timeout_seconds !== void 0 && agentsConfig.llm_request_timeout_seconds > 0 ? agentsConfig.llm_request_timeout_seconds * 1e3 : 9e5;
-  const hasProvidersMap = Boolean(
-    providers && Object.keys(providers).length > 0
-  );
-  const hasLlmApiKey = Boolean(
-    llmApiKey?.trim() || process.env.LLM_API_KEY?.trim()
-  );
-  if (explicitOverride || !agentsConfig) {
-    return {
-      planningModel: fallbackModel,
-      implementationModel: fallbackModel,
-      reviewModel: fallbackModel,
-      requestTimeoutMs,
-      ...providers ? { providers } : {},
-      ...maxTransientRetries !== void 0 ? { maxTransientRetries } : {},
-      ...transientRetryBackoffSeconds !== void 0 ? { transientRetryBackoffSeconds } : {}
-    };
-  }
-  const pickModel = (phaseCandidate) => canUsePhaseModelFromConfig(phaseCandidate, hasProvidersMap, hasLlmApiKey) ? phaseCandidate.trim() : fallbackModel;
   return {
-    planningModel: pickModel(agentsConfig.models?.planning),
-    implementationModel: pickModel(agentsConfig.models?.implementation),
-    reviewModel: pickModel(agentsConfig.models?.review),
+    planningModel: models.planning,
+    implementationModel: models.implementation,
+    reviewModel: models.review,
     requestTimeoutMs,
     ...providers ? { providers } : {},
     ...maxTransientRetries !== void 0 ? { maxTransientRetries } : {},
@@ -12211,7 +12269,7 @@ ${issue.body}`
       goldfishAudit = await runGoldfishSpecAudit({
         specArtifacts,
         apiKey: llmApiKey,
-        model: phaseModels.reviewModel || phaseModels.planningModel,
+        model: phaseModels.reviewModel,
         providers: phaseModels.providers,
         maxTransientRetries: phaseModels.maxTransientRetries,
         transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
@@ -12926,7 +12984,7 @@ ${content}`
   ].join("\n");
   return await callLlmJson({
     apiKey: params.llmApiKey,
-    model: params.phaseModels.reviewModel || params.phaseModels.planningModel,
+    model: params.phaseModels.reviewModel,
     providers: params.phaseModels.providers,
     maxTransientRetries: params.phaseModels.maxTransientRetries,
     transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
@@ -13552,7 +13610,7 @@ ${wrapUntrustedContent("untrusted_spec_content", input.designMarkdown)}` : "",
   try {
     const parsed = await callLlmJson({
       apiKey: input.llmApiKey,
-      model: input.model ?? DEFAULT_FALLBACK_LLM_MODEL,
+      model: input.model,
       providers: input.providers,
       maxTransientRetries: input.maxTransientRetries,
       transientRetryBackoffSeconds: input.transientRetryBackoffSeconds,
@@ -13802,6 +13860,10 @@ async function runFeatureIntegrationPhase(params) {
     llmApiKey: params.llmApiKey,
     fetchImpl: params.fetchImpl,
     model: params.phaseModels.implementationModel,
+    providers: params.phaseModels.providers,
+    maxTransientRetries: params.phaseModels.maxTransientRetries,
+    transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
+    requestTimeoutMs: params.phaseModels.requestTimeoutMs,
     sandboxRunner: params.sandboxRunner,
     reviewersDir
   });
@@ -15106,6 +15168,10 @@ async function runTicketExecutionLoop(params) {
       llmApiKey: params.llmApiKey,
       fetchImpl: params.fetchImpl,
       model: params.phaseModels.implementationModel,
+      providers: params.phaseModels.providers,
+      maxTransientRetries: params.phaseModels.maxTransientRetries,
+      transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
+      requestTimeoutMs: params.phaseModels.requestTimeoutMs,
       sandboxRunner: params.sandboxRunner,
       reviewersDir
     });
@@ -15132,6 +15198,10 @@ async function runTicketExecutionLoop(params) {
       llmApiKey: params.llmApiKey,
       fetchImpl: params.fetchImpl,
       model: params.phaseModels.implementationModel,
+      providers: params.phaseModels.providers,
+      maxTransientRetries: params.phaseModels.maxTransientRetries,
+      transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
+      requestTimeoutMs: params.phaseModels.requestTimeoutMs,
       sandboxRunner: params.sandboxRunner,
       reviewersDir
     });
@@ -16433,15 +16503,28 @@ async function orchestrateIssueCommand(input) {
       const planSlug = slugifyTitle(issue.title);
       planBranch = `plan/${effectiveInput.issueNumber}-${planSlug}`;
       featureBranch = `feature/${effectiveInput.issueNumber}-${planSlug}`;
-      const parsedDevAgentsConfig = await loadRepoAgentsConfig(gh, "dev") ?? await loadRepoAgentsConfig(gh, "main");
-      const phaseModels = resolvePhaseModels(
-        effectiveInput.model,
-        parsedDevAgentsConfig,
-        effectiveInput.llmApiKey
-      );
+      let agentsConfigError;
+      let parsedDevAgentsConfig = null;
+      try {
+        parsedDevAgentsConfig = await loadRepoAgentsConfig(gh, "dev") ?? await loadRepoAgentsConfig(gh, "main");
+      } catch (err) {
+        agentsConfigError = err;
+      }
+      let resolvedPhaseModels;
+      const requirePhaseModels = () => {
+        if (agentsConfigError !== void 0) {
+          throw agentsConfigError;
+        }
+        resolvedPhaseModels ??= resolvePhaseModels(
+          effectiveInput.model,
+          parsedDevAgentsConfig
+        );
+        return resolvedPhaseModels;
+      };
       maxCodeFixAttempts = parsedDevAgentsConfig?.max_code_fix_attempts ?? 3;
       const reviewersDir = parsedDevAgentsConfig?.reviewers_dir ?? DEFAULT_REVIEWERS_DIR;
       if (effectiveInput.command === "plan" || effectiveInput.command === "to-spec" || effectiveInput.command === "to-tickets" || effectiveInput.command === "reply" && (currentState?.phase === "grilling" || currentState?.phase === "spec") && currentState?.status !== "cancelled") {
+        const phaseModels = requirePhaseModels();
         try {
           return await runGrillAndPlanPhase({
             command: effectiveInput.command,
@@ -16522,6 +16605,7 @@ async function orchestrateIssueCommand(input) {
         }
       }
       if (effectiveInput.command === "sync" || effectiveInput.command === "rebase") {
+        const phaseModels = requirePhaseModels();
         const targetBranch = currentState?.active_branch && !currentState.active_branch.startsWith("plan/") ? currentState.active_branch : featureBranch;
         await gh.ensureBranch("dev", "main");
         await gh.ensureBranch(targetBranch, "dev");
@@ -16530,7 +16614,14 @@ async function orchestrateIssueCommand(input) {
             gh,
             planBranch: currentState.active_branch,
             featureBranch: targetBranch,
-            baseBranch: "dev"
+            baseBranch: "dev",
+            llmApiKey: effectiveInput.llmApiKey,
+            model: phaseModels.planningModel,
+            providers: phaseModels.providers,
+            maxTransientRetries: phaseModels.maxTransientRetries,
+            transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+            requestTimeoutMs: phaseModels.requestTimeoutMs,
+            fetchImpl: effectiveInput.fetchImpl
           });
         }
         const syncRes = await syncBranchWithBase({
@@ -16541,6 +16632,10 @@ async function orchestrateIssueCommand(input) {
           llmApiKey: effectiveInput.llmApiKey,
           fetchImpl: effectiveInput.fetchImpl,
           model: phaseModels.implementationModel,
+          providers: phaseModels.providers,
+          maxTransientRetries: phaseModels.maxTransientRetries,
+          transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+          requestTimeoutMs: phaseModels.requestTimeoutMs,
           sandboxRunner: effectiveInput.sandboxRunner,
           reviewersDir
         });
@@ -16600,6 +16695,10 @@ async function orchestrateIssueCommand(input) {
             llmApiKey: effectiveInput.llmApiKey,
             fetchImpl: effectiveInput.fetchImpl,
             model: phaseModels.implementationModel,
+            providers: phaseModels.providers,
+            maxTransientRetries: phaseModels.maxTransientRetries,
+            transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+            requestTimeoutMs: phaseModels.requestTimeoutMs,
             sandboxRunner: effectiveInput.sandboxRunner,
             reviewersDir
           });
@@ -16813,6 +16912,7 @@ async function orchestrateIssueCommand(input) {
                   }
                 }))
               );
+              const phaseModels = requirePhaseModels();
               const squashCommit = await generateSemanticSquashCommitFromDiff({
                 prNumber: prNumberToMerge,
                 targetBranch: targetFeatureBranch,
@@ -16869,6 +16969,7 @@ async function orchestrateIssueCommand(input) {
         }
       }
       if (effectiveInput.command === "approve" || effectiveInput.command === "continue" || effectiveInput.command === "reply" && currentState?.phase === "implementation" && currentState?.status === "suspended") {
+        const phaseModels = requirePhaseModels();
         if (currentState?.status === "suspended") {
           await gh.removeIssueLabel?.(effectiveInput.issueNumber, "needs-human");
         }
@@ -16920,6 +17021,10 @@ async function orchestrateIssueCommand(input) {
             baseBranch: "dev",
             llmApiKey: effectiveInput.llmApiKey,
             model: phaseModels.planningModel,
+            providers: phaseModels.providers,
+            maxTransientRetries: phaseModels.maxTransientRetries,
+            transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+            requestTimeoutMs: phaseModels.requestTimeoutMs,
             fetchImpl: effectiveInput.fetchImpl
           });
         }
@@ -17382,7 +17487,7 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
         })
       });
       const rawErrMessage = err instanceof Error ? err.message : String(err);
-      const escalationReason = err instanceof LLMError ? resolveLlmEscalationReason(err) : "internal_error";
+      const escalationReason = err instanceof LLMError ? resolveLlmEscalationReason(err) : err instanceof MissingModelConfigError ? "model_config_missing" : "internal_error";
       const escalationMarkdown = appendEpureCommandsSpoiler(
         [
           updatedSuspended.issue_mirror_markdown,
@@ -17394,6 +17499,7 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
             branch: updatedSuspended.state.active_branch || fallbackBranch,
             codeFixAttemptsUsed: updatedSuspended.state.code_fix_attempts_used,
             maxCodeFixAttempts,
+            missingModelKeys: err instanceof MissingModelConfigError ? err.missingKeys : void 0,
             diagnosticExcerpt: redactSecrets(rawErrMessage, [
               activeToken,
               effectiveInput.llmApiKey

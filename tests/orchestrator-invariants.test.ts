@@ -66,6 +66,7 @@ async function run(
     commandArgs: "",
     fallbackGithubToken: "ghs_test",
     llmApiKey: "key_test",
+    model: "openai/gpt-test",
     stateStore: store,
     fetchImpl: router.fetch,
     ...input

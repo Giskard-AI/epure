@@ -17,8 +17,6 @@ import type {
   ResponseSchemaSpec
 } from "./types.js";
 
-export const DEFAULT_FALLBACK_LLM_MODEL = "google/gemini-3.8-flash";
-
 export function resolveConfigValue(
   val: string | undefined,
   env: NodeJS.ProcessEnv = process.env
@@ -116,7 +114,8 @@ export function normalizeProviderConfig(
         : {}),
     ...(defaultHeaders
       ? { defaultHeaders: { ...defaultHeaders }, default_headers: { ...defaultHeaders } }
-      : {})
+      : {}),
+    ...(raw.effort ? { effort: raw.effort } : {})
   };
 }
 
@@ -128,14 +127,11 @@ export interface ParsedModelIdentifier {
 }
 
 export function parseModelIdentifier(
-  modelId: string | undefined,
+  modelId: string,
   configuredProviders?: Readonly<Record<string, ProviderConfig>> | undefined,
   env: NodeJS.ProcessEnv = process.env
 ): ParsedModelIdentifier {
-  const effectiveModelId =
-    modelId && modelId.trim().length > 0
-      ? modelId.trim()
-      : DEFAULT_FALLBACK_LLM_MODEL;
+  const effectiveModelId = modelId.trim();
 
   if (effectiveModelId.includes("/")) {
     const slashIndex = effectiveModelId.indexOf("/");
