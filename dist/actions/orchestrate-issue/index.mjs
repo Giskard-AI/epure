@@ -3193,6 +3193,9 @@ function containsPrivateKeyMaterial(text) {
   return PRIVATE_KEY_DETECTION_PATTERN.test(text);
 }
 
+// src/review/reviewers-dir.ts
+var DEFAULT_REVIEWERS_DIR = ".agents/reviewers";
+
 // src/bootstrap/setup-repo.ts
 var CONVENTIONAL_COMMIT_PATTERN_REGEX = "^(feat|fix|docs|style|refactor|perf|test|chore|ci|build|revert)(\\([a-z0-9/-]+\\))?(!)?: .+";
 var DEFAULT_VERIFICATION_PROFILE = {
@@ -6042,7 +6045,6 @@ var ALL_REVIEWER_AGENT_NAMES = [
   "design-reviewer",
   "user-advocate"
 ];
-var DEFAULT_REVIEWERS_DIR = ".agents/reviewers";
 function isSensitiveReviewerRosterPath(filePath, reviewersDir = DEFAULT_REVIEWERS_DIR) {
   const clean = filePath.trim().replace(/^\/+/, "").toLowerCase();
   return [reviewersDir, DEFAULT_REVIEWERS_DIR].some((dir) => {
