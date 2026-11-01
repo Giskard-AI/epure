@@ -7,6 +7,7 @@ import {
   discoverVerificationProfile,
   type VerificationProfile
 } from "../bootstrap/ci-and-renovate.js";
+import type { ParsedAgentsConfig } from "../bootstrap/setup-repo.js";
 import {
   discoverExpectedExternalWorkflows,
   evaluateSingleExternalCiSnapshot,
@@ -56,6 +57,7 @@ import {
 import { runTicketExecutionLoop } from "./phases/ticket-execution.js";
 import { EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT } from "./prompts/code-discipline.js";
 import {
+  MissingModelConfigError,
   resolvePhaseModels,
   type AdrCoherenceReconciliationPayload,
   type CreatedTicketRecord,
@@ -130,6 +132,7 @@ export {
   reconcileAdrsWithLlm,
   redactSecrets,
   renumberCollidingAdrs,
+  MissingModelConfigError,
   resolvePhaseModels,
   runEpicConvergenceAudit,
   runGoldfishSpecAudit,
@@ -344,14 +347,27 @@ export async function orchestrateIssueCommand(
       const planSlug = slugifyTitle(issue.title);
       planBranch = `plan/${effectiveInput.issueNumber}-${planSlug}`;
       featureBranch = `feature/${effectiveInput.issueNumber}-${planSlug}`;
-      const parsedDevAgentsConfig =
-        (await loadRepoAgentsConfig(gh, "dev")) ??
-        (await loadRepoAgentsConfig(gh, "main"));
-      const phaseModels = resolvePhaseModels(
-        effectiveInput.model,
-        parsedDevAgentsConfig,
-        effectiveInput.llmApiKey
-      );
+      let agentsConfigError: unknown;
+      let parsedDevAgentsConfig: ParsedAgentsConfig | null = null;
+      try {
+        parsedDevAgentsConfig =
+          (await loadRepoAgentsConfig(gh, "dev")) ??
+          (await loadRepoAgentsConfig(gh, "main"));
+      } catch (err) {
+        agentsConfigError = err;
+      }
+      // Config and model errors only escalate on paths that call an LLM.
+      let resolvedPhaseModels: ResolvedPhaseModels | undefined;
+      const requirePhaseModels = (): ResolvedPhaseModels => {
+        if (agentsConfigError !== undefined) {
+          throw agentsConfigError;
+        }
+        resolvedPhaseModels ??= resolvePhaseModels(
+          effectiveInput.model,
+          parsedDevAgentsConfig
+        );
+        return resolvedPhaseModels;
+      };
       maxCodeFixAttempts = parsedDevAgentsConfig?.max_code_fix_attempts ?? 3;
       const reviewersDir =
         parsedDevAgentsConfig?.reviewers_dir ?? DEFAULT_REVIEWERS_DIR;
@@ -366,6 +382,7 @@ export async function orchestrateIssueCommand(
           currentState?.phase === "spec") &&
         currentState?.status !== "cancelled")
     ) {
+      const phaseModels = requirePhaseModels();
       try {
         return await runGrillAndPlanPhase({
           command: effectiveInput.command,
@@ -462,6 +479,7 @@ export async function orchestrateIssueCommand(
         effectiveInput.command === "sync" ||
         effectiveInput.command === "rebase"
       ) {
+        const phaseModels = requirePhaseModels();
         const targetBranch =
           currentState?.active_branch &&
           !currentState.active_branch.startsWith("plan/")
@@ -476,7 +494,15 @@ export async function orchestrateIssueCommand(
             gh,
             planBranch: currentState.active_branch,
             featureBranch: targetBranch,
-            baseBranch: "dev"
+            baseBranch: "dev",
+            llmApiKey: effectiveInput.llmApiKey,
+            model: phaseModels.planningModel,
+            providers: phaseModels.providers,
+            maxTransientRetries: phaseModels.maxTransientRetries,
+            transientRetryBackoffSeconds:
+              phaseModels.transientRetryBackoffSeconds,
+            requestTimeoutMs: phaseModels.requestTimeoutMs,
+            fetchImpl: effectiveInput.fetchImpl
           });
         }
 
@@ -488,6 +514,10 @@ export async function orchestrateIssueCommand(
           llmApiKey: effectiveInput.llmApiKey,
           fetchImpl: effectiveInput.fetchImpl,
           model: phaseModels.implementationModel,
+          providers: phaseModels.providers,
+          maxTransientRetries: phaseModels.maxTransientRetries,
+          transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+          requestTimeoutMs: phaseModels.requestTimeoutMs,
           sandboxRunner: effectiveInput.sandboxRunner,
           reviewersDir
         });
@@ -552,6 +582,11 @@ export async function orchestrateIssueCommand(
             llmApiKey: effectiveInput.llmApiKey,
             fetchImpl: effectiveInput.fetchImpl,
             model: phaseModels.implementationModel,
+            providers: phaseModels.providers,
+            maxTransientRetries: phaseModels.maxTransientRetries,
+            transientRetryBackoffSeconds:
+              phaseModels.transientRetryBackoffSeconds,
+            requestTimeoutMs: phaseModels.requestTimeoutMs,
             sandboxRunner: effectiveInput.sandboxRunner,
             reviewersDir
           });
@@ -803,6 +838,7 @@ export async function orchestrateIssueCommand(
                 }))
               );
 
+              const phaseModels = requirePhaseModels();
               const squashCommit = await generateSemanticSquashCommitFromDiff({
                 prNumber: prNumberToMerge,
                 targetBranch: targetFeatureBranch,
@@ -874,6 +910,7 @@ export async function orchestrateIssueCommand(
         currentState?.phase === "implementation" &&
         currentState?.status === "suspended")
     ) {
+      const phaseModels = requirePhaseModels();
       if (currentState?.status === "suspended") {
         await gh.removeIssueLabel?.(effectiveInput.issueNumber, "needs-human");
       }
@@ -932,6 +969,10 @@ export async function orchestrateIssueCommand(
           baseBranch: "dev",
           llmApiKey: effectiveInput.llmApiKey,
           model: phaseModels.planningModel,
+          providers: phaseModels.providers,
+          maxTransientRetries: phaseModels.maxTransientRetries,
+          transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+          requestTimeoutMs: phaseModels.requestTimeoutMs,
           fetchImpl: effectiveInput.fetchImpl
         });
       }
@@ -1481,7 +1522,9 @@ export async function orchestrateIssueCommand(
       const escalationReason =
         err instanceof LLMError
           ? resolveLlmEscalationReason(err)
-          : "internal_error";
+          : err instanceof MissingModelConfigError
+            ? "model_config_missing"
+            : "internal_error";
 
       const escalationMarkdown = appendEpureCommandsSpoiler(
         [
@@ -1494,6 +1537,10 @@ export async function orchestrateIssueCommand(
             branch: updatedSuspended.state.active_branch || fallbackBranch,
             codeFixAttemptsUsed: updatedSuspended.state.code_fix_attempts_used,
             maxCodeFixAttempts,
+            missingModelKeys:
+              err instanceof MissingModelConfigError
+                ? err.missingKeys
+                : undefined,
             diagnosticExcerpt: redactSecrets(rawErrMessage, [
               activeToken,
               effectiveInput.llmApiKey

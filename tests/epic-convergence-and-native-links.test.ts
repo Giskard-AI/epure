@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { parseAgentsYaml } from "../src/bootstrap/setup-repo.js";
 import { formatNeedsHumanEscalationComment } from "../src/execution/external-ci-gate.js";
+import type { ProviderConfig } from "../src/llm/index.js";
 import {
   reconcileAdrsWithLlm,
   renumberCollidingAdrs,
@@ -586,6 +587,7 @@ describe("EPURE Graphe GitHub Natif, Garde-fous d'Intégrité Inter-Tickets et C
         ],
         glossaryContent: "# GLOSSARY\n",
         llmApiKey: "test-key",
+        model: "google/gemini-3.8-flash",
         fetchImpl: mockFetch
       });
 
@@ -627,6 +629,7 @@ describe("EPURE Graphe GitHub Natif, Garde-fous d'Intégrité Inter-Tickets et C
         baseBranch: "dev",
         issueNumber: 42,
         llmApiKey: "test-key",
+        model: "google/gemini-3.8-flash",
         fetchImpl: mockFetch
       });
 
@@ -637,6 +640,68 @@ describe("EPURE Graphe GitHub Natif, Garde-fous d'Intégrité Inter-Tickets et C
           ?.content
       ).toContain("Supersedes ADR-0031.");
     });
+
+    it.each([
+      {
+        id: "reconcileAdrsWithLlm routes an agents.yml provider alias and forwards its effort",
+        providers: {
+          claude: { provider: "anthropic", effort: "high" }
+        } satisfies Readonly<Record<string, ProviderConfig>>,
+        model: "claude/claude-haiku-5-5",
+        expectedUrl: "https://api.anthropic.com/v1/messages",
+        expectedModel: "claude-haiku-5-5",
+        expectedEffort: "high"
+      }
+    ])(
+      "$id",
+      async ({ providers, model, expectedUrl, expectedModel, expectedEffort }) => {
+        const requests: Array<{ url: string; body: Record<string, unknown> }> =
+          [];
+        const mockFetch: typeof fetch = async (url, init) => {
+          requests.push({
+            url: String(url),
+            body: JSON.parse(String(init?.body)) as Record<string, unknown>
+          });
+          return new Response(
+            JSON.stringify({
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({
+                    coherent: true,
+                    summary: "ok",
+                    updated_files: [],
+                    deleted_adr_paths: []
+                  })
+                }
+              ]
+            }),
+            { status: 200 }
+          );
+        };
+
+        const reconciled = await reconcileAdrsWithLlm({
+          devAdrs: [
+            { path: "docs/adr/0031-first.md", content: "# ADR-0031 : First\n" }
+          ],
+          featureAdrs: [
+            { path: "docs/adr/0032-second.md", content: "# ADR-0032 : Second\n" }
+          ],
+          specFiles: [],
+          llmApiKey: "test-key",
+          model,
+          providers,
+          fetchImpl: mockFetch
+        });
+
+        expect(reconciled?.summary).toBe("ok");
+        expect(requests[0]?.url).toBe(expectedUrl);
+        expect(requests[0]?.body.model).toBe(expectedModel);
+        expect(requests[0]?.body.output_config).toMatchObject({
+          effort: expectedEffort
+        });
+      }
+    );
   });
 
   describe("4. Épinglage dynamique des entrypoints et manifestes dans readBranchWorkspaceFiles — Q115", () => {
@@ -1298,6 +1363,7 @@ describe("EPURE Graphe GitHub Natif, Garde-fous d'Intégrité Inter-Tickets et C
         issueNumber: issueNum,
         command: "continue",
         commandArgs: "",
+        model: "google/gemini-3.8-flash",
         commentId: 202,
         actor: "maintainer",
         fallbackGithubToken: "ghs_test",

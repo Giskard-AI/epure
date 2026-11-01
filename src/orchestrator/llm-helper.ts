@@ -1,4 +1,4 @@
-import { DEFAULT_FALLBACK_LLM_MODEL, LLMClient } from "../llm/client.js";
+import { LLMClient } from "../llm/client.js";
 import { parseAndValidateStructuredOutput } from "../llm/errors.js";
 import {
   PROMPT_INJECTION_IMMUNITY_CLAUSE,
@@ -25,7 +25,7 @@ export type LlmToolHandler = ToolHandler;
 
 export interface LlmCallOptions<T = unknown> {
   readonly apiKey?: string | undefined;
-  readonly model?: string | undefined;
+  readonly model: string;
   readonly thinkingLevel?: "MINIMAL" | "LOW" | "MEDIUM" | "HIGH" | undefined;
   readonly logLabel?: string | undefined;
   readonly systemInstruction?: string | undefined;
@@ -56,7 +56,7 @@ export async function callLlmText(
   try {
     const res = await client.complete({
       apiKey: options.apiKey,
-      model: options.model ?? DEFAULT_FALLBACK_LLM_MODEL,
+      model: options.model,
       systemInstruction: options.systemInstruction ?? "",
       userPrompt: options.userPrompt ?? options.prompt ?? "",
       temperature: options.temperature,
@@ -100,7 +100,7 @@ export async function callLlmJson<T = unknown>(
     try {
       const res = await client.complete<T>({
         apiKey: options.apiKey,
-        model: options.model ?? DEFAULT_FALLBACK_LLM_MODEL,
+        model: options.model,
         systemInstruction: options.systemInstruction ?? "",
         userPrompt: options.userPrompt ?? options.prompt ?? "",
         temperature: options.temperature,

@@ -42,7 +42,7 @@ function buildAgentsYamlForTarget(target: LiveLLMTargetConfig): string {
   const lines: string[] = [
     "models:",
     `  planning: ${target.planningModel}`,
-    `  execution: ${target.executionModel ?? target.planningModel}`,
+    `  implementation: ${target.executionModel ?? target.planningModel}`,
     `  review: ${target.reviewModel ?? target.planningModel}`
   ];
 
@@ -64,6 +64,9 @@ function buildAgentsYamlForTarget(target: LiveLLMTargetConfig): string {
       const apiVersionVal = cfg.api_version ?? cfg.apiVersion;
       if (apiVersionVal) {
         lines.push(`    api_version: ${apiVersionVal}`);
+      }
+      if (cfg.effort) {
+        lines.push(`    effort: ${cfg.effort}`);
       }
     }
   }
@@ -503,7 +506,7 @@ describeLive(
           expect(subIssue.body).not.toContain("## Description\n...");
         }
       },
-      240_000
+      600_000
     );
   }
 );

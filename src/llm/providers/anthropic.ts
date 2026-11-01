@@ -62,6 +62,19 @@ interface AnthropicMessage {
   readonly content: string | readonly AnthropicContentBlock[];
 }
 
+// Opus 4.7+ and Claude 5.x+ reject temperature/top_p/top_k with HTTP 400; unknown IDs omit them since every model accepts omission.
+const SAMPLING_PARAMS_MODEL_PATTERN =
+  /^claude-(?:3-|(?:opus|sonnet|haiku)-4(?:-[0-6])?(?:-\d{8})?$)/;
+
+function throwIfRefused(stopReason: string | undefined, model: string): void {
+  if (stopReason === "refusal") {
+    throw new LLMError(
+      `Anthropic model '${model}' refused the request (stop_reason: refusal).`,
+      { provider: "anthropic", reasonCode: "REFUSAL" }
+    );
+  }
+}
+
 export async function executeAnthropicProvider<T = unknown>(
   input: AnthropicProviderExecutionInput<T>
 ): Promise<AnthropicProviderExecutionOutput<T>> {
@@ -71,6 +84,10 @@ export async function executeAnthropicProvider<T = unknown>(
     providerConfig?.apiVersion ?? providerConfig?.api_version ?? "2023-06-01";
   const defaultHeaders =
     providerConfig?.defaultHeaders ?? providerConfig?.default_headers ?? {};
+  const effort = providerConfig?.effort;
+  const acceptsSamplingParams = SAMPLING_PARAMS_MODEL_PATTERN.test(
+    model.trim().toLowerCase()
+  );
 
   const url = buildAnthropicMessagesUrl(rawBaseUrl);
   const headers: Record<string, string> = {
@@ -108,7 +125,9 @@ export async function executeAnthropicProvider<T = unknown>(
     const body: Record<string, unknown> = {
       model,
       max_tokens: options.maxOutputTokens ?? 64000,
-      temperature: options.temperature ?? 0.2,
+      ...(acceptsSamplingParams
+        ? { temperature: options.temperature ?? 0.2 }
+        : {}),
       system: effectiveSystemInstruction,
       messages
     };
@@ -122,12 +141,19 @@ export async function executeAnthropicProvider<T = unknown>(
       }
     }
 
-    if (options.responseSchema) {
+    if (options.responseSchema || effort) {
       body.output_config = {
-        format: {
-          type: "json_schema",
-          schema: closeObjectSchemasForOpenAI(options.responseSchema.schema)
-        }
+        ...(effort ? { effort } : {}),
+        ...(options.responseSchema
+          ? {
+              format: {
+                type: "json_schema",
+                schema: closeObjectSchemasForOpenAI(
+                  options.responseSchema.schema
+                )
+              }
+            }
+          : {})
       };
     }
 
@@ -150,7 +176,10 @@ export async function executeAnthropicProvider<T = unknown>(
 
     const data = (await response.json()) as {
       content?: AnthropicContentBlock[];
+      stop_reason?: string;
     };
+
+    throwIfRefused(data.stop_reason, model);
 
     const contentBlocks = data.content ?? [];
     const toolUseBlocks = contentBlocks.filter(
@@ -266,7 +295,9 @@ export async function executeAnthropicProvider<T = unknown>(
             }
             const retryData = (await retryResponse.json()) as {
               content?: AnthropicContentBlock[];
+              stop_reason?: string;
             };
+            throwIfRefused(retryData.stop_reason, model);
             currentText = (retryData.content ?? [])
               .filter((b) => b.type === "text")
               .map((b) => b.text ?? "")

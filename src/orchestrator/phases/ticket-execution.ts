@@ -636,6 +636,11 @@ export async function runTicketExecutionLoop(
       llmApiKey: params.llmApiKey,
       fetchImpl: params.fetchImpl,
       model: params.phaseModels.implementationModel,
+      providers: params.phaseModels.providers,
+      maxTransientRetries: params.phaseModels.maxTransientRetries,
+      transientRetryBackoffSeconds:
+        params.phaseModels.transientRetryBackoffSeconds,
+      requestTimeoutMs: params.phaseModels.requestTimeoutMs,
       sandboxRunner: params.sandboxRunner,
       reviewersDir
     });
@@ -664,6 +669,11 @@ export async function runTicketExecutionLoop(
       llmApiKey: params.llmApiKey,
       fetchImpl: params.fetchImpl,
       model: params.phaseModels.implementationModel,
+      providers: params.phaseModels.providers,
+      maxTransientRetries: params.phaseModels.maxTransientRetries,
+      transientRetryBackoffSeconds:
+        params.phaseModels.transientRetryBackoffSeconds,
+      requestTimeoutMs: params.phaseModels.requestTimeoutMs,
       sandboxRunner: params.sandboxRunner,
       reviewersDir
     });

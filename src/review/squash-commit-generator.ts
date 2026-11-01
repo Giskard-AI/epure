@@ -3,7 +3,6 @@ import {
   AuthenticationError,
   QuotaExhaustedError
 } from "../llm/errors.js";
-import { DEFAULT_FALLBACK_LLM_MODEL } from "../llm/client.js";
 import type { ProviderConfig } from "../llm/types.js";
 import { callLlmJson } from "../orchestrator/llm-helper.js";
 import {
@@ -28,7 +27,7 @@ export interface GenerateSemanticSquashCommitInput {
     readonly patch?: string | undefined;
   }>;
   readonly llmApiKey?: string | undefined;
-  readonly model?: string | undefined;
+  readonly model: string;
   readonly providers?: Readonly<Record<string, ProviderConfig>> | undefined;
   readonly maxTransientRetries?: number | undefined;
   readonly transientRetryBackoffSeconds?: readonly number[] | undefined;
@@ -184,7 +183,7 @@ export async function generateSemanticSquashCommitFromDiff(
 
     const parsed = await callLlmJson<SquashCommitPayload>({
       apiKey: input.llmApiKey,
-      model: input.model ?? DEFAULT_FALLBACK_LLM_MODEL,
+      model: input.model,
       providers: input.providers,
       maxTransientRetries: input.maxTransientRetries,
       transientRetryBackoffSeconds: input.transientRetryBackoffSeconds,

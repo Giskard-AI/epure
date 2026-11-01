@@ -1234,8 +1234,11 @@ export async function loadRepoAgentsConfig(
   }
   try {
     return parseAgentsYaml(rawYaml);
-  } catch {
-    return null;
+  } catch (err) {
+    throw new Error(
+      `Invalid .github/agents.yml on '${branch}': ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err }
+    );
   }
 }
 

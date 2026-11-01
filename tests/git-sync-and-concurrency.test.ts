@@ -255,7 +255,8 @@ describe("EPURE v1.2 Chantier 1 & 2 — Git Sync, Concurrency & Event-Driven CI 
         gh: mockGh,
         planBranch: "plan/42-sync",
         featureBranch: "feature/42-sync",
-        baseBranch: "dev"
+        baseBranch: "dev",
+        model: "google/gemini-3.8-flash"
       });
 
       expect(committedFiles).toHaveLength(1);
@@ -300,7 +301,8 @@ describe("EPURE v1.2 Chantier 1 & 2 — Git Sync, Concurrency & Event-Driven CI 
         baseBranch: "dev",
         targetBranch: "feature/42-sync",
         issueNumber: 42,
-        llmApiKey: "test-key"
+        llmApiKey: "test-key",
+        model: "google/gemini-3.8-flash"
       });
       expect(res.status).toBe(expectedStatus);
     });
@@ -377,6 +379,7 @@ describe("EPURE v1.2 Chantier 1 & 2 — Git Sync, Concurrency & Event-Driven CI 
         targetBranch: "feature/42-sync",
         issueNumber: 42,
         llmApiKey: "test-key",
+        model: "google/gemini-3.8-flash",
         fetchImpl: mockFetch,
         sandboxRunner: async () => ({
           isolated: true,
@@ -461,6 +464,7 @@ describe("EPURE v1.2 Chantier 1 & 2 — Git Sync, Concurrency & Event-Driven CI 
         targetBranch: "feature/42-sync",
         issueNumber: 42,
         llmApiKey: "test-key",
+        model: "google/gemini-3.8-flash",
         fetchImpl: mockFetch
       });
 
@@ -622,6 +626,7 @@ describe("EPURE v1.2 Chantier 1 & 2 — Git Sync, Concurrency & Event-Driven CI 
         issueNumber: 77,
         command: "continue",
         commandArgs: "",
+        model: "google/gemini-3.8-flash",
         commentId: 2,
         actor: "github-actions[bot]",
         fallbackGithubToken: "ghs_test",
@@ -763,6 +768,7 @@ describe("EPURE v1.2 Chantier 1 & 2 — Git Sync, Concurrency & Event-Driven CI 
           issueNumber: 0,
           command: "continue",
           commandArgs: "",
+          model: "google/gemini-3.8-flash",
           commentId: 0,
           actor: "github-actions[bot]",
           fallbackGithubToken: "ghs_test",
@@ -842,6 +848,7 @@ describe("EPURE v1.2 Chantier 1 & 2 — Git Sync, Concurrency & Event-Driven CI 
         issueNumber: 153,
         command: "continue",
         commandArgs: "",
+        model: "google/gemini-3.8-flash",
         commentId,
         actor: "Hartorn",
         fallbackGithubToken: "ghs_test",

@@ -254,6 +254,7 @@ describe("EPURE v1.2.0 — 3 Repository Rulesets, Multi-Agent Review Roster & Se
 
     it("adapts the roster and generates DESIGN.md during /epure plan when UI files are present (Q96)", async () => {
       const gateResult = await runUserAdvocateDesignGate({
+        model: "google/gemini-3.8-flash",
         repository: "Hartorn-Inc/enclume-astrale",
         planTitle: "L'Enclume Astrale — Forge D&D",
         glossaryMarkdown: "# GLOSSARY\n- **Capacité S <= B**",
@@ -400,6 +401,7 @@ describe("EPURE v1.2.0 — 3 Repository Rulesets, Multi-Agent Review Roster & Se
       "automatically blocks a task/* PR with a critical security must_fix if it modifies the reviewer roster: $id",
       async ({ reviewersDir, changedPath }) => {
         const review = await runMultiAgentPrReviewPass({
+          model: "google/gemini-3.8-flash",
           repository: "Hartorn-Inc/enclume-astrale",
           prNumber: 24,
           headBranch: "task/21-forge",
@@ -435,6 +437,7 @@ describe("EPURE v1.2.0 — 3 Repository Rulesets, Multi-Agent Review Roster & Se
       ].join("\n");
 
       const toolsBundle = buildReviewerInspectionTools({
+        model: "google/gemini-3.8-flash",
         repository: "Hartorn-Inc/enclume-astrale",
         prNumber: 35,
         headBranch: "task/25-forge",
@@ -537,6 +540,7 @@ describe("EPURE v1.2.0 — 3 Repository Rulesets, Multi-Agent Review Roster & Se
       };
 
       const review = await runMultiAgentPrReviewPass({
+        model: "google/gemini-3.8-flash",
         repository: "Hartorn-Inc/enclume-astrale",
         prNumber: 35,
         headBranch: "task/25-forge",
@@ -585,6 +589,7 @@ describe("EPURE v1.2.0 — 3 Repository Rulesets, Multi-Agent Review Roster & Se
         expectedTrailerSubstring
       }) => {
         const res = await generateSemanticSquashCommitFromDiff({
+          model: "google/gemini-3.8-flash",
           prNumber: 24,
           targetBranch,
           defaultBranch: "dev",

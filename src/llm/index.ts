@@ -1,5 +1,4 @@
 export {
-  DEFAULT_FALLBACK_LLM_MODEL,
   DEFAULT_LLM_REQUEST_TIMEOUT_MS,
   DEFAULT_MAX_RATE_LIMIT_WAITS,
   DEFAULT_MAX_TRANSIENT_RETRIES,
@@ -55,6 +54,7 @@ export {
   PROMPT_INJECTION_IMMUNITY_CLAUSE,
   PROMPT_INJECTION_IMMUNITY_SYSTEM_CLAUSE,
   type ProviderConfig,
+  type ProviderEffort,
   type ProviderKind,
   type ResponseSchemaSpec,
   type ToolDeclaration,

@@ -2,7 +2,11 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { buildConsumerAppManifests } from "../auth/github-apps.js";
 import { EPURE_PUBLIC_VERSION } from "../contract/epure-contract.js";
-import type { ProviderConfig, ProviderKind } from "../llm/types.js";
+import {
+  PROVIDER_EFFORTS,
+  type ProviderConfig,
+  type ProviderKind
+} from "../llm/types.js";
 import {
   buildDefaultReviewerRosterFiles,
   type CustomDomainReviewerSpec,
@@ -449,6 +453,9 @@ function normalizeAgentsProvidersMap(
         ...defaultHeadersVal
       };
     }
+    if (raw.effort !== undefined) {
+      entry.effort = raw.effort;
+    }
 
     out[cleanAlias] = attachDualProviderConfigGetters(entry);
   }
@@ -710,6 +717,11 @@ export function serializeAgentsConfigYaml(
           `    api_version: ${formatYamlProviderScalar(apiVersion)}`
         );
       }
+      if (rawEntry.effort !== undefined) {
+        providerLines.push(
+          `    effort: ${formatYamlProviderScalar(rawEntry.effort)}`
+        );
+      }
       const defaultHeaders =
         rawEntry.default_headers ?? rawEntry.defaultHeaders;
       if (defaultHeaders && Object.keys(defaultHeaders).length > 0) {
@@ -954,14 +966,15 @@ function parseYamlStringArrayInline(raw: string): string[] {
   return items;
 }
 
-export function parseAgentsYaml(
-  yamlContent: string
-): AgentsConfig & {
+export type ParsedAgentsConfig = Omit<AgentsConfig, "models"> & {
+  readonly models: Partial<AgentsModelsConfig>;
   readonly task_auto_merge_enabled?: boolean | undefined;
   readonly github_pages_human_consent?: boolean | undefined;
   readonly preview_separate_origin?: boolean | undefined;
   readonly security_overrides?: SecurityOverridesAttempt | undefined;
-} {
+};
+
+export function parseAgentsYaml(yamlContent: string): ParsedAgentsConfig {
   let harness: AgentHarness | undefined;
   let reviewers_dir: string | undefined;
   let llm_environment: string | undefined;
@@ -1251,6 +1264,14 @@ export function parseAgentsYaml(
               currentObj.base_url = v;
             } else if (k === "api_version" || k === "apiVersion") {
               currentObj.api_version = v;
+            } else if (k === "effort") {
+              const effort = PROVIDER_EFFORTS.find((e) => e === v);
+              if (!effort) {
+                throw new Error(
+                  `providers.${currentProviderAlias}.effort '${v}' must be one of: ${PROVIDER_EFFORTS.join(", ")}.`
+                );
+              }
+              currentObj.effort = effort;
             }
           }
           providers[currentProviderAlias] =
@@ -1517,6 +1538,7 @@ export function parseAgentsYaml(
   const resolved = resolveAgentsConfig(overrides);
   return {
     ...resolved.config,
+    models,
     max_epic_phases: resolved.config.max_epic_phases ?? 2,
     ...(task_auto_merge_enabled !== undefined
       ? { task_auto_merge_enabled }
@@ -1959,7 +1981,7 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
   let existingLlmRequestTimeoutSeconds: number | undefined;
   let existingReviewersDir: string | undefined;
   let existingLlmEnvironment: string | undefined;
-  let existingModels: AgentsModelsConfig | undefined;
+  let existingModels: Partial<AgentsModelsConfig> | undefined;
   if (
     input.repoRootDir &&
     existsSync(join(input.repoRootDir, ".github", "agents.yml"))
