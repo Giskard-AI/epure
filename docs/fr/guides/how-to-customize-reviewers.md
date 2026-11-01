@@ -1,10 +1,10 @@
 # Guide : Personnaliser le Roster de Revue & la Porte Impeccable
 
-Lors de l'invocation du skill **`/setup-repo`** (puis à chaque `/epure plan`), EPURE compose et adapte dynamiquement le roster d'agents de revue dans `.cursor/agents/*.md` ainsi que la porte de qualité UI **[Impeccable (`pbakaus/impeccable`)](https://github.com/pbakaus/impeccable)** (`DESIGN.md` + `impeccable-gate`), en s'appuyant sur les skills de spécification et de revue de **[Matt Pocock (`mattpocock/skills`)](https://github.com/mattpocock/skills)**. Ce guide explique comment ce roster est assemblé selon votre projet et comment l'enrichir en préservant l'immunité contre l'injection de prompt.
+Lors de l'invocation du skill **`/setup-repo`** (puis à chaque `/epure plan`), EPURE compose et adapte dynamiquement le roster d'agents de revue dans le répertoire du roster de reviewers (`reviewers_dir` dans `.github/agents.yml`, par défaut `.agents/reviewers/*.md`, configurable via `setup-repo --reviewers-dir <chemin>`) ainsi que la porte de qualité UI **[Impeccable (`pbakaus/impeccable`)](https://github.com/pbakaus/impeccable)** (`DESIGN.md` + `impeccable-gate`), en s'appuyant sur les skills de spécification et de revue de **[Matt Pocock (`mattpocock/skills`)](https://github.com/mattpocock/skills)**. Ce guide explique comment ce roster est assemblé selon votre projet et comment l'enrichir en préservant l'immunité contre l'injection de prompt.
 
 ---
 
-## 1. Socle Transverse vs Spécialistes Dynamiques dans `.cursor/agents/`
+## 1. Socle Transverse vs Spécialistes Dynamiques dans `reviewers_dir`
 
 Le roster généré par `/setup-repo` n'est pas figé : il associe un **socle transverse permanent** à des **spécialistes conditionnels** adaptés à votre stack et à vos sous-domaines (par exemple l'exemple complet à 10 agents généré pour l'application web React `craft-calculator`, ou des spécialistes additionnels via `--domain-reviewers realtime,game-systems` et `--no-frontend-reviewers` pour un projet sans UI) :
 
@@ -25,11 +25,11 @@ Le roster généré par `/setup-repo` n'est pas figé : il associe un **socle tr
 
 ## 2. Comment l'Agent Crée et Personnalise les Reviewers en Toute Sécurité
 
-Le répertoire `.cursor/agents/**` étant classé comme **chemin sensible de confiance** (Q92) :
+Le répertoire du roster de reviewers (`<reviewers_dir>/**`, par défaut `.agents/reviewers/**`) étant classé comme **chemin sensible de confiance** (Q92) :
 
-1. **Conception sur mesure lors de `/setup-repo` (et enrichissement manuel sur `dev`)** : lors du setup initial, l'agent inspecte le dépôt et peut créer de nouveaux reviewers spécialisés dans `.cursor/agents/<slug>-reviewer.md` en précisant un champ `paths:` dans le frontmatter YAML (ex. `paths: src/realtime, src/ws`). Dès qu'une PR modifie un fichier correspondant à `paths:` (ou au nom `<slug>`), `selectReviewersForDiff` sélectionne automatiquement ce spécialiste.
-2. **Versionnez toujours vos changements sur `dev`** : à l'exécution, l'orchestrateur EPURE charge `.cursor/agents/*.md` exclusivement depuis la branche de confiance `dev` — jamais depuis une branche `task/*` non fusionnée.
-3. **Enrichissement Automatique lors de `/epure plan`** : lorsqu'une nouvelle fonctionnalité est planifiée via `/epure plan`, EPURE enrichit les reviewers du domaine et `.cursor/agents/user-advocate.md` sur la branche `plan/<issue>-<slug>` avec les nouveaux invariants et personas. Lorsque vous validez avec `/epure approve`, ces définitions sont fusionnées dans `dev` avant le démarrage des tickets `task/*`.
+1. **Conception sur mesure lors de `/setup-repo` (et enrichissement manuel sur `dev`)** : lors du setup initial, l'agent inspecte le dépôt et peut créer de nouveaux reviewers spécialisés dans `<reviewers_dir>/<slug>-reviewer.md` en précisant un champ `paths:` dans le frontmatter YAML (ex. `paths: src/realtime, src/ws`). Dès qu'une PR modifie un fichier correspondant à `paths:` (ou au nom `<slug>`), `selectReviewersForDiff` sélectionne automatiquement ce spécialiste.
+2. **Versionnez toujours vos changements sur `dev`** : à l'exécution, l'orchestrateur EPURE charge `<reviewers_dir>/*.md` exclusivement depuis la branche de confiance `dev` (avec repli sur les templates embarqués d'EPURE) — jamais depuis une branche `task/*` non fusionnée.
+3. **Enrichissement Automatique lors de `/epure plan`** : lorsqu'une nouvelle fonctionnalité est planifiée via `/epure plan`, EPURE enrichit les reviewers du domaine et `<reviewers_dir>/user-advocate.md` sur la branche `plan/<issue>-<slug>` avec les nouveaux invariants et personas. Lorsque vous validez avec `/epure approve`, ces définitions sont fusionnées dans `dev` avant le démarrage des tickets `task/*`.
 
 ---
 

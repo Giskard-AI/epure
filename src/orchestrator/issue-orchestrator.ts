@@ -14,7 +14,10 @@ import {
   resolveLlmEscalationReason
 } from "../execution/external-ci-gate.js";
 import { LLMError } from "../llm/errors.js";
-import { adaptReviewerRosterForDomain } from "../review/reviewer-roster.js";
+import {
+  adaptReviewerRosterForDomain,
+  DEFAULT_REVIEWERS_DIR
+} from "../review/reviewer-roster.js";
 import { generateSemanticSquashCommitFromDiff } from "../review/squash-commit-generator.js";
 import { formatVerificationToolingGuideMarkdown } from "../sandbox/polyglot-workspace-runner.js";
 import {
@@ -345,10 +348,13 @@ export async function orchestrateIssueCommand(
         (await loadRepoAgentsConfig(gh, "dev")) ??
         (await loadRepoAgentsConfig(gh, "main"));
       const phaseModels = resolvePhaseModels(
-        effectiveInput.model ?? effectiveInput.geminiModel,
-        parsedDevAgentsConfig
+        effectiveInput.model,
+        parsedDevAgentsConfig,
+        effectiveInput.llmApiKey
       );
       maxCodeFixAttempts = parsedDevAgentsConfig?.max_code_fix_attempts ?? 3;
+      const reviewersDir =
+        parsedDevAgentsConfig?.reviewers_dir ?? DEFAULT_REVIEWERS_DIR;
 
     // 3 & 4. Handle /epure plan, human reply during grilling or spec review, /epure to-spec, /epure to-tickets
     if (
@@ -376,6 +382,7 @@ export async function orchestrateIssueCommand(
           store,
           llmApiKey: effectiveInput.llmApiKey,
           phaseModels,
+          reviewersDir,
           onTransientRetriesUsed: (used) => {
             totalTransientRetriesUsed += used;
           },
@@ -481,7 +488,8 @@ export async function orchestrateIssueCommand(
           llmApiKey: effectiveInput.llmApiKey,
           fetchImpl: effectiveInput.fetchImpl,
           model: phaseModels.implementationModel,
-          sandboxRunner: effectiveInput.sandboxRunner
+          sandboxRunner: effectiveInput.sandboxRunner,
+          reviewersDir
         });
 
         if (syncRes.status === "escalated") {
@@ -544,7 +552,8 @@ export async function orchestrateIssueCommand(
             llmApiKey: effectiveInput.llmApiKey,
             fetchImpl: effectiveInput.fetchImpl,
             model: phaseModels.implementationModel,
-            sandboxRunner: effectiveInput.sandboxRunner
+            sandboxRunner: effectiveInput.sandboxRunner,
+            reviewersDir
           });
           if (taskSyncRes.status === "escalated") {
             await gh.ensureLabel(
@@ -902,7 +911,8 @@ export async function orchestrateIssueCommand(
         planTitle: issue.title,
         glossaryMarkdown: issue.body,
         specMarkdown: issue.body,
-        touchesFrontendUi: true
+        touchesFrontendUi: true,
+        reviewersDir
       });
       const trustedBaseFilesMap = new Map<string, string>();
       for (const f of trustedBaseRoster.files) {
@@ -926,7 +936,10 @@ export async function orchestrateIssueCommand(
         });
       }
 
-      const remoteTrustedRoster = await gh.readTrustedBaseRosterFiles("dev");
+      const remoteTrustedRoster = await gh.readTrustedBaseRosterFiles(
+        "dev",
+        reviewersDir
+      );
       for (const [relPath, content] of remoteTrustedRoster.entries()) {
         trustedBaseFilesMap.set(relPath, content);
       }
@@ -1078,7 +1091,8 @@ export async function orchestrateIssueCommand(
       const accumulatedFiles = await gh.readBranchWorkspaceFiles(
         featureBranch,
         hintForWorkspace,
-        pinnedWorkspacePaths
+        pinnedWorkspacePaths,
+        reviewersDir
       );
       const featureChangedFilesMap = new Map<string, string>();
       const featureDeletedFilesSet = new Set<string>();

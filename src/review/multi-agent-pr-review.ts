@@ -6,12 +6,13 @@ import {
   AuthenticationError,
   QuotaExhaustedError
 } from "../llm/errors.js";
+import { DEFAULT_FALLBACK_LLM_MODEL } from "../llm/client.js";
 import type { ProviderConfig } from "../llm/types.js";
 import {
-  callGeminiJson,
-  type GeminiFunctionDeclaration,
-  type GeminiToolHandler
-} from "../orchestrator/gemini-client.js";
+  callLlmJson,
+  type LlmFunctionDeclaration,
+  type LlmToolHandler
+} from "../orchestrator/llm-helper.js";
 import {
   REVIEWER_FINDINGS_SCHEMA,
   SQUASH_COMMIT_SCHEMA,
@@ -31,6 +32,7 @@ import {
 } from "../security/prompt-injection-guard.js";
 import {
   ALL_REVIEWER_AGENT_NAMES,
+  DEFAULT_REVIEWERS_DIR,
   isSensitiveReviewerRosterPath,
   resolveTrustedReviewerPrompt,
   type ReviewerAgentName
@@ -79,6 +81,7 @@ export interface SelectReviewersInput {
     | ReadonlyMap<string, string>
     | Readonly<Record<string, string>>
     | undefined;
+  readonly reviewersDir?: string | undefined;
 }
 
 export interface SelectReviewersResult {
@@ -114,6 +117,7 @@ export interface RunMultiAgentPrReviewInput {
     | undefined;
   readonly isReReviewPass?: boolean | undefined;
   readonly previousFailedReviewers?: readonly ReviewerAgentName[] | undefined;
+  readonly reviewersDir?: string | undefined;
   readonly llmApiKey?: string | undefined;
   readonly model?: string | undefined;
   readonly providers?: Readonly<Record<string, ProviderConfig>> | undefined;
@@ -145,7 +149,7 @@ const DOMAIN_BACKEND_FILE_PATTERN =
 const INFRA_FILE_PATTERN =
   /(?:^\.github\/|(?:^|\/)(?:package\.json|tsconfig.*\.json|vite\.config\.[a-z]+|Dockerfile|Makefile)$)/i;
 const SENSITIVE_TASK_PATH_PATTERN =
-  /^(?:\.github\/workflows\/|\.github\/agents\.ya?ml$|\.cursor\/agents\/|\.env)/i;
+  /^(?:\.github\/workflows\/|\.github\/agents\.ya?ml$|\.env)/i;
 
 const BUILTIN_REVIEWER_NAMES = new Set<string>(ALL_REVIEWER_AGENT_NAMES);
 
@@ -154,7 +158,8 @@ function extractCustomReviewersFromTrustedFiles(
     | ReadonlyMap<string, string>
     | Readonly<Record<string, string>>
     | undefined,
-  cleanChangedPaths: readonly string[]
+  cleanChangedPaths: readonly string[],
+  reviewersDir: string
 ): readonly ReviewerAgentName[] {
   if (!trustedBaseBranchFiles) {
     return [];
@@ -171,10 +176,13 @@ function extractCustomReviewersFromTrustedFiles(
         );
 
   const matchedCustom: ReviewerAgentName[] = [];
+  const dirPrefix = `${reviewersDir.toLowerCase()}/`;
 
   for (const [rawPath, content] of entries) {
     const normPath = rawPath.trim().replace(/^\/+/, "");
-    const match = /^\.cursor\/agents\/([a-z0-9-]+)\.md$/i.exec(normPath);
+    const match = normPath.toLowerCase().startsWith(dirPrefix)
+      ? /^([a-z0-9-]+)\.md$/i.exec(normPath.slice(dirPrefix.length))
+      : null;
     if (!match || !match[1]) {
       continue;
     }
@@ -228,12 +236,15 @@ export function selectReviewersForDiff(
   input: SelectReviewersInput
 ): SelectReviewersResult {
   const maxReviewers = input.maxReviewers ?? 4;
+  const reviewersDir = input.reviewersDir ?? DEFAULT_REVIEWERS_DIR;
   const cleanPaths = input.changedFiles.map((f) =>
     f.trim().replace(/^\/+/, "")
   );
 
   const sensitivePathsTouched = cleanPaths.filter(
-    (p) => SENSITIVE_TASK_PATH_PATTERN.test(p) || isSensitiveReviewerRosterPath(p)
+    (p) =>
+      SENSITIVE_TASK_PATH_PATTERN.test(p) ||
+      isSensitiveReviewerRosterPath(p, reviewersDir)
   );
   const touchesSensitivePaths = sensitivePathsTouched.length > 0;
   const touchesFrontendUi = cleanPaths.some((p) => UI_FILE_PATTERN.test(p));
@@ -272,10 +283,11 @@ export function selectReviewersForDiff(
     addCandidate("security-reviewer");
   }
 
-  // Custom domain specialists created/designed in .cursor/agents/*.md during /setup-repo or /epure plan
+  // Custom domain specialists created/designed in <reviewers_dir>/*.md during /setup-repo or /epure plan
   const customMatched = extractCustomReviewersFromTrustedFiles(
     input.trustedBaseBranchFiles,
-    cleanPaths
+    cleanPaths,
+    reviewersDir
   );
   for (const customReviewer of customMatched) {
     addCandidate(customReviewer);
@@ -391,8 +403,8 @@ function mergeFileSourceIntoMap(
 }
 
 export function buildReviewerInspectionTools(input: RunMultiAgentPrReviewInput): {
-  readonly declarations: readonly GeminiFunctionDeclaration[];
-  readonly handlers: Readonly<Record<string, GeminiToolHandler>>;
+  readonly declarations: readonly LlmFunctionDeclaration[];
+  readonly handlers: Readonly<Record<string, LlmToolHandler>>;
 } {
   const allFiles = new Map<string, string>();
   mergeFileSourceIntoMap(allFiles, input.trustedBaseBranchFiles);
@@ -411,7 +423,7 @@ export function buildReviewerInspectionTools(input: RunMultiAgentPrReviewInput):
     input.changedFiles.map((f) => f.path.replace(/^\/+/, ""))
   );
 
-  const declarations: readonly GeminiFunctionDeclaration[] = [
+  const declarations: readonly LlmFunctionDeclaration[] = [
     {
       name: "list_files",
       description:
@@ -476,7 +488,7 @@ export function buildReviewerInspectionTools(input: RunMultiAgentPrReviewInput):
     }
   ];
 
-  const handlers: Record<string, GeminiToolHandler> = {
+  const handlers: Record<string, LlmToolHandler> = {
     list_files: () => {
       const files = Array.from(allFiles.entries()).map(([path, content]) => ({
         path,
@@ -591,7 +603,8 @@ async function executeSingleReviewerPass(params: {
   const trustedPrompt = resolveTrustedReviewerPrompt({
     reviewer,
     repository: input.repository,
-    trustedBaseBranchFiles: input.trustedBaseBranchFiles
+    trustedBaseBranchFiles: input.trustedBaseBranchFiles,
+    reviewersDir: input.reviewersDir
   });
 
   if (!input.llmApiKey || !input.llmApiKey.trim()) {
@@ -657,9 +670,9 @@ async function executeSingleReviewerPass(params: {
   ].join("\n");
 
   try {
-    const parsed = await callGeminiJson<ReviewerFindingsPayload>({
+    const parsed = await callLlmJson<ReviewerFindingsPayload>({
       apiKey: input.llmApiKey,
-      model: input.model ?? "gemini-3.8-flash",
+      model: input.model ?? DEFAULT_FALLBACK_LLM_MODEL,
       providers: input.providers,
       maxTransientRetries: input.maxTransientRetries,
       transientRetryBackoffSeconds: input.transientRetryBackoffSeconds,
@@ -721,7 +734,8 @@ export async function runMultiAgentPrReviewPass(
     changedFiles: filePaths,
     isReReviewPass: input.isReReviewPass,
     previousFailedReviewers: input.previousFailedReviewers,
-    trustedBaseBranchFiles: input.trustedBaseBranchFiles
+    trustedBaseBranchFiles: input.trustedBaseBranchFiles,
+    reviewersDir: input.reviewersDir
   });
 
   if (isGha) {
@@ -740,7 +754,7 @@ export async function runMultiAgentPrReviewPass(
   const mustFixFindings: ReviewerFinding[] = [];
   const informationalFindings: ReviewerFinding[] = [];
 
-  // Q92: Any modification to sensitive paths (.cursor/agents/**, .github/workflows/**, .github/agents.yml) on a task/* branch is a hard blocker
+  // Q92: Any modification to sensitive paths (<reviewers_dir>/**, .github/workflows/**, .github/agents.yml) on a task/* branch is a hard blocker
   const isTaskBranch = input.headBranch
     .replace(/^refs\/heads\//, "")
     .startsWith("task/");
@@ -754,7 +768,7 @@ export async function runMultiAgentPrReviewPass(
         line: 1,
         title: `Forbidden modification of sensitive path '${sensitivePath}' on task branch`,
         rationale:
-          "Per ADR-0004, ADR-0017 and Q92, task/* branches must never modify .cursor/agents/**, .github/workflows/**, or .github/agents.yml.",
+          `Per ADR-0004, ADR-0017 and Q92, task/* branches must never modify ${input.reviewersDir ?? DEFAULT_REVIEWERS_DIR}/**, .github/workflows/**, or .github/agents.yml.`,
         suggested_action: `Revert changes to '${sensitivePath}' and keep reviewer prompts exclusively on the trusted base branch.`
       });
     }

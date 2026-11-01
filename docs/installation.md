@@ -1,8 +1,8 @@
 # Installation & Bootstrap
 
-The recommended way to initialize or reconfigure a repository with EPURE is to invoke the **`/setup-repo` agent skill** (`.agents/skills/setup-repo/SKILL.md`) directly inside your coding agent (Cursor, Claude Code, Pi, or Codex).
+The recommended way to initialize or reconfigure a repository with EPURE is to invoke the **`/setup-repo` agent skill** (`.agents/skills/setup-repo/SKILL.md`) directly inside your Skills-compatible coding agent.
 
-The `/setup-repo` skill orchestrates the entire bootstrap end-to-end: it inspects your repository's actual architecture, walks you through the interactive wizard (`setup-github-apps-wizard.sh`) to register your two GitHub Apps and isolated GitHub Environments (`<llm-env>` and `release`), runs the deterministic CLI (`dist/cli/setup-repo.mjs`) in `--dry-run` simulation mode before `--apply`, and **dynamically designs your multi-agent reviewer roster (`.cursor/agents/*.md`)**.
+The `/setup-repo` skill orchestrates the entire bootstrap end-to-end: it inspects your repository's actual architecture, walks you through the interactive wizard (`setup-github-apps-wizard.sh`) to register your two GitHub Apps and isolated GitHub Environments (`<llm-env>` and `release`), runs the deterministic CLI (`dist/cli/setup-repo.mjs`) in `--dry-run` simulation mode before `--apply`, and **dynamically designs your multi-agent reviewer roster (`reviewers_dir`, default `.agents/reviewers/*.md`)**.
 
 ---
 
@@ -10,7 +10,7 @@ The `/setup-repo` skill orchestrates the entire bootstrap end-to-end: it inspect
 
 Before bootstrapping a repository with EPURE, ensure your local environment has:
 
-- **A Skills-compatible coding agent** (Cursor, Claude Code, Pi, or Codex) with `.agents/skills/setup-repo/SKILL.md`
+- **A Skills-compatible coding agent** (any IDE or CLI agent that can load `.agents/skills/setup-repo/SKILL.md`)
 - **Node.js 24 LTS** (`>=24.0.0`)
 - **GitHub CLI (`gh`)** authenticated against your target GitHub account or organization (`gh auth status`)
 - **Git** (`>=2.38`)
@@ -34,7 +34,7 @@ Before writing any file, the agent inspects the target repository (`package.json
 
 - The language and build stack to configure `.github/workflows/ci.yml`, `verification.targets`, `renovate.json`, `.github/zizmor.yml`, and `standards-reviewer.md`.
 - Whether the repository includes a frontend/UI surface (which determines whether the **Impeccable** gate and `frontend-reviewer`, `accessibility-reviewer`, and `design-reviewer` are included).
-- Which domain subsystems warrant creating **custom specialist reviewers** in `.cursor/agents/<domain>-reviewer.md`.
+- Which domain subsystems warrant creating **custom specialist reviewers** in `.agents/reviewers/<domain>-reviewer.md` (or your configured `reviewers_dir`).
 
 ### Step 2: Provision the Two GitHub Apps & Environment-Scoped Secrets (Wizard)
 
@@ -51,7 +51,7 @@ bash scripts/wizards/setup-github-apps-wizard.sh \
   --llm-env <llm-env>
 ```
 
-> **Configurable & LLM-Agnostic `<llm-env>`**: The agent environment name (`<llm-env>`) can be chosen freely (for example `epure-agent`, `llm`, `openai`, `anthropic`, or `gemini`) and matches `environment: <llm-env>` on the `orchestrate-command` job in `.github/workflows/epure-issue-command.yml`.
+> **Configurable & LLM-Agnostic `<llm-env>`**: The agent environment name (`<llm-env>`) defaults to `epure-agent` and can be chosen freely (other examples: `llm`, `openai`, `anthropic`, or `gemini`; pass the same value to `setup-repo --llm-env`) and matches `environment: <llm-env>` on the `orchestrate-command` job in `.github/workflows/epure-issue-command.yml`.
 
 | Secret Name | GitHub Environment Scope | Purpose |
 | --- | --- | --- |
@@ -81,9 +81,9 @@ node dist/cli/setup-repo.mjs \
   --dry-run
 ```
 
-### Step 4: Guided Application (`--apply`) & Custom `.cursor/agents/` Design
+### Step 4: Guided Application (`--apply`) & Custom Reviewer Roster Design
 
-Once you confirm the dry-run report, the `/setup-repo` skill applies the repository governance via `--apply --apply-github-settings`, and then creates and tailors the `.cursor/agents/*.md` reviewer prompts specific to your repository:
+Once you confirm the dry-run report, the `/setup-repo` skill applies the repository governance via `--apply --apply-github-settings`, and then creates and tailors the reviewer prompts in `.agents/reviewers/*.md` (or the directory chosen with `--reviewers-dir`) specific to your repository:
 
 ```bash
 node dist/cli/setup-repo.mjs \
@@ -95,10 +95,10 @@ node dist/cli/setup-repo.mjs \
   --apply-github-settings
 ```
 
-Then commit and push the generated files (`.github/`, `.cursor/agents/`, and `renovate.json`) to `dev`:
+Then commit and push the generated files (`.github/`, `.agents/reviewers/`, and `renovate.json`) to `dev`:
 
 ```bash
-git add .github/ .cursor/agents/ renovate.json
+git add .github/ .agents/reviewers/ renovate.json
 git commit -m "chore(epure): bootstrap repository governance and workflows"
 git push origin dev
 ```
@@ -115,8 +115,8 @@ git push origin dev
 3. **Declarative Configuration, Hardened Supply-Chain & Thin Caller Workflows**:
    - Generates `.github/agents.yml` (flat canonical schema with auto-discovered `verification.targets`), `.github/zizmor.yml` (static workflow security configuration), and `renovate.json` (with 3-to-14-day quarantine cooldowns).
    - Installs `.github/workflows/epure-issue-command.yml`, `.github/workflows/epure-check.yml`, `.github/workflows/pr-title.yml`, `.github/workflows/ci.yml` (tailored to the detected stack), and `.github/workflows/release.yml`, all pinned to the 40-character commit SHA of `Giskard-AI/epure`.
-4. **Dynamic Multi-Agent Reviewer Roster (`.cursor/agents/*.md`)**:
-   - The agent running `/setup-repo` **creates, designs, and adds the appropriate `.cursor/agents/<role>-reviewer.md` files as needed** based on the repository's actual elements (further refined during `/epure plan`):
+4. **Dynamic Multi-Agent Reviewer Roster (`reviewers_dir`, default `.agents/reviewers/*.md`)**:
+   - The agent running `/setup-repo` **creates, designs, and adds the appropriate `<reviewers_dir>/<role>-reviewer.md` files as needed** based on the repository's actual elements (further refined during `/epure plan`):
      - **Always-On Core (Cross-Cutting & Persona)**: `architecture-reviewer`, `security-reviewer`, `spec-parity-reviewer`, `standards-reviewer` (adapted to the detected language: TypeScript, Python, Rust, or Go), and `user-advocate`.
      - **Agent-Designed Stack, Domain & UI Specialists**: `domain-backend-reviewer`, `infra-reviewer`, any custom domain specialists designed by the agent for your subsystems (e.g. `realtime-reviewer.md`, `combat-engine-reviewer.md`, `sql-migration-reviewer.md` with YAML frontmatter `paths:` routing), and — only when the project includes a UI — the frontend/Impeccable trio (`frontend-reviewer`, `accessibility-reviewer`, `design-reviewer`).
      - *Illustrative example on `craft-calculator` (TypeScript + React web app)*: the agent composes a 10-reviewer roster combining the always-on core, `domain-backend-reviewer`, `infra-reviewer`, and the 3 UI/Impeccable reviewers.

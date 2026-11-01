@@ -5,6 +5,7 @@ import { EPURE_PUBLIC_VERSION } from "../contract/epure-contract.js";
 import type { ProviderConfig, ProviderKind } from "../llm/types.js";
 import {
   buildDefaultReviewerRosterFiles,
+  DEFAULT_REVIEWERS_DIR,
   type CustomDomainReviewerSpec,
   type ReviewerAgentName
 } from "../review/reviewer-roster.js";
@@ -73,6 +74,8 @@ export interface AgentsConfig {
   readonly harness: AgentHarness;
   readonly models: AgentsModelsConfig;
   readonly providers?: Readonly<Record<string, ProviderConfig>> | undefined;
+  readonly reviewers_dir: string;
+  readonly llm_environment: string;
   readonly merge_policy: StaleBaseMergePolicy;
   readonly max_code_fix_attempts: number;
   readonly max_epic_phases?: number | undefined;
@@ -103,6 +106,8 @@ export interface AgentsConfigOverrides {
   readonly harness?: AgentHarness | undefined;
   readonly models?: Partial<AgentsModelsConfig> | undefined;
   readonly providers?: Readonly<Record<string, ProviderConfig>> | undefined;
+  readonly reviewers_dir?: string | undefined;
+  readonly llm_environment?: string | undefined;
   readonly merge_policy?: StaleBaseMergePolicy | undefined;
   readonly max_code_fix_attempts?: number | undefined;
   readonly max_epic_phases?: number | undefined;
@@ -296,10 +301,12 @@ export const DEFAULT_VERIFICATION_PROFILE: VerificationProfile = {
 export const DEFAULT_AGENTS_CONFIG: AgentsConfig = {
   harness: "pi",
   models: {
-    planning: "claude-sonnet-4-20250514",
-    implementation: "claude-sonnet-4-20250514",
-    review: "gpt-4.1"
+    planning: "anthropic/claude-sonnet-4-20250514",
+    implementation: "anthropic/claude-sonnet-4-20250514",
+    review: "openai/gpt-4.1"
   },
+  reviewers_dir: DEFAULT_REVIEWERS_DIR,
+  llm_environment: "epure-agent",
   merge_policy: "strict",
   max_code_fix_attempts: 3,
   max_transient_api_retries: 4,
@@ -324,6 +331,17 @@ export const DEFAULT_REPOSITORY_MERGE_SETTINGS: RepositoryMergeSettingsSpec = {
 };
 
 const REPO_SLUG_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const LLM_ENVIRONMENT_NAME_PATTERN = /^[A-Za-z0-9._-]+$/;
+
+function isUnsafeReviewersDir(dir: string): boolean {
+  return (
+    dir === "" ||
+    dir === "." ||
+    /^(?:[\\/]|[A-Za-z]:)/.test(dir) ||
+    dir.split(/[\\/]/).includes("..") ||
+    /^src(?:[\\/]|$)/i.test(dir)
+  );
+}
 
 function normalizeVerificationTarget(
   target: VerificationTargetSpec
@@ -481,6 +499,33 @@ export function resolveAgentsConfig(
     }
   }
 
+  const reviewersDir = (
+    overrides.reviewers_dir ?? DEFAULT_AGENTS_CONFIG.reviewers_dir
+  )
+    .trim()
+    .replace(/^(?:\.\/)+/, "")
+    .replace(/\/+$/, "");
+  if (isUnsafeReviewersDir(reviewersDir)) {
+    return {
+      valid: false,
+      error_code: "SECURITY_INVARIANT_VIOLATION",
+      error_message: `Local .github/agents.yml reviewers_dir '${overrides.reviewers_dir ?? ""}' must be a relative directory outside 'src/' without '..' segments.`,
+      config: DEFAULT_AGENTS_CONFIG
+    };
+  }
+
+  const llmEnvironment = (
+    overrides.llm_environment ?? DEFAULT_AGENTS_CONFIG.llm_environment
+  ).trim();
+  if (!LLM_ENVIRONMENT_NAME_PATTERN.test(llmEnvironment)) {
+    return {
+      valid: false,
+      error_code: "SECURITY_INVARIANT_VIOLATION",
+      error_message: `Local .github/agents.yml llm_environment '${overrides.llm_environment ?? ""}' must match ${LLM_ENVIRONMENT_NAME_PATTERN.source}.`,
+      config: DEFAULT_AGENTS_CONFIG
+    };
+  }
+
   const pagesPreviews =
     overrides.github_pages_previews ?? DEFAULT_AGENTS_CONFIG.github_pages_previews;
   if (pagesPreviews) {
@@ -562,6 +607,8 @@ export function resolveAgentsConfig(
       review: overrides.models?.review ?? DEFAULT_AGENTS_CONFIG.models.review
     },
     ...(normalizedProviders ? { providers: normalizedProviders } : {}),
+    reviewers_dir: reviewersDir,
+    llm_environment: llmEnvironment,
     merge_policy: overrides.merge_policy ?? DEFAULT_AGENTS_CONFIG.merge_policy,
     max_code_fix_attempts:
       overrides.max_code_fix_attempts ??
@@ -785,6 +832,8 @@ export function serializeAgentsConfigYaml(
     `  implementation: ${config.models.implementation}`,
     `  review: ${config.models.review}`,
     ...providerLines,
+    `reviewers_dir: ${formatYamlProviderScalar(config.reviewers_dir)}`,
+    `llm_environment: ${config.llm_environment}`,
     `merge_policy: ${config.merge_policy}`,
     `task_auto_merge_enabled: ${taskAutoMergeEnabled}`,
     `max_code_fix_attempts: ${config.max_code_fix_attempts}`,
@@ -914,6 +963,8 @@ export function parseAgentsYaml(
   readonly security_overrides?: SecurityOverridesAttempt | undefined;
 } {
   let harness: AgentHarness | undefined;
+  let reviewers_dir: string | undefined;
+  let llm_environment: string | undefined;
   const models: Partial< Record<keyof AgentsModelsConfig, string> > = {};
   const providers: Record<string, ProviderConfig> = {};
   let currentProviderAlias: string | null = null;
@@ -1097,6 +1148,10 @@ export function parseAgentsYaml(
         if (h === "pi" || h === "codex") {
           harness = h;
         }
+      } else if (key === "reviewers_dir") {
+        reviewers_dir = unquoteYamlScalar(val);
+      } else if (key === "llm_environment") {
+        llm_environment = unquoteYamlScalar(val);
       } else if (key === "merge_policy") {
         const mp = unquoteYamlScalar(val);
         if (mp === "strict" || mp === "relaxed") {
@@ -1402,6 +1457,8 @@ export function parseAgentsYaml(
     ...(harness ? { harness } : {}),
     ...(Object.keys(models).length > 0 ? { models } : {}),
     ...(Object.keys(providers).length > 0 ? { providers } : {}),
+    ...(reviewers_dir !== undefined ? { reviewers_dir } : {}),
+    ...(llm_environment !== undefined ? { llm_environment } : {}),
     ...(merge_policy ? { merge_policy } : {}),
     ...(max_code_fix_attempts !== undefined ? { max_code_fix_attempts } : {}),
     ...(max_epic_phases !== undefined ? { max_epic_phases } : {}),
@@ -1481,7 +1538,8 @@ export const parseAgentsYml = parseAgentsYaml;
 function buildCallerWorkflows(
   pinnedSha: string,
   stack: DetectedStackProfile,
-  jobTimeoutMinutes: number = DEFAULT_AGENTS_CONFIG.job_timeout_minutes
+  jobTimeoutMinutes: number = DEFAULT_AGENTS_CONFIG.job_timeout_minutes,
+  llmEnvironment: string = DEFAULT_AGENTS_CONFIG.llm_environment
 ): ReadonlyArray<{
   readonly path: string;
   readonly content: string;
@@ -1537,7 +1595,7 @@ function buildCallerWorkflows(
         "    if: ${{ always() && (needs.authorize-command.outputs.authorized == 'true' || ((github.event_name == 'check_suite' || github.event_name == 'workflow_run') && (startsWith(github.event.check_suite.head_branch, 'task/') || startsWith(github.event.check_suite.head_branch, 'feature/') || startsWith(github.event.workflow_run.head_branch, 'task/') || startsWith(github.event.workflow_run.head_branch, 'feature/')))) }}",
         "    runs-on: ubuntu-26.04",
         `    timeout-minutes: ${jobTimeoutMinutes}`,
-        "    environment: gemini",
+        `    environment: ${llmEnvironment}`,
         "    concurrency:",
         "      group: epure-issue-${{ github.event.issue.number || github.event.check_suite.head_branch || github.event.workflow_run.head_branch || github.run_id }}",
         "      cancel-in-progress: false",
@@ -1899,6 +1957,9 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
   let existingVerification: VerificationProfile | undefined;
   let existingProviders: Readonly<Record<string, ProviderConfig>> | undefined;
   let existingLlmRequestTimeoutSeconds: number | undefined;
+  let existingReviewersDir: string | undefined;
+  let existingLlmEnvironment: string | undefined;
+  let existingModels: AgentsModelsConfig | undefined;
   if (
     input.repoRootDir &&
     existsSync(join(input.repoRootDir, ".github", "agents.yml"))
@@ -1913,10 +1974,16 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
       existingProviders = parsedExisting.providers;
       existingLlmRequestTimeoutSeconds =
         parsedExisting.llm_request_timeout_seconds;
+      existingReviewersDir = parsedExisting.reviewers_dir;
+      existingLlmEnvironment = parsedExisting.llm_environment;
+      existingModels = parsedExisting.models;
     } catch {
       existingVerification = undefined;
       existingProviders = undefined;
       existingLlmRequestTimeoutSeconds = undefined;
+      existingReviewersDir = undefined;
+      existingLlmEnvironment = undefined;
+      existingModels = undefined;
     }
   }
 
@@ -2011,8 +2078,31 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
       : (existingLlmRequestTimeoutSeconds ??
         resolvedConfig.config.llm_request_timeout_seconds);
 
+  const overrideModels = input.agentsOverrides?.models;
   const effectiveAgentsConfig: AgentsConfig = {
     ...resolvedConfig.config,
+    models: {
+      planning:
+        overrideModels?.planning ??
+        existingModels?.planning ??
+        resolvedConfig.config.models.planning,
+      implementation:
+        overrideModels?.implementation ??
+        existingModels?.implementation ??
+        resolvedConfig.config.models.implementation,
+      review:
+        overrideModels?.review ??
+        existingModels?.review ??
+        resolvedConfig.config.models.review
+    },
+    reviewers_dir:
+      input.agentsOverrides?.reviewers_dir !== undefined
+        ? resolvedConfig.config.reviewers_dir
+        : (existingReviewersDir ?? resolvedConfig.config.reviewers_dir),
+    llm_environment:
+      input.agentsOverrides?.llm_environment !== undefined
+        ? resolvedConfig.config.llm_environment
+        : (existingLlmEnvironment ?? resolvedConfig.config.llm_environment),
     llm_request_timeout_seconds: effectiveLlmRequestTimeoutSeconds,
     ...(effectiveProviders ? { providers: effectiveProviders } : {}),
     verification: effectiveVerification
@@ -2044,7 +2134,8 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
   const workflowTemplates = buildCallerWorkflows(
     pinnedSha,
     detectedStack,
-    effectiveAgentsConfig.job_timeout_minutes
+    effectiveAgentsConfig.job_timeout_minutes,
+    effectiveAgentsConfig.llm_environment
   );
   const plannedWorkflows: PlannedWorkflowFile[] = workflowTemplates.map((wf) => ({
     path: wf.path,
@@ -2056,7 +2147,8 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
     repository,
     stackKind: detectedStack.kind,
     includeFrontendReviewers: input.includeFrontendReviewers,
-    customDomainSpecialists: input.customDomainSpecialists
+    customDomainSpecialists: input.customDomainSpecialists,
+    reviewersDir: effectiveAgentsConfig.reviewers_dir
   });
   const plannedReviewerRoster: PlannedReviewerRosterFile[] = rosterTemplates.map(
     (item) => ({
@@ -2162,7 +2254,7 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
     `- **Repository**: \`${repository}\``,
     `- **Merge Governance**: \`squash-only\` (\`allow_merge_commit=false\`, \`allow_rebase_merge=false\`, \`delete_branch_on_merge=true\`)`,
     `- **Agents Config (\`.github/agents.yml\`)**: \`${agentsConfigAction}\` (harness=\`${effectiveAgentsConfig.harness}\`, merge_policy=\`${effectiveAgentsConfig.merge_policy}\`)`,
-    `- **Reviewer Roster (\`.cursor/agents/*.md\`)**: \`${plannedReviewerRoster.length}\` agents (specialists + cross-cutting + \`user-advocate\`)`,
+    `- **Reviewer Roster (\`${effectiveAgentsConfig.reviewers_dir}/*.md\`)**: \`${plannedReviewerRoster.length}\` agents (specialists + cross-cutting + \`user-advocate\`)`,
     `- **Task Auto-Merge Enabled**: \`${taskAutoMergeEnabled}\` (${autoMergeWarningCode})`,
     `- **Governance Rulesets**: ${governanceRulesets.map((r) => `\`${r.name}\``).join(", ")}`,
     `- **Deferred External Workflows**: ${deferredWorkflowsList.length > 0 ? deferredWorkflowsList.map((w) => `\`${w}\``).join(", ") : "none"}`,

@@ -1,6 +1,6 @@
 # Guide : Onboarder un Dépôt avec le Skill `/setup-repo`
 
-Ce guide explique comment configurer un dépôt GitHub neuf ou existant (tel que `my-org/craft-calculator`) en invoquant **le skill d'agent `/setup-repo`** (`.agents/skills/setup-repo/SKILL.md`), qui est la façon privilégiée d'installer EPURE, ses 2 GitHub Apps, ses secrets cloisonnés par environnement (`<llm-env>` et `release`), `.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`, son roster dynamique `.cursor/agents/*.md` et ses 3 Repository Rulesets.
+Ce guide explique comment configurer un dépôt GitHub neuf ou existant (tel que `my-org/craft-calculator`) en invoquant **le skill d'agent `/setup-repo`** (`.agents/skills/setup-repo/SKILL.md`), qui est la façon privilégiée d'installer EPURE, ses 2 GitHub Apps, ses secrets cloisonnés par environnement (`<llm-env>` et `release`), `.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`, son roster dynamique de reviewers (`reviewers_dir`, par défaut `.agents/reviewers/*.md`) et ses 3 Repository Rulesets.
 
 ---
 
@@ -11,7 +11,7 @@ EPURE sépare les privilèges d'orchestration quotidienne des privilèges de mis
 - **`<owner>-epure-agent`** : permissions `contents: write`, `issues: write`, `pull_requests: write`, `checks: write`.
 - **`<owner>-epure-release`** : permissions `contents: write`, `metadata: read`.
 
-Exécutez l'assistant interactif (qui propose l'**Approche 2** GitHub App Manifest en 1 clic et l'**Approche 1 de repli** manuelle guidée) en indiquant le dépôt cible et le nom choisi pour l'environnement d'agent (`--llm-env <nom-env>`, p. ex. `epure-agent`, `llm`, `openai`, `anthropic` ou `gemini`) :
+Exécutez l'assistant interactif (qui propose l'**Approche 2** GitHub App Manifest en 1 clic et l'**Approche 1 de repli** manuelle guidée) en indiquant le dépôt cible et le nom choisi pour l'environnement d'agent (`--llm-env <nom-env>`, `epure-agent` par défaut ; autres exemples : `llm`, `openai`, `anthropic` ou `gemini`) :
 
 ```bash
 bash scripts/wizards/setup-github-apps-wizard.sh \
@@ -45,7 +45,7 @@ EPURE_RELEASE_APP_PRIVATE_KEY
 
 ## 2. Invoquer le Skill `/setup-repo` (Inspection & Simulation `--dry-run`)
 
-Dans votre agent local (Cursor, Claude Code, Pi ou Codex), invoquez le skill **`/setup-repo`** sur le dépôt cible :
+Dans votre agent local compatible Skills, invoquez le skill **`/setup-repo`** sur le dépôt cible :
 
 ```text
 /setup-repo my-org/craft-calculator
@@ -66,14 +66,14 @@ Vérifiez que le rapport de simulation présenté par l'agent mentionne :
 
 - La création de `.github/agents.yml` (schéma canonique plat avec découverte automatique de `verification.targets`), `.github/zizmor.yml` et `renovate.json`.
 - La création de `.github/workflows/epure-issue-command.yml`, `epure-check.yml`, `pr-title.yml`, `ci.yml` et `release.yml` épinglés sur le SHA de 40 caractères de `Giskard-AI/epure`.
-- L'initialisation dynamique du roster de reviewers `.cursor/agents/*.md` conçu par l'agent selon la stack et les sous-domaines du projet (socle transverse `architecture-reviewer`, `security-reviewer`, `spec-parity-reviewer`, `standards-reviewer`, `user-advocate` + spécialistes métier/UI sur mesure, soit 10 agents dans l'exemple `craft-calculator`).
+- L'initialisation dynamique du roster de reviewers dans `.agents/reviewers/*.md` (ou le `--reviewers-dir` choisi) conçu par l'agent selon la stack et les sous-domaines du projet (socle transverse `architecture-reviewer`, `security-reviewer`, `spec-parity-reviewer`, `standards-reviewer`, `user-advocate` + spécialistes métier/UI sur mesure, soit 10 agents dans l'exemple `craft-calculator`).
 - La configuration des 3 Repository Rulesets (`epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`).
 
 ---
 
 ## 3. Confirmer l'Application (`--apply`) & Pousser sur `dev`
 
-Après votre accord, le skill `/setup-repo` exécute `--apply --apply-github-settings`, ajuste les définitions `.cursor/agents/<role>-reviewer.md` propres à vos composants métier, et prépare les fichiers :
+Après votre accord, le skill `/setup-repo` exécute `--apply --apply-github-settings`, ajuste les définitions `<reviewers_dir>/<role>-reviewer.md` propres à vos composants métier, et prépare les fichiers :
 
 ```bash
 node dist/cli/setup-repo.mjs \
@@ -85,12 +85,12 @@ node dist/cli/setup-repo.mjs \
   --apply-github-settings
 ```
 
-Commitez et poussez ensuite les fichiers générés (`.github/`, `.cursor/agents/` et `renovate.json`) sur la branche par défaut `dev` :
+Commitez et poussez ensuite les fichiers générés (`.github/`, `.agents/reviewers/` et `renovate.json`) sur la branche par défaut `dev` :
 
 ```bash
 cd /chemin/vers/craft-calculator
 git checkout dev
-git add .github/ .cursor/agents/ renovate.json
+git add .github/ .agents/reviewers/ renovate.json
 git commit -m "chore(epure): bootstrap repository governance and workflows"
 git push origin dev
 ```

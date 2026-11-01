@@ -56,7 +56,7 @@ Postez `/epure approve` sur l'issue de pilotage pour intégrer directement les a
 
 EPURE interrompt l'automatisation et pose le label `needs-human` (`status: "suspended"`) lorsqu'une décision humaine est requise :
 
-1. **Modification d'un Chemin Sensible** : une branche `task/*` a modifié `.github/workflows/**`, `.github/agents.yml`, `.cursor/agents/**` ou `CODEOWNERS`.
+1. **Modification d'un Chemin Sensible** : une branche `task/*` a modifié `.github/workflows/**`, `.github/agents.yml`, le répertoire du roster de reviewers (`<reviewers_dir>/**`, par défaut `.agents/reviewers/**`) ou `CODEOWNERS`.
    - *Résolution* : inspectez le diff. Si la modification est légitime, ajoutez le label `approved-sensitive-change` sur la PR puis commentez **`/epure continue`** (ou `/epure approve`) sur l'issue de pilotage.
 2. **Plafond d'Auto-Remédiation Atteint (`max_code_fix_attempts = 3`)** : un ticket a échoué aux tests Stage 1, à la CI externe ou aux constats `must_fix` 3 fois consécutives.
    - *Résolution* : poussez un commit de correction sur la branche `task/*` ou `feature/*` (ou publiez une précision en commentaire), puis commentez **`/epure continue`** sur l'issue de pilotage. EPURE retire le label `needs-human`, restaure `status: "active"`, ignore les tickets déjà fermés et reprend exactement au dernier jalon validé.

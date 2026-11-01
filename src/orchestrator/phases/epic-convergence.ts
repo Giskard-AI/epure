@@ -3,7 +3,7 @@ import {
   wrapUntrustedContent
 } from "../../security/prompt-injection-guard.js";
 import { appendEpureCommandsSpoiler } from "../formatting/comments.js";
-import { callGeminiJson } from "../gemini-client.js";
+import { callLlmJson } from "../llm-helper.js";
 import { EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT } from "../prompts/code-discipline.js";
 import {
   EPIC_CONVERGENCE_AUDIT_SCHEMA,
@@ -139,7 +139,7 @@ export async function runEpicConvergenceAudit(
       : [])
   ].join("\n");
 
-  return await callGeminiJson<EpicConvergenceAuditPayload>({
+  return await callLlmJson<EpicConvergenceAuditPayload>({
     apiKey: params.llmApiKey,
     model: params.phaseModels.reviewModel || params.phaseModels.planningModel,
     providers: params.phaseModels.providers,

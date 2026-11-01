@@ -17,6 +17,8 @@ import type {
   ResponseSchemaSpec
 } from "./types.js";
 
+export const DEFAULT_FALLBACK_LLM_MODEL = "google/gemini-3.8-flash";
+
 export function resolveConfigValue(
   val: string | undefined,
   env: NodeJS.ProcessEnv = process.env
@@ -133,7 +135,7 @@ export function parseModelIdentifier(
   const effectiveModelId =
     modelId && modelId.trim().length > 0
       ? modelId.trim()
-      : "google/gemini-3.8-flash";
+      : DEFAULT_FALLBACK_LLM_MODEL;
 
   if (effectiveModelId.includes("/")) {
     const slashIndex = effectiveModelId.indexOf("/");

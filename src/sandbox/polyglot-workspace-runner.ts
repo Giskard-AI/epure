@@ -18,6 +18,10 @@ import type {
   VerificationTargetSpec
 } from "../bootstrap/ci-and-renovate.js";
 import {
+  DEFAULT_REVIEWERS_DIR,
+  isSensitiveReviewerRosterPath
+} from "../review/reviewer-roster.js";
+import {
   runInUntrustedCodeSandbox,
   type SandboxExecutionInput,
   type SandboxExecutionResult,
@@ -37,6 +41,7 @@ export interface ValidateWorkspaceFileOperationsInput {
   readonly deleted_files?: readonly string[] | undefined;
   readonly targets?: readonly VerificationTargetSpec[] | undefined;
   readonly isTaskBranch?: boolean | undefined;
+  readonly reviewersDir?: string | undefined;
 }
 
 export interface WorkspaceFileValidationResult {
@@ -130,6 +135,7 @@ export interface RunPolyglotStage1VerificationInput {
   readonly deleted_files?: readonly string[] | undefined;
   readonly changedPaths?: readonly string[] | undefined;
   readonly isTaskBranch?: boolean | undefined;
+  readonly reviewersDir?: string | undefined;
   readonly llmApiKey: string;
   readonly runnerEnv?: Readonly<Record<string, string | undefined>> | undefined;
   readonly bootstrappedTargets?: Set<string> | undefined;
@@ -152,7 +158,6 @@ export interface RunPolyglotStage1VerificationResult {
 const SENSITIVE_TASK_BRANCH_PATH_PATTERNS: readonly RegExp[] = [
   /^\.github\/agents\.ya?ml$/i,
   /^\.github\/workflows(?:\/|$)/i,
-  /^\.cursor\/agents(?:\/|$)/i,
   /(?:^|\/)\.env(?:\.(?!example$|sample$|template$).+)?$/i
 ];
 
@@ -285,9 +290,15 @@ function normalizeRelativeCandidate(rawPath: string): string {
     .replace(/^\/+/, "");
 }
 
-export function isSensitiveTaskBranchPath(rawPath: string): boolean {
+export function isSensitiveTaskBranchPath(
+  rawPath: string,
+  reviewersDir: string = DEFAULT_REVIEWERS_DIR
+): boolean {
   const norm = normalizeRelativeCandidate(rawPath);
-  return SENSITIVE_TASK_BRANCH_PATH_PATTERNS.some((re) => re.test(norm));
+  return (
+    SENSITIVE_TASK_BRANCH_PATH_PATTERNS.some((re) => re.test(norm)) ||
+    isSensitiveReviewerRosterPath(norm, reviewersDir)
+  );
 }
 
 function hasSymlinkEscapeAlongPath(resolvedRoot: string, rawRelPath: string): boolean {
@@ -391,7 +402,10 @@ export function validateWorkspaceFileOperations(
       traversalSet.add(rawPath);
       continue;
     }
-    if (input.isTaskBranch && isSensitiveTaskBranchPath(rawPath)) {
+    if (
+      input.isTaskBranch &&
+      isSensitiveTaskBranchPath(rawPath, input.reviewersDir)
+    ) {
       sensitiveSet.add(normalizeRelativeCandidate(rawPath));
     }
   }
@@ -932,7 +946,8 @@ export async function runPolyglotStage1Verification(
           : input.files,
       deleted_files: input.deleted_files,
       targets: input.profile.targets,
-      isTaskBranch: input.isTaskBranch
+      isTaskBranch: input.isTaskBranch,
+      reviewersDir: input.reviewersDir
     });
     const fullContainment = validateWorkspaceFileOperations({
       workDir,

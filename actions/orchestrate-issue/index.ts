@@ -58,7 +58,7 @@ async function run(): Promise<void> {
     process.env.LLM_API_KEY ??
     ""
   ).trim();
-  const model = (process.env.INPUT_MODEL ?? "gemini-3.8-flash").trim();
+  const model = (process.env.INPUT_MODEL ?? "").trim();
   const triggerHeadSha = (process.env.INPUT_TRIGGER_HEAD_SHA ?? "").trim();
   const triggerBranch = (process.env.INPUT_TRIGGER_BRANCH ?? "").trim();
   const asyncCiContinuation =
@@ -81,7 +81,7 @@ async function run(): Promise<void> {
       agentAppPrivateKey,
       fallbackGithubToken,
       llmApiKey,
-      model,
+      model: model || undefined,
       ...(triggerHeadSha ? { triggerHeadSha } : {}),
       ...(triggerBranch ? { triggerBranch } : {}),
       ...(asyncCiContinuation ? { asyncCiContinuation } : {})

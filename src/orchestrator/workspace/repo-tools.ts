@@ -13,9 +13,9 @@ import {
 } from "../../sandbox/polyglot-workspace-runner.js";
 import { wrapUntrustedContent } from "../../security/prompt-injection-guard.js";
 import type {
-  GeminiFunctionDeclaration,
-  GeminiToolHandler
-} from "../gemini-client.js";
+  LlmFunctionDeclaration,
+  LlmToolHandler
+} from "../llm-helper.js";
 import type {
   EpicGoalContract,
   GeneratedTicketImplementation,
@@ -574,6 +574,7 @@ export async function runTestsInIsolatedWorkspace(params: {
   readonly deleted_files?: readonly string[] | undefined;
   readonly changedPaths?: readonly string[] | undefined;
   readonly isTaskBranch?: boolean | undefined;
+  readonly reviewersDir?: string | undefined;
   readonly verificationProfile?: VerificationProfile | undefined;
   readonly workDir?: string | undefined;
   readonly bootstrappedTargets?: Set<string> | undefined;
@@ -610,6 +611,7 @@ export async function runTestsInIsolatedWorkspace(params: {
       deleted_files: params.deleted_files,
       changedPaths: params.changedPaths,
       isTaskBranch: params.isTaskBranch,
+      reviewersDir: params.reviewersDir,
       llmApiKey: params.llmApiKey,
       bootstrappedTargets: params.bootstrappedTargets,
       sandboxRunner: params.sandboxRunner,
@@ -750,6 +752,7 @@ export interface BuildCompactWorkspaceFilesContextInput {
   readonly priorityPaths?: Iterable<string> | undefined;
   readonly maxInlineLinesPerFile?: number | undefined;
   readonly maxTotalInlineChars?: number | undefined;
+  readonly reviewersDir?: string | undefined;
 }
 
 export function buildCompactWorkspaceFilesContext(
@@ -791,7 +794,10 @@ export function buildCompactWorkspaceFilesContext(
 
   for (const [rawPath, content] of sortedEntries) {
     const cleanPath = rawPath.trim().replace(/^\/+/, "");
-    if (!cleanPath || isSensitiveTaskBranchPath(cleanPath)) {
+    if (
+      !cleanPath ||
+      isSensitiveTaskBranchPath(cleanPath, input.reviewersDir)
+    ) {
       continue;
     }
     const lineCount = content.split("\n").length;
@@ -838,10 +844,11 @@ export function buildRepoExplorationToolsAndHandlers(params: {
   readonly phase?: WebToolsPhase | undefined;
   readonly webToolsConfig?: WebToolsConfig | undefined;
   readonly alwaysEnableRepoTools?: boolean | undefined;
+  readonly reviewersDir?: string | undefined;
   readonly fetchImpl?: typeof fetch | undefined;
 }): {
-  readonly tools?: readonly GeminiFunctionDeclaration[];
-  readonly toolHandlers?: Readonly<Record<string, GeminiToolHandler>>;
+  readonly tools?: readonly LlmFunctionDeclaration[];
+  readonly toolHandlers?: Readonly<Record<string, LlmToolHandler>>;
 } {
   if (
     !params.alwaysEnableRepoTools &&
@@ -897,7 +904,7 @@ export function buildRepoExplorationToolsAndHandlers(params: {
     return content;
   };
 
-  const searchInRepoHandler: GeminiToolHandler = async (
+  const searchInRepoHandler: LlmToolHandler = async (
     args: Readonly<Record<string, unknown>>
   ) => {
     const p = String(args.path ?? "")
@@ -919,7 +926,7 @@ export function buildRepoExplorationToolsAndHandlers(params: {
       for (const [filePath, fileContent] of combinedFiles.entries()) {
         if (
           isEffectiveDeleted(filePath) ||
-          isSensitiveTaskBranchPath(filePath)
+          isSensitiveTaskBranchPath(filePath, params.reviewersDir)
         ) {
           continue;
         }
@@ -945,7 +952,10 @@ export function buildRepoExplorationToolsAndHandlers(params: {
       }
       return { query: q, matches: crossFileMatches };
     }
-    if (p.includes("..") || isSensitiveTaskBranchPath(p)) {
+    if (
+      p.includes("..") ||
+      isSensitiveTaskBranchPath(p, params.reviewersDir)
+    ) {
       return { error: `Access denied or invalid path: ${p}` };
     }
     if (isEffectiveDeleted(p)) {
@@ -984,7 +994,7 @@ export function buildRepoExplorationToolsAndHandlers(params: {
     };
   };
 
-  const mutationTools: GeminiFunctionDeclaration[] = params.stagedImplementation
+  const mutationTools: LlmFunctionDeclaration[] = params.stagedImplementation
     ? [
         {
           name: "write_repo_file",
@@ -1056,14 +1066,14 @@ export function buildRepoExplorationToolsAndHandlers(params: {
       ]
     : [];
 
-  const mutationToolHandlers: Record<string, GeminiToolHandler> =
+  const mutationToolHandlers: Record<string, LlmToolHandler> =
     params.stagedImplementation
       ? {
           write_repo_file: async (args: Readonly<Record<string, unknown>>) => {
             const p = String(args.path ?? "")
               .trim()
               .replace(/^\/+/, "");
-            if (!p || p.includes("..") || isSensitiveTaskBranchPath(p)) {
+            if (!p || p.includes("..") || isSensitiveTaskBranchPath(p, params.reviewersDir)) {
               return { error: `Access denied or invalid path: ${p}` };
             }
             if (typeof args.content !== "string") {
@@ -1082,7 +1092,7 @@ export function buildRepoExplorationToolsAndHandlers(params: {
             const p = String(args.path ?? "")
               .trim()
               .replace(/^\/+/, "");
-            if (!p || p.includes("..") || isSensitiveTaskBranchPath(p)) {
+            if (!p || p.includes("..") || isSensitiveTaskBranchPath(p, params.reviewersDir)) {
               return { error: `Access denied or invalid path: ${p}` };
             }
             const rawEdits = Array.isArray(args.edits) ? args.edits : [];
@@ -1150,7 +1160,7 @@ export function buildRepoExplorationToolsAndHandlers(params: {
             const p = String(args.path ?? "")
               .trim()
               .replace(/^\/+/, "");
-            if (!p || p.includes("..") || isSensitiveTaskBranchPath(p)) {
+            if (!p || p.includes("..") || isSensitiveTaskBranchPath(p, params.reviewersDir)) {
               return { error: `Access denied or invalid path: ${p}` };
             }
             await params.stagedImplementation!.ensureBaselineLoaded?.([p]);
@@ -1303,7 +1313,7 @@ export function buildRepoExplorationToolsAndHandlers(params: {
         const p = String(args.path ?? "")
           .trim()
           .replace(/^\/+/, "");
-        if (!p || p.includes("..") || isSensitiveTaskBranchPath(p)) {
+        if (!p || p.includes("..") || isSensitiveTaskBranchPath(p, params.reviewersDir)) {
           return { error: `Access denied or invalid path: ${p}` };
         }
         if (isEffectiveDeleted(p)) {

@@ -11,6 +11,7 @@ import {
 } from "../../planning/artifacts-gate.js";
 import {
   adaptReviewerRosterForDomain,
+  DEFAULT_REVIEWERS_DIR,
   runUserAdvocateDesignGate
 } from "../../review/reviewer-roster.js";
 import {
@@ -22,7 +23,7 @@ import {
   type GitRefStateStore
 } from "../../state/git-ref-state.js";
 import { appendEpureCommandsSpoiler } from "../formatting/comments.js";
-import { callGeminiJson, callGeminiText } from "../gemini-client.js";
+import { callLlmJson, callLlmText } from "../llm-helper.js";
 import {
   GENERATED_PLANNING_BUNDLE_SCHEMA,
   GENERATED_SPEC_ARTIFACTS_SCHEMA,
@@ -292,7 +293,7 @@ export async function runGoldfishSpecAudit(
       : [])
   ].join("\n");
 
-  return await callGeminiJson<GoldfishSpecAuditPayload>({
+  return await callLlmJson<GoldfishSpecAuditPayload>({
     apiKey: params.apiKey,
     model: params.model,
     providers: params.providers,
@@ -362,6 +363,7 @@ export async function runGrillAndPlanPhase(params: {
   readonly store: GitRefStateStore;
   readonly llmApiKey: string;
   readonly phaseModels: ResolvedPhaseModels;
+  readonly reviewersDir?: string | undefined;
   readonly onTransientRetriesUsed?: ((retriesUsed: number) => void) | undefined;
   readonly fetchImpl?: typeof fetch | undefined;
 }): Promise<OrchestrateIssueResult> {
@@ -380,6 +382,7 @@ export async function runGrillAndPlanPhase(params: {
     store,
     llmApiKey,
     phaseModels,
+    reviewersDir = DEFAULT_REVIEWERS_DIR,
     onTransientRetriesUsed,
     fetchImpl
   } = params;
@@ -396,6 +399,7 @@ export async function runGrillAndPlanPhase(params: {
     accumulatedFiles: grillExplorationCache,
     devBranchPaths: [],
     phase: command === "to-spec" ? "spec" : "plan",
+    reviewersDir,
     fetchImpl
   });
 
@@ -432,7 +436,7 @@ export async function runGrillAndPlanPhase(params: {
       )
     ].join("\n");
 
-    const grillQuestions = await callGeminiText({
+    const grillQuestions = await callLlmText({
       apiKey: llmApiKey,
       model: phaseModels.planningModel,
       providers: phaseModels.providers,
@@ -529,7 +533,7 @@ export async function runGrillAndPlanPhase(params: {
       )
     ].join("\n");
 
-    const evalResult = await callGeminiJson<GrillRoundEvaluation>({
+    const evalResult = await callLlmJson<GrillRoundEvaluation>({
       apiKey: llmApiKey,
       model: phaseModels.planningModel,
       providers: phaseModels.providers,
@@ -726,7 +730,7 @@ export async function runGrillAndPlanPhase(params: {
       )
     ].join("\n");
 
-    let specArtifacts = await callGeminiJson<GeneratedSpecArtifacts>({
+    let specArtifacts = await callLlmJson<GeneratedSpecArtifacts>({
       apiKey: llmApiKey,
       model: phaseModels.planningModel,
       providers: phaseModels.providers,
@@ -795,7 +799,7 @@ export async function runGrillAndPlanPhase(params: {
       ].join("\n");
 
       try {
-        specArtifacts = await callGeminiJson<GeneratedSpecArtifacts>({
+        specArtifacts = await callLlmJson<GeneratedSpecArtifacts>({
           apiKey: llmApiKey,
           model: phaseModels.planningModel,
           providers: phaseModels.providers,
@@ -926,7 +930,8 @@ export async function runGrillAndPlanPhase(params: {
       touchesFrontendUi,
       stackKind: plannedStack.kind,
       personas: designGate?.personas,
-      domainInvariants: designGate?.domain_invariants
+      domainInvariants: designGate?.domain_invariants,
+      reviewersDir
     });
 
     const zizmorFile = buildZizmorConfigYaml();
@@ -936,7 +941,10 @@ export async function runGrillAndPlanPhase(params: {
       stack: plannedStack
     });
 
-    const existingBaseRoster = await gh.readTrustedBaseRosterFiles("dev");
+    const existingBaseRoster = await gh.readTrustedBaseRosterFiles(
+      "dev",
+      reviewersDir
+    );
     const hasExistingConfiguredRoster = existingBaseRoster.size > 0;
 
     const corePlanningDocs: Array<{ path: string; content: string }> = [
@@ -1000,7 +1008,7 @@ export async function runGrillAndPlanPhase(params: {
         "- **Glossaire** : `GLOSSARY.md`",
         `- **ADRs** : ${specArtifacts.adrs.map((a) => `\`${a.path}\``).join(", ")}`,
         `- **Spécification** : \`${specArtifacts.spec_path}\``,
-        `- **Roster Multi-Agents adapté** : \`.cursor/agents/*.md\` (${adaptedRoster.files.length} fichiers)`,
+        `- **Roster Multi-Agents adapté** : \`${reviewersDir}/*.md\` (${adaptedRoster.files.length} fichiers)`,
         ...(impeccableSession.impeccable_invoked
           ? [
               "- **Design Gate Impeccable & `user-advocate` (`design-gate`)** : `DESIGN.md` généré"
@@ -1112,7 +1120,7 @@ export async function runGrillAndPlanPhase(params: {
       )
     ].join("\n");
 
-    const ticketDag = await callGeminiJson<GeneratedTicketDag>({
+    const ticketDag = await callLlmJson<GeneratedTicketDag>({
       apiKey: llmApiKey,
       model: phaseModels.planningModel,
       providers: phaseModels.providers,
@@ -1200,7 +1208,7 @@ export async function runGrillAndPlanPhase(params: {
       )
     ].join("\n");
 
-    bundle = await callGeminiJson<GeneratedPlanningBundle>({
+    bundle = await callLlmJson<GeneratedPlanningBundle>({
       apiKey: llmApiKey,
       model: phaseModels.planningModel,
       providers: phaseModels.providers,
@@ -1333,7 +1341,8 @@ export async function runGrillAndPlanPhase(params: {
     touchesFrontendUi,
     stackKind: plannedStack.kind,
     personas: designGate?.personas,
-    domainInvariants: designGate?.domain_invariants
+    domainInvariants: designGate?.domain_invariants,
+    reviewersDir
   });
 
   const zizmorFile = buildZizmorConfigYaml();
@@ -1343,7 +1352,10 @@ export async function runGrillAndPlanPhase(params: {
     stack: plannedStack
   });
 
-  const existingBaseRoster = await gh.readTrustedBaseRosterFiles("dev");
+  const existingBaseRoster = await gh.readTrustedBaseRosterFiles(
+    "dev",
+    reviewersDir
+  );
   const hasExistingConfiguredRoster = existingBaseRoster.size > 0;
 
   const corePlanningDocs: Array<{ path: string; content: string }> = [
@@ -1447,7 +1459,7 @@ export async function runGrillAndPlanPhase(params: {
       "- **Glossaire** : `GLOSSARY.md`",
       `- **ADRs** : ${bundle.adrs.map((a) => `\`${a.path}\``).join(", ")}`,
       `- **Spécification** : \`${bundle.spec_path}\``,
-      `- **Roster Multi-Agents adapté** : \`.cursor/agents/*.md\` (${adaptedRoster.files.length} fichiers)`,
+      `- **Roster Multi-Agents adapté** : \`${reviewersDir}/*.md\` (${adaptedRoster.files.length} fichiers)`,
       ...(impeccableSession.impeccable_invoked
         ? [
             "- **Design Gate Impeccable & `user-advocate` (`design-gate`)** : `DESIGN.md` généré et critères UX injectés dans les tickets UI"

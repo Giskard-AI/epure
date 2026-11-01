@@ -33,7 +33,7 @@ L'exploitation d'`EPURE` sur plusieurs **Issues de pilotage** exécutées en par
 - L'orchestrateur synchronise automatiquement `feature/*` avec `dev` (et `task/*` avec `feature/*`) via `syncBranchWithBase` avant chaque ticket et avant l'ouverture/validation de la PR finale `feature/* -> dev`.
 - Les nouvelles commandes **`/epure sync`** et **`/epure rebase`** (normalisées vers `command: "sync"`) permettent à tout contributeur autorisé (`write` ou `admin`) de déclencher à tout moment ce rattrapage depuis `dev`.
 - En cas de conflit Git (`409 Conflict` sur `POST /repos/{owner}/{repo}/merges`) :
-  - Si un fichier en conflit touche un chemin sensible (`.github/workflows/**`, `.cursor/agents/**`, `.github/agents.yml`, `.env*`) ou si plus de 8 fichiers de code sont en conflit, l'orchestrateur escalade immédiatement en `needs-human`.
+  - Si un fichier en conflit touche un chemin sensible (`.github/workflows/**`, `<reviewers_dir>/**` (`.agents/reviewers/**` par défaut), `.github/agents.yml`, `.env*`) ou si plus de 8 fichiers de code sont en conflit, l'orchestrateur escalade immédiatement en `needs-human`.
   - Sinon, `GLOSSARY.md` est fusionné additivement et le modèle d'implémentation résout les fichiers en conflit à partir des trois versions (`base`, `ours`, `theirs`). L'arbre résultant est obligatoirement vérifié dans le **Sandbox Stage 1** (`runTestsInIsolatedWorkspace`) avant commit ; tout échec Stage 1 déclenche une escalade `needs-human`.
 
 ### 2. Machine à états événementielle avec relâchement du runner (`waiting_ticket_ci` / `waiting_feature_ci` + `continue`)

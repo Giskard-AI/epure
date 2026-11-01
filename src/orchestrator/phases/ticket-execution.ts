@@ -17,7 +17,10 @@ import {
   StructuredOutputValidationError
 } from "../../llm/errors.js";
 import { runMultiAgentPrReviewPass } from "../../review/multi-agent-pr-review.js";
-import type { ReviewerAgentName } from "../../review/reviewer-roster.js";
+import {
+  DEFAULT_REVIEWERS_DIR,
+  type ReviewerAgentName
+} from "../../review/reviewer-roster.js";
 import { generateSemanticSquashCommitFromDiff } from "../../review/squash-commit-generator.js";
 import type {
   SandboxExecutionInput,
@@ -38,7 +41,7 @@ import {
   type GitRefStateStore
 } from "../../state/git-ref-state.js";
 import { appendEpureCommandsSpoiler } from "../formatting/comments.js";
-import { callGeminiJson } from "../gemini-client.js";
+import { callLlmJson } from "../llm-helper.js";
 import { syncBranchWithBase } from "../github/branch-sync.js";
 import { loadOrchestratorStateFromGitRef } from "../github/rest-client.js";
 import { EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT } from "../prompts/code-discipline.js";
@@ -227,6 +230,7 @@ interface GenerateTicketImplementationWithFallbackParams {
   readonly accumulatedFiles: Map<string, string>;
   readonly deletedFilesSet: ReadonlySet<string>;
   readonly devBranchPaths: readonly string[];
+  readonly reviewersDir: string;
   readonly ensureBaselineLoaded: (paths: readonly string[]) => Promise<void>;
   readonly gh: GitHubRestHelper;
   readonly llmApiKey: string;
@@ -245,7 +249,7 @@ async function generateTicketImplementationWithFallback(
   });
 
   try {
-    const parsedPrimary = await callGeminiJson<GeneratedTicketImplementation>({
+    const parsedPrimary = await callLlmJson<GeneratedTicketImplementation>({
       apiKey: params.llmApiKey,
       model: params.phaseModels.implementationModel,
       providers: params.phaseModels.providers,
@@ -267,6 +271,7 @@ async function generateTicketImplementationWithFallback(
         deletedFilesSet: params.deletedFilesSet,
         stagedImplementation: stagedBuffer,
         devBranchPaths: params.devBranchPaths,
+        reviewersDir: params.reviewersDir,
         gh: params.gh
       }),
       responseSchema: schemaWithStaged,
@@ -356,7 +361,7 @@ async function generateTicketImplementationWithFallback(
             : `REPLI SEGMENTÉ (Fichier cible unique : \`${batchTarget}\`) : Génère ou patche UNIQUEMENT le fichier \`${batchTarget}\` requis par le Ticket #${params.ticket.ticketIssueNumber}. Ne génère aucun autre fichier dans cet appel.`
         ].join("\n");
 
-        const batchImpl = await callGeminiJson<GeneratedTicketImplementation>({
+        const batchImpl = await callLlmJson<GeneratedTicketImplementation>({
           apiKey: params.llmApiKey,
           model: params.phaseModels.implementationModel,
           providers: params.phaseModels.providers,
@@ -381,6 +386,7 @@ async function generateTicketImplementationWithFallback(
             deletedFilesSet: params.deletedFilesSet,
             stagedImplementation: stagedBuffer,
             devBranchPaths: params.devBranchPaths,
+            reviewersDir: params.reviewersDir,
             gh: params.gh
           }),
           responseSchema: schemaWithStaged,
@@ -438,6 +444,8 @@ async function generateTicketImplementationWithFallback(
 export async function runTicketExecutionLoop(
   params: RunTicketExecutionLoopParams
 ): Promise<RunTicketExecutionLoopOutcome> {
+  const reviewersDir =
+    params.parsedDevAgentsConfig?.reviewers_dir ?? DEFAULT_REVIEWERS_DIR;
   let verificationProfile = params.initialVerificationProfile;
   let verificationGuideMarkdown = params.initialVerificationGuideMarkdown;
   const completedTicketNumbers = new Set<number>();
@@ -628,7 +636,8 @@ export async function runTicketExecutionLoop(
       llmApiKey: params.llmApiKey,
       fetchImpl: params.fetchImpl,
       model: params.phaseModels.implementationModel,
-      sandboxRunner: params.sandboxRunner
+      sandboxRunner: params.sandboxRunner,
+      reviewersDir
     });
     if (featureSync.status === "escalated") {
       const escalated = await params.escalateToNeedsHuman({
@@ -655,7 +664,8 @@ export async function runTicketExecutionLoop(
       llmApiKey: params.llmApiKey,
       fetchImpl: params.fetchImpl,
       model: params.phaseModels.implementationModel,
-      sandboxRunner: params.sandboxRunner
+      sandboxRunner: params.sandboxRunner,
+      reviewersDir
     });
     if (taskSync.status === "escalated") {
       const escalated = await params.escalateToNeedsHuman({
@@ -791,6 +801,7 @@ export async function runTicketExecutionLoop(
                 ...Array.from(ticketDeletedFilesSet)
               ],
               isTaskBranch: true,
+              reviewersDir,
               verificationProfile,
               bootstrappedTargets,
               sandboxRunner: params.sandboxRunner,
@@ -835,7 +846,9 @@ export async function runTicketExecutionLoop(
         } else {
           const taskBranchFiles = await params.gh.readBranchWorkspaceFiles(
             taskBranch,
-            params.hintForWorkspace
+            params.hintForWorkspace,
+            [],
+            reviewersDir
           );
           for (const [p, c] of taskBranchFiles.entries()) {
             params.accumulatedFiles.set(p, c);
@@ -851,7 +864,8 @@ export async function runTicketExecutionLoop(
           })),
           deleted_files: Array.from(ticketDeletedFilesSet),
           targets: verificationProfile.targets,
-          isTaskBranch: true
+          isTaskBranch: true,
+          reviewersDir
         });
         if (!existingPreCheck.allowed) {
           const escalated = await params.escalateToNeedsHuman({
@@ -885,6 +899,7 @@ export async function runTicketExecutionLoop(
         currentPrHeadSha = existingTaskPr.head_sha;
       } else {
         const existingFilesContext = buildCompactWorkspaceFilesContext({
+          reviewersDir,
           accumulatedFiles: params.accumulatedFiles,
           priorityPaths: [
             ...ticket.filesToTouch,
@@ -905,7 +920,7 @@ export async function runTicketExecutionLoop(
           "1. Écris des tests couvrant tous les critères d'acceptation et cas limites.",
           "2. Implémente le code propre et complet faisant passer 100% des tests.",
           "3. N'utilise aucune dépendance externe exotique non déclarée.",
-          "4. Ne modifie JAMAIS .cursor/agents/**, .github/workflows/**, .github/agents.yml ou .env*.",
+          `4. Ne modifie JAMAIS ${reviewersDir}/**, .github/workflows/**, .github/agents.yml ou .env*.`,
           "",
           verificationGuideMarkdown,
           "",
@@ -980,6 +995,7 @@ export async function runTicketExecutionLoop(
           accumulatedFiles: params.accumulatedFiles,
           deletedFilesSet: ticketDeletedFilesSet,
           devBranchPaths: params.devBranchPaths,
+          reviewersDir,
           ensureBaselineLoaded: ensureBaselineFilesLoaded,
           gh: params.gh,
           llmApiKey: params.llmApiKey,
@@ -996,7 +1012,8 @@ export async function runTicketExecutionLoop(
           ],
           deleted_files: parsedImpl.deleted_files,
           targets: verificationProfile.targets,
-          isTaskBranch: true
+          isTaskBranch: true,
+          reviewersDir
         });
         if (!preStage1Check.allowed) {
           const escalated = await params.escalateToNeedsHuman({
@@ -1050,6 +1067,7 @@ export async function runTicketExecutionLoop(
           fixAttempt += 1;
           restoreViolatedBaselineFiles(integrityCheck);
           const currentFilesContext = buildCompactWorkspaceFilesContext({
+            reviewersDir,
             accumulatedFiles: params.accumulatedFiles,
             priorityPaths: [
               ...ticket.filesToTouch,
@@ -1061,7 +1079,7 @@ export async function runTicketExecutionLoop(
             "Tu es un ingénieur TDD EPURE corrigeant un échec de vérification Stage 1 en sandbox isolée.",
             PROMPT_INJECTION_IMMUNITY_CLAUSE,
             "Corrige les fichiers en défaut (code ou assertions de test) pour que 100% des cibles Stage 1 passent.",
-            "Ne modifie JAMAIS .cursor/agents/**, .github/workflows/**, .github/agents.yml ou .env*.",
+            `Ne modifie JAMAIS ${reviewersDir}/**, .github/workflows/**, .github/agents.yml ou .env*.`,
             "Tu peux utiliser les outils `list_repo_files`, `search_in_repo_file`, `read_repo_file`, `write_repo_file`, `patch_repo_file` et `delete_repo_file` pour inspecter et modifier les fichiers du dépôt.",
             "Pour modifier un fichier existant volumineux, utilise de préférence `patch_repo_file` ou `patches` (`old_string` -> `new_string` exact). Pour supprimer un fichier obsolète, utilise `delete_repo_file` ou `deleted_files`.",
             "",
@@ -1106,6 +1124,7 @@ export async function runTicketExecutionLoop(
             accumulatedFiles: params.accumulatedFiles,
             deletedFilesSet: ticketDeletedFilesSet,
             devBranchPaths: params.devBranchPaths,
+            reviewersDir,
             ensureBaselineLoaded: ensureBaselineFilesLoaded,
             gh: params.gh,
             llmApiKey: params.llmApiKey,
@@ -1122,7 +1141,8 @@ export async function runTicketExecutionLoop(
             ],
             deleted_files: fixedImpl.deleted_files,
             targets: verificationProfile.targets,
-            isTaskBranch: true
+            isTaskBranch: true,
+            reviewersDir
           });
           if (!fixPreCheck.allowed) {
             const escalated = await params.escalateToNeedsHuman({
@@ -1273,6 +1293,7 @@ export async function runTicketExecutionLoop(
           deletedFiles: Array.from(ticketDeletedFilesSet),
           workspaceFiles: params.accumulatedFiles,
           trustedBaseBranchFiles: params.trustedBaseFilesMap,
+          reviewersDir,
           isReReviewPass: passParams.isReReviewPass,
           previousFailedReviewers: passParams.previousFailedReviewers,
           llmApiKey: params.llmApiKey,
@@ -1503,6 +1524,7 @@ export async function runTicketExecutionLoop(
           .join("\n");
 
         const currentFilesContext = buildCompactWorkspaceFilesContext({
+          reviewersDir,
           accumulatedFiles: params.accumulatedFiles,
           priorityPaths: [
             ...ticket.filesToTouch,
@@ -1515,7 +1537,7 @@ export async function runTicketExecutionLoop(
           "Tu es un ingénieur TDD EPURE corrigeant les constats bloquants ('must_fix') de revue multi-agents et/ou les échecs CI externes.",
           PROMPT_INJECTION_IMMUNITY_CLAUSE,
           "Corrige précisément chaque anomalie tout en maintenant 100% des cibles Stage 1 au vert.",
-          "Ne modifie JAMAIS .cursor/agents/**, .github/workflows/**, .github/agents.yml ou .env*.",
+          `Ne modifie JAMAIS ${reviewersDir}/**, .github/workflows/**, .github/agents.yml ou .env*.`,
           "Utilise les outils `list_repo_files`, `search_in_repo_file`, `read_repo_file`, `write_repo_file`, `patch_repo_file` et `delete_repo_file` pour inspecter et modifier les fichiers pertinents du dépôt.",
           "",
           verificationGuideMarkdown,
@@ -1570,6 +1592,7 @@ export async function runTicketExecutionLoop(
           accumulatedFiles: params.accumulatedFiles,
           deletedFilesSet: ticketDeletedFilesSet,
           devBranchPaths: params.devBranchPaths,
+          reviewersDir,
           ensureBaselineLoaded: ensureBaselineFilesLoaded,
           gh: params.gh,
           llmApiKey: params.llmApiKey,
@@ -1588,7 +1611,8 @@ export async function runTicketExecutionLoop(
           ],
           deleted_files: reviewFixedImpl.deleted_files,
           targets: verificationProfile.targets,
-          isTaskBranch: true
+          isTaskBranch: true,
+          reviewersDir
         });
         if (!remediationPreCheck.allowed) {
           const escalated = await params.escalateToNeedsHuman({
@@ -1644,6 +1668,7 @@ export async function runTicketExecutionLoop(
           reviewTestRetry += 1;
           restoreViolatedBaselineFiles(reviewIntegrityCheck);
           const retryFilesContext = buildCompactWorkspaceFilesContext({
+            reviewersDir,
             accumulatedFiles: params.accumulatedFiles,
             priorityPaths: [
               ...ticket.filesToTouch,
@@ -1684,6 +1709,7 @@ export async function runTicketExecutionLoop(
             accumulatedFiles: params.accumulatedFiles,
             deletedFilesSet: ticketDeletedFilesSet,
             devBranchPaths: params.devBranchPaths,
+            reviewersDir,
             ensureBaselineLoaded: ensureBaselineFilesLoaded,
             gh: params.gh,
             llmApiKey: params.llmApiKey,
@@ -1700,7 +1726,8 @@ export async function runTicketExecutionLoop(
             ],
             deleted_files: retryImpl.deleted_files,
             targets: verificationProfile.targets,
-            isTaskBranch: true
+            isTaskBranch: true,
+            reviewersDir
           });
           if (!retryPreCheck.allowed) {
             const escalated = await params.escalateToNeedsHuman({

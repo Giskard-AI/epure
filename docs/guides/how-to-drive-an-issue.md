@@ -56,7 +56,7 @@ Post `/epure approve` on the tracking issue to directly integrate the `plan/*` a
 
 EPURE pauses and applies the `needs-human` label (`status: "suspended"`) when human judgment is required:
 
-1. **Sensitive Path Modification**: A `task/*` branch modified `.github/workflows/**`, `.github/agents.yml`, `.cursor/agents/**`, or `CODEOWNERS`.
+1. **Sensitive Path Modification**: A `task/*` branch modified `.github/workflows/**`, `.github/agents.yml`, the reviewer roster directory (`<reviewers_dir>/**`, default `.agents/reviewers/**`), or `CODEOWNERS`.
    - *Resolution*: Inspect the diff. If legitimate, add the `approved-sensitive-change` label to the PR and comment **`/epure continue`** (or `/epure approve`) on the tracking issue.
 2. **Remediation Cap Reached (`max_code_fix_attempts = 3`)**: A ticket failed Stage 1 tests, external CI, or reviewer `must_fix` checks 3 times in a row.
    - *Resolution*: Push a manual fix commit to the `task/*` or `feature/*` branch (or post a clarifying comment), then comment **`/epure continue`** on the tracking issue. EPURE removes `needs-human`, restores `status: "active"`, skips all already-closed tickets, and resumes from the current milestone.

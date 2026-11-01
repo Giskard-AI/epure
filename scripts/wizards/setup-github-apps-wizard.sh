@@ -210,8 +210,8 @@ GitHub Environment secrets without writing PEM private keys to disk.
 Options:
   --repo <owner>/<repo>             Target GitHub repository slug (prompted if omitted).
   --llm-env <env-name>              GitHub Environment scoping Agent App & LLM secrets
-                                    (e.g. epure-agent, llm, openai, anthropic, gemini;
-                                    arbitrary and LLM-agnostic; prompted if omitted).
+                                    (default: epure-agent; e.g. llm, openai, anthropic,
+                                    gemini; arbitrary and LLM-agnostic; prompted if omitted).
   --llm-secret-name <secret-name>   Optional provider-specific secret name to store in
                                     addition to LLM_API_KEY (defaults to LLM_API_KEY;
                                     supports OPENAI_API_KEY, ANTHROPIC_API_KEY,
@@ -651,10 +651,10 @@ run_wizard() {
 
   if [[ -z "$LLM_ENV" ]]; then
     say "Choose the GitHub Environment name that scopes Agent App & LLM secrets."
-    note "This name is arbitrary and LLM-agnostic (e.g. gemini, epure-agent, llm, openai, anthropic)"
-    note "and must match 'environment:' in .github/workflows/epure-issue-command.yml (default: gemini)."
-    ask LLM_ENV "GitHub Environment name for Agent App & LLM secrets [default: gemini]:" || true
-    [[ -z "$LLM_ENV" ]] && LLM_ENV="gemini"
+    note "This name is arbitrary and LLM-agnostic (e.g. epure-agent, llm, openai, anthropic, gemini)"
+    note "and must match 'environment:' in .github/workflows/epure-issue-command.yml (default: epure-agent)."
+    ask LLM_ENV "GitHub Environment name for Agent App & LLM secrets [default: epure-agent]:" || true
+    [[ -z "$LLM_ENV" ]] && LLM_ENV="epure-agent"
   fi
 
   # ── Stage 1: Provision GitHub Environments (<llm-env> and release) ────────

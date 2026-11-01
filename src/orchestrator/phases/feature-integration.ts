@@ -13,7 +13,10 @@ import {
 import { LLMError } from "../../llm/errors.js";
 import { prepareFeatureToDevPullRequest } from "../../planning/feature-to-dev-pr.js";
 import { runMultiAgentPrReviewPass } from "../../review/multi-agent-pr-review.js";
-import type { ReviewerAgentName } from "../../review/reviewer-roster.js";
+import {
+  DEFAULT_REVIEWERS_DIR,
+  type ReviewerAgentName
+} from "../../review/reviewer-roster.js";
 import { generateSemanticSquashCommitFromDiff } from "../../review/squash-commit-generator.js";
 import type {
   SandboxExecutionInput,
@@ -33,7 +36,7 @@ import {
   type GitRefStateStore
 } from "../../state/git-ref-state.js";
 import { appendEpureCommandsSpoiler } from "../formatting/comments.js";
-import { callGeminiJson } from "../gemini-client.js";
+import { callLlmJson } from "../llm-helper.js";
 import { syncBranchWithBase } from "../github/branch-sync.js";
 import { EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT } from "../prompts/code-discipline.js";
 import {
@@ -104,6 +107,8 @@ export interface RunFeatureIntegrationPhaseParams {
 export async function runFeatureIntegrationPhase(
   params: RunFeatureIntegrationPhaseParams
 ): Promise<OrchestrateIssueResult> {
+  const reviewersDir =
+    params.parsedDevAgentsConfig?.reviewers_dir ?? DEFAULT_REVIEWERS_DIR;
   let verificationProfile = params.initialVerificationProfile;
   let verificationGuideMarkdown = params.initialVerificationGuideMarkdown;
 
@@ -143,7 +148,8 @@ export async function runFeatureIntegrationPhase(
     llmApiKey: params.llmApiKey,
     fetchImpl: params.fetchImpl,
     model: params.phaseModels.implementationModel,
-    sandboxRunner: params.sandboxRunner
+    sandboxRunner: params.sandboxRunner,
+    reviewersDir
   });
   if (featureSync.status === "escalated") {
     return await params.escalateToNeedsHuman({
@@ -290,6 +296,7 @@ export async function runFeatureIntegrationPhase(
       deletedFiles: Array.from(params.featureDeletedFilesSet),
       workspaceFiles: params.accumulatedFiles,
       trustedBaseBranchFiles: params.trustedBaseFilesMap,
+      reviewersDir,
       isReReviewPass: passParams.isReReviewPass,
       previousFailedReviewers: passParams.previousFailedReviewers,
       llmApiKey: params.llmApiKey,
@@ -534,7 +541,7 @@ export async function runFeatureIntegrationPhase(
         "Tu es un ingénieur TDD EPURE corrigeant les constats bloquants ('must_fix') et/ou échecs CI sur la PR finale de feature.",
         PROMPT_INJECTION_IMMUNITY_CLAUSE,
         "Corrige précisément chaque anomalie tout en maintenant 100% des cibles Stage 1 au vert.",
-        "Ne modifie JAMAIS .cursor/agents/**, .github/workflows/**, .github/agents.yml ou .env*.",
+        `Ne modifie JAMAIS ${reviewersDir}/**, .github/workflows/**, .github/agents.yml ou .env*.`,
         "Utilise les outils `list_repo_files`, `search_in_repo_file` et `read_repo_file` pour inspecter les fichiers pertinents du dépôt avant de coder.",
         "",
         verificationGuideMarkdown,
@@ -582,7 +589,7 @@ export async function runFeatureIntegrationPhase(
       );
 
       const parsedFeatureFix =
-        await callGeminiJson<GeneratedTicketImplementation>({
+        await callLlmJson<GeneratedTicketImplementation>({
           apiKey: params.llmApiKey,
           model: params.phaseModels.implementationModel,
           providers: params.phaseModels.providers,
@@ -603,6 +610,7 @@ export async function runFeatureIntegrationPhase(
             accumulatedFiles: params.accumulatedFiles,
             deletedFilesSet: params.featureDeletedFilesSet,
             devBranchPaths: params.devBranchPaths,
+            reviewersDir,
             gh: params.gh
           }),
           responseSchema: GENERATED_TICKET_IMPLEMENTATION_SCHEMA,
@@ -619,7 +627,8 @@ export async function runFeatureIntegrationPhase(
         ],
         deleted_files: parsedFeatureFix.deleted_files,
         targets: verificationProfile.targets,
-        isTaskBranch: true
+        isTaskBranch: true,
+        reviewersDir
       });
       if (!featureFixPreCheck.allowed) {
         return await params.escalateToNeedsHuman({
@@ -662,6 +671,7 @@ export async function runFeatureIntegrationPhase(
           ])
         ),
         isTaskBranch: true,
+        reviewersDir,
         verificationProfile,
         sandboxRunner: params.sandboxRunner,
         llmApiKey: params.llmApiKey,
@@ -677,7 +687,7 @@ export async function runFeatureIntegrationPhase(
           .map(([p, c]) => `--- FILE: ${p} ---\n${c}`)
           .join("\n\n");
         const retryParsed =
-          await callGeminiJson<GeneratedTicketImplementation>({
+          await callLlmJson<GeneratedTicketImplementation>({
             apiKey: params.llmApiKey,
             model: params.phaseModels.implementationModel,
             providers: params.phaseModels.providers,
@@ -720,6 +730,7 @@ export async function runFeatureIntegrationPhase(
               accumulatedFiles: params.accumulatedFiles,
               deletedFilesSet: params.featureDeletedFilesSet,
               devBranchPaths: params.devBranchPaths,
+              reviewersDir,
               gh: params.gh
             }),
             responseSchema: GENERATED_TICKET_IMPLEMENTATION_SCHEMA,
@@ -734,7 +745,8 @@ export async function runFeatureIntegrationPhase(
           ],
           deleted_files: retryParsed.deleted_files,
           targets: verificationProfile.targets,
-          isTaskBranch: true
+          isTaskBranch: true,
+          reviewersDir
         });
         if (!retryPreCheck.allowed) {
           return await params.escalateToNeedsHuman({
@@ -774,6 +786,7 @@ export async function runFeatureIntegrationPhase(
             ])
           ),
           isTaskBranch: true,
+          reviewersDir,
           verificationProfile,
           sandboxRunner: params.sandboxRunner,
           llmApiKey: params.llmApiKey,

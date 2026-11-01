@@ -24,7 +24,7 @@ const EN_PAGES = [
     url: `${SITE_URL}/installation`,
     file: "installation.md",
     summary:
-      "Primary onboarding via the /setup-repo agent skill, Dual GitHub Apps wizard with environment-scoped secrets (--llm-env and release), 3 Repository Rulesets, and dynamic .cursor/agents/ reviewer roster design."
+      "Primary onboarding via the /setup-repo agent skill, Dual GitHub Apps wizard with environment-scoped secrets (--llm-env and release), 3 Repository Rulesets, and dynamic reviewer roster design (reviewers_dir, default .agents/reviewers/)."
   },
   {
     title: "Basic Usage (Case Study: craft-calculator)",
@@ -73,7 +73,7 @@ const EN_PAGES = [
     url: `${SITE_URL}/guides/how-to-customize-reviewers`,
     file: "guides/how-to-customize-reviewers.md",
     summary:
-      "How to add domain-specific reviewers in .cursor/agents/*.md and configure DESIGN.md + impeccable-gate."
+      "How to add domain-specific reviewers in the reviewer roster directory (reviewers_dir, default .agents/reviewers/*.md) and configure DESIGN.md + impeccable-gate."
   },
   {
     title: "How-To: Promote a Release (dev -> main)",
@@ -104,7 +104,7 @@ const FR_PAGES = [
     url: `${SITE_URL}/fr/installation`,
     file: "fr/installation.md",
     summary:
-      "Onboarding recommandé via le skill /setup-repo, wizard des 2 GitHub Apps avec secrets cloisonnés par environnement (--llm-env et release), 3 Rulesets et composition dynamique du roster .cursor/agents/."
+      "Onboarding recommandé via le skill /setup-repo, wizard des 2 GitHub Apps avec secrets cloisonnés par environnement (--llm-env et release), 3 Rulesets et composition dynamique du roster de reviewers (reviewers_dir, .agents/reviewers/ par défaut)."
   },
   {
     title: "Usage de Base (Étude de Cas : craft-calculator)",
@@ -153,7 +153,7 @@ const FR_PAGES = [
     url: `${SITE_URL}/fr/guides/how-to-customize-reviewers`,
     file: "fr/guides/how-to-customize-reviewers.md",
     summary:
-      "Créer des reviewers spécialisés dans .cursor/agents/*.md et configurer DESIGN.md."
+      "Créer des reviewers spécialisés dans le répertoire du roster (reviewers_dir, .agents/reviewers/*.md par défaut) et configurer DESIGN.md."
   },
   {
     title: "Guide : Promouvoir une Release (dev -> main)",
@@ -178,7 +178,7 @@ function buildLlmsIndex() {
     "",
     "## Core Summary for AI Agents",
     "",
-    "- **Preferred Onboarding (`/setup-repo`)**: Invoke `/setup-repo <owner>/<repo>` in Cursor, Claude Code, Pi, or Codex (`.agents/skills/setup-repo/SKILL.md`). The agent inspects the repository stack and domains, runs `scripts/wizards/setup-github-apps-wizard.sh --repo <owner>/<repo> --llm-env <env-name>`, executes `node dist/cli/setup-repo.mjs --dry-run` then `--apply --apply-github-settings`, configures 3 Repository Rulesets (`epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`), generates `.github/zizmor.yml` and a hardened `renovate.json` (with 3-to-14-day quarantine cooldowns), and dynamically composes `.cursor/agents/*.md` specialist reviewers.",
+    "- **Preferred Onboarding (`/setup-repo`)**: Invoke `/setup-repo <owner>/<repo>` in any Skills-compatible coding agent (`.agents/skills/setup-repo/SKILL.md`). The agent inspects the repository stack and domains, runs `scripts/wizards/setup-github-apps-wizard.sh --repo <owner>/<repo> --llm-env <env-name>` (default `epure-agent`), executes `node dist/cli/setup-repo.mjs --dry-run` then `--apply --apply-github-settings`, configures 3 Repository Rulesets (`epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`), generates `.github/zizmor.yml` and a hardened `renovate.json` (with 3-to-14-day quarantine cooldowns), and dynamically composes specialist reviewers in `reviewers_dir` (default `.agents/reviewers/*.md`).",
     "- **Four Mandatory Human Gates**:",
     "  1. Initiating `/epure plan` and answering the architectural Grill on the GitHub Issue.",
     "  2. Approving the locked specification mandate via `/epure approve` (integrating `plan/*` directly into `feature/*` and locking `spec_sha`).",

@@ -145,7 +145,7 @@
       "title": "Stage 2: Async PR Checks & Stage 3: Trusted dev Review",
       "items": [
         "Opens task/* -> feature/* PR and exits 0 in waiting_ticket_ci while ci.yml, epure-check & impeccable-gate run",
-        "Loads .cursor/agents/*.md strictly from dev (<=4 specialists + spec-parity) with read-only tools",
+        "Loads reviewer prompts (reviewers_dir, default .agents/reviewers/*.md) strictly from dev (<=4 specialists + spec-parity) with read-only tools",
         "Rounds 1..3 re-run only failed reviewers; AI Semantic Squash synthesizes Conventional Commit"
       ]
     },

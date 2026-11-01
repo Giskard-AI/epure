@@ -1,11 +1,14 @@
-import type { LLMClient } from "../../llm/client.js";
+import {
+  DEFAULT_FALLBACK_LLM_MODEL,
+  type LLMClient
+} from "../../llm/client.js";
 import type {
   SandboxExecutionInput,
   SandboxExecutionResult
 } from "../../sandbox/llm-sandbox.js";
 import { validateWorkspaceFileOperations } from "../../sandbox/polyglot-workspace-runner.js";
 import { wrapUntrustedContent } from "../../security/prompt-injection-guard.js";
-import { callGeminiJson } from "../gemini-client.js";
+import { callLlmJson } from "../llm-helper.js";
 import { EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT } from "../prompts/code-discipline.js";
 import {
   ADR_COHERENCE_RECONCILIATION_SCHEMA,
@@ -553,16 +556,16 @@ export async function reconcileAdrsWithLlm(
   try {
     if (input.llmClient) {
       return await input.llmClient.completeStructured({
-        model: input.model ?? "gemini-3.8-flash",
+        model: input.model ?? DEFAULT_FALLBACK_LLM_MODEL,
         systemInstruction,
         userPrompt,
         responseSchema: ADR_COHERENCE_RECONCILIATION_SCHEMA,
         temperature: 0.1
       });
     }
-    return await callGeminiJson<AdrCoherenceReconciliationPayload>({
+    return await callLlmJson<AdrCoherenceReconciliationPayload>({
       apiKey: input.llmApiKey ?? "",
-      model: input.model ?? "gemini-3.8-flash",
+      model: input.model ?? DEFAULT_FALLBACK_LLM_MODEL,
       systemInstruction,
       prompt: userPrompt,
       temperature: 0.1,
@@ -865,6 +868,7 @@ export interface SyncBranchWithBaseInput {
     | undefined;
   readonly escalateToNeedsHuman?: EscalateToNeedsHumanFn | undefined;
   readonly maxConflictingFiles?: number | undefined;
+  readonly reviewersDir?: string | undefined;
 }
 
 export interface SyncBranchWithBaseResult {
@@ -1066,7 +1070,8 @@ export async function syncBranchWithBase(
       path
     })),
     targets: [],
-    isTaskBranch: true
+    isTaskBranch: true,
+    reviewersDir: input.reviewersDir
   });
   if (!pathGuard.allowed) {
     const diag = `3-way conflict touched forbidden sensitive or traversal paths: ${[...pathGuard.sensitivePaths, ...pathGuard.traversalPaths].join(", ")}`;
@@ -1190,16 +1195,16 @@ export async function syncBranchWithBase(
     let resolutionData: ConflictResolutionPayload;
     if (input.llmClient) {
       resolutionData = await input.llmClient.completeStructured({
-        model: input.model ?? "gemini-3.8-flash",
+        model: input.model ?? DEFAULT_FALLBACK_LLM_MODEL,
         systemInstruction,
         userPrompt,
         responseSchema: CONFLICT_RESOLUTION_SCHEMA,
         temperature: 0.1
       });
     } else {
-      resolutionData = await callGeminiJson<ConflictResolutionPayload>({
+      resolutionData = await callLlmJson<ConflictResolutionPayload>({
         apiKey: input.llmApiKey ?? "",
-        model: input.model ?? "gemini-3.8-flash",
+        model: input.model ?? DEFAULT_FALLBACK_LLM_MODEL,
         systemInstruction,
         prompt: userPrompt,
         temperature: 0.1,
@@ -1243,7 +1248,8 @@ export async function syncBranchWithBase(
       workDir: process.cwd(),
       files: returnedNormalizedPaths.map((path) => ({ path })),
       targets: [],
-      isTaskBranch: true
+      isTaskBranch: true,
+      reviewersDir: input.reviewersDir
     });
     if (!resolvedPathGuard.allowed) {
       const diag = `LLM conflict resolution returned forbidden paths: ${[...resolvedPathGuard.sensitivePaths, ...resolvedPathGuard.traversalPaths].join(", ")}`;
@@ -1302,7 +1308,9 @@ export async function syncBranchWithBase(
   if (input.sandboxRunner && allFilesToCommit.length > 0) {
     const workspaceFiles = await input.gh.readBranchWorkspaceFiles(
       input.targetBranch,
-      allFilesToCommit.map((f) => f.path).join(" ")
+      allFilesToCommit.map((f) => f.path).join(" "),
+      [],
+      input.reviewersDir
     );
     for (const deletedPath of baseDeletedFiles) {
       workspaceFiles.delete(deletedPath);
@@ -1317,6 +1325,7 @@ export async function syncBranchWithBase(
       })),
       changedPaths: allFilesToCommit.map((f) => f.path),
       isTaskBranch: true,
+      reviewersDir: input.reviewersDir,
       sandboxRunner: input.sandboxRunner,
       llmApiKey: input.llmApiKey ?? "",
       label: `3-way conflict resolution (${input.baseBranch} -> ${input.targetBranch})`

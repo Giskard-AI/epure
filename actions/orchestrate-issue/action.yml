@@ -1,5 +1,5 @@
 name: "EPURE Orchestrate Issue Lifecycle"
-description: "Pre-bundled TypeScript (Node.js 24 LTS) Custom Action executing authorized EPURE issue commands (/epure plan, human grill replies, /epure to-spec, /epure to-tickets, /epure approve, /epure status, /epure cancel) using Gemini API and scoped GitHub App installation tokens."
+description: "Pre-bundled TypeScript (Node.js 24 LTS) Custom Action executing authorized EPURE issue commands (/epure plan, human grill replies, /epure to-spec, /epure to-tickets, /epure approve, /epure status, /epure cancel) using the configured LLM provider and scoped GitHub App installation tokens."
 author: "Giskard-AI"
 inputs:
   repository:
@@ -47,13 +47,13 @@ inputs:
     required: false
     default: ""
   llm_api_key:
-    description: "Gemini / LLM API key (LLM_API_KEY)"
+    description: "LLM provider API key (LLM_API_KEY)"
     required: false
     default: ""
   model:
-    description: "Gemini model name (defaults to gemini-3.8-flash)"
+    description: "Optional '<provider>/<model>' override for all phases; when empty, models.* from .github/agents.yml apply"
     required: false
-    default: "gemini-3.8-flash"
+    default: ""
 outputs:
   executed:
     description: "'true' if an orchestration transition executed, 'false' otherwise"

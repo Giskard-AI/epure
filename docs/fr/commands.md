@@ -1,7 +1,7 @@
 # Référence des Commandes (`/epure`, Skill `/setup-repo` & CLI)
 
 EPURE s'utilise à travers deux surfaces complémentaires :
-1. **Le skill d'agent local `/setup-repo`** (`.agents/skills/setup-repo/SKILL.md` — **méthode privilégiée** pour initialiser ou reconfigurer un dépôt, ses Rulesets et son roster dynamique `.cursor/agents/*.md`).
+1. **Le skill d'agent local `/setup-repo`** (`.agents/skills/setup-repo/SKILL.md` — **méthode privilégiée** pour initialiser ou reconfigurer un dépôt, ses Rulesets et son roster dynamique de reviewers dans `reviewers_dir`, par défaut `.agents/reviewers/*.md`).
 2. **Les commandes slash sur les Issues GitHub (`/epure ...`)** pour piloter le cycle de vie d'une fonctionnalité au quotidien depuis l'interface GitHub.
 
 ---
@@ -42,7 +42,7 @@ Toutes les commandes `/epure` se postent sous forme de commentaires sur une Issu
    - Vérifie que l'auteur du commentaire est un humain disposant de la permission effective `write` ou `admin` via `GET /repos/{owner}/{repo}/collaborators/{username}/permission`.
    - Grâce à `allow_implicit_planning_reply: "true"`, tout commentaire humain en texte libre (sans commande slash) posté pendant les phases `grilling` ou `spec` est automatiquement routé comme une commande `reply`.
 2. **Job 2 — Orchestration Isolée sous Environnement d'Agent (`orchestrate-command` via `actions/orchestrate-issue`)** :
-   - S'exécute sur `ubuntu-26.04` dans l'environnement GitHub dédié (`environment: <llm-env>`, p. ex. `epure-agent`, `llm`, `openai`, `anthropic` ou `gemini`) **uniquement après** validation par `authorize-command` (ou lors d'un événement de continuation CI autorisé).
+   - S'exécute sur `ubuntu-26.04` dans l'environnement GitHub dédié (`environment: <llm-env>`, `epure-agent` par défaut ; autres exemples : `llm`, `openai`, `anthropic` ou `gemini`) **uniquement après** validation par `authorize-command` (ou lors d'un événement de continuation CI autorisé).
    - Reçoit les secrets cloisonnés dans l'environnement (`EPURE_AGENT_APP_ID`, `EPURE_AGENT_APP_PRIVATE_KEY` et `LLM_API_KEY` ou clé fournisseur) et installe l'outillage de sandbox noyau (`bubblewrap`, `landrun`, `rtk`).
    - Lors de `/epure to-tickets`, crée les sous-issues GitHub et câble nativement le graphe relationnel GitHub (`sub_issues` parent-enfant + `dependencies/blocked_by`).
 3. **Réveil Événementiel Automatique de la CI (`check_suite.completed` / `workflow_run.completed`)** :
@@ -56,7 +56,7 @@ Toutes les commandes `/epure` se postent sous forme de commentaires sur une Issu
 
 ## 3. Skill d'Agent de Bootstrap (`/setup-repo` — Recommandé)
 
-Le skill **`.agents/skills/setup-repo/SKILL.md`** est la **façon privilégiée** d'initialiser ou de mettre à jour un dépôt consommateur EPURE depuis Cursor, Claude Code, Pi ou Codex :
+Le skill **`.agents/skills/setup-repo/SKILL.md`** est la **façon privilégiée** d'initialiser ou de mettre à jour un dépôt consommateur EPURE depuis n'importe quel agent de développement compatible Skills :
 
 ```text
 /setup-repo <owner>/<repo>
@@ -66,7 +66,7 @@ Le skill **`.agents/skills/setup-repo/SKILL.md`** est la **façon privilégiée*
 
 1. **Analyse du projet** : inspecte la stack (`package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, `Makefile`), la structure des modules `src/` et la présence ou non d'une interface utilisateur.
 2. **Simulation (`--dry-run`)** : exécute `dist/cli/setup-repo.mjs --dry-run` et présente le plan complet au mainteneur avant toute écriture.
-3. **Conception dynamique du roster `.cursor/agents/*.md`** : crée, conçoit et adapte les reviewers spécialisés en fonction des composants réels du projet (socle transverse `architecture-reviewer`, `security-reviewer`, `spec-parity-reviewer`, `standards-reviewer`, `user-advocate` + spécialistes métier/UI sur mesure avec routage `paths:`).
+3. **Conception dynamique du roster de reviewers (`reviewers_dir`, par défaut `.agents/reviewers/*.md`)** : crée, conçoit et adapte les reviewers spécialisés en fonction des composants réels du projet (socle transverse `architecture-reviewer`, `security-reviewer`, `spec-parity-reviewer`, `standards-reviewer`, `user-advocate` + spécialistes métier/UI sur mesure avec routage `paths:`).
 4. **Application idempotente (`--apply --apply-github-settings`)** : écrit `.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`, les workflows appelants épinglés par SHA, configure le dépôt en squash-only et installe les 3 Repository Rulesets.
 
 ---
@@ -84,6 +84,12 @@ node dist/cli/setup-repo.mjs \
   [--apply-github-settings] \
   [--no-frontend-reviewers] \
   [--domain-reviewers <slug1,slug2>] \
+  [--reviewers-dir <chemin>] \
+  [--llm-env <nom-env>] \
+  [--model <fournisseur/modèle>] \
+  [--planning-model <fournisseur/modèle>] \
+  [--implementation-model <fournisseur/modèle>] \
+  [--review-model <fournisseur/modèle>] \
   [--agent-app-id <id>] \
   [--release-app-id <id>] \
   [--require-pr-approvals <N>] \
@@ -93,13 +99,19 @@ node dist/cli/setup-repo.mjs \
 | Option | Valeur par défaut | Description |
 | --- | --- | --- |
 | `--repo <owner/name>` | *(Obligatoire)* | Identifiant du dépôt GitHub cible (ex. `my-org/craft-calculator`). |
-| `--target-dir <chemin>` (alias `--dir`, `--repo-root`) | Répertoire courant | Chemin local où sont écrits `.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`, les workflows et `.cursor/agents/*.md`. |
+| `--target-dir <chemin>` (alias `--dir`, `--repo-root`) | Répertoire courant | Chemin local où sont écrits `.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`, les workflows et les prompts des reviewers (`<reviewers_dir>/*.md`). |
 | `--pinned-sha <sha>` | Dernier SHA EPURE | SHA Git immuable de 40 caractères de `Giskard-AI/epure` utilisé pour épingler les workflows appelants générés. |
 | `--dry-run` | `true` (si `--apply` omis) | Affiche le plan complet de bootstrap sans modifier aucun fichier ni appeler d'API d'écriture. |
-| `--apply` | `false` | Écrit les fichiers de configuration (`.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`), les workflows appelants et le socle `.cursor/agents/*.md`. |
+| `--apply` | `false` | Écrit les fichiers de configuration (`.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`), les workflows appelants et le socle des prompts de reviewers (`<reviewers_dir>/*.md`, par défaut `.agents/reviewers/*.md`). |
 | `--apply-github-settings` | `false` | Applique le mode squash-only et les 3 Repository Rulesets via l'API REST GitHub. |
 | `--no-frontend-reviewers` | `false` | Omet `frontend-reviewer`, `accessibility-reviewer` et `design-reviewer` pour les dépôts sans UI. |
-| `--domain-reviewers <csv>` | Aucun | Génère des fichiers `.cursor/agents/<slug>-reviewer.md` supplémentaires pour les sous-domaines métier. |
+| `--domain-reviewers <csv>` | Aucun | Génère des fichiers `<reviewers_dir>/<slug>-reviewer.md` supplémentaires pour les sous-domaines métier. |
+| `--reviewers-dir <chemin>` | `.agents/reviewers` | Répertoire du roster de reviewers écrit dans `.github/agents.yml` (`reviewers_dir`) et lu par l'orchestrateur depuis `dev` (p. ex. `--reviewers-dir .cursor/agents` pour une équipe souhaitant que Cursor charge les reviewers comme sous-agents). Les chemins absolus, les segments `.`/`..` et les chemins sous `src/` sont rejetés en *fail-closed* avec `SECURITY_INVARIANT_VIOLATION`. |
+| `--llm-env <nom-env>` | `epure-agent` | Nom de l'environnement GitHub (`[A-Za-z0-9._-]`) écrit dans `.github/agents.yml` (`llm_environment`) et utilisé par le job `orchestrate-command` de `.github/workflows/epure-issue-command.yml`. Doit correspondre au `--llm-env` de l'assistant. |
+| `--model <fournisseur/modèle>` | — | Définit en une fois `models.planning`, `models.implementation` et `models.review`. |
+| `--planning-model <fournisseur/modèle>` | `anthropic/claude-sonnet-4-20250514` | Définit `models.planning`. |
+| `--implementation-model <fournisseur/modèle>` | `anthropic/claude-sonnet-4-20250514` | Définit `models.implementation`. |
+| `--review-model <fournisseur/modèle>` | `openai/gpt-4.1` | Définit `models.review`. |
 | `--agent-app-id <id>` | Optionnel | ID numérique de `<owner>-epure-agent` ajouté en Bypass Actor PR sur `epure-feature-governance` (`feature/*`). |
 | `--release-app-id <id>` | Optionnel | ID numérique de `<owner>-epure-release` ajouté comme unique Bypass Actor sur `epure-release-immutability` (`main` et `v*`). |
 | `--require-pr-approvals <N>` | `0` | Nombre d'approbations humaines requises sur `dev` (`0` pour compatibilité mainteneur solo ; `>=1` en équipe). |
@@ -115,4 +127,4 @@ bash scripts/wizards/setup-github-apps-wizard.sh \
   --llm-env <nom-env>
 ```
 
-Accompagne pas à pas un mainteneur humain dans la création des deux GitHub Apps (`<owner>-epure-agent` et `<owner>-epure-release`) via l'**Approche 2** (flux local GitHub App Manifest en 1 clic) ou l'**Approche 1 de repli** (enregistrement manuel guidé étape par étape), crée les environnements GitHub isolés (`<llm-env>` — libre et agnostique du fournisseur LLM, p. ex. `epure-agent`, `llm`, `openai`, `anthropic`, `gemini` — ainsi que `release`), et configure les 5 secrets dans leurs environnements respectifs (`EPURE_AGENT_APP_ID`, `EPURE_AGENT_APP_PRIVATE_KEY` et `LLM_API_KEY` dans `--env <llm-env>` ; `EPURE_RELEASE_APP_ID` et `EPURE_RELEASE_APP_PRIVATE_KEY` dans `--env release`).
+Accompagne pas à pas un mainteneur humain dans la création des deux GitHub Apps (`<owner>-epure-agent` et `<owner>-epure-release`) via l'**Approche 2** (flux local GitHub App Manifest en 1 clic) ou l'**Approche 1 de repli** (enregistrement manuel guidé étape par étape), crée les environnements GitHub isolés (`<llm-env>` — libre et agnostique du fournisseur LLM, `epure-agent` par défaut ; autres exemples : `llm`, `openai`, `anthropic`, `gemini` — ainsi que `release`), et configure les 5 secrets dans leurs environnements respectifs (`EPURE_AGENT_APP_ID`, `EPURE_AGENT_APP_PRIVATE_KEY` et `LLM_API_KEY` dans `--env <llm-env>` ; `EPURE_RELEASE_APP_ID` et `EPURE_RELEASE_APP_PRIVATE_KEY` dans `--env release`).

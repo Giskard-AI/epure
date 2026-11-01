@@ -7,7 +7,7 @@ status: accepted
 
 Le test pilote de bout en bout d'`EPURE v1.1.0` sur un dépôt consommateur réel (`my-org/craft-calculator`) et la comparaison avec une architecture de référence multi-agents ont mis en évidence quatre décisions structurantes difficiles à inverser :
 1. Un GitHub Repository Ruleset unique ciblant simultanément `refs/heads/dev` et `refs/heads/feature/*` partagerait ses `bypass_actors` : accorder un bypass à l'`Agent App` pour squash-merger `task/* -> feature/*` lui permettrait aussi de fusionner du code applicatif dans `dev` sans intervention humaine, ce qui violerait la frontière de validation humaine ([ADR-0001](0001-branches-et-frontieres-de-validation.md), Q45).
-2. Un dépôt consommateur héberge dans `.cursor/agents/*.md` les définitions de ses reviewers spécialisés, transverses et `user-advocate`, enrichies avec les personas et invariants du domaine lors de `/epure plan`. Charger ces prompts directement depuis la branche de travail `task/*` inspectée exposerait la review à une injection de prompt d'auto-approbation par l'exécuteur ([ADR-0004](0004-separation-execution-et-publication.md), [ADR-0017](0017-prevention-des-boucles-review-independante-et-reprises.md)).
+2. Un dépôt consommateur héberge dans un répertoire de roster versionné (`reviewers_dir`, `.agents/reviewers/*.md` par défaut) les définitions de ses reviewers spécialisés, transverses et `user-advocate`, enrichies avec les personas et invariants du domaine lors de `/epure plan`. Charger ces prompts directement depuis la branche de travail `task/*` inspectée exposerait la review à une injection de prompt d'auto-approbation par l'exécuteur ([ADR-0004](0004-separation-execution-et-publication.md), [ADR-0017](0017-prevention-des-boucles-review-independante-et-reprises.md)).
 3. La sélection et les re-passes de review multi-agents doivent concilier couverture spécialisée (domaine, UI, sécurité, parité spec, accessibilité Impeccable, personas `user-advocate`) et maîtrise du coût/temps sous le plafond `max_code_fix_attempts = 3` (Q78).
 4. La politique squash-only exige des messages Conventional Commits fidèles au diff final sans se heurter au fait que GitHub n'interprète les mots-clés de fermeture (`Closes #N`) que lors d'un merge vers la branche par défaut (`dev`).
 
@@ -19,11 +19,12 @@ Le test pilote de bout en bout d'`EPURE v1.1.0` sur un dépôt consommateur rée
      2. `epure-dev-governance` (`refs/heads/dev`) : mêmes règles d'intégrité, de checks et de format de commit, avec `required_approving_review_count: 0` par défaut (configurable via `--require-pr-approvals <N>` pour les équipes) afin qu'un mainteneur solo puisse fusionner ses propres PRs ou celles du bot sans friction, tout en interdisant par garde-fou matériel dans le publisher tout auto-merge par l'`Agent App` sur `dev` en dehors de la PR documentaire `plan/* -> dev` consécutive à `/epure approve`.
      3. `epure-release-immutability` (`refs/heads/main`, `refs/tags/v*`) : immuabilité stricte avec la seule `Release App` en `bypass_actors` (Q80).
 
-2. **Q92 — Source de confiance des prompts `.cursor/agents/*.md` et chemin sensible** :
-   - `setup-repo` initialise dans le dépôt consommateur le socle `.cursor/agents/` (`domain-backend-reviewer.md`, `frontend-reviewer.md`, `infra-reviewer.md`, `architecture-reviewer.md`, `security-reviewer.md`, `spec-parity-reviewer.md`, `standards-reviewer.md`, `accessibility-reviewer.md`, `design-reviewer.md`, `user-advocate.md`).
+2. **Q92 — Source de confiance des prompts du roster (`reviewers_dir`) et chemin sensible** :
+   - Le répertoire du roster est configurable via la clé `reviewers_dir` de `.github/agents.yml` (`.agents/reviewers` par défaut, agnostique de tout IDE) ou `setup-repo --reviewers-dir <chemin>` (p. ex. `.cursor/agents` pour une équipe souhaitant que Cursor charge les reviewers comme sous-agents). Un chemin absolu, comportant un segment `.` ou `..`, ou situé sous `src/` est rejeté en *fail-closed* avec `SECURITY_INVARIANT_VIOLATION`.
+   - `setup-repo` initialise dans ce répertoire du dépôt consommateur le socle (`domain-backend-reviewer.md`, `frontend-reviewer.md`, `infra-reviewer.md`, `architecture-reviewer.md`, `security-reviewer.md`, `spec-parity-reviewer.md`, `standards-reviewer.md`, `accessibility-reviewer.md`, `design-reviewer.md`, `user-advocate.md`).
    - À la fin du Grill (`/epure plan`), l'orchestrateur adapte ces fichiers sur `plan/*` avec les personas et invariants du projet, qui sont ensuite intégrés dans `dev` après `/epure approve`.
-   - Lors de l'évaluation d'une PR `task/* -> feature/*`, l'orchestrateur charge **exclusivement** `.cursor/agents/*.md` depuis la branche de base de confiance (`dev`), avec repli sur les templates embarqués dans `EPURE`, et jamais depuis la branche `task/*` inspectée.
-   - Tout changement touchant `.cursor/agents/**` sur une branche `task/*` est classé comme **chemin sensible** (au même titre que `.github/workflows/**`, Q32) et interdit l'auto-merge sans validation humaine.
+   - Lors de l'évaluation d'une PR `task/* -> feature/*`, l'orchestrateur charge **exclusivement** `<reviewers_dir>/*.md` depuis la branche de base de confiance (`dev`), avec repli sur les templates embarqués dans `EPURE`, et jamais depuis la branche `task/*` inspectée.
+   - Tout changement touchant le `reviewers_dir/**` configuré (ainsi que `.agents/reviewers/**` par défaut) sur une branche `task/*` est classé comme **chemin sensible** (au même titre que `.github/workflows/**` et `.github/agents.yml`, Q32) et interdit l'auto-merge sans validation humaine.
 
 3. **Q93 & Q96 — Sélection plafonnée à 4 reviewers, re-review ciblée et double porte `user-advocate` + Impeccable** :
    - À la fin du Grill (`/epure plan`), si la fonctionnalité comporte une interface utilisateur, l'orchestrateur génère `DESIGN.md` (conventions Impeccable) et exécute `user-advocate` en mode **`design-gate`** pour enrichir les critères d'acceptation UX des tickets avant `/epure approve`.
@@ -32,12 +33,13 @@ Le test pilote de bout en bout d'`EPURE v1.1.0` sur un dépôt consommateur rée
    - Une passe complète de synthèse (`architecture-reviewer`, `spec-parity-reviewer`, `user-advocate`, et `impeccable-gate` si UI) est également publiée sur la PR finale `feature/* -> dev` pour éclairer le validateur humain.
 
 4. **Q94 — Synthèse IA du message de squash sémantique et convention `Refs` vs `Closes`** :
-   - Juste avant chaque squash-merge, un appel LLM léger à température `0.0` (`gemini-3.8-flash`) synthétise à partir du diff consolidé de la PR un `commit_title` Conventional Commit (`type(scope): summary (#PR)`) et un `commit_message` concis en liste à puces.
+   - Juste avant chaque squash-merge, un appel LLM léger à température `0.0` (modèle `models.review` de `.github/agents.yml`) synthétise à partir du diff consolidé de la PR un `commit_title` Conventional Commit (`type(scope): summary (#PR)`) et un `commit_message` concis en liste à puces.
    - Le titre de la PR est synchronisé via `PATCH /repos/{owner}/{repo}/pulls/{pr_number}` avant le merge.
    - Les squash-merges `task/* -> feature/*` utilisent `Refs #<ticket>` (car `feature/*` n'est pas la branche par défaut) et l'orchestrateur clôt explicitement le ticket via l'API Issues, tandis que la PR finale `feature/* -> dev` inclut `Closes #<plan_issue>` et `Closes #<ticket>` pour déclencher la liaison et la fermeture natives de GitHub à l'atterrissage sur `dev`.
 
 ## Conséquences
 
 - Séparation étanche des privilèges de merge entre `feature/*`, `dev` et `main`.
-- Immunité de la chaîne de review face aux modifications de `.cursor/agents/*` sur une branche de tâche.
+- Immunité de la chaîne de review face aux modifications du répertoire du roster (`reviewers_dir`) sur une branche de tâche.
+- Roster indépendant de tout IDE par défaut, tout en restant chargeable par un IDE particulier via `--reviewers-dir`.
 - Historique Git linéaire sur `feature/*` et `dev` composé uniquement de commits sémantiques résumant le diff réel.

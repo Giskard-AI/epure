@@ -1,5 +1,6 @@
 import type { EpureCommandName } from "../auth/issue-command-gate.js";
 import type { AgentsConfig } from "../bootstrap/setup-repo.js";
+import { DEFAULT_FALLBACK_LLM_MODEL } from "../llm/client.js";
 import type {
   CheckRunAnnotationRecord,
   EpicConvergenceEscalationDetails,
@@ -124,7 +125,6 @@ export interface OrchestrateIssueInput {
   readonly fallbackGithubToken?: string | undefined;
   readonly llmApiKey: string;
   readonly model?: string | undefined;
-  readonly geminiModel?: string | undefined;
   readonly stateStore?: GitRefStateStore | undefined;
   readonly fetchImpl?: typeof fetch | undefined;
   readonly sleepFn?: ((ms: number) => Promise<void>) | undefined;
@@ -190,9 +190,13 @@ export interface GitHubRestHelper {
   readBranchWorkspaceFiles(
     branch: string,
     hintText?: string,
-    pinnedPaths?: readonly string[]
+    pinnedPaths?: readonly string[],
+    reviewersDir?: string
   ): Promise<Map<string, string>>;
-  readTrustedBaseRosterFiles(branch: string): Promise<Map<string, string>>;
+  readTrustedBaseRosterFiles(
+    branch: string,
+    reviewersDir?: string
+  ): Promise<Map<string, string>>;
   readDevWorkflowsMap(branch: string): Promise<Map<string, string>>;
   ensureBranch(branch: string, fromBranch?: string): Promise<string>;
   commitFilesToBranch(params: {
@@ -317,13 +321,14 @@ export interface ResolvedPhaseModels {
 
 function canUsePhaseModelFromConfig(
   candidateModel: string | undefined,
-  hasProvidersMap: boolean
+  hasProvidersMap: boolean,
+  hasLlmApiKey: boolean
 ): boolean {
   if (!candidateModel || candidateModel.trim().length === 0) {
     return false;
   }
   const clean = candidateModel.trim();
-  if (hasProvidersMap || clean.includes("/")) {
+  if (hasProvidersMap || hasLlmApiKey || clean.includes("/")) {
     return true;
   }
   const lower = clean.toLowerCase();
@@ -346,9 +351,10 @@ function canUsePhaseModelFromConfig(
 
 export function resolvePhaseModels(
   inputModel: string | undefined,
-  agentsConfig: AgentsConfig | null | undefined
+  agentsConfig: AgentsConfig | null | undefined,
+  llmApiKey?: string | undefined
 ): ResolvedPhaseModels {
-  const fallbackModel = inputModel?.trim() || "gemini-3.8-flash";
+  const fallbackModel = inputModel?.trim() || DEFAULT_FALLBACK_LLM_MODEL;
   const explicitOverride = Boolean(inputModel && inputModel.trim().length > 0);
   const providers = agentsConfig?.providers;
   const maxTransientRetries = agentsConfig?.max_transient_api_retries;
@@ -361,6 +367,9 @@ export function resolvePhaseModels(
       : 900_000;
   const hasProvidersMap = Boolean(
     providers && Object.keys(providers).length > 0
+  );
+  const hasLlmApiKey = Boolean(
+    llmApiKey?.trim() || process.env.LLM_API_KEY?.trim()
   );
 
   if (explicitOverride || !agentsConfig) {
@@ -378,7 +387,7 @@ export function resolvePhaseModels(
   }
 
   const pickModel = (phaseCandidate: string | undefined): string =>
-    canUsePhaseModelFromConfig(phaseCandidate, hasProvidersMap)
+    canUsePhaseModelFromConfig(phaseCandidate, hasProvidersMap, hasLlmApiKey)
       ? phaseCandidate!.trim()
       : fallbackModel;
 

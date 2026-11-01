@@ -4,6 +4,7 @@ import type {
   ExternalCheckRunRecord,
   ExternalWorkflowRunRecord
 } from "../../execution/external-ci-gate.js";
+import { DEFAULT_REVIEWERS_DIR } from "../../review/reviewer-roster.js";
 import {
   buildIssueStateRefName,
   updateIssueStateWithCas,
@@ -373,7 +374,8 @@ export function createGitHubRestHelper(params: {
     async readBranchWorkspaceFiles(
       branch: string,
       hintText = "",
-      pinnedPaths: readonly string[] = []
+      pinnedPaths: readonly string[] = [],
+      reviewersDir: string = DEFAULT_REVIEWERS_DIR
     ): Promise<Map<string, string>> {
       const filesMap = new Map<string, string>();
       try {
@@ -398,7 +400,7 @@ export function createGitHubRestHelper(params: {
           const p = entry.path;
           if (
             p.startsWith(".github/") ||
-            p.startsWith(".cursor/") ||
+            p.startsWith(`${reviewersDir}/`) ||
             p.startsWith(".agents/") ||
             p.startsWith("docs/") ||
             p === ".gitignore" ||
@@ -580,9 +582,11 @@ export function createGitHubRestHelper(params: {
     },
 
     async readTrustedBaseRosterFiles(
-      branch: string
+      branch: string,
+      reviewersDir: string = DEFAULT_REVIEWERS_DIR
     ): Promise<Map<string, string>> {
       const filesMap = new Map<string, string>();
+      const dirPrefix = `${reviewersDir.toLowerCase()}/`;
       try {
         const treeRes = await apiRequest<{
           tree?: Array<{ path?: string; type?: string; sha?: string }>;
@@ -598,10 +602,10 @@ export function createGitHubRestHelper(params: {
             continue;
           }
           const p = entry.path;
-          if (
-            !/^\.cursor\/agents\/[a-z0-9-]+\.md$/i.test(p) &&
-            p !== "DESIGN.md"
-          ) {
+          const isRosterFile =
+            p.toLowerCase().startsWith(dirPrefix) &&
+            /^[a-z0-9-]+\.md$/i.test(p.slice(dirPrefix.length));
+          if (!isRosterFile && p !== "DESIGN.md") {
             continue;
           }
           const blobRes = await apiRequest<{
