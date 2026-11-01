@@ -1,0 +1,6 @@
+{
+  "repository": "Giskard-AI/epure-live-sandbox",
+  "appId": "123456",
+  "privateKeyPath": "~/.config/epure/epure-live-sandbox.private-key.pem",
+  "installationId": 12345678
+}

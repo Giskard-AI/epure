@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createGitHubMockRouter, json } from "./fixtures/github-mock-router.js";
 import {
   type AgentsConfig,
   DEFAULT_AGENTS_CONFIG,
@@ -2553,66 +2554,26 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
     ])(
       "$id",
       async ({ baseTreeBlobs, deletedFiles, expectedTreePathsPosted }) => {
-        const postedTreeEntries: Array<{ path: string; sha: string | null }> =
-          [];
-
-        const mockFetch: typeof fetch = async (inputUrl, init) => {
-          const url = String(inputUrl);
-          const method = init?.method ?? "GET";
-
-          if (url.includes("/git/ref/heads/") && method === "GET") {
-            return new Response(
-              JSON.stringify({ object: { sha: "parent_sha_1" } }),
-              { status: 200 }
-            );
-          }
-          if (url.includes("/git/commits/parent_sha_1") && method === "GET") {
-            return new Response(
-              JSON.stringify({ tree: { sha: "base_tree_sha_1" } }),
-              { status: 200 }
-            );
-          }
-          if (
-            url.includes("/git/trees/base_tree_sha_1?recursive=1") &&
-            method === "GET"
-          ) {
-            return new Response(
-              JSON.stringify({
-                tree: baseTreeBlobs.map((p) => ({
-                  path: p,
-                  type: "blob",
-                  sha: "blob_existing"
-                }))
-              }),
-              { status: 200 }
-            );
-          }
-          if (url.endsWith("/git/blobs") && method === "POST") {
-            return new Response(JSON.stringify({ sha: "new_blob_sha" }), {
-              status: 201
-            });
-          }
-          if (url.endsWith("/git/trees") && method === "POST") {
-            const parsed = JSON.parse(String(init?.body ?? "{}")) as {
-              tree?: Array<{ path: string; sha: string | null }>;
-            };
-            postedTreeEntries.push(...(parsed.tree ?? []));
-            return new Response(JSON.stringify({ sha: "new_tree_sha" }), {
-              status: 201
-            });
-          }
-          if (url.endsWith("/git/commits") && method === "POST") {
-            return new Response(JSON.stringify({ sha: "new_commit_sha" }), {
-              status: 201
-            });
-          }
-          return new Response(JSON.stringify({}), { status: 200 });
-        };
+        const git = "/repos/Hartorn-Inc/CozyVTT/git";
+        const router = createGitHubMockRouter()
+          .on("GET", `${git}/ref/heads/task%2F137-triage`, json({ object: { sha: "parent_sha_1" } }))
+          .on("GET", `${git}/commits/parent_sha_1`, json({ tree: { sha: "base_tree_sha_1" } }))
+          .on(
+            "GET",
+            `${git}/trees/base_tree_sha_1?recursive=1`,
+            json({
+              tree: baseTreeBlobs.map((p) => ({ path: p, type: "blob", sha: "blob_existing" }))
+            })
+          )
+          .on("POST", `${git}/blobs`, json({ sha: "new_blob_sha" }, 201))
+          .on("POST", `${git}/trees`, json({ sha: "new_tree_sha" }, 201))
+          .on("POST", `${git}/commits`, json({ sha: "new_commit_sha" }, 201))
+          .on("PATCH", `${git}/refs/heads/task%2F137-triage`, json({ object: { sha: "new_commit_sha" } }));
 
         const gh = createGitHubRestHelper({
           repository: "Hartorn-Inc/CozyVTT",
           token: "ghs_test",
-          fetchImpl: mockFetch
+          fetchImpl: router.fetch
         });
 
         await gh.commitFilesToBranch({
@@ -2623,9 +2584,13 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
           deletedFiles
         });
 
-        expect(postedTreeEntries.map((e) => e.path)).toEqual(
+        const postedTree = router.requests.find(
+          (r) => r.method === "POST" && r.path === `${git}/trees`
+        )?.body as { tree?: Array<{ path: string }> } | undefined;
+        expect(postedTree?.tree?.map((e) => e.path)).toEqual(
           expectedTreePathsPosted
         );
+        expect(router.unmatched).toEqual([]);
       }
     );
 

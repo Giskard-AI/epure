@@ -109,5 +109,7 @@ Desktop.ini
 docs/.vitepress/cache/
 docs/.vitepress/dist/
 epure.live-test.json
+epure.live-github.json
+*.pem
 .cursor/plans/
 
