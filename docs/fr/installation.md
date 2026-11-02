@@ -41,7 +41,7 @@ Avant d'écrire le moindre fichier, l'agent inspecte le dépôt cible (`package.
 Pour garantir une séparation stricte des privilèges (Q82, Q91) et zéro exposition de secrets aux workflows publics de Pull Request (conformité Zizmor), EPURE n'utilise jamais de jeton personnel (PAT) omnipotent ni de secrets globaux du dépôt. Chaque dépôt utilise **deux GitHub Apps distinctes** et **deux environnements GitHub isolés** (`<llm-env>` et `release`) :
 
 1. **Agent App (`<owner>-epure-agent`)** : utilisée par l'orchestrateur pour l'automatisation quotidienne (`plan/*`, `task/*`, `feature/*`, Issues, PRs et Check Runs). Elle ne figure **jamais** parmi les Bypass Actors de `dev` ou `main`.
-2. **Release App (`<owner>-epure-release`)** : utilisée exclusivement par `release-promote.yml` / `release.yml` lorsqu'un humain déclenche une promotion fast-forward de `dev` vers `main`. C'est le **seul Bypass Actor** autorisé sur `main` et les tags `v*`.
+2. **Release App (`<owner>-epure-release`)** : utilisée exclusivement par le workflow de release (votre `.github/workflows/release.yml`, qui appelle le workflow réutilisable `release-promote.yml` d'EPURE) lorsqu'un humain déclenche une promotion fast-forward de `dev` vers `main` avec `semver_tag` et `expected_dev_sha`. C'est le **seul Bypass Actor** sur `epure-release-immutability` (`main` et les tags `v*`). Voir [Promouvoir une Release](./guides/how-to-release.md) pour la protection initiale de l'environnement (relecteur obligatoire, politique de déploiement limitée à `dev`).
 
 Lancez l'assistant interactif, qui propose l'**Approche 2** (flux local GitHub App Manifest en 1 clic) avec repli automatique sur l'**Approche 1** (enregistrement manuel guidé étape par étape) et injecte les secrets dans leurs environnements GitHub dédiés via `gh secret set --env` sans jamais exposer vos clés privées PEM au modèle LLM :
 
@@ -59,7 +59,7 @@ bash scripts/wizards/setup-github-apps-wizard.sh \
 | `EPURE_AGENT_APP_ID` | `--env <llm-env>` | Identifiant numérique de l'application `<owner>-epure-agent`. |
 | `EPURE_AGENT_APP_PRIVATE_KEY` | `--env <llm-env>` | Clé privée PEM de `<owner>-epure-agent` (sert à signer des jetons d'installation éphémères). |
 | `EPURE_RELEASE_APP_ID` | `--env release` | Identifiant numérique de l'application `<owner>-epure-release` (associé à l'environnement protégé `release`). |
-| `EPURE_RELEASE_APP_PRIVATE_KEY` | `--env release` | Clé privée PEM de `<owner>-epure-release` (utilisée uniquement par `release.yml` / `release-promote.yml`). |
+| `EPURE_RELEASE_APP_PRIVATE_KEY` | `--env release` | Clé privée PEM de `<owner>-epure-release` (transmise par `release.yml` à `release-promote.yml` uniquement). |
 
 Vérifiez le cloisonnement des secrets par environnement via `gh` :
 

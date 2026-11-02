@@ -149,7 +149,7 @@ Before writing any file, the agent inspects the target repository (`package.json
 To enforce strict privilege separation (Q82, Q91) and Zizmor-compliant zero secret exposure to unprivileged PR workflows, EPURE never uses a single all-powerful Personal Access Token or global repository secrets. Instead, every repository uses **two distinct GitHub Apps** and **two isolated GitHub Environments** (`<llm-env>` and `release`):
 
 1. **Agent App (`<owner>-epure-agent`)**: Used by the orchestrator for day-to-day automation (`plan/*`, `task/*`, `feature/*`, Issues, PRs, and Check Runs). It is **never** a Bypass Actor on `dev` or `main`.
-2. **Release App (`<owner>-epure-release`)**: Used exclusively by `release-promote.yml` / `release.yml` when a human triggers a fast-forward release from `dev` to `main`. It is the **sole Bypass Actor** on `main` and `v*` tags.
+2. **Release App (`<owner>-epure-release`)**: Used exclusively by the release workflow (your `.github/workflows/release.yml`, which calls EPURE's reusable `release-promote.yml`) when a human dispatches a fast-forward release from `dev` to `main` with `semver_tag` and `expected_dev_sha`. It is the **sole Bypass Actor** on `epure-release-immutability` (`main` and `v*` tags). See [Promote a Release](./guides/how-to-release.md) for the one-time environment protection (required reviewer, `dev`-only deployment branch policy).
 
 Launch the interactive wizard, which supports **Approach 2** (1-click local GitHub App Manifest Flow) with automatic **Fallback Approach 1** (manual step-by-step guided registration) and injects secrets into their dedicated GitHub Environments via `gh secret set --env` without ever exposing PEM private keys to the LLM:
 
@@ -167,7 +167,7 @@ bash scripts/wizards/setup-github-apps-wizard.sh \
 | `EPURE_AGENT_APP_ID` | `--env <llm-env>` | Numeric App ID of `<owner>-epure-agent`. |
 | `EPURE_AGENT_APP_PRIVATE_KEY` | `--env <llm-env>` | PEM private key of `<owner>-epure-agent` (used to mint short-lived installation tokens). |
 | `EPURE_RELEASE_APP_ID` | `--env release` | Numeric App ID of `<owner>-epure-release` (bound to the human-approved `release` environment). |
-| `EPURE_RELEASE_APP_PRIVATE_KEY` | `--env release` | PEM private key of `<owner>-epure-release` (used only by `release.yml` / `release-promote.yml`). |
+| `EPURE_RELEASE_APP_PRIVATE_KEY` | `--env release` | PEM private key of `<owner>-epure-release` (passed by `release.yml` to `release-promote.yml` only). |
 
 Verify the environment-scoped secrets with `gh`:
 
@@ -264,7 +264,7 @@ At every step of driving an issue, EPURE separates **what you do**, **what runs 
 | **2. Blueprint & Spec** | Comment `/epure to-spec` (and optionally post plain-text adjustments). | Creates `plan/<issue>-<slug>`, runs the zero-context **Goldfish Specification Audit**, and commits `GLOSSARY.md`, ADRs, `DESIGN.md` (if UI), and `docs/specs/<slug>.md`. | **Act again** once the spec draft is committed: reply in plain text to revise the spec, or comment `/epure to-tickets` when satisfied. |
 | **3. Ticket DAG & Mandate** | Comment `/epure to-tickets`, review the sub-issues, then comment `/epure approve`. | Wires native GitHub `sub_issues` and `blocked_by` links, merges `plan/* -> feature/*` directly, and locks `spec_sha` in `refs/epure/state/<issue>`. | **No action required** once `/epure approve` is posted—EPURE immediately starts executing the ticket DAG. |
 | **4. Autonomous Ticket Loop** | Nothing during normal execution (optional `/epure status` or `/epure sync`). | For each ticket (`task/* -> feature/*`): **Stage 1** 2-phase kernel sandbox TDD (`bwrap`/`landrun` + `rtk`) -> **Stage 2** zero-cost async CI wait (`waiting_ticket_ci`) -> **Stage 3** trusted `dev` multi-agent review + AI Semantic Squash. | **Autofix 1..3** automatically fixes Stage 1, CI, or review failures. Comment `/epure sync` for 3-way Git conflicts, or `/epure continue` if paused in `needs-human`. |
-| **5. Convergence & Final Merge** | Review the final `feature/* -> dev` PR and click **Squash and merge** (plus optional `release-promote.yml` for `dev -> main`). | Runs zero-context **`EpicConvergenceAudit`** (spawning Phase 2 tickets automatically if incomplete), opens `feature/* -> dev`, and runs final synthesis CI & review. | **Act again** when the synthesis PR `feature/* -> dev` is green to perform the human Squash & Merge into `dev`. |
+| **5. Convergence & Final Merge** | Review the final `feature/* -> dev` PR and click **Squash and merge** (plus optional `release.yml` for `dev -> main`). | Runs zero-context **`EpicConvergenceAudit`** (spawning Phase 2 tickets automatically if incomplete), opens `feature/* -> dev`, and runs final synthesis CI & review. | **Act again** when the synthesis PR `feature/* -> dev` is green to perform the human Squash & Merge into `dev`. |
 
 ---
 
@@ -397,13 +397,15 @@ Once tickets `#25`, `#26`, and `#27` are merged into `feature/16-markov-craft-ca
 
 <span class="epure-badge epure-badge--human">Mandatory Human Gate 4</span>
 
-When ready to cut a production release, the maintainer triggers the **`Release Promote (dev -> main)`** workflow (`workflow_dispatch` with `version: v1.0.0`), or runs via `gh`:
+When ready to cut a production release, the maintainer dispatches **`EPURE Controlled Release (dev -> main)`** (`.github/workflows/release.yml`) from `dev` with the tag and the reviewed `dev` head SHA, then approves the `release` environment deployment:
 
 ```bash
-gh workflow run release-promote.yml -R my-org/craft-calculator -f version=v1.0.0
+DEV_SHA="$(gh api repos/my-org/craft-calculator/branches/dev --jq .commit.sha)"
+gh workflow run release.yml -R my-org/craft-calculator --ref dev \
+  -f semver_tag=v1.0.0 -f expected_dev_sha="$DEV_SHA"
 ```
 
-Using the isolated **Release App** (`<owner>-epure-release`), the workflow verifies that `main` is an ancestor of `dev`, performs an atomic fast-forward of `main` to `dev`, and pushes the immutable tag `v1.0.0`.
+`release.yml` calls EPURE's reusable `release-promote.yml`. It checks that `expected_dev_sha` is still the `dev` head, that `CI` is green on it, that `v1.0.0` does not exist and that `main` is an ancestor of it; then, with a short-lived **Release App** (`<owner>-epure-release`) token, it fast-forwards `main` and pushes the annotated tag `v1.0.0` in one atomic push, publishes the GitHub Release with generated notes, and revokes the token. See [Promote a Release](./guides/how-to-release.md).
 
 ---
 ## [EN] Commands Reference (/epure & /setup-repo)
@@ -461,7 +463,7 @@ All `/epure` commands are posted as comments on a GitHub Issue. Every command is
    - When external CI finishes on `task/*` or `feature/*`, the `check_suite.completed` or `workflow_run.completed` event wakes `orchestrate-command` with `command: "continue"`, `trigger_head_sha`, and `trigger_branch` to run Stage 3 multi-agent review, AI semantic squash, or unified auto-remediation.
 4. **Pull Request Gates & Controlled Release Promotion**:
    - On `pull_request` events (`dev`, `main`, `feature/**`), `epure-check.yml` (`actions/epure-contract`), `pr-title.yml`, and `ci.yml` execute with `contents: read` and zero privileged secrets.
-   - On human `workflow_dispatch`, `release.yml` runs inside the protected `environment: release` (`EPURE_RELEASE_APP_ID`, `EPURE_RELEASE_APP_PRIVATE_KEY`) via `actions/verify-app-role` to fast-forward `dev -> main`.
+   - On human `workflow_dispatch` (`semver_tag`, `expected_dev_sha`), `release.yml` calls EPURE's reusable `release-promote.yml`, which runs inside the protected `environment: release` (`EPURE_RELEASE_APP_ID`, `EPURE_RELEASE_APP_PRIVATE_KEY`), checks the role boundary with `actions/verify-app-role`, fast-forwards `dev -> main`, tags, and publishes the GitHub Release.
 
 ---
 
@@ -1062,43 +1064,103 @@ URL: https://giskard-ai.github.io/epure/guides/how-to-release
 
 # How-To: Promote a Release (`dev -> main`)
 
-In EPURE, `dev` is the active default integration branch and `main` is the **immutable release line** protected by the `epure-release-immutability` ruleset. Neither developers nor the `Agent App` can push directly to `main`.
+In EPURE, `dev` is the integration branch and `main` is the **release line**. Neither developers nor the `Agent App` push to `main`: only the **Release App** (`<owner>-epure-release`) does, from the release workflow, inside the protected `release` environment.
 
 Promoting a release is the **4th Mandatory Human Validation Gate** (Q101).
 
+Both entry points run the same implementation, the reusable workflow `Giskard-AI/epure/.github/workflows/release-promote.yml`:
+
+| Repository | Workflow to dispatch | Rulesets that must list the Release App as bypass actor |
+| --- | --- | --- |
+| Consumer repository bootstrapped by `/setup-repo` | `.github/workflows/release.yml` (**EPURE Controlled Release (dev -> main)**), a thin caller pinned to an EPURE commit SHA | `epure-release-immutability` |
+| `Giskard-AI/epure` itself | `.github/workflows/release-promote.yml` (**Promote Dev to Main (Fast-Forward Release)**) | `Main basic protection`, `epure-branch-governance`, `epure-tag-immutability` |
+
+Inputs: `semver_tag` (`vMAJOR.MINOR.PATCH`), `expected_dev_sha` (the full 40-character SHA of the `dev` head you reviewed) and, on `release-promote.yml`, the optional `ci_workflow` (default `ci.yml`, the workflow file whose run on `dev` must have succeeded).
+
 ---
 
-## 1. Prerequisites Before Promoting
+## 1. One-Time Setup
 
-Before triggering a release promotion, verify that:
+1. **Create and install the Release App.** Stage 3 of `scripts/wizards/setup-github-apps-wizard.sh --repo <owner>/<repo>` creates `<owner>-epure-release` (repository permissions `Contents: Read and write`, `Metadata: Read-only`, no webhook), installs it on that repository only, and stores two **secrets** in the `release` environment: `EPURE_RELEASE_APP_ID` (numeric App ID) and `EPURE_RELEASE_APP_PRIVATE_KEY` (PEM). The wizard always runs all stages, including the Agent App; if you only need the Release App, follow the same steps by hand and set the secrets with `gh secret set <NAME> -R <owner>/<repo> --env release`.
+2. **Add the Release App as bypass actor** (`actor_type: Integration`, `actor_id: <App ID>`, `bypass_mode: always`) on every ruleset that covers `main` and `v*` tags (see the table above). In consumer repositories, `node dist/cli/setup-repo.mjs --repo <owner>/<repo> --release-app-id <App ID> --apply --apply-github-settings` does it for `epure-release-immutability`. Elsewhere, add the actor with `gh api` while keeping the existing actors:
+
+   ```bash
+   gh api repos/<owner>/<repo>/rulesets/<ruleset-id> \
+     | jq '{name, target, enforcement, conditions, rules,
+            bypass_actors: (.bypass_actors + [{actor_id: <App ID>, actor_type: "Integration", bypass_mode: "always"}])}' \
+     | gh api -X PUT repos/<owner>/<repo>/rulesets/<ruleset-id> --input -
+   ```
+
+3. **Protect the `release` environment** with at least one required reviewer and a deployment branch policy that only allows `dev`:
+
+   ```bash
+   gh api -X PUT repos/<owner>/<repo>/environments/release --input - <<'EOF'
+   {
+     "reviewers": [{"type": "User", "id": <reviewer-user-id>}],
+     "deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true}
+   }
+   EOF
+   gh api -X POST repos/<owner>/<repo>/environments/release/deployment-branch-policies \
+     -f name=dev -f type=branch
+   ```
+
+---
+
+## 2. Prerequisites Before Each Release
 
 1. All target `feature/* -> dev` Pull Requests have been squash-merged into `dev`.
-2. The `CI` workflow on the latest `dev` commit is green.
-3. The repository secrets `EPURE_RELEASE_APP_ID` and `EPURE_RELEASE_APP_PRIVATE_KEY` are configured, and `<owner>-epure-release` is listed as the Bypass Actor on `epure-release-immutability`.
+2. The `CI` workflow (`.github/workflows/ci.yml`) concluded `success` on the `dev` head.
+3. You picked the next tag from the Conventional Commits since the previous tag (`fix:` -> PATCH, `feat:` -> MINOR, `!:` / `BREAKING CHANGE` -> MAJOR).
 
 ---
 
-## 2. Trigger the Release Promotion Workflow
+## 3. Trigger the Release
 
-You can trigger the release either from the GitHub web UI (**Actions** -> **Release Promote (dev -> main)** -> **Run workflow**) or via the `gh` CLI:
+Dispatch the workflow **from `dev`** (the `release` environment rejects other refs), then approve the pending deployment in the **Actions** tab.
+
+Consumer repository:
 
 ```bash
-gh workflow run release-promote.yml \
-  -R my-org/craft-calculator \
-  -f version=v1.0.0
+DEV_SHA="$(gh api repos/my-org/craft-calculator/branches/dev --jq .commit.sha)"
+gh workflow run release.yml -R my-org/craft-calculator --ref dev \
+  -f semver_tag=v1.0.0 -f expected_dev_sha="$DEV_SHA"
+```
+
+EPURE itself:
+
+```bash
+DEV_SHA="$(gh api repos/Giskard-AI/epure/branches/dev --jq .commit.sha)"
+gh workflow run release-promote.yml -R Giskard-AI/epure --ref dev \
+  -f semver_tag=v1.0.0 -f expected_dev_sha="$DEV_SHA"
 ```
 
 ---
 
-## 3. What `release-promote.yml` Executes
+## 4. What `release-promote.yml` Executes
 
-1. **Mints a Short-Lived Release App Token**: Signs an RS256 JWT using `EPURE_RELEASE_APP_ID` and `EPURE_RELEASE_APP_PRIVATE_KEY` to obtain a short-lived installation token for `<owner>-epure-release`.
-2. **Verifies Fast-Forward Ancestry**: Checks that `main` is a strict ancestor of `dev` (`git merge-base --is-ancestor origin/main origin/dev`). If `main` has diverged, the workflow aborts immediately without forcing a push.
-3. **Atomic Fast-Forward & Tag**:
-   - Pushes `dev` to `refs/heads/main` (`git push origin dev:refs/heads/main`).
-   - Creates and pushes the annotated tag `v1.0.0` pointing to the exact promoted SHA.
-   - Publishes the GitHub Release notes generated from the Conventional Commits merged since the previous tag.
-4. **Revokes the Ephemeral Token**: Immediately revokes the installation token in an `always()` cleanup step.
+1. **Validates before any write** and aborts with an `::error::` annotation when:
+   - `semver_tag` does not match `vMAJOR.MINOR.PATCH` (no leading zeros);
+   - `expected_dev_sha` is not a 40-character SHA equal to the current `origin/dev` head;
+   - the tag already exists;
+   - `origin/main` is not an ancestor of `expected_dev_sha` (no fast-forward possible);
+   - the latest `CI` run for that SHA on `dev` did not conclude `success`;
+   - `EPURE_RELEASE_APP_ID` or `EPURE_RELEASE_APP_PRIVATE_KEY` is missing from the `release` environment.
+2. **Verifies Release App role separation** with `actions/verify-app-role` (`promote_dev_to_main` on `refs/heads/main`, from `release.yml` / `release-promote.yml`, environment `release`).
+3. **Mints a short-lived installation token** with `actions/create-github-app-token`, scoped to this repository with `contents: write` only.
+4. **Fast-forwards `main` and tags atomically**: creates the annotated tag on `expected_dev_sha` as `<owner>-epure-release[bot]`, then runs one `git push --atomic` of `<sha>:refs/heads/main` and `refs/tags/<tag>`. Both refs move or neither does; nothing is force-pushed, and the token is passed to `git` through the process environment only (never written to `.git/config`).
+5. **Publishes the GitHub Release** with `gh release create --verify-tag --generate-notes --notes-start-tag <previous tag> --latest`.
+6. **Revokes the token** in an `always()` step, even when an earlier step failed.
+
+---
+
+## 5. Re-Running After a Failure
+
+Re-dispatch with the **same inputs**:
+
+- **Failure before the push**: nothing was written; fix the cause and re-run.
+- **Push done, release not published**: the workflow detects that the tag and `origin/main` already point to `expected_dev_sha`, skips the push (and the `dev` head check, since `dev` may have moved), and only publishes the GitHub Release.
+- **Release already published**: the run ends with a notice and changes nothing.
+- **Tag exists on another commit**: the run aborts. Release tags are immutable; choose the next version instead.
 
 ---
 ## [EN] Domain Glossary (EN / FR)
@@ -1305,7 +1367,7 @@ Avant d'écrire le moindre fichier, l'agent inspecte le dépôt cible (`package.
 Pour garantir une séparation stricte des privilèges (Q82, Q91) et zéro exposition de secrets aux workflows publics de Pull Request (conformité Zizmor), EPURE n'utilise jamais de jeton personnel (PAT) omnipotent ni de secrets globaux du dépôt. Chaque dépôt utilise **deux GitHub Apps distinctes** et **deux environnements GitHub isolés** (`<llm-env>` et `release`) :
 
 1. **Agent App (`<owner>-epure-agent`)** : utilisée par l'orchestrateur pour l'automatisation quotidienne (`plan/*`, `task/*`, `feature/*`, Issues, PRs et Check Runs). Elle ne figure **jamais** parmi les Bypass Actors de `dev` ou `main`.
-2. **Release App (`<owner>-epure-release`)** : utilisée exclusivement par `release-promote.yml` / `release.yml` lorsqu'un humain déclenche une promotion fast-forward de `dev` vers `main`. C'est le **seul Bypass Actor** autorisé sur `main` et les tags `v*`.
+2. **Release App (`<owner>-epure-release`)** : utilisée exclusivement par le workflow de release (votre `.github/workflows/release.yml`, qui appelle le workflow réutilisable `release-promote.yml` d'EPURE) lorsqu'un humain déclenche une promotion fast-forward de `dev` vers `main` avec `semver_tag` et `expected_dev_sha`. C'est le **seul Bypass Actor** sur `epure-release-immutability` (`main` et les tags `v*`). Voir [Promouvoir une Release](./guides/how-to-release.md) pour la protection initiale de l'environnement (relecteur obligatoire, politique de déploiement limitée à `dev`).
 
 Lancez l'assistant interactif, qui propose l'**Approche 2** (flux local GitHub App Manifest en 1 clic) avec repli automatique sur l'**Approche 1** (enregistrement manuel guidé étape par étape) et injecte les secrets dans leurs environnements GitHub dédiés via `gh secret set --env` sans jamais exposer vos clés privées PEM au modèle LLM :
 
@@ -1323,7 +1385,7 @@ bash scripts/wizards/setup-github-apps-wizard.sh \
 | `EPURE_AGENT_APP_ID` | `--env <llm-env>` | Identifiant numérique de l'application `<owner>-epure-agent`. |
 | `EPURE_AGENT_APP_PRIVATE_KEY` | `--env <llm-env>` | Clé privée PEM de `<owner>-epure-agent` (sert à signer des jetons d'installation éphémères). |
 | `EPURE_RELEASE_APP_ID` | `--env release` | Identifiant numérique de l'application `<owner>-epure-release` (associé à l'environnement protégé `release`). |
-| `EPURE_RELEASE_APP_PRIVATE_KEY` | `--env release` | Clé privée PEM de `<owner>-epure-release` (utilisée uniquement par `release.yml` / `release-promote.yml`). |
+| `EPURE_RELEASE_APP_PRIVATE_KEY` | `--env release` | Clé privée PEM de `<owner>-epure-release` (transmise par `release.yml` à `release-promote.yml` uniquement). |
 
 Vérifiez le cloisonnement des secrets par environnement via `gh` :
 
@@ -1420,7 +1482,7 @@ Nous allons suivre l'**Issue #16** depuis son ouverture initiale en 3 lignes jus
 | **2. Épure & Spec** | Commenter `/epure to-spec` (et demander d'éventuels ajustements en texte libre). | Crée `plan/<issue>-<slug>`, exécute l'**Audit Goldfish zéro-contexte** et commite `GLOSSARY.md`, les ADRs, `DESIGN.md` (si UI) et `docs/specs/<slug>.md`. | **Réagir** dès que la spec est prête : commenter en texte libre pour l'ajuster, ou lancer `/epure to-tickets` pour valider. |
 | **3. DAG de Tickets & Mandat** | Commenter `/epure to-tickets`, relire le découpage, puis commenter `/epure approve`. | Crée et câble nativement les `sub_issues` et `blocked_by` GitHub, fusionne directement `plan/* -> feature/*` et scelle `spec_sha` dans `refs/epure/state/<issue>`. | **Aucune action requise** après `/epure approve` — EPURE lance immédiatement l'exécution autonome du DAG. |
 | **4. Boucle Tickets Autonome** | Rien en fonctionnement nominal (commandes `/epure status` ou `/epure sync` à la demande). | Pour chaque ticket (`task/* -> feature/*`) : **Stage 1** TDD en sandbox noyau 2-phases (`bwrap`/`landrun` + `rtk`) -> **Stage 2** pause CI asynchrone à coût zéro (`waiting_ticket_ci`) -> **Stage 3** revue multi-agents depuis `dev` + Squash Sémantique IA. | **Autofix 1..3** corrige seul les échecs de tests, CI ou revue. Utiliser `/epure sync` en cas de conflit Git avec `dev`, ou `/epure continue` après une pause `needs-human`. |
-| **5. Convergence & Merge Final** | Relire la PR finale `feature/* -> dev` et cliquer sur **Squash and merge** (puis `release-promote.yml` pour `dev -> main`). | Exécute l'**`EpicConvergenceAudit`** zéro-contexte (en créant automatiquement des tickets de Phase 2 si incomplet), ouvre `feature/* -> dev` et valide la synthèse. | **Réagir** lorsque la PR finale `feature/* -> dev` est au vert pour effectuer le Squash & Merge humain sur `dev`. |
+| **5. Convergence & Merge Final** | Relire la PR finale `feature/* -> dev` et cliquer sur **Squash and merge** (puis `release.yml` pour `dev -> main`). | Exécute l'**`EpicConvergenceAudit`** zéro-contexte (en créant automatiquement des tickets de Phase 2 si incomplet), ouvre `feature/* -> dev` et valide la synthèse. | **Réagir** lorsque la PR finale `feature/* -> dev` est au vert pour effectuer le Squash & Merge humain sur `dev`. |
 
 ---
 
@@ -1553,13 +1615,15 @@ Une fois les tickets `#25`, `#26` et `#27` fusionnés dans `feature/16-markov-cr
 
 <span class="epure-badge epure-badge--human">Jalon Humain Obligatoire 4</span>
 
-Pour publier la version en production, le mainteneur déclenche manuellement le workflow **`Release Promote (dev -> main)`** (`workflow_dispatch` avec `version: v1.0.0`), ou via la CLI `gh` :
+Pour publier la version en production, le mainteneur déclenche **`EPURE Controlled Release (dev -> main)`** (`.github/workflows/release.yml`) depuis `dev` avec le tag et le SHA de la tête de `dev` relue, puis approuve le déploiement dans l'environnement `release` :
 
 ```bash
-gh workflow run release-promote.yml -R my-org/craft-calculator -f version=v1.0.0
+DEV_SHA="$(gh api repos/my-org/craft-calculator/branches/dev --jq .commit.sha)"
+gh workflow run release.yml -R my-org/craft-calculator --ref dev \
+  -f semver_tag=v1.0.0 -f expected_dev_sha="$DEV_SHA"
 ```
 
-À l'aide de la **Release App** isolée (`<owner>-epure-release`), le workflow vérifie que `main` est bien un ancêtre de `dev`, effectue un fast-forward atomique de `main` sur `dev`, et pousse le tag immuable `v1.0.0`.
+`release.yml` appelle le workflow réutilisable `release-promote.yml` d'EPURE. Celui-ci vérifie que `expected_dev_sha` est toujours la tête de `dev`, que `CI` y est au vert, que `v1.0.0` n'existe pas et que `main` en est un ancêtre ; puis, avec un jeton éphémère de la **Release App** (`<owner>-epure-release`), il fait avancer `main` en fast-forward et pousse le tag annoté `v1.0.0` en un seul push atomique, publie la GitHub Release avec des notes générées et révoque le jeton. Voir [Promouvoir une Release](./guides/how-to-release.md).
 
 ---
 ## [FR] Référence des Commandes (/epure & /setup-repo)
@@ -1617,7 +1681,7 @@ Toutes les commandes `/epure` se postent sous forme de commentaires sur une Issu
    - Dès que la CI externe se termine sur `task/*` ou `feature/*`, l'événement `check_suite.completed` ou `workflow_run.completed` réveille `orchestrate-command` avec `command: "continue"`, `trigger_head_sha` et `trigger_branch` afin d'exécuter la revue multi-agents Stage 3, le squash sémantique IA ou un round d'auto-remédiation unifié.
 4. **Portes de Contrat PR & Promotion de Release Protégée** :
    - Sur `pull_request` (`dev`, `main`, `feature/**`), `epure-check.yml` (`actions/epure-contract`), `pr-title.yml` et `ci.yml` s'exécutent en `contents: read` sans aucun secret privilégié.
-   - Sur `workflow_dispatch` humain, `release.yml` s'exécute dans l'environnement protégé `environment: release` (`EPURE_RELEASE_APP_ID`, `EPURE_RELEASE_APP_PRIVATE_KEY`) via `actions/verify-app-role` pour promouvoir `dev -> main` en fast-forward.
+   - Sur `workflow_dispatch` humain (`semver_tag`, `expected_dev_sha`), `release.yml` appelle le workflow réutilisable `release-promote.yml` d'EPURE, qui s'exécute dans l'environnement protégé `environment: release` (`EPURE_RELEASE_APP_ID`, `EPURE_RELEASE_APP_PRIVATE_KEY`), vérifie la frontière de rôle avec `actions/verify-app-role`, promeut `dev -> main` en fast-forward, pose le tag et publie la GitHub Release.
 
 ---
 
@@ -2218,40 +2282,100 @@ URL: https://giskard-ai.github.io/epure/fr/guides/how-to-release
 
 # Guide : Promouvoir une Release (`dev -> main`)
 
-Dans EPURE, `dev` est la branche d'intégration active par défaut et `main` est la **ligne de release immuable** protégée par le ruleset `epure-release-immutability`. Ni les développeurs humains ni l'`Agent App` ne peuvent pousser directement sur `main`.
+Dans EPURE, `dev` est la branche d'intégration et `main` est la **ligne de release**. Ni les développeurs humains ni l'`Agent App` ne poussent sur `main` : seule la **Release App** (`<owner>-epure-release`) le fait, depuis le workflow de release, dans l'environnement protégé `release`.
 
 La promotion d'une release constitue le **4e Jalon de Validation Humaine Obligatoire** (Q101).
 
+Les deux points d'entrée exécutent la même implémentation, le workflow réutilisable `Giskard-AI/epure/.github/workflows/release-promote.yml` :
+
+| Dépôt | Workflow à déclencher | Rulesets où la Release App doit être Bypass Actor |
+| --- | --- | --- |
+| Dépôt consommateur initialisé par `/setup-repo` | `.github/workflows/release.yml` (**EPURE Controlled Release (dev -> main)**), un appelant minimal épinglé sur un SHA d'EPURE | `epure-release-immutability` |
+| `Giskard-AI/epure` lui-même | `.github/workflows/release-promote.yml` (**Promote Dev to Main (Fast-Forward Release)**) | `Main basic protection`, `epure-branch-governance`, `epure-tag-immutability` |
+
+Entrées : `semver_tag` (`vMAJOR.MINOR.PATCH`), `expected_dev_sha` (le SHA complet de 40 caractères de la tête de `dev` que vous avez relue) et, sur `release-promote.yml`, l'entrée optionnelle `ci_workflow` (par défaut `ci.yml`, le fichier du workflow dont l'exécution sur `dev` doit avoir réussi).
+
 ---
 
-## 1. Prérequis Avant la Promotion
+## 1. Configuration Initiale (une seule fois)
 
-Avant de déclencher une promotion en production, vérifiez que :
+1. **Créer et installer la Release App.** L'étape 3 de `scripts/wizards/setup-github-apps-wizard.sh --repo <owner>/<repo>` crée `<owner>-epure-release` (permissions de dépôt `Contents: Read and write`, `Metadata: Read-only`, sans webhook), l'installe sur ce seul dépôt et enregistre deux **secrets** dans l'environnement `release` : `EPURE_RELEASE_APP_ID` (identifiant numérique de l'App) et `EPURE_RELEASE_APP_PRIVATE_KEY` (PEM). L'assistant enchaîne toujours toutes les étapes, y compris l'Agent App ; si seule la Release App vous intéresse, suivez les mêmes étapes à la main puis enregistrez les secrets avec `gh secret set <NAME> -R <owner>/<repo> --env release`.
+2. **Déclarer la Release App comme Bypass Actor** (`actor_type: Integration`, `actor_id: <App ID>`, `bypass_mode: always`) sur chaque ruleset couvrant `main` et les tags `v*` (voir le tableau ci-dessus). Dans un dépôt consommateur, `node dist/cli/setup-repo.mjs --repo <owner>/<repo> --release-app-id <App ID> --apply --apply-github-settings` le fait pour `epure-release-immutability`. Ailleurs, ajoutez l'acteur avec `gh api` en conservant les acteurs existants :
+
+   ```bash
+   gh api repos/<owner>/<repo>/rulesets/<ruleset-id> \
+     | jq '{name, target, enforcement, conditions, rules,
+            bypass_actors: (.bypass_actors + [{actor_id: <App ID>, actor_type: "Integration", bypass_mode: "always"}])}' \
+     | gh api -X PUT repos/<owner>/<repo>/rulesets/<ruleset-id> --input -
+   ```
+
+3. **Protéger l'environnement `release`** avec au moins un relecteur obligatoire et une politique de branches de déploiement limitée à `dev` :
+
+   ```bash
+   gh api -X PUT repos/<owner>/<repo>/environments/release --input - <<'EOF'
+   {
+     "reviewers": [{"type": "User", "id": <reviewer-user-id>}],
+     "deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true}
+   }
+   EOF
+   gh api -X POST repos/<owner>/<repo>/environments/release/deployment-branch-policies \
+     -f name=dev -f type=branch
+   ```
+
+---
+
+## 2. Prérequis Avant Chaque Release
 
 1. Toutes les PRs `feature/* -> dev` prévues pour la version ont été fusionnées en squash dans `dev`.
-2. Le workflow `CI` est au vert sur le dernier commit de `dev`.
-3. Les secrets `EPURE_RELEASE_APP_ID` et `EPURE_RELEASE_APP_PRIVATE_KEY` sont configurés, et `<owner>-epure-release` est déclaré comme Bypass Actor sur `epure-release-immutability`.
+2. Le workflow `CI` (`.github/workflows/ci.yml`) s'est terminé en `success` sur la tête de `dev`.
+3. Vous avez choisi le prochain tag à partir des Conventional Commits depuis le tag précédent (`fix:` -> PATCH, `feat:` -> MINOR, `!:` / `BREAKING CHANGE` -> MAJOR).
 
 ---
 
-## 2. Déclencher le Workflow de Promotion
+## 3. Déclencher la Release
 
-Vous pouvez lancer la promotion depuis l'interface GitHub (**Actions** -> **Release Promote (dev -> main)** -> **Run workflow**) ou en ligne de commande avec `gh` :
+Déclenchez le workflow **depuis `dev`** (l'environnement `release` refuse les autres refs), puis approuvez le déploiement en attente dans l'onglet **Actions**.
+
+Dépôt consommateur :
 
 ```bash
-gh workflow run release-promote.yml \
-  -R my-org/craft-calculator \
-  -f version=v1.0.0
+DEV_SHA="$(gh api repos/my-org/craft-calculator/branches/dev --jq .commit.sha)"
+gh workflow run release.yml -R my-org/craft-calculator --ref dev \
+  -f semver_tag=v1.0.0 -f expected_dev_sha="$DEV_SHA"
+```
+
+EPURE lui-même :
+
+```bash
+DEV_SHA="$(gh api repos/Giskard-AI/epure/branches/dev --jq .commit.sha)"
+gh workflow run release-promote.yml -R Giskard-AI/epure --ref dev \
+  -f semver_tag=v1.0.0 -f expected_dev_sha="$DEV_SHA"
 ```
 
 ---
 
-## 3. Ce qu'exécute `release-promote.yml`
+## 4. Ce qu'exécute `release-promote.yml`
 
-1. **Émission d'un Jeton Éphémère Release App** : signe un JWT RS256 avec `EPURE_RELEASE_APP_ID` et `EPURE_RELEASE_APP_PRIVATE_KEY` pour obtenir un jeton d'installation court au nom de `<owner>-epure-release`.
-2. **Vérification d'Ascendance Fast-Forward** : contrôle que `main` est un ancêtre strict de `dev` (`git merge-base --is-ancestor origin/main origin/dev`). En cas de divergence, le workflow s'arrête immédiatement sans jamais forcer le push.
-3. **Fast-Forward Atomique & Tag** :
-   - Pousse `dev` sur `refs/heads/main` (`git push origin dev:refs/heads/main`).
-   - Crée et pousse le tag `v1.0.0` pointant exactement sur le SHA promu.
-   - Publie la GitHub Release avec les notes générées depuis les Conventional Commits fusionnés depuis le tag précédent.
-4. **Révocation Immédiate du Jeton** : révoque le jeton d'installation dans une étape finale `always()`.
+1. **Valide tout avant la moindre écriture** et s'arrête avec une annotation `::error::` lorsque :
+   - `semver_tag` ne respecte pas `vMAJOR.MINOR.PATCH` (sans zéro initial) ;
+   - `expected_dev_sha` n'est pas un SHA de 40 caractères égal à la tête actuelle de `origin/dev` ;
+   - le tag existe déjà ;
+   - `origin/main` n'est pas un ancêtre de `expected_dev_sha` (fast-forward impossible) ;
+   - la dernière exécution de `CI` pour ce SHA sur `dev` ne s'est pas terminée en `success` ;
+   - `EPURE_RELEASE_APP_ID` ou `EPURE_RELEASE_APP_PRIVATE_KEY` manque dans l'environnement `release`.
+2. **Vérifie la séparation des rôles de la Release App** avec `actions/verify-app-role` (`promote_dev_to_main` sur `refs/heads/main`, depuis `release.yml` / `release-promote.yml`, environnement `release`).
+3. **Émet un jeton d'installation éphémère** avec `actions/create-github-app-token`, limité à ce dépôt et à la seule permission `contents: write`.
+4. **Fast-forward de `main` et tag atomiques** : crée le tag annoté sur `expected_dev_sha` au nom de `<owner>-epure-release[bot]`, puis exécute un unique `git push --atomic` de `<sha>:refs/heads/main` et `refs/tags/<tag>`. Les deux refs avancent ensemble ou aucune ne bouge ; aucun push forcé, et le jeton n'est transmis à `git` que par l'environnement du processus (jamais écrit dans `.git/config`).
+5. **Publie la GitHub Release** avec `gh release create --verify-tag --generate-notes --notes-start-tag <tag précédent> --latest`.
+6. **Révoque le jeton** dans une étape `always()`, même si une étape précédente a échoué.
+
+---
+
+## 5. Relancer Après un Échec
+
+Relancez avec **les mêmes entrées** :
+
+- **Échec avant le push** : rien n'a été écrit ; corrigez la cause et relancez.
+- **Push effectué, release non publiée** : le workflow constate que le tag et `origin/main` pointent déjà sur `expected_dev_sha`, saute le push (ainsi que la vérification de la tête de `dev`, qui a pu avancer) et publie seulement la GitHub Release.
+- **Release déjà publiée** : l'exécution se termine par une notice sans rien modifier.
+- **Tag existant sur un autre commit** : l'exécution s'arrête. Les tags de release sont immuables ; choisissez la version suivante.

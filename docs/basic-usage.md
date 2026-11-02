@@ -23,7 +23,7 @@ At every step of driving an issue, EPURE separates **what you do**, **what runs 
 | **2. Blueprint & Spec** | Comment `/epure to-spec` (and optionally post plain-text adjustments). | Creates `plan/<issue>-<slug>`, runs the zero-context **Goldfish Specification Audit**, and commits `GLOSSARY.md`, ADRs, `DESIGN.md` (if UI), and `docs/specs/<slug>.md`. | **Act again** once the spec draft is committed: reply in plain text to revise the spec, or comment `/epure to-tickets` when satisfied. |
 | **3. Ticket DAG & Mandate** | Comment `/epure to-tickets`, review the sub-issues, then comment `/epure approve`. | Wires native GitHub `sub_issues` and `blocked_by` links, merges `plan/* -> feature/*` directly, and locks `spec_sha` in `refs/epure/state/<issue>`. | **No action required** once `/epure approve` is posted—EPURE immediately starts executing the ticket DAG. |
 | **4. Autonomous Ticket Loop** | Nothing during normal execution (optional `/epure status` or `/epure sync`). | For each ticket (`task/* -> feature/*`): **Stage 1** 2-phase kernel sandbox TDD (`bwrap`/`landrun` + `rtk`) -> **Stage 2** zero-cost async CI wait (`waiting_ticket_ci`) -> **Stage 3** trusted `dev` multi-agent review + AI Semantic Squash. | **Autofix 1..3** automatically fixes Stage 1, CI, or review failures. Comment `/epure sync` for 3-way Git conflicts, or `/epure continue` if paused in `needs-human`. |
-| **5. Convergence & Final Merge** | Review the final `feature/* -> dev` PR and click **Squash and merge** (plus optional `release-promote.yml` for `dev -> main`). | Runs zero-context **`EpicConvergenceAudit`** (spawning Phase 2 tickets automatically if incomplete), opens `feature/* -> dev`, and runs final synthesis CI & review. | **Act again** when the synthesis PR `feature/* -> dev` is green to perform the human Squash & Merge into `dev`. |
+| **5. Convergence & Final Merge** | Review the final `feature/* -> dev` PR and click **Squash and merge** (plus optional `release.yml` for `dev -> main`). | Runs zero-context **`EpicConvergenceAudit`** (spawning Phase 2 tickets automatically if incomplete), opens `feature/* -> dev`, and runs final synthesis CI & review. | **Act again** when the synthesis PR `feature/* -> dev` is green to perform the human Squash & Merge into `dev`. |
 
 ---
 
@@ -156,10 +156,12 @@ Once tickets `#25`, `#26`, and `#27` are merged into `feature/16-markov-craft-ca
 
 <span class="epure-badge epure-badge--human">Mandatory Human Gate 4</span>
 
-When ready to cut a production release, the maintainer triggers the **`Release Promote (dev -> main)`** workflow (`workflow_dispatch` with `version: v1.0.0`), or runs via `gh`:
+When ready to cut a production release, the maintainer dispatches **`EPURE Controlled Release (dev -> main)`** (`.github/workflows/release.yml`) from `dev` with the tag and the reviewed `dev` head SHA, then approves the `release` environment deployment:
 
 ```bash
-gh workflow run release-promote.yml -R my-org/craft-calculator -f version=v1.0.0
+DEV_SHA="$(gh api repos/my-org/craft-calculator/branches/dev --jq .commit.sha)"
+gh workflow run release.yml -R my-org/craft-calculator --ref dev \
+  -f semver_tag=v1.0.0 -f expected_dev_sha="$DEV_SHA"
 ```
 
-Using the isolated **Release App** (`<owner>-epure-release`), the workflow verifies that `main` is an ancestor of `dev`, performs an atomic fast-forward of `main` to `dev`, and pushes the immutable tag `v1.0.0`.
+`release.yml` calls EPURE's reusable `release-promote.yml`. It checks that `expected_dev_sha` is still the `dev` head, that `CI` is green on it, that `v1.0.0` does not exist and that `main` is an ancestor of it; then, with a short-lived **Release App** (`<owner>-epure-release`) token, it fast-forwards `main` and pushes the annotated tag `v1.0.0` in one atomic push, publishes the GitHub Release with generated notes, and revokes the token. See [Promote a Release](./guides/how-to-release.md).
