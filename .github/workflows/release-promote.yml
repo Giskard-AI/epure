@@ -11,15 +11,43 @@ on:
         description: 'Exact commit SHA of dev to promote'
         required: true
         type: string
+      ci_workflow:
+        description: 'Workflow file whose run on dev must have succeeded for the promoted SHA'
+        required: false
+        default: 'ci.yml'
+        type: string
+  # EPURE_RELEASE_APP_ID / EPURE_RELEASE_APP_PRIVATE_KEY are read from the caller's 'release' environment:
+  # environment secrets of the job below take precedence over secrets passed by a caller.
+  workflow_call:
+    inputs:
+      semver_tag:
+        description: 'Immutable SemVer tag (vMAJOR.MINOR.PATCH)'
+        required: true
+        type: string
+      expected_dev_sha:
+        description: 'Exact commit SHA of dev to promote'
+        required: true
+        type: string
+      ci_workflow:
+        description: 'Workflow file whose run on dev must have succeeded for the promoted SHA'
+        required: false
+        default: 'ci.yml'
+        type: string
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
   promote-release:
+    name: "Promote dev to main and publish release"
     runs-on: ubuntu-26.04
     environment: release
     timeout-minutes: 15
+    concurrency:
+      group: epure-release-promote-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      contents: read # read history, tags and releases before any write (writes use the Release App token)
+      actions: read # look up the CI workflow run of the promoted SHA
     steps:
       - name: Checkout repository with full history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -27,13 +55,138 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Checkout EPURE distribution
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .epure
+          persist-credentials: false
+
+      - name: Validate release inputs and repository state
+        id: validate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SEMVER_TAG: ${{ inputs.semver_tag }}
+          EXPECTED_DEV_SHA: ${{ inputs.expected_dev_sha }}
+          CI_WORKFLOW: ${{ inputs.ci_workflow }}
+          HAS_RELEASE_APP_ID: ${{ secrets.EPURE_RELEASE_APP_ID != '' }}
+          HAS_RELEASE_APP_PRIVATE_KEY: ${{ secrets.EPURE_RELEASE_APP_PRIVATE_KEY != '' }}
+        run: |
+          fail() {
+            echo "::error title=Release promotion blocked::$1"
+            exit 1
+          }
+
+          [[ "$SEMVER_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
+            || fail "semver_tag must match vMAJOR.MINOR.PATCH without leading zeros (e.g. v1.2.3)."
+          [[ "$EXPECTED_DEV_SHA" =~ ^[0-9a-f]{40}$ ]] \
+            || fail "expected_dev_sha must be a full 40-character lowercase commit SHA."
+          [[ "$CI_WORKFLOW" =~ ^[A-Za-z0-9._-]+\.ya?ml$ ]] \
+            || fail "ci_workflow must be a workflow file name such as ci.yml."
+          [[ "$HAS_RELEASE_APP_ID" == "true" && "$HAS_RELEASE_APP_PRIVATE_KEY" == "true" ]] \
+            || fail "EPURE_RELEASE_APP_ID and EPURE_RELEASE_APP_PRIVATE_KEY must be secrets of the 'release' environment."
+
+          main_sha="$(git rev-parse refs/remotes/origin/main)"
+          dev_sha="$(git rev-parse refs/remotes/origin/dev)"
+
+          # A re-run after a partial failure finds the tag and main already on the SHA: only the GitHub Release is left.
+          mode=promote
+          if tag_sha="$(git rev-parse -q --verify "refs/tags/${SEMVER_TAG}^{commit}")"; then
+            [[ "$tag_sha" == "$EXPECTED_DEV_SHA" && "$main_sha" == "$EXPECTED_DEV_SHA" ]] \
+              || fail "Tag ${SEMVER_TAG} already exists on ${tag_sha} (origin/main is ${main_sha}); release tags are immutable."
+            mode=resume
+            echo "::notice::${SEMVER_TAG} and origin/main already point to ${EXPECTED_DEV_SHA}; skipping the push."
+          else
+            [[ "$dev_sha" == "$EXPECTED_DEV_SHA" ]] \
+              || fail "expected_dev_sha ${EXPECTED_DEV_SHA} is not the current origin/dev head (${dev_sha})."
+            git merge-base --is-ancestor "$main_sha" "$EXPECTED_DEV_SHA" \
+              || fail "origin/main (${main_sha}) is not an ancestor of ${EXPECTED_DEV_SHA}; refusing a non-fast-forward promotion."
+          fi
+
+          ci_conclusion="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/${CI_WORKFLOW}/runs?head_sha=${EXPECTED_DEV_SHA}&branch=dev&per_page=1" \
+            --jq '.workflow_runs[0] | if . == null then "missing" else (.conclusion // .status) end')"
+          [[ "$ci_conclusion" == "success" ]] \
+            || fail "CI workflow (${CI_WORKFLOW}) on dev for ${EXPECTED_DEV_SHA} is '${ci_conclusion}', expected 'success'."
+
+          if [[ "$mode" == "resume" ]] && gh release view "$SEMVER_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            mode=noop
+            echo "::notice::GitHub Release ${SEMVER_TAG} is already published; nothing to do."
+          fi
+
+          previous_tag="$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' --exclude "$SEMVER_TAG" "$EXPECTED_DEV_SHA" 2>/dev/null || true)"
+          workflow_path="${GITHUB_WORKFLOW_REF%@*}"
+          workflow_path="${workflow_path#"${GITHUB_REPOSITORY}/"}"
+          {
+            echo "mode=${mode}"
+            echo "previous_tag=${previous_tag}"
+            echo "workflow_path=${workflow_path}"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Verify Release App role separation
-        uses: ./actions/verify-app-role
+        uses: ./.epure/actions/verify-app-role
         with:
           app_role: release
           operation: promote_dev_to_main
           target_ref: refs/heads/main
-          workflow_path: .github/workflows/release-promote.yml
+          workflow_path: ${{ steps.validate.outputs.workflow_path }}
           environment_name: release
           agent_app_id: ${{ vars.EPURE_AGENT_APP_ID || '1001' }}
-          release_app_id: ${{ vars.EPURE_RELEASE_APP_ID || '2002' }}
+          release_app_id: ${{ secrets.EPURE_RELEASE_APP_ID }}
+
+      - name: Mint short-lived Release App installation token
+        id: release-token
+        if: ${{ steps.validate.outputs.mode != 'noop' }}
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.EPURE_RELEASE_APP_ID }}
+          private-key: ${{ secrets.EPURE_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          skip-token-revoke: true
+
+      - name: Fast-forward main and push annotated tag atomically
+        if: ${{ steps.validate.outputs.mode == 'promote' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TOKEN: ${{ steps.release-token.outputs.token }}
+          APP_SLUG: ${{ steps.release-token.outputs.app-slug }}
+          SEMVER_TAG: ${{ inputs.semver_tag }}
+          EXPECTED_DEV_SHA: ${{ inputs.expected_dev_sha }}
+        run: |
+          bot_login="${APP_SLUG}[bot]"
+          bot_id="$(gh api "users/${bot_login}" --jq .id)"
+          export GIT_COMMITTER_NAME="$bot_login"
+          export GIT_COMMITTER_EMAIL="${bot_id}+${bot_login}@users.noreply.github.com"
+          git tag -a "$SEMVER_TAG" "$EXPECTED_DEV_SHA" -m "Release ${SEMVER_TAG}"
+
+          # The token reaches git only through this process environment; nothing is written to .git/config.
+          basic_auth="$(printf 'x-access-token:%s' "$RELEASE_TOKEN" | base64 -w0)"
+          echo "::add-mask::${basic_auth}"
+          GIT_CONFIG_COUNT=1 \
+          GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL}/.extraheader" \
+          GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${basic_auth}" \
+            git push --atomic origin \
+              "${EXPECTED_DEV_SHA}:refs/heads/main" \
+              "refs/tags/${SEMVER_TAG}:refs/tags/${SEMVER_TAG}"
+
+      - name: Publish GitHub Release
+        if: ${{ steps.validate.outputs.mode == 'promote' || steps.validate.outputs.mode == 'resume' }}
+        env:
+          GH_TOKEN: ${{ steps.release-token.outputs.token }}
+          SEMVER_TAG: ${{ inputs.semver_tag }}
+          PREVIOUS_TAG: ${{ steps.validate.outputs.previous_tag }}
+        run: |
+          notes_args=(--generate-notes)
+          if [[ -n "$PREVIOUS_TAG" ]]; then
+            notes_args+=(--notes-start-tag "$PREVIOUS_TAG")
+          fi
+          gh release create "$SEMVER_TAG" --repo "$GITHUB_REPOSITORY" \
+            --verify-tag --latest --title "$SEMVER_TAG" "${notes_args[@]}"
+
+      - name: Revoke Release App installation token
+        if: ${{ always() && steps.release-token.outputs.token != '' }}
+        env:
+          GH_TOKEN: ${{ steps.release-token.outputs.token }}
+        run: gh api --method DELETE installation/token

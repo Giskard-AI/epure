@@ -50,7 +50,7 @@ All `/epure` commands are posted as comments on a GitHub Issue. Every command is
    - When external CI finishes on `task/*` or `feature/*`, the `check_suite.completed` or `workflow_run.completed` event wakes `orchestrate-command` with `command: "continue"`, `trigger_head_sha`, and `trigger_branch` to run Stage 3 multi-agent review, AI semantic squash, or unified auto-remediation.
 4. **Pull Request Gates & Controlled Release Promotion**:
    - On `pull_request` events (`dev`, `main`, `feature/**`), `epure-check.yml` (`actions/epure-contract`), `pr-title.yml`, and `ci.yml` execute with `contents: read` and zero privileged secrets.
-   - On human `workflow_dispatch`, `release.yml` runs inside the protected `environment: release` (`EPURE_RELEASE_APP_ID`, `EPURE_RELEASE_APP_PRIVATE_KEY`) via `actions/verify-app-role` to fast-forward `dev -> main`.
+   - On human `workflow_dispatch` (`semver_tag`, `expected_dev_sha`), `release.yml` calls EPURE's reusable `release-promote.yml`, which runs inside the protected `environment: release` (`EPURE_RELEASE_APP_ID`, `EPURE_RELEASE_APP_PRIVATE_KEY`), checks the role boundary with `actions/verify-app-role`, fast-forwards `dev -> main`, tags, and publishes the GitHub Release.
 
 ---
 

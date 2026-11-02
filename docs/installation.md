@@ -41,7 +41,7 @@ Before writing any file, the agent inspects the target repository (`package.json
 To enforce strict privilege separation (Q82, Q91) and Zizmor-compliant zero secret exposure to unprivileged PR workflows, EPURE never uses a single all-powerful Personal Access Token or global repository secrets. Instead, every repository uses **two distinct GitHub Apps** and **two isolated GitHub Environments** (`<llm-env>` and `release`):
 
 1. **Agent App (`<owner>-epure-agent`)**: Used by the orchestrator for day-to-day automation (`plan/*`, `task/*`, `feature/*`, Issues, PRs, and Check Runs). It is **never** a Bypass Actor on `dev` or `main`.
-2. **Release App (`<owner>-epure-release`)**: Used exclusively by `release-promote.yml` / `release.yml` when a human triggers a fast-forward release from `dev` to `main`. It is the **sole Bypass Actor** on `main` and `v*` tags.
+2. **Release App (`<owner>-epure-release`)**: Used exclusively by the release workflow (your `.github/workflows/release.yml`, which calls EPURE's reusable `release-promote.yml`) when a human dispatches a fast-forward release from `dev` to `main` with `semver_tag` and `expected_dev_sha`. It is the **sole Bypass Actor** on `epure-release-immutability` (`main` and `v*` tags). See [Promote a Release](./guides/how-to-release.md) for the one-time environment protection (required reviewer, `dev`-only deployment branch policy).
 
 Launch the interactive wizard, which supports **Approach 2** (1-click local GitHub App Manifest Flow) with automatic **Fallback Approach 1** (manual step-by-step guided registration) and injects secrets into their dedicated GitHub Environments via `gh secret set --env` without ever exposing PEM private keys to the LLM:
 
@@ -59,7 +59,7 @@ bash scripts/wizards/setup-github-apps-wizard.sh \
 | `EPURE_AGENT_APP_ID` | `--env <llm-env>` | Numeric App ID of `<owner>-epure-agent`. |
 | `EPURE_AGENT_APP_PRIVATE_KEY` | `--env <llm-env>` | PEM private key of `<owner>-epure-agent` (used to mint short-lived installation tokens). |
 | `EPURE_RELEASE_APP_ID` | `--env release` | Numeric App ID of `<owner>-epure-release` (bound to the human-approved `release` environment). |
-| `EPURE_RELEASE_APP_PRIVATE_KEY` | `--env release` | PEM private key of `<owner>-epure-release` (used only by `release.yml` / `release-promote.yml`). |
+| `EPURE_RELEASE_APP_PRIVATE_KEY` | `--env release` | PEM private key of `<owner>-epure-release` (passed by `release.yml` to `release-promote.yml` only). |
 
 Verify the environment-scoped secrets with `gh`:
 
