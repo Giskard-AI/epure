@@ -4104,12 +4104,15 @@ async function updateIssueStateWithCas(input) {
     `CAS conflict retry budget exhausted (${maxRetries}) on '${refName}'.`
   );
 }
+var EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+var UPDATE_REFS_MUTATION = "mutation($repositoryId: ID!, $refUpdates: [RefUpdate!]!) { updateRefs(input: {repositoryId: $repositoryId, refUpdates: $refUpdates}) { clientMutationId } }";
 function createGitHubApiRefStateStore(options) {
   const [owner, repo] = options.repository.trim().split("/");
   const baseUrl = (options.apiBaseUrl ?? "https://api.github.com").replace(
     /\/+$/,
     ""
   );
+  const repoUrl = `${baseUrl}/repos/${owner}/${repo}`;
   const fetchFn = options.fetchImpl ?? fetch;
   const headers = {
     Authorization: `Bearer ${options.githubToken}`,
@@ -4117,110 +4120,134 @@ function createGitHubApiRefStateStore(options) {
     "Content-Type": "application/json",
     "X-GitHub-Api-Version": "2022-11-28"
   };
+  let repositoryNodeId;
+  const fetchRepositoryNodeId = async () => {
+    const repoResp = await fetchFn(repoUrl, { method: "GET", headers });
+    if (!repoResp.ok) {
+      throw new Error(
+        `Failed to read repository '${owner}/${repo}' (HTTP ${repoResp.status}).`
+      );
+    }
+    return (await repoResp.json()).node_id;
+  };
+  const getRefObject = async (refName) => {
+    const refResp = await fetchFn(
+      `${repoUrl}/git/ref/${refName.replace(/^refs\//, "")}`,
+      { method: "GET", headers }
+    );
+    if (refResp.status === 404) {
+      return null;
+    }
+    if (!refResp.ok) {
+      throw new Error(
+        `Failed to read Git ref '${refName}' (HTTP ${refResp.status}).`
+      );
+    }
+    const refData = await refResp.json();
+    const sha = refData.object?.sha;
+    return sha ? { sha, type: refData.object?.type ?? "commit" } : null;
+  };
+  const readStateObject = async (object) => {
+    if (object.type === "commit") {
+      const commitResp = await fetchFn(`${repoUrl}/git/commits/${object.sha}`, {
+        method: "GET",
+        headers
+      });
+      if (!commitResp.ok) {
+        return null;
+      }
+      const commit = await commitResp.json();
+      return JSON.parse(commit.message ?? "");
+    }
+    const blobResp = await fetchFn(`${repoUrl}/git/blobs/${object.sha}`, {
+      method: "GET",
+      headers
+    });
+    if (!blobResp.ok) {
+      return null;
+    }
+    const blobData = await blobResp.json();
+    const rawJson = Buffer.from(
+      blobData.content ?? "",
+      blobData.encoding === "base64" ? "base64" : "utf8"
+    ).toString("utf8");
+    return JSON.parse(rawJson);
+  };
+  const writeRef = async (refName, current, newSha) => {
+    if (current === null) {
+      const createRefResp = await fetchFn(`${repoUrl}/git/refs`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ ref: refName, sha: newSha })
+      });
+      return createRefResp.ok;
+    }
+    if (current.type !== "commit") {
+      const migrateResp = await fetchFn(`${repoUrl}/git/${refName}`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({ sha: newSha, force: true })
+      });
+      return migrateResp.ok;
+    }
+    repositoryNodeId ??= await fetchRepositoryNodeId();
+    const updateRefsResp = await fetchFn(`${baseUrl}/graphql`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        query: UPDATE_REFS_MUTATION,
+        variables: {
+          repositoryId: repositoryNodeId,
+          refUpdates: [
+            { name: refName, beforeOid: current.sha, afterOid: newSha, force: true }
+          ]
+        }
+      })
+    });
+    if (!updateRefsResp.ok) {
+      return false;
+    }
+    const payload = await updateRefsResp.json();
+    return Boolean(payload.data?.updateRefs);
+  };
   return {
     readRef: async (refName) => {
-      const normalizedRef = refName.replace(/^refs\//, "");
-      const refResp = await fetchFn(
-        `${baseUrl}/repos/${owner}/${repo}/git/ref/${normalizedRef}`,
-        { method: "GET", headers }
-      );
-      if (refResp.status === 404) {
+      const object = await getRefObject(refName);
+      if (!object) {
         return { sha: null, state: null };
       }
-      if (!refResp.ok) {
-        throw new Error(
-          `Failed to read Git ref '${refName}' (HTTP ${refResp.status}).`
-        );
-      }
-      const refData = await refResp.json();
-      const blobSha = refData.object?.sha;
-      if (!blobSha) {
-        return { sha: null, state: null };
-      }
-      const blobResp = await fetchFn(
-        `${baseUrl}/repos/${owner}/${repo}/git/blobs/${blobSha}`,
-        { method: "GET", headers }
-      );
-      if (!blobResp.ok) {
-        return { sha: null, state: null };
-      }
-      const blobData = await blobResp.json();
-      const rawJson = Buffer.from(
-        blobData.content ?? "",
-        blobData.encoding === "base64" ? "base64" : "utf8"
-      ).toString("utf8");
-      const parsed = JSON.parse(rawJson);
-      return { sha: blobSha, state: parsed };
+      const state = await readStateObject(object);
+      return state ? { sha: object.sha, state } : { sha: null, state: null };
     },
     compareAndSwapRef: async (refName, expectedOldSha, nextState) => {
-      const normalizedRef = refName.replace(/^refs\//, "");
-      const checkResp = await fetchFn(
-        `${baseUrl}/repos/${owner}/${repo}/git/ref/${normalizedRef}`,
-        { method: "GET", headers }
-      );
-      if (expectedOldSha === null) {
-        if (checkResp.status !== 404) {
-          return { swapped: false, newSha: "" };
-        }
-      } else {
-        if (!checkResp.ok) {
-          return { swapped: false, newSha: "" };
-        }
-        const currentRef = await checkResp.json();
-        if (currentRef.object?.sha !== expectedOldSha) {
-          return { swapped: false, newSha: "" };
-        }
+      const notSwapped = { swapped: false, newSha: "" };
+      const fullRefName = refName.startsWith("refs/") ? refName : `refs/${refName}`;
+      const current = await getRefObject(fullRefName).catch(() => void 0);
+      if (current === void 0 || (current?.sha ?? null) !== expectedOldSha) {
+        return notSwapped;
       }
-      const createBlobResp = await fetchFn(
-        `${baseUrl}/repos/${owner}/${repo}/git/blobs`,
-        {
-          method: "POST",
-          headers,
-          body: JSON.stringify({
-            content: JSON.stringify(nextState, null, 2),
-            encoding: "utf-8"
-          })
-        }
-      );
-      if (!createBlobResp.ok) {
-        return { swapped: false, newSha: "" };
+      const createCommitResp = await fetchFn(`${repoUrl}/git/commits`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          message: JSON.stringify(nextState),
+          tree: EMPTY_TREE_SHA,
+          parents: current?.type === "commit" ? [current.sha] : []
+        })
+      });
+      if (!createCommitResp.ok) {
+        return notSwapped;
       }
-      const blobCreated = await createBlobResp.json();
-      const newSha = blobCreated.sha ?? "";
+      const newSha = (await createCommitResp.json()).sha ?? "";
       if (!newSha) {
-        return { swapped: false, newSha: "" };
+        return notSwapped;
       }
-      if (expectedOldSha === null) {
-        const createRefResp = await fetchFn(
-          `${baseUrl}/repos/${owner}/${repo}/git/refs`,
-          {
-            method: "POST",
-            headers,
-            body: JSON.stringify({
-              ref: refName.startsWith("refs/") ? refName : `refs/${refName}`,
-              sha: newSha
-            })
-          }
-        );
-        return { swapped: createRefResp.ok, newSha: createRefResp.ok ? newSha : "" };
-      }
-      const updateRefResp = await fetchFn(
-        `${baseUrl}/repos/${owner}/${repo}/git/refs/${normalizedRef}`,
-        {
-          method: "PATCH",
-          headers,
-          body: JSON.stringify({
-            sha: newSha,
-            force: true
-          })
-        }
-      );
-      return { swapped: updateRefResp.ok, newSha: updateRefResp.ok ? newSha : "" };
+      return await writeRef(fullRefName, current, newSha) ? { swapped: true, newSha } : notSwapped;
     },
     listIssueStates: async () => {
       try {
         const listResp = await fetchFn(
-          `${baseUrl}/repos/${owner}/${repo}/git/matching-refs/epure/state/`,
+          `${repoUrl}/git/matching-refs/epure/state/`,
           { method: "GET", headers }
         );
         if (!listResp.ok) {
@@ -4232,23 +4259,17 @@ function createGitHubApiRefStateStore(options) {
         }
         const states = [];
         for (const entry of entries) {
-          const blobSha = entry.object?.sha;
-          if (!blobSha) {
+          const sha = entry.object?.sha;
+          if (!sha) {
             continue;
           }
-          const blobResp = await fetchFn(
-            `${baseUrl}/repos/${owner}/${repo}/git/blobs/${blobSha}`,
-            { method: "GET", headers }
-          );
-          if (!blobResp.ok) {
-            continue;
+          const state = await readStateObject({
+            sha,
+            type: entry.object?.type ?? "commit"
+          });
+          if (state) {
+            states.push(state);
           }
-          const blobData = await blobResp.json();
-          const rawJson = Buffer.from(
-            blobData.content ?? "",
-            blobData.encoding === "base64" ? "base64" : "utf8"
-          ).toString("utf8");
-          states.push(JSON.parse(rawJson));
         }
         return states;
       } catch {

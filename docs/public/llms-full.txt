@@ -742,7 +742,7 @@ EPURE is built from the ground up around **Defense-in-Depth**, **Least Privilege
    - When EPURE runs `npm test`, `npm run build`, or `pytest` on a `task/*` branch, the child process environment is scrubbed of `LLM_API_KEY`, `EPURE_AGENT_APP_PRIVATE_KEY`, and `EPURE_RELEASE_APP_PRIVATE_KEY`.
    - A malicious or compromised test script cannot exfiltrate credentials. If sandbox isolation fails, EPURE aborts **fail-closed**.
 3. **Out-of-Branch CAS State (`refs/epure/state/<issue>`, Q76)**:
-   - State transitions (`last_processed_comment_id`, signed `spec_sha`, retry counters, ticket status table, and active CI continuation subphases) are stored as JSON blobs inside `refs/epure/state/<issue-number>` updated via atomic `git update-ref` Compare-And-Swap.
+   - State transitions (`last_processed_comment_id`, signed `spec_sha`, retry counters, ticket status table, and active CI continuation subphases) are stored as the JSON message of an empty-tree commit chained under `refs/epure/state/<issue-number>`, updated by Compare-And-Swap through the GraphQL `updateRefs` mutation (`beforeOid` precondition): a concurrent write is rejected, then EPURE re-reads the state and retries. Legacy refs pointing at a JSON blob are read and migrated on the next write.
    - `dev` and `main` remain 100% free of machine-state commit noise.
 
 ---
@@ -1960,7 +1960,7 @@ EPURE a été conçu dès l'origine autour de trois principes d'ingénierie : **
    - Lorsqu'EPURE exécute `npm test`, `npm run build` ou `pytest` sur une branche `task/*`, l'environnement des sous-processus est intégralement purgé de `LLM_API_KEY`, `EPURE_AGENT_APP_PRIVATE_KEY` et `EPURE_RELEASE_APP_PRIVATE_KEY`.
    - Un test ou une dépendance compromise ne peut exfiltrer aucun secret. Si l'isolation de la sandbox ne peut être garantie, EPURE s'arrête immédiatement en mode **fail-closed**.
 3. **État Atomique Hors-Branches (`refs/epure/state/<issue>`, Q76)** :
-   - Les transitions d'état (`last_processed_comment_id`, `spec_sha` signé, compteurs de tentatives, table des tickets et sous-phases de continuation CI) sont stockées sous forme d'objets Git dans `refs/epure/state/<issue-number>` mis à jour par Compare-And-Swap (`git update-ref`).
+   - Les transitions d'état (`last_processed_comment_id`, `spec_sha` signé, compteurs de tentatives, table des tickets et sous-phases de continuation CI) sont stockées dans le message JSON d'un commit à arbre vide chaîné sous `refs/epure/state/<issue-number>`, mis à jour par Compare-And-Swap via la mutation GraphQL `updateRefs` (précondition `beforeOid`) : une écriture concurrente est rejetée, puis EPURE relit l'état et réessaie. Les anciennes références pointant vers un blob JSON sont lues puis migrées à l'écriture suivante.
    - Les branches `dev` et `main` restent 100 % exemptes de commits techniques d'état machine.
 
 ---

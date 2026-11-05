@@ -352,6 +352,19 @@ export interface GitApiRefStateStoreOptions {
   readonly fetchImpl?: typeof fetch | undefined;
 }
 
+// State is the message of an empty-tree commit chained on the previous state commit. REST
+// `PATCH git/refs` has no precondition outside refs/heads/*, so updates go through GraphQL
+// `updateRefs`, which rejects them when the ref no longer points at `beforeOid`. `updateRefs`
+// cannot move a ref that points at a blob: legacy JSON-blob refs migrate with a checked PATCH.
+const EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+const UPDATE_REFS_MUTATION =
+  "mutation($repositoryId: ID!, $refUpdates: [RefUpdate!]!) { updateRefs(input: {repositoryId: $repositoryId, refUpdates: $refUpdates}) { clientMutationId } }";
+
+interface GitRefObject {
+  readonly sha: string;
+  readonly type: string;
+}
+
 export function createGitHubApiRefStateStore(
   options: GitApiRefStateStoreOptions
 ): GitRefStateStore {
@@ -360,6 +373,7 @@ export function createGitHubApiRefStateStore(
     /\/+$/,
     ""
   );
+  const repoUrl = `${baseUrl}/repos/${owner}/${repo}`;
   const fetchFn = options.fetchImpl ?? fetch;
 
   const headers = {
@@ -369,46 +383,122 @@ export function createGitHubApiRefStateStore(
     "X-GitHub-Api-Version": "2022-11-28"
   };
 
+  let repositoryNodeId: string | undefined;
+  const fetchRepositoryNodeId = async (): Promise<string> => {
+    const repoResp = await fetchFn(repoUrl, { method: "GET", headers });
+    if (!repoResp.ok) {
+      throw new Error(
+        `Failed to read repository '${owner}/${repo}' (HTTP ${repoResp.status}).`
+      );
+    }
+    return ((await repoResp.json()) as { node_id: string }).node_id;
+  };
+
+  const getRefObject = async (refName: string): Promise<GitRefObject | null> => {
+    const refResp = await fetchFn(
+      `${repoUrl}/git/ref/${refName.replace(/^refs\//, "")}`,
+      { method: "GET", headers }
+    );
+    if (refResp.status === 404) {
+      return null;
+    }
+    if (!refResp.ok) {
+      throw new Error(
+        `Failed to read Git ref '${refName}' (HTTP ${refResp.status}).`
+      );
+    }
+    const refData = (await refResp.json()) as {
+      object?: { sha?: string; type?: string };
+    };
+    const sha = refData.object?.sha;
+    return sha ? { sha, type: refData.object?.type ?? "commit" } : null;
+  };
+
+  const readStateObject = async (
+    object: GitRefObject
+  ): Promise<EpureIssueState | null> => {
+    if (object.type === "commit") {
+      const commitResp = await fetchFn(`${repoUrl}/git/commits/${object.sha}`, {
+        method: "GET",
+        headers
+      });
+      if (!commitResp.ok) {
+        return null;
+      }
+      const commit = (await commitResp.json()) as { message?: string };
+      return JSON.parse(commit.message ?? "") as EpureIssueState;
+    }
+    const blobResp = await fetchFn(`${repoUrl}/git/blobs/${object.sha}`, {
+      method: "GET",
+      headers
+    });
+    if (!blobResp.ok) {
+      return null;
+    }
+    const blobData = (await blobResp.json()) as {
+      content?: string;
+      encoding?: string;
+    };
+    const rawJson = Buffer.from(
+      blobData.content ?? "",
+      blobData.encoding === "base64" ? "base64" : "utf8"
+    ).toString("utf8");
+    return JSON.parse(rawJson) as EpureIssueState;
+  };
+
+  const writeRef = async (
+    refName: string,
+    current: GitRefObject | null,
+    newSha: string
+  ): Promise<boolean> => {
+    if (current === null) {
+      // POST git/refs fails with 422 when the ref already exists.
+      const createRefResp = await fetchFn(`${repoUrl}/git/refs`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ ref: refName, sha: newSha })
+      });
+      return createRefResp.ok;
+    }
+    if (current.type !== "commit") {
+      const migrateResp = await fetchFn(`${repoUrl}/git/${refName}`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({ sha: newSha, force: true })
+      });
+      return migrateResp.ok;
+    }
+    repositoryNodeId ??= await fetchRepositoryNodeId();
+    const updateRefsResp = await fetchFn(`${baseUrl}/graphql`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        query: UPDATE_REFS_MUTATION,
+        variables: {
+          repositoryId: repositoryNodeId,
+          refUpdates: [
+            { name: refName, beforeOid: current.sha, afterOid: newSha, force: true }
+          ]
+        }
+      })
+    });
+    if (!updateRefsResp.ok) {
+      return false;
+    }
+    const payload = (await updateRefsResp.json()) as {
+      data?: { updateRefs?: unknown };
+    };
+    return Boolean(payload.data?.updateRefs);
+  };
+
   return {
     readRef: async (refName: string): Promise<GitRefSnapshot> => {
-      const normalizedRef = refName.replace(/^refs\//, "");
-      const refResp = await fetchFn(
-        `${baseUrl}/repos/${owner}/${repo}/git/ref/${normalizedRef}`,
-        { method: "GET", headers }
-      );
-      if (refResp.status === 404) {
+      const object = await getRefObject(refName);
+      if (!object) {
         return { sha: null, state: null };
       }
-      if (!refResp.ok) {
-        throw new Error(
-          `Failed to read Git ref '${refName}' (HTTP ${refResp.status}).`
-        );
-      }
-      const refData = (await refResp.json()) as {
-        object?: { sha?: string };
-      };
-      const blobSha = refData.object?.sha;
-      if (!blobSha) {
-        return { sha: null, state: null };
-      }
-
-      const blobResp = await fetchFn(
-        `${baseUrl}/repos/${owner}/${repo}/git/blobs/${blobSha}`,
-        { method: "GET", headers }
-      );
-      if (!blobResp.ok) {
-        return { sha: null, state: null };
-      }
-      const blobData = (await blobResp.json()) as {
-        content?: string;
-        encoding?: string;
-      };
-      const rawJson = Buffer.from(
-        blobData.content ?? "",
-        blobData.encoding === "base64" ? "base64" : "utf8"
-      ).toString("utf8");
-      const parsed = JSON.parse(rawJson) as EpureIssueState;
-      return { sha: blobSha, state: parsed };
+      const state = await readStateObject(object);
+      return state ? { sha: object.sha, state } : { sha: null, state: null };
     },
 
     compareAndSwapRef: async (
@@ -416,83 +506,40 @@ export function createGitHubApiRefStateStore(
       expectedOldSha: string | null,
       nextState: EpureIssueState
     ): Promise<{ readonly swapped: boolean; readonly newSha: string }> => {
-      const normalizedRef = refName.replace(/^refs\//, "");
-
-      // Verify current ref SHA matches expectedOldSha
-      const checkResp = await fetchFn(
-        `${baseUrl}/repos/${owner}/${repo}/git/ref/${normalizedRef}`,
-        { method: "GET", headers }
-      );
-      if (expectedOldSha === null) {
-        if (checkResp.status !== 404) {
-          return { swapped: false, newSha: "" };
-        }
-      } else {
-        if (!checkResp.ok) {
-          return { swapped: false, newSha: "" };
-        }
-        const currentRef = (await checkResp.json()) as {
-          object?: { sha?: string };
-        };
-        if (currentRef.object?.sha !== expectedOldSha) {
-          return { swapped: false, newSha: "" };
-        }
+      const notSwapped = { swapped: false, newSha: "" } as const;
+      const fullRefName = refName.startsWith("refs/") ? refName : `refs/${refName}`;
+      const current = await getRefObject(fullRefName).catch(() => undefined);
+      if (current === undefined || (current?.sha ?? null) !== expectedOldSha) {
+        return notSwapped;
       }
 
-      // Create blob for nextState
-      const createBlobResp = await fetchFn(
-        `${baseUrl}/repos/${owner}/${repo}/git/blobs`,
-        {
-          method: "POST",
-          headers,
-          body: JSON.stringify({
-            content: JSON.stringify(nextState, null, 2),
-            encoding: "utf-8"
-          })
-        }
-      );
-      if (!createBlobResp.ok) {
-        return { swapped: false, newSha: "" };
+      const createCommitResp = await fetchFn(`${repoUrl}/git/commits`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          message: JSON.stringify(nextState),
+          tree: EMPTY_TREE_SHA,
+          parents: current?.type === "commit" ? [current.sha] : []
+        })
+      });
+      if (!createCommitResp.ok) {
+        return notSwapped;
       }
-      const blobCreated = (await createBlobResp.json()) as { sha?: string };
-      const newSha = blobCreated.sha ?? "";
+      const newSha =
+        ((await createCommitResp.json()) as { sha?: string }).sha ?? "";
       if (!newSha) {
-        return { swapped: false, newSha: "" };
+        return notSwapped;
       }
 
-      if (expectedOldSha === null) {
-        const createRefResp = await fetchFn(
-          `${baseUrl}/repos/${owner}/${repo}/git/refs`,
-          {
-            method: "POST",
-            headers,
-            body: JSON.stringify({
-              ref: refName.startsWith("refs/") ? refName : `refs/${refName}`,
-              sha: newSha
-            })
-          }
-        );
-        return { swapped: createRefResp.ok, newSha: createRefResp.ok ? newSha : "" };
-      }
-
-      const updateRefResp = await fetchFn(
-        `${baseUrl}/repos/${owner}/${repo}/git/refs/${normalizedRef}`,
-        {
-          method: "PATCH",
-          headers,
-          body: JSON.stringify({
-            sha: newSha,
-            force: true
-          })
-        }
-      );
-      return { swapped: updateRefResp.ok, newSha: updateRefResp.ok ? newSha : "" };
+      return (await writeRef(fullRefName, current, newSha))
+        ? { swapped: true, newSha }
+        : notSwapped;
     },
 
     listIssueStates: async (): Promise<readonly EpureIssueState[]> => {
       try {
         const listResp = await fetchFn(
-          `${baseUrl}/repos/${owner}/${repo}/git/matching-refs/epure/state/`,
+          `${repoUrl}/git/matching-refs/epure/state/`,
           { method: "GET", headers }
         );
         if (!listResp.ok) {
@@ -500,33 +547,24 @@ export function createGitHubApiRefStateStore(
         }
         const entries = (await listResp.json()) as Array<{
           ref?: string;
-          object?: { sha?: string };
+          object?: { sha?: string; type?: string };
         }>;
         if (!Array.isArray(entries)) {
           return [];
         }
         const states: EpureIssueState[] = [];
         for (const entry of entries) {
-          const blobSha = entry.object?.sha;
-          if (!blobSha) {
+          const sha = entry.object?.sha;
+          if (!sha) {
             continue;
           }
-          const blobResp = await fetchFn(
-            `${baseUrl}/repos/${owner}/${repo}/git/blobs/${blobSha}`,
-            { method: "GET", headers }
-          );
-          if (!blobResp.ok) {
-            continue;
+          const state = await readStateObject({
+            sha,
+            type: entry.object?.type ?? "commit"
+          });
+          if (state) {
+            states.push(state);
           }
-          const blobData = (await blobResp.json()) as {
-            content?: string;
-            encoding?: string;
-          };
-          const rawJson = Buffer.from(
-            blobData.content ?? "",
-            blobData.encoding === "base64" ? "base64" : "utf8"
-          ).toString("utf8");
-          states.push(JSON.parse(rawJson) as EpureIssueState);
         }
         return states;
       } catch {
@@ -535,4 +573,3 @@ export function createGitHubApiRefStateStore(
     }
   };
 }
-

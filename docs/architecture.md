@@ -24,7 +24,7 @@ EPURE is built from the ground up around **Defense-in-Depth**, **Least Privilege
    - When EPURE runs `npm test`, `npm run build`, or `pytest` on a `task/*` branch, the child process environment is scrubbed of `LLM_API_KEY`, `EPURE_AGENT_APP_PRIVATE_KEY`, and `EPURE_RELEASE_APP_PRIVATE_KEY`.
    - A malicious or compromised test script cannot exfiltrate credentials. If sandbox isolation fails, EPURE aborts **fail-closed**.
 3. **Out-of-Branch CAS State (`refs/epure/state/<issue>`, Q76)**:
-   - State transitions (`last_processed_comment_id`, signed `spec_sha`, retry counters, ticket status table, and active CI continuation subphases) are stored as JSON blobs inside `refs/epure/state/<issue-number>` updated via atomic `git update-ref` Compare-And-Swap.
+   - State transitions (`last_processed_comment_id`, signed `spec_sha`, retry counters, ticket status table, and active CI continuation subphases) are stored as the JSON message of an empty-tree commit chained under `refs/epure/state/<issue-number>`, updated by Compare-And-Swap through the GraphQL `updateRefs` mutation (`beforeOid` precondition): a concurrent write is rejected, then EPURE re-reads the state and retries. Legacy refs pointing at a JSON blob are read and migrated on the next write.
    - `dev` and `main` remain 100% free of machine-state commit noise.
 
 ---

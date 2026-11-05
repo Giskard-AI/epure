@@ -148,10 +148,10 @@ describeLive(
       };
     }
 
-    function fetchWithConcurrentWriterBeforeStatePatch(writer: () => Promise<void>): typeof fetch {
+    function fetchWithConcurrentWriterBeforeStateUpdate(writer: () => Promise<void>): typeof fetch {
       let armed = true;
       return async (input, init) => {
-        if (armed && init?.method === "PATCH" && String(input).includes("/git/refs/epure/state/")) {
+        if (armed && init?.method === "POST" && String(input).endsWith("/graphql")) {
           armed = false;
           await writer();
         }
@@ -342,6 +342,39 @@ describeLive(
         expect(res.data).toMatchObject({ ref, object: { sha: blobB.data.sha, type: "blob" } });
         expect(after.data.object.sha).toBe(blobB.data.sha);
       });
+
+      it.each([
+        { id: "commit-ref-matching-beforeOid-moves-the-ref", stale: false, from: "commit", accepted: true },
+        { id: "commit-ref-stale-beforeOid-is-rejected-with-an-error-payload", stale: true, from: "commit", accepted: false },
+        { id: "legacy-blob-ref-is-rejected-even-with-a-matching-beforeOid", stale: false, from: "blob", accepted: false }
+      ] as const)("GraphQL updateRefs precondition on refs/epure/state/* [$id]", async ({ id, stale, from, accepted }) => {
+        const object = async (type: "blob" | "commit", content: string) =>
+          type === "blob"
+            ? (await api<{ sha: string }>("POST", `${R}/git/blobs`, { content, encoding: "utf-8" })).data.sha
+            : (await api<{ sha: string }>("POST", `${R}/git/commits`, { message: content, tree: "4b825dc642cb6eb9a060e54bf8d69288fbee4904", parents: [] })).data.sha;
+        const shas = {
+          current: await object(from, `{"v":1,"id":"${id}"}`),
+          next: await object("commit", `{"v":2,"id":"${id}"}`),
+          other: await object(from, `{"v":0,"id":"${id}"}`)
+        };
+        const ref = `refs/epure/state/${NS}/graphql-${id}`;
+        expect((await api("POST", `${R}/git/refs`, { ref, sha: shas.current })).status).toBe(201);
+        const repo = await api<{ node_id: string }>("GET", R);
+
+        const res = await api<{ data?: { updateRefs?: unknown }; errors?: unknown[] }>("POST", "/graphql", {
+          query: "mutation($repositoryId: ID!, $refUpdates: [RefUpdate!]!) { updateRefs(input: {repositoryId: $repositoryId, refUpdates: $refUpdates}) { clientMutationId } }",
+          variables: {
+            repositoryId: repo.data.node_id,
+            refUpdates: [{ name: ref, beforeOid: stale ? shas.other : shas.current, afterOid: shas.next, force: true }]
+          }
+        });
+        const after = await api<{ object: { sha: string } }>("GET", `${R}/git/${ref.replace(/^refs\//, "ref/")}`);
+
+        expect(res.status).toBe(200);
+        expect(Boolean(res.data.data?.updateRefs)).toBe(accepted);
+        expect(Boolean(res.data.errors?.length)).toBe(!accepted);
+        expect(after.data.object.sha).toBe(accepted ? shas.next : shas.current);
+      });
     });
 
     describe("concurrent CAS on refs/epure/state/* (createGitHubApiRefStateStore)", () => {
@@ -353,19 +386,20 @@ describeLive(
         );
         const writer = async () => {
           const current = await plainStore.readRef(stateRef);
-          const blob = await api<{ sha: string }>("POST", `${R}/git/blobs`, {
-            content: JSON.stringify({ ...current.state, status: "cancelled" }),
-            encoding: "utf-8"
+          const competing = await plainStore.compareAndSwapRef(stateRef, current.sha, {
+            ...current.state!,
+            version: current.state!.version + 1,
+            status: "cancelled"
           });
-          await api("PATCH", `${R}/git/refs/epure/state/${NS}/${issueNumber}`, { sha: blob.data.sha, force: true });
-          competingWrites.push(blob.data.sha);
+          expect(competing.swapped).toBe(true);
+          competingWrites.push(competing.newSha);
         };
         await updateIssueStateWithCas({ issueNumber, store: plainStore, mutator: (prev) => ({ ...prev, phase: "implementation" }) });
         const racingStore = namespacedStore(
           createGitHubApiRefStateStore({
             repository: cfg.repository,
             githubToken: token,
-            fetchImpl: fetchWithConcurrentWriterBeforeStatePatch(writer)
+            fetchImpl: fetchWithConcurrentWriterBeforeStateUpdate(writer)
           })
         );
         const result = await updateIssueStateWithCas({
@@ -380,42 +414,46 @@ describeLive(
         return { result, final, competingWrites };
       }
 
-      it("current: force-true PATCH silently overwrites the concurrent write", async () => {
-        const { result, final, competingWrites } = await seedAndRaceOnce(1);
+      it("concurrent write between the CAS read and the ref update is detected and retried without a lost update", async () => {
+        const { result, final, competingWrites } = await seedAndRaceOnce(2);
         expect(competingWrites).toHaveLength(1);
-        expect(result.cas_conflicts_recovered).toBe(0);
-        expect(final.status).not.toBe("cancelled");
-      });
-
-      it.fails("target: concurrent write is detected and retried without a lost update", async () => {
-        const { result, final } = await seedAndRaceOnce(2);
         expect(result.cas_conflicts_recovered).toBe(1);
         expect(final.status).toBe("cancelled");
         expect(final.last_processed_comment_id).toBe(42);
       });
     });
 
-    describe("legacy state format (ref -> JSON blob)", () => {
-      it("current: reader reads blob-backed state written by the current writer", async () => {
+    describe("state format (ref -> state commit; legacy ref -> JSON blob)", () => {
+      it("the writer stores state as an empty-tree commit chained on the previous state commit", async () => {
         const issueNumber = 3;
         const store = namespacedStore(createGitHubApiRefStateStore({ repository: cfg.repository, githubToken: token }));
         await updateIssueStateWithCas({ issueNumber, store, mutator: (prev) => ({ ...prev, phase: "spec" }) });
-
-        const ref = await api<{ object: { type: string } }>("GET", `${R}/git/ref/epure/state/${NS}/${issueNumber}`);
-        const snapshot = await store.readRef(`refs/epure/state/${issueNumber}`);
-        expect(ref.data.object.type).toBe("blob");
-        expect(snapshot.state?.phase).toBe("spec");
-      });
-
-      it.fails("target: a write on a legacy blob ref migrates it to a fast-forwardable commit", async () => {
-        const issueNumber = 4;
-        const store = namespacedStore(createGitHubApiRefStateStore({ repository: cfg.repository, githubToken: token }));
-        await updateIssueStateWithCas({ issueNumber, store, mutator: (prev) => ({ ...prev, phase: "spec" }) });
+        const first = await store.readRef(`refs/epure/state/${issueNumber}`);
         await updateIssueStateWithCas({ issueNumber, store, mutator: (prev) => ({ ...prev, phase: "tickets" }) });
 
-        const ref = await api<{ object: { type: string } }>("GET", `${R}/git/ref/epure/state/${NS}/${issueNumber}`);
+        const ref = await api<{ object: { type: string; sha: string } }>("GET", `${R}/git/ref/epure/state/${NS}/${issueNumber}`);
+        const commit = await api<{ parents: Array<{ sha: string }> }>("GET", `${R}/git/commits/${ref.data.object.sha}`);
         expect(ref.data.object.type).toBe("commit");
-        expect((await store.readRef(`refs/epure/state/${issueNumber}`)).state?.phase).toBe("tickets");
+        expect(commit.data.parents.map((p) => p.sha)).toEqual([first.sha]);
+        expect((await store.readRef(`refs/epure/state/${issueNumber}`)).state).toMatchObject({ phase: "tickets", version: 2 });
+      });
+
+      it("a write on a legacy JSON-blob ref reads it then migrates it to a state commit", async () => {
+        const issueNumber = 4;
+        const ref = `refs/epure/state/${NS}/${issueNumber}`;
+        const store = namespacedStore(createGitHubApiRefStateStore({ repository: cfg.repository, githubToken: token }));
+        const legacy = await api<{ sha: string }>("POST", `${R}/git/blobs`, {
+          content: JSON.stringify({ issue_number: issueNumber, version: 3, phase: "spec", status: "active", active_branch: "", last_processed_comment_id: 7, code_fix_attempts_used: 0, transient_retries_used: 0, updated_at: new Date().toISOString() }, null, 2),
+          encoding: "utf-8"
+        });
+        expect((await api("POST", `${R}/git/refs`, { ref, sha: legacy.data.sha })).status).toBe(201);
+        expect((await store.readRef(`refs/epure/state/${issueNumber}`)).state?.phase).toBe("spec");
+
+        await updateIssueStateWithCas({ issueNumber, store, mutator: (prev) => ({ ...prev, phase: "tickets" }) });
+
+        const after = await api<{ object: { type: string } }>("GET", `${R}/git/${ref.replace(/^refs\//, "ref/")}`);
+        expect(after.data.object.type).toBe("commit");
+        expect((await store.readRef(`refs/epure/state/${issueNumber}`)).state).toMatchObject({ phase: "tickets", version: 4, last_processed_comment_id: 7 });
       });
     });
 

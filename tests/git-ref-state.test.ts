@@ -105,11 +105,13 @@ describe("Ticket 09 (#10) — Atomic Git ref state (refs/epure/state/*) & concur
     }
   );
 
-  it.fails.each([
-    { id: "concurrent-writer-between-read-and-patch-is-not-overwritten-by-force-true" }
+  it.each([
+    { id: "concurrent-writer-between-read-and-update-is-rejected-by-the-graphql-beforeOid-precondition", seeded: true, expectedUpdateRefsCalls: 2 },
+    { id: "concurrent-creator-of-a-missing-ref-is-rejected-as-already-existing", seeded: false, expectedUpdateRefsCalls: 1 }
   ])(
-    "createGitHubApiRefStateStore CAS [$id]: a concurrent ref update between the CAS read and the PATCH is detected and retried",
-    async () => {
+    "createGitHubApiRefStateStore CAS [$id]: a concurrent ref update before the write is detected and retried without a lost update",
+    async ({ seeded, expectedUpdateRefsCalls }) => {
+      const ref = "refs/epure/state/10";
       const router = createGitHubMockRouter();
       const git = installFakeGitDataApi(router, "acme/demo");
       const store = createGitHubApiRefStateStore({
@@ -117,18 +119,22 @@ describe("Ticket 09 (#10) — Atomic Git ref state (refs/epure/state/*) & concur
         githubToken: "ghs_test",
         fetchImpl: router.fetch
       });
-      await updateIssueStateWithCas({
-        issueNumber: 10,
-        store,
-        mutator: (prev) => ({ ...prev, phase: "implementation" })
-      });
-      git.onBeforeNextRefWrite("refs/epure/state/10", () => {
-        const current = JSON.parse(
-          git.readBlob(git.getRef("refs/epure/state/10")!)!
-        ) as EpureIssueState;
+      if (seeded) {
+        await updateIssueStateWithCas({
+          issueNumber: 10,
+          store,
+          mutator: (prev) => ({ ...prev, phase: "implementation" })
+        });
+      }
+      const snapshot = await store.readRef(ref);
+      const before = snapshot.state ?? { ...WAITING_TICKET_STATE, version: 0 };
+      git.onBeforeNextRefWrite(ref, () => {
         git.setRef(
-          "refs/epure/state/10",
-          git.putBlob(JSON.stringify({ ...current, version: 2, status: "cancelled" }))
+          ref,
+          git.putCommit({
+            parents: snapshot.sha ? [snapshot.sha] : [],
+            message: JSON.stringify({ ...before, version: before.version + 1, status: "cancelled" })
+          })
         );
       });
 
@@ -138,12 +144,42 @@ describe("Ticket 09 (#10) — Atomic Git ref state (refs/epure/state/*) & concur
         mutator: (prev) => ({ ...prev, last_processed_comment_id: 42 })
       });
 
+      expect(router.unmatched).toEqual([]);
       expect(result.cas_conflicts_recovered).toBe(1);
-      const final = await store.readRef("refs/epure/state/10");
-      expect(final.state?.status).toBe("cancelled");
-      expect(final.state?.last_processed_comment_id).toBe(42);
+      expect(router.calls("POST", "/graphql")).toBe(expectedUpdateRefsCalls);
+      expect(router.calls("PATCH", /\/git\/refs\//)).toBe(0);
+      const final = await store.readRef(ref);
+      expect(final.state).toMatchObject({ status: "cancelled", last_processed_comment_id: 42, version: before.version + 2 });
     }
   );
+
+  it.each([
+    { id: "state-commit-ref-moves-through-graphql-updateRefs-on-a-child-commit", legacyBlob: false, expected: { parents: 1, updateRefs: 1, patches: 0 } },
+    { id: "legacy-json-blob-ref-is-read-then-migrated-to-a-state-commit-by-rest-patch", legacyBlob: true, expected: { parents: 0, updateRefs: 0, patches: 1 } }
+  ])("createGitHubApiRefStateStore write [$id]", async ({ legacyBlob, expected }) => {
+    const ref = "refs/epure/state/10";
+    const router = createGitHubMockRouter();
+    const git = installFakeGitDataApi(router, "acme/demo");
+    const store = createGitHubApiRefStateStore({ repository: "acme/demo", githubToken: "ghs_test", fetchImpl: router.fetch });
+    if (legacyBlob) {
+      git.setRef(ref, git.putBlob(JSON.stringify({ ...WAITING_TICKET_STATE, phase: "spec" }, null, 2)));
+    } else {
+      await updateIssueStateWithCas({ issueNumber: 10, store, mutator: (prev) => ({ ...prev, phase: "spec" }) });
+    }
+    const before = await store.readRef(ref);
+    const writesBefore = router.requests.length;
+
+    await updateIssueStateWithCas({ issueNumber: 10, store, mutator: (prev) => ({ ...prev, phase: "tickets" }) });
+
+    const writes = router.requests.slice(writesBefore);
+    const commit = writes.find((r) => r.method === "POST" && r.path.endsWith("/git/commits"))!.body as { parents: string[] };
+    expect(router.unmatched).toEqual([]);
+    expect(before.state?.phase).toBe("spec");
+    expect(commit.parents).toHaveLength(expected.parents);
+    expect(writes.filter((r) => r.path === "/graphql")).toHaveLength(expected.updateRefs);
+    expect(writes.filter((r) => r.method === "PATCH")).toHaveLength(expected.patches);
+    expect((await store.readRef(ref)).state).toMatchObject({ phase: "tickets", version: before.state!.version + 1 });
+  });
 
   it("formatIssueStateMirrorMarkdown renders deterministic human-readable state summary", () => {
     const state: EpureIssueState = {

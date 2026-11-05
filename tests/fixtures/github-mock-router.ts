@@ -251,7 +251,7 @@ function escapeRegExp(raw: string): string {
   return raw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-// Refs and blobs mirror what src/state/git-ref-state.ts calls; commits (all on the empty tree)
+// Refs, blobs and GraphQL `updateRefs` mirror what src/state/git-ref-state.ts calls; commits (all on the empty tree)
 // exist only to build the graph that fast-forward checks walk.
 export function installFakeGitDataApi(
   router: GitHubMockRouter,
@@ -375,6 +375,30 @@ export function installFakeGitDataApi(
       }
       refs.set(ref, sha);
       return json(refBody(ref, sha));
+    })
+    .on("GET", `/repos/${repository}`, json({ full_name: repository, node_id: `R_${repository}` }))
+    // Real GitHub answers a failed `beforeOid` precondition, or a ref currently on a blob,
+    // with HTTP 200 and an opaque error.
+    .on("POST", "/graphql", (req) => {
+      const { variables } = req.body as {
+        variables: { refUpdates: ReadonlyArray<{ name: string; beforeOid: string; afterOid: string }> };
+      };
+      for (const update of variables.refUpdates) {
+        runRefWriteHook(update.name);
+      }
+      const rejected = variables.refUpdates.some(
+        ({ name, beforeOid, afterOid }) =>
+          refs.get(name) !== beforeOid ||
+          objects.get(beforeOid)?.type !== "commit" ||
+          objects.get(afterOid)?.type !== "commit"
+      );
+      if (rejected) {
+        return json({ errors: [{ message: "Something went wrong while executing your query." }] });
+      }
+      for (const { name, afterOid } of variables.refUpdates) {
+        refs.set(name, afterOid);
+      }
+      return json({ data: { updateRefs: { clientMutationId: null } } });
     })
     .on("DELETE", new RegExp(`^${prefix}/refs/(.+)$`), (_req, m) => {
       const ref = `refs/${decodeURIComponent(m![1]!)}`;
