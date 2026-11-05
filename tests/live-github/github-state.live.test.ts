@@ -7,6 +7,7 @@ import {
   mintRepositoryInstallationToken,
   revokeGitHubInstallationToken
 } from "../../src/auth/github-app-jwt.js";
+import { createGitHubRateLimitedFetch } from "../../src/orchestrator/github/rate-limit.js";
 import { createGitHubRestHelper } from "../../src/orchestrator/github/rest-client.js";
 import {
   createGitHubApiRefStateStore,
@@ -539,6 +540,24 @@ describeLive(
           expect(res.headers.get(name)).toMatch(/^\d+$/);
         }
         expect(res.headers.get("x-ratelimit-resource")).toBe("core");
+      });
+
+      it.each([
+        { id: "200-repository-read", path: R, expectedStatus: 200 },
+        { id: "403-permission-denied-is-not-a-rate-limit", path: `${R}/actions/secrets`, expectedStatus: 403 }
+      ])("rate-limited fetch passes a real $id response through without waiting", async ({ path, expectedStatus }) => {
+        const waits: number[] = [];
+        const githubFetch = createGitHubRateLimitedFetch({
+          fetchImpl: fetch,
+          sleepFn: async (ms) => {
+            waits.push(ms);
+          }
+        });
+        const resp = await githubFetch(`https://api.github.com${path}`, {
+          headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" }
+        });
+        expect(resp.status).toBe(expectedStatus);
+        expect(waits).toEqual([]);
       });
     });
   }

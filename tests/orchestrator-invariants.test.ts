@@ -13,6 +13,8 @@ import {
   noContent,
   notFound,
   primaryRateLimit,
+  secondaryRateLimit,
+  tooManyRequests,
   type GitHubMockRouter
 } from "./fixtures/github-mock-router.js";
 
@@ -753,7 +755,8 @@ describe("Lot 1 — a resume command after budget exhaustion grants one fresh bu
   it.each([
     { id: "continue-after-remediation_exhausted-resets-the-ticket-budget-and-counts-the-grant", command: "continue", reason: "remediation_exhausted", expectedImplementationCalls: 3, expectedGrants: 1 },
     { id: "approve-after-remediation_exhausted-resets-the-ticket-budget-and-counts-the-grant", command: "approve", reason: "remediation_exhausted", expectedImplementationCalls: 3, expectedGrants: 1 },
-    { id: "continue-after-another-escalation-reason-keeps-the-exhausted-budget", command: "continue", reason: "llm_request_invalid", expectedImplementationCalls: 0, expectedGrants: 0 }
+    { id: "continue-after-another-escalation-reason-keeps-the-exhausted-budget", command: "continue", reason: "llm_request_invalid", expectedImplementationCalls: 0, expectedGrants: 0 },
+    { id: "continue-after-github_rate_limited-resumes-the-ticket-without-a-budget-grant", command: "continue", reason: "github_rate_limited", expectedImplementationCalls: 0, expectedGrants: 0 }
   ] as const)("$id", async ({ command, reason, expectedImplementationCalls, expectedGrants }) => {
     const store = await seedState({
       status: "suspended",
@@ -809,5 +812,82 @@ describe("Lot 1 — escalation comments remind the exact resume command", () => 
     expect(body).toContain("Postez `/epure continue` (ou `/epure approve`)");
     expect(body).toContain("Une réponse libre ne reprend pas l'exécution");
     expect(body.includes("remet à zéro le budget de remédiation")).toBe(mentionsBudgetReset);
+  });
+});
+
+describe("Lot 1 — GitHub API rate limits are waited out within 5 minutes, then escalate github_rate_limited", () => {
+  const nowSeconds = () => Math.floor(Date.now() / 1000);
+  const seedWaitingTicket = () =>
+    seedState({ status: "active", subphase: "waiting_ticket_ci", active_ticket_number: 78, active_task_branch: TASK_BRANCH });
+
+  it.each([
+    { id: "secondary-403-with-retry-after-waits-the-advertised-seconds", limited: () => secondaryRateLimit(30), expectedWaitsSeconds: [30] },
+    { id: "secondary-403-without-retry-after-waits-one-minute", limited: () => secondaryRateLimit(), expectedWaitsSeconds: [60] },
+    { id: "429-with-retry-after-waits-the-advertised-seconds", limited: () => tooManyRequests(10), expectedWaitsSeconds: [10] },
+    { id: "primary-403-quota-spent-waits-until-x-ratelimit-reset", limited: () => primaryRateLimit(nowSeconds() + 120), expectedWaitsSeconds: [120] },
+    { id: "primary-403-reset-already-passed-retries-after-one-second", limited: () => primaryRateLimit(nowSeconds() - 10), expectedWaitsSeconds: [1] }
+  ])("$id then completes the command", async ({ limited, expectedWaitsSeconds }) => {
+    const store = await seedWaitingTicket();
+    const waits: number[] = [];
+    const router = declareIssueWrites(createGitHubMockRouter())
+      .on("POST", `${R}/issues/${ISSUE}/comments`, limited(), json({ html_url: "c" }, 201));
+
+    await orchestrateIssueCommand({
+      repository: REPO,
+      commandArgs: "",
+      fallbackGithubToken: "ghs_test",
+      llmApiKey: "key_test",
+      model: "openai/gpt-test",
+      stateStore: store,
+      fetchImpl: router.fetch,
+      sleepFn: async (ms) => {
+        waits.push(ms);
+      },
+      command: "cancel",
+      actor: "maintainer",
+      issueNumber: ISSUE,
+      commentId: 501
+    });
+
+    expect(router.unmatched).toEqual([]);
+    expect(waits.map((ms) => Math.ceil(ms / 1000))).toEqual(expectedWaitsSeconds);
+    expect(router.calls("POST", `${R}/issues/${ISSUE}/comments`)).toBe(2);
+    expect((await readState(store)).status).toBe("cancelled");
+  });
+
+  it.each([
+    { id: "primary-403-reset-beyond-the-budget-escalates-without-waiting", limited: () => primaryRateLimit(nowSeconds() + 3600), expectedWaitsSeconds: [] },
+    { id: "secondary-403-retry-after-120-waits-twice-then-escalates-before-exceeding-300s", limited: () => secondaryRateLimit(120), expectedWaitsSeconds: [120, 120] },
+    { id: "429-retry-after-100-waits-three-times-then-escalates-before-exceeding-300s", limited: () => tooManyRequests(100), expectedWaitsSeconds: [100, 100, 100] }
+  ])("$id", async ({ limited, expectedWaitsSeconds }) => {
+    const store = await seedWaitingTicket();
+    const waits: number[] = [];
+    const router = declareIssueWrites(createGitHubMockRouter()).on("GET", `${R}/issues/${ISSUE}`, limited());
+
+    await orchestrateIssueCommand({
+      repository: REPO,
+      commandArgs: "",
+      fallbackGithubToken: "ghs_test",
+      llmApiKey: "key_test",
+      model: "openai/gpt-test",
+      stateStore: store,
+      fetchImpl: router.fetch,
+      sleepFn: async (ms) => {
+        waits.push(ms);
+      },
+      command: "continue",
+      actor: "github-actions[bot]",
+      ...TRIGGERS.continueWithoutComment
+    });
+    const posted = router.requests.filter((r) => r.method === "POST" && r.path === `${R}/issues/${ISSUE}/comments`);
+    const body = (posted.at(-1)?.body as { body: string }).body;
+
+    expect(router.unmatched).toEqual([]);
+    expect(waits.map((ms) => Math.ceil(ms / 1000))).toEqual(expectedWaitsSeconds);
+    expect(await readState(store)).toMatchObject({ status: "suspended", last_escalation: { reason: "github_rate_limited" } });
+    expect(router.calls("POST", `${R}/issues/${ISSUE}/labels`)).toBe(1);
+    expect(posted).toHaveLength(1);
+    expect(body).toContain("`github_rate_limited`");
+    expect(body).toContain("Postez `/epure continue` (ou `/epure approve`)");
   });
 });

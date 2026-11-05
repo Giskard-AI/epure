@@ -168,6 +168,7 @@ export type NeedsHumanEscalationReason =
   | "llm_request_invalid"
   | "llm_refusal"
   | "model_config_missing"
+  | "github_rate_limited"
   | "internal_error";
 
 /**
@@ -1257,6 +1258,9 @@ export function formatNeedsHumanEscalationComment(
     reasonHeadline =
       `LLM model configuration missing — set ${keys} in \`.github/agents.yml\` ` +
       "(or the action `model` input); no fallback model";
+  } else if (input.reason === "github_rate_limited") {
+    reasonHeadline =
+      "GitHub API rate limit still exceeded after waiting up to 5 minutes (`github_rate_limited`) — code-fix budget preserved";
   } else if (input.reason === "internal_error") {
     reasonHeadline =
       "Internal orchestrator error — code-fix budget preserved";

@@ -50,6 +50,10 @@ import {
   syncBranchWithBase
 } from "./github/branch-sync.js";
 import {
+  createGitHubRateLimitedFetch,
+  GitHubRateLimitError
+} from "./github/rate-limit.js";
+import {
   createGitHubRestHelper,
   loadRepoAgentsConfig,
   slugifyTitle,
@@ -221,10 +225,14 @@ export async function orchestrateIssueCommand(
       );
     }
 
+    const githubFetch = createGitHubRateLimitedFetch({
+      fetchImpl: input.fetchImpl ?? fetch,
+      sleepFn: input.sleepFn
+    });
     const gh = createGitHubRestHelper({
       repository: input.repository,
       token: activeToken,
-      fetchImpl: input.fetchImpl
+      fetchImpl: githubFetch
     });
 
     const store =
@@ -232,7 +240,7 @@ export async function orchestrateIssueCommand(
       createGitHubApiRefStateStore({
         repository: input.repository,
         githubToken: activeToken,
-        fetchImpl: input.fetchImpl
+        fetchImpl: githubFetch
       });
 
     const isAutomaticEntry =
@@ -1600,9 +1608,11 @@ export async function orchestrateIssueCommand(
       const escalationReason =
         err instanceof LLMError
           ? resolveLlmEscalationReason(err)
-          : err instanceof MissingModelConfigError
-            ? "model_config_missing"
-            : "internal_error";
+          : err instanceof GitHubRateLimitError
+            ? "github_rate_limited"
+            : err instanceof MissingModelConfigError
+              ? "model_config_missing"
+              : "internal_error";
 
       const latestSnap = await store.readRef(refName);
       const fallbackPhase: EpureIssueState["phase"] =

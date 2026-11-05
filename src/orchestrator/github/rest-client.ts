@@ -18,6 +18,7 @@ import type {
   IssueCommentRecord,
   IssueMetadata
 } from "../types.js";
+import { GitHubRateLimitError } from "./rate-limit.js";
 
 const COLLABORATOR_PERMISSIONS: ReadonlySet<string> = new Set<CollaboratorPermission>([
   "admin",
@@ -107,6 +108,9 @@ export function createGitHubRestHelper(params: {
         }
         break;
       } catch (err) {
+        if (err instanceof GitHubRateLimitError) {
+          throw err;
+        }
         lastErr = err;
         if (attempt < 3) {
           await new Promise((r) => setTimeout(r, 350 * (attempt + 1)));
