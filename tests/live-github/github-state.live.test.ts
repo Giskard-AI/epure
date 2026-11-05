@@ -512,6 +512,38 @@ describeLive(
         expect(all.data.find((p) => p.number === prNumber)?.merged_at).toBeTruthy();
         expect(await gh.findOpenPullRequestByHead(headBranch, `${NS}/merge-base`)).toBeNull();
       });
+
+      it("duplicate guard finds the merged PR by head branch after the branch is deleted", async () => {
+        const gh = createGitHubRestHelper({ repository: cfg.repository, token });
+        expect(await gh.findMergedPullRequestByHead(headBranch, `${NS}/merge-base`)).toEqual({
+          number: prNumber,
+          html_url: expect.stringContaining(`/pull/${prNumber}`)
+        });
+      });
+    });
+
+    describe("epic closure reads on an open, unmerged PR", () => {
+      let prNumber = 0;
+      let base = "";
+      let headBranch = "";
+
+      beforeAll(async () => {
+        base = await createBranch("closure-base", baseSha);
+        headBranch = await createBranch("closure-head", await commitOnTop([baseSha], `${NS}/closure.txt`, "unmerged"));
+        const pr = await api<{ number: number }>("POST", `${R}/pulls`, {
+          title: `test(${NS}): closure`,
+          head: headBranch,
+          base
+        });
+        prNumber = pr.data.number;
+      }, HOOK_TIMEOUT_MS);
+
+      it("the open PR is listed by base, its commit counted as unmerged, and it is never reported as merged", async () => {
+        const gh = createGitHubRestHelper({ repository: cfg.repository, token });
+        expect(await gh.findMergedPullRequestByHead(headBranch, base)).toBeNull();
+        expect((await gh.listOpenPullRequestsByBase(base)).map((pr) => pr.number)).toEqual([prNumber]);
+        expect((await gh.compareCommits?.(base, headBranch))?.aheadBy).toBe(1);
+      });
     });
 
     describe("git data API", () => {

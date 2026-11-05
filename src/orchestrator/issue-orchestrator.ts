@@ -1124,6 +1124,45 @@ export async function orchestrateIssueCommand(
         featureBranch,
         "dev"
       );
+      const mergedFeaturePr = existingFeaturePrCheck
+        ? null
+        : await gh.findMergedPullRequestByHead(featureBranch, "dev");
+      if (mergedFeaturePr) {
+        const updatedDone = await updateIssueStateWithCas({
+          issueNumber: effectiveInput.issueNumber,
+          store,
+          mutator: (prev) =>
+            toTerminalState(prev, {
+              phase: "completed",
+              status: "done",
+              active_branch: featureBranch,
+              last_processed_comment_id:
+                Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
+            })
+        });
+        const mergedComment = appendEpureCommandsSpoiler(
+          [
+            updatedDone.issue_mirror_markdown,
+            "",
+            `La Pull Request de fonctionnalité [#${mergedFeaturePr.number}](${mergedFeaturePr.html_url}) de \`${featureBranch}\` est déjà fusionnée dans \`dev\` : aucune nouvelle Pull Request n'est ouverte.`
+          ].join("\n"),
+          {
+            phase: "completed",
+            status: "completed",
+            issueNumber: effectiveInput.issueNumber
+          }
+        );
+        await gh.postIssueComment(effectiveInput.issueNumber, mergedComment);
+        return {
+          executed: true,
+          phase: updatedDone.state.phase,
+          status: updatedDone.state.status,
+          active_branch: featureBranch,
+          summary_markdown: mergedComment,
+          created_ticket_numbers: [],
+          feature_pr_url: mergedFeaturePr.html_url
+        };
+      }
 
       if (hasExplicitPlanManifest && !existingFeaturePrCheck) {
         await integratePlanBranchIntoFeature({

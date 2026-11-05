@@ -815,6 +815,40 @@ describe("Lot 1 — escalation comments remind the exact resume command", () => 
   });
 });
 
+describe("Lot 1 — a feature PR is never opened twice for the same epic", () => {
+  it.each([
+    {
+      id: "merged-feature-pr-for-the-epic-marks-the-plan-done-without-rerunning-tickets-or-opening-another",
+      closedPrs: [{ number: 105, html_url: "pr105", merged_at: "2026-11-01T00:00:00Z" }],
+      expectsShortCircuit: true
+    },
+    {
+      id: "closed-unmerged-feature-pr-does-not-stop-the-implementation",
+      closedPrs: [{ number: 104, html_url: "pr104", merged_at: null }],
+      expectsShortCircuit: false
+    },
+    {
+      id: "no-previous-feature-pr-does-not-stop-the-implementation",
+      closedPrs: [],
+      expectsShortCircuit: false
+    }
+  ])("$id", async ({ closedPrs, expectsShortCircuit }) => {
+    const store = await seedState(FEATURE_INTEGRATION_PENDING_STATE);
+    const router = declareImplementationFlow(createGitHubMockRouter(), "success", { taskPr: false, featurePr: false })
+      .on("GET", /\/pulls\?state=closed&head=/, json(closedPrs));
+
+    await run(router, store, { command: "approve", actor: "maintainer", issueNumber: ISSUE, commentId: 900 });
+    const posted = router.requests.filter((r) => r.method === "POST" && r.path === `${R}/issues/${ISSUE}/comments`);
+    const after = await readState(store);
+
+    expect(router.unmatched).toEqual([]);
+    expect(router.calls("POST", `${R}/pulls`)).toBe(0);
+    expect(router.calls("POST", "/v1/chat/completions", "api.openai.com") > 0).toBe(!expectsShortCircuit);
+    expect(after.status === "done").toBe(expectsShortCircuit);
+    expect(JSON.stringify(posted.at(-1)?.body).includes("[#105](pr105) de `feature/77-async-ci-feature` est déjà fusionnée dans `dev`")).toBe(expectsShortCircuit);
+  });
+});
+
 describe("Lot 1 — a human closing the epic before its feature branch reaches dev cancels the plan with an alert", () => {
   function declareClosureReads(
     router: GitHubMockRouter,
