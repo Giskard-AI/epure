@@ -13,6 +13,7 @@ import {
   createInMemoryGitRefStateStore,
   updateIssueStateWithCas
 } from "../src/state/git-ref-state.js";
+import { createGitHubMockRouter, json, notFound } from "./fixtures/github-mock-router.js";
 
 describe("EPURE v1.2 Chantier 1 & 2 — Git Sync, Concurrency & Event-Driven CI Continuation", () => {
   describe("parseEpureCommand for /epure sync, /epure rebase, and /epure continue", () => {
@@ -641,149 +642,74 @@ describe("EPURE v1.2 Chantier 1 & 2 — Git Sync, Concurrency & Event-Driven CI 
 
     it.each([
       {
-        id: "resolves issueNumber from waiting state when workflow_run passes issueNumber=0 and CI fails without throwing Invalid issueNumber 0",
+        id: "ticket-ci-failure-at-exhausted-budget-resolved-from-workflow_run-issueNumber-0-escalates-once-without-sync-or-llm",
         triggerHeadSha: "head-sha-task-203",
         triggerBranch: "task/203-door-auth",
-        expectedExecuted: true,
-        expectedStatus: "suspended"
+        expected: { executed: true, status: "suspended", comments: 1, ciPolls: 2 }
       },
       {
-        id: "returns executed=false without hijacking unrelated waiting state when workflow_run fires on dev with issueNumber=0",
+        id: "workflow_run-on-dev-with-issueNumber-0-leaves-unrelated-waiting-state-untouched",
         triggerHeadSha: "dev-sha-unrelated",
         triggerBranch: "dev",
-        expectedExecuted: false,
-        expectedStatus: "active"
+        expected: { executed: false, status: "active", comments: 0, ciPolls: 0 }
       }
-    ])(
-      "$id",
-      async ({
+    ])("$id", async ({ triggerHeadSha, triggerBranch, expected }) => {
+      const store = createInMemoryGitRefStateStore();
+      await updateIssueStateWithCas({
+        issueNumber: 156,
+        store,
+        mutator: (prev) => ({
+          ...prev,
+          phase: "implementation",
+          subphase: "waiting_ticket_ci",
+          status: "active",
+          active_branch: "feature/156-maps",
+          active_ticket_number: 203,
+          active_task_branch: "task/203-door-auth",
+          active_pr_number: 299,
+          active_head_sha: "head-sha-task-203",
+          code_fix_attempts_used: 3
+        })
+      });
+      const repo = "/repos/acme/demo";
+      const router = createGitHubMockRouter()
+        .on("GET", `${repo}/issues/156`, json({ number: 156, title: "fix(maps): Map Lighting & Doors", body: "- [ ] Authorize door toggles", state: "open" }))
+        .on("GET", `${repo}/issues/156/comments?per_page=100`, json([]))
+        .on("GET", /\/git\/trees\/[^?]+\?recursive=1$/, notFound())
+        .on("GET", /\/actions\/runs\?head_sha=/, json({ workflow_runs: [{ id: 601, name: "CI", path: ".github/workflows/ci.yml", status: "completed", conclusion: "failure" }] }))
+        .on("GET", /\/commits\/[^/]+\/check-runs\?/, json({ check_runs: [{ id: 11, name: "Backend", status: "completed", conclusion: "failure" }, { id: 12, name: "ai-review", status: "completed", conclusion: "success" }] }))
+        .on("GET", /\/check-runs\/\d+\/annotations\?/, json([]))
+        .on("GET", /\/actions\/jobs\/\d+\/logs$/, { status: 200, body: "error TS2322" })
+        .on("GET", /\/labels\/[^/]+$/, json({}))
+        .on("POST", /^\/repos\/acme\/demo\/issues\/(156|203)\/labels$/, json([]))
+        .on("DELETE", /\/issues\/156\/labels\/[^/]+$/, json([]))
+        .on("POST", `${repo}/issues/156/comments`, json({ html_url: "c" }, 201));
+
+      const res = await orchestrateIssueCommand({
+        repository: "acme/demo",
+        issueNumber: 0,
+        command: "continue",
+        commandArgs: "",
+        model: "google/gemini-3.8-flash",
+        commentId: 0,
+        actor: "github-actions[bot]",
+        fallbackGithubToken: "ghs_test",
+        llmApiKey: "key_test",
         triggerHeadSha,
         triggerBranch,
-        expectedExecuted,
-        expectedStatus
-      }) => {
-        const store = createInMemoryGitRefStateStore();
-        await updateIssueStateWithCas({
-          issueNumber: 156,
-          store,
-          mutator: (prev) => ({
-            ...prev,
-            phase: "implementation",
-            subphase: "waiting_ticket_ci",
-            status: "active",
-            active_branch: "feature/156-maps",
-            active_ticket_number: 203,
-            active_task_branch: "task/203-door-auth",
-            active_pr_number: 299,
-            active_head_sha: "head-sha-task-203",
-            code_fix_attempts_used: 3
-          })
-        });
+        asyncCiContinuation: true,
+        stateStore: store,
+        fetchImpl: router.fetch
+      });
 
-        const mockFetch: typeof fetch = async (reqInput, init) => {
-          const url = String(reqInput);
-          if (url.endsWith("/issues/156")) {
-            return new Response(
-              JSON.stringify({
-                number: 156,
-                title: "fix(maps): Map Lighting & Doors",
-                body: "- [ ] Authorize door toggles",
-                labels: [{ name: "ready-for-agent" }]
-              }),
-              { status: 200, headers: { "content-type": "application/json" } }
-            );
-          }
-          if (
-            url.includes("/issues/156/comments") &&
-            (!init?.method || init.method === "GET")
-          ) {
-            return new Response(JSON.stringify([]), {
-              status: 200,
-              headers: { "content-type": "application/json" }
-            });
-          }
-          if (url.includes("/actions/runs")) {
-            return new Response(
-              JSON.stringify({
-                total_count: 1,
-                workflow_runs: [
-                  {
-                    id: 601,
-                    name: "CI",
-                    path: ".github/workflows/ci.yml",
-                    status: "completed",
-                    conclusion: "failure"
-                  }
-                ]
-              }),
-              { status: 200, headers: { "content-type": "application/json" } }
-            );
-          }
-          if (url.includes("/check-runs")) {
-            return new Response(
-              JSON.stringify({
-                total_count: 2,
-                check_runs: [
-                  {
-                    id: 11,
-                    name: "Backend",
-                    status: "completed",
-                    conclusion: "failure"
-                  },
-                  {
-                    id: 12,
-                    name: "ai-review",
-                    status: "completed",
-                    conclusion: "success"
-                  }
-                ]
-              }),
-              { status: 200, headers: { "content-type": "application/json" } }
-            );
-          }
-          if (url.includes("/pulls")) {
-            return new Response(
-              JSON.stringify([
-                {
-                  number: 299,
-                  html_url: "https://github.com/acme/demo/pull/299",
-                  head: {
-                    ref: "task/203-door-auth",
-                    sha: "head-sha-task-203"
-                  },
-                  base: { ref: "feature/156-maps" }
-                }
-              ]),
-              { status: 200, headers: { "content-type": "application/json" } }
-            );
-          }
-          return new Response(JSON.stringify({}), {
-            status: 200,
-            headers: { "content-type": "application/json" }
-          });
-        };
-
-        const res = await orchestrateIssueCommand({
-          repository: "acme/demo",
-          issueNumber: 0,
-          command: "continue",
-          commandArgs: "",
-          model: "google/gemini-3.8-flash",
-          commentId: 0,
-          actor: "github-actions[bot]",
-          fallbackGithubToken: "ghs_test",
-          llmApiKey: "key_test",
-          triggerHeadSha,
-          triggerBranch,
-          asyncCiContinuation: true,
-          stateStore: store,
-          fetchImpl: mockFetch
-        });
-
-        expect(res.executed).toBe(expectedExecuted);
-        expect(res.status).toBe(expectedStatus);
-      }
-    );
+      expect(router.unmatched).toEqual([]);
+      expect(res.executed).toBe(expected.executed);
+      expect(res.status).toBe(expected.status);
+      expect(router.calls("POST", `${repo}/issues/156/comments`)).toBe(expected.comments);
+      expect(router.calls("GET", /\/actions\/runs\?/) + router.calls("GET", /\/check-runs\?/)).toBe(expected.ciPolls);
+      expect(router.calls("POST", `${repo}/merges`)).toBe(0);
+      expect(router.requests.filter((r) => r.host !== "api.github.com")).toEqual([]);
+    });
 
     it.each([
       {

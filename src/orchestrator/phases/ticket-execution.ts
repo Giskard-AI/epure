@@ -37,12 +37,17 @@ import {
 } from "../../security/prompt-injection-guard.js";
 import { processPendingIssueCommentsBatch } from "../../state/comment-batch-cursor.js";
 import {
+  toTerminalState,
   updateIssueStateWithCas,
+  withTicketCodeFixAttempts,
   type GitRefStateStore
 } from "../../state/git-ref-state.js";
 import { appendEpureCommandsSpoiler } from "../formatting/comments.js";
 import { callLlmJson } from "../llm-helper.js";
-import { syncBranchWithBase } from "../github/branch-sync.js";
+import {
+  syncBranchWithBase,
+  type BaseSyncGuard
+} from "../github/branch-sync.js";
 import { loadOrchestratorStateFromGitRef } from "../github/rest-client.js";
 import { EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT } from "../prompts/code-discipline.js";
 import {
@@ -105,7 +110,8 @@ export interface RunTicketExecutionLoopParams {
     | undefined;
   readonly asyncCiContinuation?: boolean | undefined;
   readonly forceOneRemediationRoundOnOpenPr?: boolean | undefined;
-  readonly initialCodeFixAttemptsUsed?: number | undefined;
+  readonly initialCodeFixAttemptsByTicket: Readonly<Record<string, number>>;
+  readonly baseSyncGuard: BaseSyncGuard;
 }
 
 export interface RunTicketExecutionLoopOutcome {
@@ -543,14 +549,14 @@ export async function runTicketExecutionLoop(
         const updatedSuspended = await updateIssueStateWithCas({
           issueNumber: params.issueNumber,
           store: params.store,
-          mutator: (prev) => ({
-            ...prev,
-            phase: "implementation",
-            status: "suspended",
-            active_branch: params.featureBranch,
-            last_processed_comment_id:
-              params.commentId ?? prev.last_processed_comment_id
-          })
+          mutator: (prev) =>
+            toTerminalState(prev, {
+              phase: "implementation",
+              status: "suspended",
+              active_branch: params.featureBranch,
+              last_processed_comment_id:
+                params.commentId ?? prev.last_processed_comment_id
+            })
         });
 
         const unprovenList =
@@ -628,68 +634,74 @@ export async function runTicketExecutionLoop(
         `::group::[EPURE][Ticket #${ticket.ticketIssueNumber}] Initial TDD Implementation (${taskBranch})\n`
       );
     }
-    const featureSync = await syncBranchWithBase({
-      gh: params.gh,
-      targetBranch: params.featureBranch,
-      baseBranch: "dev",
-      issueNumber: params.issueNumber,
-      llmApiKey: params.llmApiKey,
-      fetchImpl: params.fetchImpl,
-      model: params.phaseModels.implementationModel,
-      providers: params.phaseModels.providers,
-      maxTransientRetries: params.phaseModels.maxTransientRetries,
-      transientRetryBackoffSeconds:
-        params.phaseModels.transientRetryBackoffSeconds,
-      requestTimeoutMs: params.phaseModels.requestTimeoutMs,
-      sandboxRunner: params.sandboxRunner,
-      reviewersDir
-    });
-    if (featureSync.status === "escalated") {
-      const escalated = await params.escalateToNeedsHuman({
-        reason: featureSync.escalationReason ?? "merge_conflict_unresolved",
-        ticketNumber: ticket.ticketIssueNumber,
-        branch: params.featureBranch,
-        diagnosticExcerpt: featureSync.diagnosticExcerpt
+    const syncWithBase = await params.baseSyncGuard.needsSync();
+    if (syncWithBase) {
+      const featureSync = await syncBranchWithBase({
+        gh: params.gh,
+        targetBranch: params.featureBranch,
+        baseBranch: "dev",
+        issueNumber: params.issueNumber,
+        llmApiKey: params.llmApiKey,
+        fetchImpl: params.fetchImpl,
+        model: params.phaseModels.implementationModel,
+        providers: params.phaseModels.providers,
+        maxTransientRetries: params.phaseModels.maxTransientRetries,
+        transientRetryBackoffSeconds:
+          params.phaseModels.transientRetryBackoffSeconds,
+        requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+        sandboxRunner: params.sandboxRunner,
+        reviewersDir
       });
-      return {
-        halted: true,
-        result: escalated,
-        verificationProfile,
-        verificationGuideMarkdown
-      };
+      if (featureSync.status === "escalated") {
+        const escalated = await params.escalateToNeedsHuman({
+          reason: featureSync.escalationReason ?? "merge_conflict_unresolved",
+          ticketNumber: ticket.ticketIssueNumber,
+          branch: params.featureBranch,
+          diagnosticExcerpt: featureSync.diagnosticExcerpt
+        });
+        return {
+          halted: true,
+          result: escalated,
+          verificationProfile,
+          verificationGuideMarkdown
+        };
+      }
     }
 
     await params.gh.ensureBranch(taskBranch, params.featureBranch);
 
-    const taskSync = await syncBranchWithBase({
-      gh: params.gh,
-      targetBranch: taskBranch,
-      baseBranch: params.featureBranch,
-      issueNumber: ticket.ticketIssueNumber,
-      llmApiKey: params.llmApiKey,
-      fetchImpl: params.fetchImpl,
-      model: params.phaseModels.implementationModel,
-      providers: params.phaseModels.providers,
-      maxTransientRetries: params.phaseModels.maxTransientRetries,
-      transientRetryBackoffSeconds:
-        params.phaseModels.transientRetryBackoffSeconds,
-      requestTimeoutMs: params.phaseModels.requestTimeoutMs,
-      sandboxRunner: params.sandboxRunner,
-      reviewersDir
-    });
-    if (taskSync.status === "escalated") {
-      const escalated = await params.escalateToNeedsHuman({
-        reason: taskSync.escalationReason ?? "merge_conflict_unresolved",
-        ticketNumber: ticket.ticketIssueNumber,
-        branch: taskBranch,
-        diagnosticExcerpt: taskSync.diagnosticExcerpt
+    if (syncWithBase) {
+      const taskSync = await syncBranchWithBase({
+        gh: params.gh,
+        targetBranch: taskBranch,
+        baseBranch: params.featureBranch,
+        issueNumber: ticket.ticketIssueNumber,
+        llmApiKey: params.llmApiKey,
+        fetchImpl: params.fetchImpl,
+        model: params.phaseModels.implementationModel,
+        providers: params.phaseModels.providers,
+        maxTransientRetries: params.phaseModels.maxTransientRetries,
+        transientRetryBackoffSeconds:
+          params.phaseModels.transientRetryBackoffSeconds,
+        requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+        sandboxRunner: params.sandboxRunner,
+        reviewersDir
       });
-      return {
-        halted: true,
-        result: escalated,
-        verificationProfile,
-        verificationGuideMarkdown
-      };
+      if (taskSync.status === "escalated") {
+        const escalated = await params.escalateToNeedsHuman({
+          reason: taskSync.escalationReason ?? "merge_conflict_unresolved",
+          ticketNumber: ticket.ticketIssueNumber,
+          branch: taskBranch,
+          diagnosticExcerpt: taskSync.diagnosticExcerpt
+        });
+        return {
+          halted: true,
+          result: escalated,
+          verificationProfile,
+          verificationGuideMarkdown
+        };
+      }
+      await params.baseSyncGuard.markSynced();
     }
 
     const sandboxWorkspace = prepareRepositorySandboxWorkspace({
@@ -733,7 +745,10 @@ export async function runTicketExecutionLoop(
 
     let taskPr: { number: number; html_url: string; head_sha: string } | undefined;
     let fixAttempt = 0;
-    let reviewFixAttempt = 0;
+    const initialTicketFixAttempts =
+      params.initialCodeFixAttemptsByTicket[String(ticket.ticketIssueNumber)] ??
+      0;
+    let reviewFixAttempt = initialTicketFixAttempts;
 
     try {
       const ticketChangedFilesMap = new Map<string, string>();
@@ -1347,15 +1362,18 @@ export async function runTicketExecutionLoop(
           verificationProfile.wait_for_external_ci !== false &&
           expectedWorkflows.length > 0 &&
           (!params.forceOneRemediationRoundOnOpenPr ||
-            passParams.reviewFixAttemptsUsed >
-              (params.initialCodeFixAttemptsUsed ?? 0));
+            passParams.reviewFixAttemptsUsed > initialTicketFixAttempts);
 
         if (shouldReleaseRunnerForAsyncCi) {
           const updatedWaiting = await updateIssueStateWithCas({
             issueNumber: params.issueNumber,
             store: params.store,
             mutator: (prev) => ({
-              ...prev,
+              ...withTicketCodeFixAttempts(
+                prev,
+                ticket.ticketIssueNumber,
+                passParams.reviewFixAttemptsUsed
+              ),
               phase: "implementation",
               status: "active",
               active_branch: params.featureBranch,
@@ -1363,8 +1381,7 @@ export async function runTicketExecutionLoop(
               active_ticket_number: ticket.ticketIssueNumber,
               active_task_branch: taskBranch,
               active_pr_number: taskPr!.number,
-              active_head_sha: passParams.headSha,
-              code_fix_attempts_used: passParams.reviewFixAttemptsUsed
+              active_head_sha: passParams.headSha
             })
           });
           const asyncSummary = [
@@ -1375,7 +1392,7 @@ export async function runTicketExecutionLoop(
             `- **Branche du ticket** : \`${taskBranch}\` -> \`${params.featureBranch}\``,
             `- **HEAD SHA** : \`${passParams.headSha}\``,
             `- **Revue Multi-Agents (\`ai-review\`)** : \`${reviewRes.conclusion}\``,
-            "- **Action** : Runner GitHub Actions libéré (`exit 0`). Reprise automatique sur `check_suite` / `workflow_run: completed` ou `/epure continue`."
+            "- **Action** : Runner GitHub Actions libéré (`exit 0`). Reprise automatique sur `workflow_run: completed` ou `/epure continue`."
           ].join("\n");
           return {
             reviewResult: reviewRes,
@@ -1441,8 +1458,6 @@ export async function runTicketExecutionLoop(
         };
       };
 
-      reviewFixAttempt = params.initialCodeFixAttemptsUsed ?? 0;
-
       const initialPass = await runStage2AndStage3ForTaskPr({
         headSha: currentPrHeadSha,
         isReReviewPass: false,
@@ -1469,7 +1484,6 @@ export async function runTicketExecutionLoop(
           branch: taskBranch,
           prNumber: taskPr.number,
           prUrl: taskPr.html_url,
-          codeFixAttemptsUsed: 0,
           failedChecks: ciGateResult.failedChecks,
           mustFixFindings: reviewResult.must_fix_findings,
           diagnosticExcerpt: ciGateResult.formattedDiagnostics
@@ -1493,7 +1507,6 @@ export async function runTicketExecutionLoop(
           branch: taskBranch,
           prNumber: taskPr.number,
           prUrl: taskPr.html_url,
-          codeFixAttemptsUsed: 0,
           failedChecks: ciGateResult.failedChecks,
           mustFixFindings: reviewResult.must_fix_findings,
           diagnosticExcerpt: ciGateResult.formattedDiagnostics
@@ -1515,11 +1528,12 @@ export async function runTicketExecutionLoop(
           issueNumber: params.issueNumber,
           store: params.store,
           mutator: (prev) => ({
-            ...prev,
-            code_fix_attempts_used: reviewFixAttempt,
-            transient_retries_used:
-              params.getTotalTransientRetriesUsed() ||
-              prev.transient_retries_used
+            ...withTicketCodeFixAttempts(
+              prev,
+              ticket.ticketIssueNumber,
+              reviewFixAttempt
+            ),
+            transient_retries_used: params.getTotalTransientRetriesUsed()
           })
         });
 

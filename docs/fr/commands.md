@@ -32,7 +32,7 @@ Toutes les commandes `/epure` se postent sous forme de commentaires sur une Issu
   slug="epure-ci-actions-flow"
   locale="fr"
   title="Pipeline Événementiel GitHub Actions, Custom Actions & CI d'EPURE"
-  caption="Pipeline complet reliant issue_comment, la continuation CI check_suite/workflow_run, les portes de Pull Request et la promotion de release entre jobs sans secret et environnements cloisonnés."
+  caption="Pipeline complet reliant issue_comment, la continuation CI workflow_run, les portes de Pull Request et la promotion de release entre jobs sans secret et environnements cloisonnés."
 />
 
 ### Fonctionnement Détaillé du Pipeline `epure-issue-command.yml`
@@ -45,9 +45,9 @@ Toutes les commandes `/epure` se postent sous forme de commentaires sur une Issu
    - S'exécute sur `ubuntu-26.04` dans l'environnement GitHub dédié (`environment: <llm-env>`, `epure-agent` par défaut ; autres exemples : `llm`, `openai`, `anthropic` ou `gemini`) **uniquement après** validation par `authorize-command` (ou lors d'un événement de continuation CI autorisé).
    - Reçoit les secrets cloisonnés dans l'environnement (`EPURE_AGENT_APP_ID`, `EPURE_AGENT_APP_PRIVATE_KEY` et `LLM_API_KEY` ou clé fournisseur) et installe l'outillage de sandbox noyau (`bubblewrap`, `landrun`, `rtk`).
    - Lors de `/epure to-tickets`, crée les sous-issues GitHub et câble nativement le graphe relationnel GitHub (`sub_issues` parent-enfant + `dependencies/blocked_by`).
-3. **Réveil Événementiel Automatique de la CI (`check_suite.completed` / `workflow_run.completed`)** :
+3. **Réveil Événementiel Automatique de la CI (`workflow_run.completed`)** :
    - Avec `async_ci_continuation: "true"`, dès l'ouverture d'une PR `task/* -> feature/*` (`waiting_ticket_ci`) ou `feature/* -> dev` (`waiting_feature_ci`), l'orchestrateur persiste la PR et le `head_sha` dans `refs/epure/state/<issue>` et termine immédiatement (`exit 0`) pour libérer le runner GitHub Actions.
-   - Dès que la CI externe se termine sur `task/*` ou `feature/*`, l'événement `check_suite.completed` ou `workflow_run.completed` réveille `orchestrate-command` avec `command: "continue"`, `trigger_head_sha` et `trigger_branch` afin d'exécuter la revue multi-agents Stage 3, le squash sémantique IA ou un round d'auto-remédiation unifié.
+   - Dès que la CI externe se termine sur `task/*` ou `feature/*`, l'événement `workflow_run.completed` réveille `orchestrate-command` avec `command: "continue"`, `trigger_head_sha` et `trigger_branch` afin d'exécuter la revue multi-agents Stage 3, le squash sémantique IA ou un round d'auto-remédiation unifié. Le réveil n'agit que si l'issue est `active` en attente de CI (`waiting_*`) sur ce même `trigger_head_sha` ; il ne reprend jamais une issue `suspended`, `done` ou `cancelled`.
 4. **Portes de Contrat PR & Promotion de Release Protégée** :
    - Sur `pull_request` (`dev`, `main`, `feature/**`), `epure-check.yml` (`actions/epure-contract`), `pr-title.yml` et `ci.yml` s'exécutent en `contents: read` sans aucun secret privilégié.
    - Sur `workflow_dispatch` humain (`semver_tag`, `expected_dev_sha`), `release.yml` appelle le workflow réutilisable `release-promote.yml` d'EPURE, qui s'exécute dans l'environnement protégé `environment: release` (`EPURE_RELEASE_APP_ID`, `EPURE_RELEASE_APP_PRIVATE_KEY`), vérifie la frontière de rôle avec `actions/verify-app-role`, promeut `dev -> main` en fast-forward, pose le tag et publie la GitHub Release.

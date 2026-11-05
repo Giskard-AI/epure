@@ -44,12 +44,14 @@ L'exploitation d'`EPURE` sur plusieurs **Issues de pilotage** exécutées en par
   - `active_ticket_number?: number`, `active_task_branch?: string`, `active_pr_number?: number`, `active_head_sha?: string`.
 - Lorsque le mode événementiel (`asyncCiContinuation`) est actif et que des workflows CI externes sont attendus sur une PR nouvellement ouverte ou mise à jour :
   - Dès que `ai-review` (et `impeccable-gate` si UI) est publié sur le `head_sha`, l'orchestrateur persiste `subphase: "waiting_ticket_ci"` (ou `"waiting_feature_ci"`) dans `refs/epure/state/<issue>` et **termine immédiatement le job (`exit 0`)**, libérant le runner GitHub Actions.
-- Le workflow `.github/workflows/epure-issue-command.yml` écoute `check_suite: types: [completed]` et `workflow_run: { workflows: ["CI"], types: [completed] }` (et supporte la commande manuelle de secours `/epure continue`) pour invoquer l'orchestrateur avec `command: "continue"` :
-  - L'orchestrateur retrouve l'issue correspondante via `listIssueStates()` (`active_head_sha` / `active_task_branch` / `active_branch`).
+- Le workflow `.github/workflows/epure-issue-command.yml` écoute `workflow_run: { workflows: ["CI"], types: [completed] }` (et supporte la commande manuelle de secours `/epure continue`) pour invoquer l'orchestrateur avec `command: "continue"` :
+  - L'orchestrateur retrouve l'issue correspondante via `listIssueStates()` (`active_head_sha` / `active_task_branch` / `active_branch`), parmi les seuls états `active` en sous-phase `waiting_*`.
+  - Un réveil automatique (`workflow_run` ou `/epure continue` sans commentaire) s'arrête immédiatement si l'état n'est pas `active` en sous-phase `waiting_*`, ou si le SHA de l'événement diffère de `active_head_sha`.
   - Si des workflows CI externes attendus sur `active_head_sha` sont encore en cours (`queued` / `in_progress`), le job quitte immédiatement (`exit 0`).
   - Lorsque tous les workflows CI externes du SHA sont terminés :
     - Si la CI externe et `ai-review` sont verts : il squash-merge la sous-PR `task/* -> feature/*`, clôt le ticket, synchronise `feature/*` avec `dev` et enchaîne immédiatement le ticket suivant dans le même run (ou finalise la PR `feature/* -> dev` en `phase: "review", status: "awaiting_human_approval"`).
-    - Si la CI externe ou `ai-review` est en échec : sous réserve du budget `max_code_fix_attempts = 3`, il exécute un round de remédiation unifié, pousse le nouveau SHA, met à jour `active_head_sha` et relâche à nouveau le runner.
+    - Si la CI externe ou `ai-review` est en échec : sous réserve du budget `max_code_fix_attempts = 3` de l'élément actif (ticket ou PR de fonctionnalité), il exécute un round de remédiation unifié, pousse le nouveau SHA, met à jour `active_head_sha` et relâche à nouveau le runner. Budget épuisé, il escalade une seule fois en `needs-human` sans synchronisation, revue ni appel LLM.
+  - Lors d'une reprise automatique, la synchronisation `dev -> feature/* -> task/*` n'est rejouée que si `dev` a avancé depuis `last_synced_base_sha`.
 
 ### 3. Intégration de Ponytail 5 et de l'Auditeur de Spécification Goldfish zéro-contexte (Google EGM)
 

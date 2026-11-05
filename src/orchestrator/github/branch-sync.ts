@@ -6,6 +6,11 @@ import type {
 } from "../../sandbox/llm-sandbox.js";
 import { validateWorkspaceFileOperations } from "../../sandbox/polyglot-workspace-runner.js";
 import { wrapUntrustedContent } from "../../security/prompt-injection-guard.js";
+import {
+  buildIssueStateRefName,
+  updateIssueStateWithCas,
+  type GitRefStateStore
+} from "../../state/git-ref-state.js";
 import { callLlmJson } from "../llm-helper.js";
 import { EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT } from "../prompts/code-discipline.js";
 import {
@@ -900,6 +905,48 @@ export interface SyncBranchWithBaseResult {
     | "sensitive_path_violation"
     | undefined;
   readonly diagnosticExcerpt?: string | undefined;
+}
+
+export interface BaseSyncGuard {
+  needsSync(): Promise<boolean>;
+  markSynced(): Promise<void>;
+}
+
+/**
+ * Gates the `dev -> feature/* -> task/*` synchronization chain: an automatic resume skips it
+ * unless `baseBranch` moved since the SHA recorded in `last_synced_base_sha`.
+ */
+export function createBaseSyncGuard(input: {
+  readonly gh: Pick<GitHubRestHelper, "getDefaultBranchSha">;
+  readonly store: GitRefStateStore;
+  readonly issueNumber: number;
+  readonly baseBranch: string;
+  readonly automaticResume: boolean;
+}): BaseSyncGuard {
+  let baseSha: string | null = null;
+  return {
+    needsSync: async () => {
+      baseSha = await input.gh.getDefaultBranchSha(input.baseBranch);
+      if (!input.automaticResume || baseSha === null) {
+        return true;
+      }
+      const { state } = await input.store.readRef(
+        buildIssueStateRefName(input.issueNumber)
+      );
+      return state?.last_synced_base_sha !== baseSha;
+    },
+    markSynced: async () => {
+      const syncedSha = baseSha;
+      if (syncedSha === null) {
+        return;
+      }
+      await updateIssueStateWithCas({
+        issueNumber: input.issueNumber,
+        store: input.store,
+        mutator: (prev) => ({ ...prev, last_synced_base_sha: syncedSha })
+      });
+    }
+  };
 }
 
 /**

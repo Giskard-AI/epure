@@ -16,7 +16,6 @@ import {
   type GitHubMockRouter
 } from "./fixtures/github-mock-router.js";
 
-// `it.fails` cases document invariants the orchestrator violates today; flip them to `it` once fixed.
 const REPO = "acme/demo";
 const ISSUE = 77;
 const FEATURE_BRANCH = "feature/77-async-ci-feature";
@@ -84,13 +83,19 @@ function declareIssueReads(router: GitHubMockRouter): GitHubMockRouter {
     .on("GET", new RegExp(`^${R_RX}/git/trees/[^?]+\\?recursive=1$`), notFound());
 }
 
+type CiOutcome = "success" | "failure" | "pending";
+
 function declareCiSnapshot(
   router: GitHubMockRouter,
-  conclusion: "success" | "failure"
+  outcome: CiOutcome
 ): GitHubMockRouter {
+  const run =
+    outcome === "pending"
+      ? { status: "in_progress", conclusion: null }
+      : { status: "completed", conclusion: outcome };
   return router
-    .on("GET", /\/actions\/runs\?head_sha=/, json({ workflow_runs: [{ id: 501, name: "CI", path: ".github/workflows/ci.yml", status: "completed", conclusion }] }))
-    .on("GET", /\/commits\/[^/]+\/check-runs\?/, json({ check_runs: [{ id: 1, name: "CI", status: "completed", conclusion }, { id: 2, name: "ai-review", status: "completed", conclusion: "success" }] }));
+    .on("GET", /\/actions\/runs\?head_sha=/, json({ workflow_runs: [{ id: 501, name: "CI", path: ".github/workflows/ci.yml", ...run }] }))
+    .on("GET", /\/commits\/[^/]+\/check-runs\?/, json({ check_runs: [{ id: 1, name: "CI", ...run }, { id: 2, name: "ai-review", status: "completed", conclusion: "success" }] }));
 }
 
 function declareIssueWrites(router: GitHubMockRouter): GitHubMockRouter {
@@ -109,11 +114,11 @@ function ciPollCalls(router: GitHubMockRouter): number {
 }
 
 describe("Invariant 1 — automatic continuation runs only when status is active and subphase is waiting_*", () => {
-  it.fails.each([
-    { id: "suspended-waiting_feature_ci-resumed-by-continue-without-comment", status: "suspended", trigger: TRIGGERS.continueWithoutComment },
-    { id: "suspended-waiting_feature_ci-resumed-by-workflow_run-head-sha", status: "suspended", trigger: TRIGGERS.workflowRun },
-    { id: "suspended-waiting_feature_ci-resumed-by-check_suite-branch", status: "suspended", trigger: TRIGGERS.checkSuite },
-    { id: "awaiting_human_approval-waiting_feature_ci-resumed-by-workflow_run", status: "awaiting_human_approval", trigger: TRIGGERS.workflowRun }
+  it.each([
+    { id: "suspended-waiting_feature_ci-not-resumed-by-continue-without-comment", status: "suspended", trigger: TRIGGERS.continueWithoutComment },
+    { id: "suspended-waiting_feature_ci-not-resumed-by-workflow_run-head-sha", status: "suspended", trigger: TRIGGERS.workflowRun },
+    { id: "suspended-waiting_feature_ci-not-resumed-by-check_suite-branch", status: "suspended", trigger: TRIGGERS.checkSuite },
+    { id: "awaiting_human_approval-waiting_feature_ci-not-resumed-by-workflow_run", status: "awaiting_human_approval", trigger: TRIGGERS.workflowRun }
   ] as const)("$id", async ({ status, trigger }) => {
     const store = await seedState({ status, subphase: "waiting_feature_ci" });
     const before = await readState(store);
@@ -182,7 +187,7 @@ const FEATURE_INTEGRATION_PENDING_STATE: Partial<EpureIssueState> = {
 
 function declareImplementationFlow(
   router: GitHubMockRouter,
-  ciConclusion: "success" | "failure",
+  ciConclusion: CiOutcome,
   openPrs: { readonly taskPr: boolean; readonly featurePr: boolean }
 ): GitHubMockRouter {
   return declareIssueWrites(declareCiSnapshot(declareIssueReads(router), ciConclusion))
@@ -204,15 +209,21 @@ function declareImplementationFlow(
             : []
       );
     })
-    .onHost("generativelanguage.googleapis.com", "POST", /:generateContent\?/, json({
-      candidates: [{ content: { parts: [{ text: JSON.stringify({ summary: "ok", findings: [] }) }] } }]
-    }));
+    .onHost("api.openai.com", "POST", "/v1/chat/completions", (req) => {
+      const schemaName = (req.body as { response_format?: { json_schema?: { name?: string } } })
+        .response_format?.json_schema?.name;
+      const payload =
+        schemaName === "squash_commit_payload"
+          ? { title: "feat: ship it", body: "", pr_title: "feat: ship it", commit_title: "feat: ship it", commit_body: "", bullets: ["- ship it", "- test it"] }
+          : { summary: "ok", findings: [] };
+      return json({ choices: [{ message: { content: JSON.stringify(payload) } }] });
+    });
 }
 
 describe("Invariant 2 — suspended, done and cancelled imply subphase idle and empty active_* fields", () => {
-  it.fails.each([
+  it.each([
     {
-      id: "remediation-exhausted-escalation-keeps-subphase-and-active-fields",
+      id: "remediation-exhausted-escalation-clears-subphase-and-active-fields",
       seed: EXHAUSTED_TICKET_STATE,
       expectedStatus: "suspended",
       ciConclusion: "failure",
@@ -220,7 +231,7 @@ describe("Invariant 2 — suspended, done and cancelled imply subphase idle and 
       input: { command: "continue", actor: "github-actions[bot]", ...TRIGGERS.workflowRun }
     },
     {
-      id: "done-after-feature-integration-keeps-stale-active-fields",
+      id: "done-after-feature-integration-clears-active-fields",
       seed: FEATURE_INTEGRATION_PENDING_STATE,
       expectedStatus: "done",
       ciConclusion: "success",
@@ -239,15 +250,15 @@ describe("Invariant 2 — suspended, done and cancelled imply subphase idle and 
     expect(terminalResidue(after)).toEqual(CLEAN_TERMINAL);
   });
 
-  it.fails.each([
+  it.each([
     {
-      id: "cancel-command-while-waiting_ticket_ci-keeps-subphase-and-active-fields",
+      id: "cancel-command-while-waiting_ticket_ci-clears-subphase-and-active-fields",
       expectedStatus: "cancelled",
       declare: (router: GitHubMockRouter) => declareIssueWrites(router),
       input: { command: "cancel", actor: "maintainer", issueNumber: ISSUE, commentId: 501 }
     },
     {
-      id: "global-catch-suspension-on-github-403-rate-limit-keeps-subphase-and-active-fields",
+      id: "global-catch-suspension-on-github-403-rate-limit-clears-subphase-and-active-fields",
       expectedStatus: "suspended",
       declare: (router: GitHubMockRouter) =>
         declareIssueWrites(router).on("GET", `${R}/issues/${ISSUE}`, primaryRateLimit(1_800_000_000)),
@@ -272,10 +283,10 @@ describe("Invariant 2 — suspended, done and cancelled imply subphase idle and 
 });
 
 describe("Invariant 3 — only an explicit human command gets an issue out of cancelled or done", () => {
-  it.fails.each([
-    { id: "cancelled-with-stale-waiting_feature_ci-reactivated-by-workflow_run", status: "cancelled", phase: "implementation", trigger: TRIGGERS.workflowRun },
-    { id: "cancelled-with-stale-waiting_feature_ci-reactivated-by-continue-without-comment", status: "cancelled", phase: "implementation", trigger: TRIGGERS.continueWithoutComment },
-    { id: "done-with-stale-waiting_feature_ci-reactivated-by-check_suite", status: "done", phase: "completed", trigger: TRIGGERS.checkSuite }
+  it.each([
+    { id: "cancelled-with-stale-waiting_feature_ci-not-reactivated-by-workflow_run", status: "cancelled", phase: "implementation", trigger: TRIGGERS.workflowRun },
+    { id: "cancelled-with-stale-waiting_feature_ci-not-reactivated-by-continue-without-comment", status: "cancelled", phase: "implementation", trigger: TRIGGERS.continueWithoutComment },
+    { id: "done-with-stale-waiting_feature_ci-not-reactivated-by-check_suite", status: "done", phase: "completed", trigger: TRIGGERS.checkSuite }
   ] as const)("$id", async ({ status, phase, trigger }) => {
     const store = await seedState({ status, phase, subphase: "waiting_feature_ci" });
     const router = declareIssueWrites(declareCiSnapshot(declareIssueReads(createGitHubMockRouter()), "success"))
@@ -305,7 +316,7 @@ describe("Invariant 3 — only an explicit human command gets an issue out of ca
 });
 
 describe("Invariant 4 — exhausted remediation budget escalates exactly once with no sync, review or LLM call", () => {
-  it.fails.each([
+  it.each([
     { id: "ticket-ci-failure-at-3-of-3-attempts-resumed-by-workflow_run", trigger: TRIGGERS.workflowRun },
     { id: "ticket-ci-failure-at-3-of-3-attempts-resumed-by-continue-without-comment", trigger: TRIGGERS.continueWithoutComment }
   ] as const)("$id", async ({ trigger }) => {
@@ -320,5 +331,203 @@ describe("Invariant 4 — exhausted remediation budget escalates exactly once wi
     expect(router.requests.filter((r) => r.host !== "api.github.com")).toEqual([]);
     expect(router.calls("POST", `${R}/issues/${ISSUE}/comments`)).toBe(1);
     expect((await readState(store)).status).toBe("suspended");
+  });
+});
+
+const TICKET = ISSUE + 1;
+const STALE_SHA = "stale-sha-from-previous-push";
+
+const SOURCES = {
+  "workflow_run": TRIGGERS.workflowRun,
+  "workflow_run-stale-sha": { ...TRIGGERS.workflowRun, triggerHeadSha: STALE_SHA },
+  "workflow_run-stale-sha-with-issue-number": { ...TRIGGERS.workflowRun, issueNumber: ISSUE, triggerHeadSha: STALE_SHA },
+  "continue-without-comment": TRIGGERS.continueWithoutComment
+} satisfies Record<string, Trigger>;
+
+type Expected = "none" | "resume" | "fix_round" | "escalation";
+
+function seedFor(row: {
+  readonly status: EpureIssueState["status"];
+  readonly subphase: NonNullable<EpureIssueState["subphase"]>;
+  readonly attempts: number;
+}): Partial<EpureIssueState> {
+  const scope =
+    row.subphase === "waiting_feature_ci"
+      ? { feature_code_fix_attempts_used: row.attempts }
+      : { active_ticket_number: TICKET, active_task_branch: TASK_BRANCH, active_pr_number: 106, code_fix_attempts_by_ticket: { [String(TICKET)]: row.attempts } };
+  return { status: row.status, phase: row.status === "done" ? "completed" : "implementation", subphase: row.subphase, ...scope };
+}
+
+function declareFullFlow(ci: CiOutcome): GitHubMockRouter {
+  return declareImplementationFlow(createGitHubMockRouter(), ci, { taskPr: true, featurePr: true })
+    .on("POST", `${R}/issues/${TICKET}/labels`, json([]))
+    .onHost("api.openai.com", "POST", "/v1/chat/completions", json({ error: { message: "invalid request" } }, 400));
+}
+
+function llmCalls(router: GitHubMockRouter): number {
+  return router.requests.filter((r) => r.host !== "api.github.com").length;
+}
+
+describe("Lot 1 — automatic entry decision table (status x subphase x event source x budget)", () => {
+  it.each([
+    { id: "suspended-waiting_ticket_ci-workflow_run-exhausted-budget-does-nothing", status: "suspended", subphase: "waiting_ticket_ci", source: "workflow_run", attempts: 3, ci: "failure", expected: "none" },
+    { id: "suspended-idle-continue-without-comment-fresh-budget-does-nothing", status: "suspended", subphase: "idle", source: "continue-without-comment", attempts: 0, ci: "success", expected: "none" },
+    { id: "awaiting_human_approval-waiting_feature_ci-workflow_run-does-nothing", status: "awaiting_human_approval", subphase: "waiting_feature_ci", source: "workflow_run", attempts: 0, ci: "success", expected: "none" },
+    { id: "cancelled-waiting_ticket_ci-workflow_run-does-nothing", status: "cancelled", subphase: "waiting_ticket_ci", source: "workflow_run", attempts: 3, ci: "failure", expected: "none" },
+    { id: "done-idle-continue-without-comment-does-nothing", status: "done", subphase: "idle", source: "continue-without-comment", attempts: 0, ci: "success", expected: "none" },
+    { id: "active-idle-workflow_run-does-nothing", status: "active", subphase: "idle", source: "workflow_run", attempts: 0, ci: "failure", expected: "none" },
+    { id: "active-waiting_ticket_ci-workflow_run-on-stale-sha-does-nothing", status: "active", subphase: "waiting_ticket_ci", source: "workflow_run-stale-sha", attempts: 3, ci: "failure", expected: "none" },
+    { id: "active-waiting_feature_ci-workflow_run-on-stale-sha-does-nothing", status: "active", subphase: "waiting_feature_ci", source: "workflow_run-stale-sha", attempts: 0, ci: "success", expected: "none" },
+    { id: "active-waiting_ticket_ci-workflow_run-on-stale-sha-for-known-issue-does-nothing", status: "active", subphase: "waiting_ticket_ci", source: "workflow_run-stale-sha-with-issue-number", attempts: 3, ci: "failure", expected: "none" },
+    { id: "active-waiting_ticket_ci-workflow_run-ci-still-running-polls-without-writing", status: "active", subphase: "waiting_ticket_ci", source: "workflow_run", attempts: 1, ci: "pending", expected: "resume" },
+    { id: "active-waiting_feature_ci-workflow_run-green-ci-at-exhausted-budget-moves-to-review", status: "active", subphase: "waiting_feature_ci", source: "workflow_run", attempts: 3, ci: "success", expected: "resume" },
+    { id: "active-waiting_feature_ci-continue-without-comment-green-ci-moves-to-review", status: "active", subphase: "waiting_feature_ci", source: "continue-without-comment", attempts: 0, ci: "success", expected: "resume" },
+    { id: "active-waiting_ticket_ci-workflow_run-red-ci-with-budget-left-runs-one-fix-round", status: "active", subphase: "waiting_ticket_ci", source: "workflow_run", attempts: 2, ci: "failure", expected: "fix_round" },
+    { id: "active-waiting_ticket_ci-workflow_run-red-ci-at-exhausted-budget-escalates-once", status: "active", subphase: "waiting_ticket_ci", source: "workflow_run", attempts: 3, ci: "failure", expected: "escalation" },
+    { id: "active-waiting_ticket_ci-continue-without-comment-red-ci-at-exhausted-budget-escalates-once", status: "active", subphase: "waiting_ticket_ci", source: "continue-without-comment", attempts: 3, ci: "failure", expected: "escalation" },
+    { id: "active-waiting_feature_ci-workflow_run-red-ci-at-exhausted-feature-budget-escalates-once", status: "active", subphase: "waiting_feature_ci", source: "workflow_run", attempts: 3, ci: "failure", expected: "escalation" }
+  ] as const satisfies ReadonlyArray<{
+    id: string;
+    status: EpureIssueState["status"];
+    subphase: NonNullable<EpureIssueState["subphase"]>;
+    source: keyof typeof SOURCES;
+    attempts: number;
+    ci: CiOutcome;
+    expected: Expected;
+  }>)("$id", async (row) => {
+    const store = await seedState(seedFor(row));
+    const before = await readState(store);
+    const router = declareFullFlow(row.ci);
+
+    const res = await run(router, store, { command: "continue", actor: "github-actions[bot]", ...SOURCES[row.source] });
+    const after = await readState(store);
+    const comments = router.calls("POST", `${R}/issues/${ISSUE}/comments`);
+
+    expect(router.unmatched).toEqual([]);
+    switch (row.expected) {
+      case "none":
+        expect(res.executed).toBe(false);
+        expect(ciPollCalls(router)).toBe(0);
+        expect(after).toEqual(before);
+        break;
+      case "resume":
+        expect(ciPollCalls(router)).toBeGreaterThan(0);
+        expect(llmCalls(router)).toBe(0);
+        expect(after.status).not.toBe("suspended");
+        expect(after.last_escalation).toBeUndefined();
+        if (row.ci === "pending") {
+          expect(after).toEqual(before);
+          expect(comments).toBe(0);
+        } else {
+          expect(after).toMatchObject({ phase: "review", status: "awaiting_human_approval", subphase: "idle" });
+        }
+        break;
+      case "fix_round":
+        expect(llmCalls(router)).toBeGreaterThan(0);
+        expect(after.last_escalation?.reason).not.toBe("remediation_exhausted");
+        break;
+      case "escalation":
+        expect(comments).toBe(1);
+        expect(llmCalls(router)).toBe(0);
+        expect(router.calls("POST", `${R}/merges`)).toBe(0);
+        expect(after).toMatchObject({ status: "suspended", last_escalation: { reason: "remediation_exhausted", head_sha: HEAD_SHA } });
+        expect(terminalResidue(after)).toEqual(CLEAN_TERMINAL);
+        break;
+    }
+  });
+});
+
+describe("Lot 1 — event sequences that used to loop", () => {
+  it("cancel-then-workflow_run-on-the-same-head-sha-leaves-the-issue-cancelled", async () => {
+    const store = await seedState(seedFor({ status: "active", subphase: "waiting_ticket_ci", attempts: 1 }));
+    const router = declareFullFlow("failure");
+
+    await run(router, store, { command: "cancel", actor: "maintainer", issueNumber: ISSUE, commentId: 501 });
+    const cancelled = await readState(store);
+    const res = await run(router, store, { command: "continue", actor: "github-actions[bot]", ...TRIGGERS.workflowRun });
+
+    expect(router.unmatched).toEqual([]);
+    expect(cancelled.status).toBe("cancelled");
+    expect(res.executed).toBe(false);
+    expect(ciPollCalls(router)).toBe(0);
+    expect(await readState(store)).toEqual(cancelled);
+  });
+
+  it.each([
+    { id: "done-with-leftover-waiting_feature_ci-ignores-workflow_run-on-old-head-sha", trigger: TRIGGERS.workflowRun },
+    { id: "done-with-leftover-waiting_feature_ci-ignores-continue-without-comment", trigger: TRIGGERS.continueWithoutComment }
+  ] as const)("$id", async ({ trigger }) => {
+    const store = await seedState({ status: "done", phase: "completed", subphase: "waiting_feature_ci" });
+    const before = await readState(store);
+    const router = declareFullFlow("success");
+
+    const res = await run(router, store, { command: "continue", actor: "github-actions[bot]", ...trigger });
+
+    expect(router.unmatched).toEqual([]);
+    expect(res.executed).toBe(false);
+    expect(ciPollCalls(router)).toBe(0);
+    expect(await readState(store)).toEqual(before);
+  });
+
+  it("two-successive-automatic-resumes-escalate-once-then-ignore-the-suspended-state", async () => {
+    const store = await seedState(seedFor({ status: "active", subphase: "waiting_ticket_ci", attempts: 3 }));
+    const router = declareFullFlow("failure");
+
+    const first = await run(router, store, { command: "continue", actor: "github-actions[bot]", ...TRIGGERS.workflowRun });
+    const suspended = await readState(store);
+    const second = await run(router, store, { command: "continue", actor: "github-actions[bot]", ...TRIGGERS.continueWithoutComment });
+
+    expect(router.unmatched).toEqual([]);
+    expect([first.executed, second.executed]).toEqual([true, false]);
+    expect(suspended.status).toBe("suspended");
+    expect(router.calls("POST", `${R}/issues/${ISSUE}/comments`)).toBe(1);
+    expect(await readState(store)).toEqual(suspended);
+  });
+
+  it("escalation-already-recorded-for-the-same-reason-and-sha-posts-no-new-comment", async () => {
+    const store = await seedState({
+      ...seedFor({ status: "active", subphase: "waiting_ticket_ci", attempts: 3 }),
+      last_escalation: { reason: "remediation_exhausted", head_sha: HEAD_SHA, ticket_number: TICKET, budget_scope: "ticket" }
+    });
+    const router = declareFullFlow("failure");
+
+    await run(router, store, { command: "continue", actor: "github-actions[bot]", ...TRIGGERS.workflowRun });
+
+    expect(router.unmatched).toEqual([]);
+    expect(router.calls("POST", `${R}/issues/${ISSUE}/comments`)).toBe(0);
+    expect((await readState(store)).status).toBe("suspended");
+  });
+
+  it("plain-human-reply-does-not-resume-a-suspended-implementation", async () => {
+    const store = await seedState({ status: "suspended", subphase: "idle" });
+    const before = await readState(store);
+    const router = declareFullFlow("success");
+
+    await run(router, store, { command: "reply", actor: "maintainer", issueNumber: ISSUE, commentId: 900 });
+
+    expect(router.unmatched).toEqual([]);
+    expect(llmCalls(router)).toBe(0);
+    expect(router.calls("POST", `${R}/merges`)).toBe(0);
+    expect((await readState(store)).status).toBe(before.status);
+  });
+});
+
+describe("Lot 1 — automatic resume skips dev -> feature -> task sync unless dev moved", () => {
+  it.each([
+    { id: "dev-unchanged-since-last-sync-skips-both-merges", lastSyncedBaseSha: "branch-sha", expectedMerges: 0 },
+    { id: "dev-advanced-since-last-sync-merges-and-records-new-base-sha", lastSyncedBaseSha: "older-dev-sha", expectedMerges: 2 },
+    { id: "legacy-state-without-recorded-base-sha-syncs-once", lastSyncedBaseSha: undefined, expectedMerges: 2 }
+  ] as const)("$id", async ({ lastSyncedBaseSha, expectedMerges }) => {
+    const store = await seedState({
+      ...seedFor({ status: "active", subphase: "waiting_ticket_ci", attempts: 1 }),
+      last_synced_base_sha: lastSyncedBaseSha
+    });
+    const router = declareFullFlow("failure");
+
+    await run(router, store, { command: "continue", actor: "github-actions[bot]", ...TRIGGERS.workflowRun });
+
+    expect(router.unmatched).toEqual([]);
+    expect(router.calls("POST", `${R}/merges`)).toBe(expectedMerges);
+    expect((await readState(store)).last_synced_base_sha).toBe("branch-sha");
   });
 });

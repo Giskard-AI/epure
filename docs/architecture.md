@@ -2,7 +2,7 @@
 
 EPURE is built from the ground up around **Defense-in-Depth**, **Least Privilege**, and **Out-of-Branch Deterministic State**. Every automation boundary is enforced both by GitHub Repository Rulesets and by local runtime sandboxing.
 
-> **Interactive Event & Custom Actions Pipeline Diagram**: See the [`epure-ci-actions-flow` diagram in Commands Reference](./commands#2-end-to-end-github-actions-custom-actions-pipeline-epure-ci-actions-flow) for the complete mapping of GitHub events (`issue_comment`, `check_suite`, `workflow_run`, `pull_request`, `workflow_dispatch`), secretless `authorize-command`, environment-scoped `orchestrate-command` (`environment: <llm-env>`), and `release` promotion.
+> **Interactive Event & Custom Actions Pipeline Diagram**: See the [`epure-ci-actions-flow` diagram in Commands Reference](./commands#2-end-to-end-github-actions-custom-actions-pipeline-epure-ci-actions-flow) for the complete mapping of GitHub events (`issue_comment`, `workflow_run`, `pull_request`, `workflow_dispatch`), secretless `authorize-command`, environment-scoped `orchestrate-command` (`environment: <llm-env>`), and `release` promotion.
 
 ---
 
@@ -86,7 +86,7 @@ EPURE is built from the ground up around **Defense-in-Depth**, **Least Privilege
    - **3-Way Git Branch Sync (`/epure sync`) & Goldfish Isolation**: Keeps `dev -> feature/* -> task/*` synchronized with 3-way LLM conflict resolution validated by Stage 1, and executes each ticket in a fresh zero-context Goldfish session (`runGoldfishSpecAudit` during `/epure to-spec`).
 2. **Stage 2 — Event-Driven External CI Continuation (`waiting_ticket_ci` / `waiting_feature_ci`)**:
    - Once Stage 1 passes and the `task/* -> feature/*` or `feature/* -> dev` Pull Request is opened alongside the `ai-review` check, EPURE records `subphase: "waiting_ticket_ci"` (or `"waiting_feature_ci"`), `active_pr_number`, and `active_head_sha` in `refs/epure/state/<issue>` and immediately exits `0` (`async_ci_continuation: true`).
-   - No runner sits idle polling external workflows. When GitHub emits `check_suite.completed` or `workflow_run.completed` (or a human posts `/epure continue`), EPURE resumes from the exact persisted state.
+   - No runner sits idle polling external workflows. When GitHub emits `workflow_run.completed` (or a human posts `/epure continue`), EPURE resumes from the exact persisted state, re-syncing `dev -> feature/* -> task/*` only if `dev` moved since the last recorded sync.
 3. **Stage 3 — Trusted `dev` Multi-Agent Review Roster & AI Semantic Squash**:
    - Correlates external CI results with the multi-agent specialist review roster loaded from `dev`. If external CI or any reviewer fails, EPURE extracts sanitized failure logs (~12 KB) and executes up to `max_code_fix_attempts = 3` unified remediation rounds before AI semantic squash-merging `task/* -> feature/*`.
 

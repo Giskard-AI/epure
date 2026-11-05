@@ -91,7 +91,7 @@ In `.github/workflows/epure-issue-command.yml`, the `orchestrate-command` job ru
 | `harness` | `"pi" \| "codex"` | `"pi"` | Agent execution adapter harness used for sandboxed runs. |
 | `merge_policy` | `"strict" \| "relaxed"` | `"strict"` | Stale-base policy for `task/* -> feature/*` integration (`strict` requires up-to-date base; `relaxed` allows clean 3-way merge when approved diff is unchanged). |
 | `task_auto_merge_enabled` | `boolean` | `false` (`true` when CI & branch protections exist) | Enables autonomous squash-merge of validated `task/* -> feature/*` PRs; forced to `false` (`AUTO_MERGE_DISABLED_MISSING_PROTECTIONS`) if required CI or branch protections are missing. |
-| `max_code_fix_attempts` | `integer` | `3` | Maximum number of automated remediation rounds (Stage 1 sandbox, external CI, or multi-agent review) per ticket before escalating to `needs-human` (Q78). |
+| `max_code_fix_attempts` | `integer` | `3` | Maximum number of automated remediation rounds (Stage 1 sandbox, external CI, or multi-agent review) per ticket, and separately for the feature PR, before escalating to `needs-human` (Q78). |
 | `max_epic_phases` | `integer` (`1..3`) | `2` | Maximum number of epic execution phases when `runEpicConvergenceAudit` detects unwired entrypoints (`[Phase 2 - Ticket N]`, ADR-0032). |
 | `max_transient_api_retries` | `integer` | `4` | Per-HTTP-request retry ceiling for transient LLM errors (`5xx`, `408`, network timeout). `HTTP 429` rate limits honor `Retry-After` (up to 10 waits) without consuming this quota. |
 | `transient_retry_backoff_seconds` | `[int, int, int, int]` | `[5, 15, 45, 120]` | Exponential backoff schedule in seconds between transient HTTP retries. |

@@ -204,6 +204,7 @@ export interface FormatNeedsHumanEscalationInput {
   readonly reason: NeedsHumanEscalationReason;
   readonly codeFixAttemptsUsed?: number | undefined;
   readonly maxCodeFixAttempts?: number | undefined;
+  readonly humanBudgetGrants?: number | undefined;
   readonly graceWindowSeconds?: number | undefined;
   readonly expectedWorkflows?: readonly string[] | undefined;
   readonly sensitivePaths?: readonly string[] | undefined;
@@ -1270,6 +1271,12 @@ export function formatNeedsHumanEscalationComment(
     `- **Statut d'orchestration** : \`suspended\` (label \`needs-human\` appliqué)`,
     `- **Cause de l'escalade** : ${reasonHeadline}`
   );
+
+  if (input.humanBudgetGrants !== undefined) {
+    lines.push(
+      `- **Budgets de correction accordés par un humain** : \`${input.humanBudgetGrants}\` (\`human_budget_grants\`)`
+    );
+  }
 
   if (input.reason === "model_config_missing") {
     lines.push(

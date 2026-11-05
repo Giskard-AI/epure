@@ -23,11 +23,11 @@ inputs:
     description: "Authorized human actor login"
     required: true
   trigger_head_sha:
-    description: "Optional head SHA from check_suite or workflow_run continuation event"
+    description: "Optional head SHA from workflow_run continuation event"
     required: false
     default: ""
   trigger_branch:
-    description: "Optional branch name from check_suite or workflow_run continuation event"
+    description: "Optional branch name from workflow_run continuation event"
     required: false
     default: ""
   async_ci_continuation:

@@ -298,6 +298,7 @@ export interface EscalateToNeedsHumanParams {
   prUrl?: string | undefined;
   featurePrUrl?: string | undefined;
   codeFixAttemptsUsed?: number | undefined;
+  budgetScope?: "ticket" | "feature" | undefined;
   failedChecks?: WaitForExternalCiChecksResult["failedChecks"] | undefined;
   mustFixFindings?: ReadonlyArray<ReviewerFinding> | undefined;
   sensitivePaths?: ReadonlyArray<string> | undefined;

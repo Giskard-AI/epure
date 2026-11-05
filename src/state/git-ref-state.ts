@@ -41,6 +41,150 @@ export interface EpureIssueState {
   readonly active_pr_number?: number | undefined;
   readonly active_head_sha?: string | undefined;
   readonly epic_phase?: number | undefined;
+  readonly code_fix_attempts_by_ticket?:
+    | Readonly<Record<string, number>>
+    | undefined;
+  readonly feature_code_fix_attempts_used?: number | undefined;
+  readonly human_budget_grants?: number | undefined;
+  readonly last_escalation?: EpureEscalationRecord | undefined;
+  readonly last_synced_base_sha?: string | undefined;
+}
+
+export interface EpureEscalationRecord {
+  readonly reason: string;
+  readonly head_sha: string;
+  readonly ticket_number: number;
+  readonly budget_scope: "ticket" | "feature";
+}
+
+export type TerminalIssueStatus = Extract<
+  IssueOrchestrationStatus,
+  "suspended" | "done" | "cancelled"
+>;
+
+export type TerminalStateUpdate = Omit<
+  Partial<EpureIssueState>,
+  | "status"
+  | "subphase"
+  | "active_head_sha"
+  | "active_pr_number"
+  | "active_task_branch"
+  | "active_ticket_number"
+> & { readonly status: TerminalIssueStatus };
+
+export function toTerminalState(
+  prev: EpureIssueState,
+  update: TerminalStateUpdate
+): EpureIssueState {
+  return {
+    ...prev,
+    ...update,
+    subphase: "idle",
+    active_head_sha: undefined,
+    active_pr_number: undefined,
+    active_task_branch: undefined,
+    active_ticket_number: undefined
+  };
+}
+
+export function isWaitingSubphase(
+  subphase: EpureIssueSubphase | undefined
+): boolean {
+  return subphase === "waiting_ticket_ci" || subphase === "waiting_feature_ci";
+}
+
+export function isAutomaticallyResumable(state: EpureIssueState): boolean {
+  return state.status === "active" && isWaitingSubphase(state.subphase);
+}
+
+// States written before per-ticket budgets kept a single counter for the active element.
+export function readTicketCodeFixAttempts(
+  state: EpureIssueState,
+  ticketNumber: number
+): number {
+  if (state.code_fix_attempts_by_ticket !== undefined) {
+    return state.code_fix_attempts_by_ticket[String(ticketNumber)] ?? 0;
+  }
+  return state.active_ticket_number === ticketNumber &&
+    state.subphase !== "waiting_feature_ci"
+    ? state.code_fix_attempts_used
+    : 0;
+}
+
+export function readFeatureCodeFixAttempts(state: EpureIssueState): number {
+  return (
+    state.feature_code_fix_attempts_used ??
+    (state.subphase === "waiting_feature_ci" ? state.code_fix_attempts_used : 0)
+  );
+}
+
+export function activeBudgetScope(
+  state: EpureIssueState
+): EpureEscalationRecord["budget_scope"] {
+  return state.subphase === "waiting_feature_ci" ? "feature" : "ticket";
+}
+
+export function readActiveCodeFixAttempts(state: EpureIssueState): number {
+  return activeBudgetScope(state) === "feature"
+    ? readFeatureCodeFixAttempts(state)
+    : readTicketCodeFixAttempts(
+        state,
+        state.active_ticket_number ?? state.issue_number
+      );
+}
+
+export function readCodeFixAttemptsByTicket(
+  state: EpureIssueState
+): Readonly<Record<string, number>> {
+  if (state.code_fix_attempts_by_ticket !== undefined) {
+    return state.code_fix_attempts_by_ticket;
+  }
+  return state.active_ticket_number !== undefined &&
+    state.subphase !== "waiting_feature_ci"
+    ? { [String(state.active_ticket_number)]: state.code_fix_attempts_used }
+    : {};
+}
+
+export function withTicketCodeFixAttempts(
+  prev: EpureIssueState,
+  ticketNumber: number,
+  attempts: number
+): EpureIssueState {
+  return {
+    ...prev,
+    code_fix_attempts_used: attempts,
+    code_fix_attempts_by_ticket: {
+      ...readCodeFixAttemptsByTicket(prev),
+      [String(ticketNumber)]: attempts
+    }
+  };
+}
+
+export function withFeatureCodeFixAttempts(
+  prev: EpureIssueState,
+  attempts: number
+): EpureIssueState {
+  return {
+    ...prev,
+    code_fix_attempts_used: attempts,
+    feature_code_fix_attempts_used: attempts
+  };
+}
+
+export function grantHumanBudget(prev: EpureIssueState): EpureIssueState {
+  const escalation = prev.last_escalation;
+  if (!escalation || escalation.reason !== "remediation_exhausted") {
+    return prev;
+  }
+  const granted =
+    escalation.budget_scope === "feature"
+      ? withFeatureCodeFixAttempts(prev, 0)
+      : withTicketCodeFixAttempts(prev, escalation.ticket_number, 0);
+  return {
+    ...granted,
+    human_budget_grants: (prev.human_budget_grants ?? 0) + 1,
+    last_escalation: undefined
+  };
 }
 
 export interface GitRefSnapshot {

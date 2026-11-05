@@ -1,5 +1,6 @@
 import { isBotActor } from "../auth/issue-command-gate.js";
 import {
+  toTerminalState,
   updateIssueStateWithCas,
   type EpureIssueState,
   type GitRefStateStore
@@ -98,11 +99,11 @@ export async function processPendingIssueCommentsBatch(
       latestStateResult = await updateIssueStateWithCas({
         issueNumber: input.issueNumber,
         store: input.store,
-        mutator: (prev) => ({
-          ...prev,
-          status: "cancelled",
-          last_processed_comment_id: cursor
-        })
+        mutator: (prev) =>
+          toTerminalState(prev, {
+            status: "cancelled",
+            last_processed_comment_id: cursor
+          })
       });
       break;
     }

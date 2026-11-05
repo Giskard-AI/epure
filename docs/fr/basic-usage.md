@@ -129,7 +129,7 @@ EPURE exécute alors les tickets du DAG dans l'ordre topologique (`#25`, puis `#
    - Ouvre la **PR #28** (`task/25-markov-solver -> feature/16-markov-craft-calculator`).
 2. **Stage 2 — Attente CI Externe Événementielle (`waiting_ticket_ci`)** :
    - Persiste `subphase: "waiting_ticket_ci"` dans `refs/epure/state/16` et termine immédiatement (`exit 0`) afin de libérer le runner pendant que GitHub Actions exécute la CI externe sur la PR #28.
-   - Se réveille automatiquement à la réception de l'événement `check_suite.completed` / `workflow_run.completed` sur `task/25-markov-solver`.
+   - Se réveille automatiquement à la réception de l'événement `workflow_run.completed` sur `task/25-markov-solver`.
 3. **Stage 3 — Revue Multi-Agents (chargée depuis `dev`) & Squash Sémantique IA** :
    - Charge les prompts des reviewers (`<reviewers_dir>/*.md`, par défaut `.agents/reviewers/*.md`) exclusivement depuis la branche de confiance `dev` (jamais depuis `task/25-*`).
    - Sélectionne jusqu'à 4 reviewers pertinents (ex. `domain-backend-reviewer`, `standards-reviewer`, `security-reviewer`) + `spec-parity-reviewer`.

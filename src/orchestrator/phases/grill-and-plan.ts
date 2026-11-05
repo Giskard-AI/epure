@@ -19,6 +19,7 @@ import {
   wrapUntrustedContent
 } from "../../security/prompt-injection-guard.js";
 import {
+  toTerminalState,
   updateIssueStateWithCas,
   type GitRefStateStore
 } from "../../state/git-ref-state.js";
@@ -851,13 +852,14 @@ export async function runGrillAndPlanPhase(params: {
       const suspended = await updateIssueStateWithCas({
         issueNumber,
         store,
-        mutator: (prev) => ({
-          ...prev,
-          phase: "spec",
-          status: "suspended",
-          active_branch: planBranch,
-          last_processed_comment_id: commentId ?? prev.last_processed_comment_id
-        })
+        mutator: (prev) =>
+          toTerminalState(prev, {
+            phase: "spec",
+            status: "suspended",
+            active_branch: planBranch,
+            last_processed_comment_id:
+              commentId ?? prev.last_processed_comment_id
+          })
       });
 
       const escalationComment = appendEpureCommandsSpoiler(
@@ -1259,13 +1261,13 @@ export async function runGrillAndPlanPhase(params: {
     const suspended = await updateIssueStateWithCas({
       issueNumber,
       store,
-      mutator: (prev) => ({
-        ...prev,
-        phase: "tickets",
-        status: "suspended",
-        active_branch: planBranch,
-        last_processed_comment_id: commentId ?? prev.last_processed_comment_id
-      })
+      mutator: (prev) =>
+        toTerminalState(prev, {
+          phase: "tickets",
+          status: "suspended",
+          active_branch: planBranch,
+          last_processed_comment_id: commentId ?? prev.last_processed_comment_id
+        })
     });
 
     const escalationComment = appendEpureCommandsSpoiler(

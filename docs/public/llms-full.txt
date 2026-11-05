@@ -69,7 +69,7 @@ Once a human gate is crossed, EPURE executes these steps deterministically on ev
 
 - **Blueprint, Goldfish Spec Audit & Ticket DAG Generation**: Runs the zero-context Goldfish specification audit (`runGoldfishSpecAudit`), commits `GLOSSARY.md`, `docs/adr/`, and `docs/specs/<slug>.md` (with `EpicGoalContract`) on `plan/<issue>-<slug>`, and creates GitHub Issues for each atomic task with native `sub_issues` and `blocked_by` dependencies and the `ready-for-agent` label.
 - **Secretless Kernel Sandbox TDD Loop**: For each unblocked ticket, applies incremental mutations (`write_repo_file`, `patch_repo_file`, `delete_repo_file`) and runs Stage 1 verification inside an isolated 2-phase Linux kernel sandbox (`landrun` / `bubblewrap`) stripped of `LLM_API_KEY` and GitHub App private keys.
-- **Event-Driven External CI, Trusted `dev` Multi-Agent Review & AI Semantic Squash**: Exits immediately while external CI runs (`waiting_ticket_ci`), resumes on `check_suite.completed` / `workflow_run.completed`, runs up to 4 domain-specialized reviewers (loaded strictly from `dev`) plus `spec-parity-reviewer`, and squash-merges `task/* -> feature/*` with a synthesized Conventional Commit title/body (`Refs #<ticket>`).
+- **Event-Driven External CI, Trusted `dev` Multi-Agent Review & AI Semantic Squash**: Exits immediately while external CI runs (`waiting_ticket_ci`), resumes on `workflow_run.completed`, runs up to 4 domain-specialized reviewers (loaded strictly from `dev`) plus `spec-parity-reviewer`, and squash-merges `task/* -> feature/*` with a synthesized Conventional Commit title/body (`Refs #<ticket>`).
 - **Zero-Context `EpicConvergenceAudit` & Final Synthesis PR Review**: Runs `runEpicConvergenceAudit` on `feature/*` to ensure all `required_entrypoints` are wired and no `forbidden_stubs` remain (spawning Phase 2 convergence tickets if needed), then opens and audits the consolidated synthesis PR `feature/* -> dev` with `Closes #<issue>` and `Closes #<ticket>` trailer links.
 
 ### 3. <span class="epure-badge epure-badge--optional">Optional or Conditional Steps</span>
@@ -370,7 +370,7 @@ EPURE now executes the ticket DAG in topological order (`#25`, then `#26`, then 
    - Opens **PR #28** (`task/25-markov-solver -> feature/16-markov-craft-calculator`).
 2. **Stage 2 Event-Driven External CI (`waiting_ticket_ci`)**:
    - Persists `subphase: "waiting_ticket_ci"` in `refs/epure/state/16` and exits `0` immediately so no runner sits idle while GitHub Actions runs external CI on PR #28.
-   - Automatically wakes up when `check_suite.completed` / `workflow_run.completed` fires on `task/25-markov-solver`.
+   - Automatically wakes up when `workflow_run.completed` fires on `task/25-markov-solver`.
 3. **Stage 3 Multi-Agent Review (from trusted `dev`) & AI Semantic Squash**:
    - Loads the reviewer prompts (`<reviewers_dir>/*.md`, default `.agents/reviewers/*.md`) strictly from `dev` (never from `task/25-*`).
    - Selects up to 4 relevant reviewers (e.g., `domain-backend-reviewer`, `standards-reviewer`, `security-reviewer`) plus `spec-parity-reviewer`.
@@ -445,7 +445,7 @@ All `/epure` commands are posted as comments on a GitHub Issue. Every command is
   slug="epure-ci-actions-flow"
   locale="en"
   title="EPURE GitHub Actions, Custom Actions & Event-Driven CI Pipeline"
-  caption="End-to-end event pipeline connecting issue_comment, check_suite/workflow_run continuation, pull_request gates, and release workflow_dispatch across secretless and environment-scoped jobs."
+  caption="End-to-end event pipeline connecting issue_comment, workflow_run continuation, pull_request gates, and release workflow_dispatch across secretless and environment-scoped jobs."
 />
 
 ### How Commands & CI Events Flow Through `epure-issue-command.yml`
@@ -458,9 +458,9 @@ All `/epure` commands are posted as comments on a GitHub Issue. Every command is
    - Runs on `ubuntu-26.04` inside the dedicated GitHub Environment (`environment: <llm-env>`, default `epure-agent`; other examples: `llm`, `openai`, `anthropic`, or `gemini`) **only after** `authorize-command` succeeds (or upon an authorized CI continuation event).
    - Receives the environment-scoped secrets (`EPURE_AGENT_APP_ID`, `EPURE_AGENT_APP_PRIVATE_KEY`, and `LLM_API_KEY` or provider key) and provisions the kernel sandbox tools (`bubblewrap`, `landrun`, `rtk`).
    - On `/epure to-tickets`, creates the child GitHub Issues and wires native GitHub relational graph links (`sub_issues` parent-child hierarchy + `dependencies/blocked_by` task edges).
-3. **Automatic Event-Driven CI Continuation (`check_suite.completed` / `workflow_run.completed`)**:
+3. **Automatic Event-Driven CI Continuation (`workflow_run.completed`)**:
    - When `async_ci_continuation: "true"` is enabled, opening a `task/* -> feature/*` PR (`waiting_ticket_ci`) or `feature/* -> dev` PR (`waiting_feature_ci`) records the active PR/SHA in `refs/epure/state/<issue>` and immediately exits `0` to free the GitHub Actions runner.
-   - When external CI finishes on `task/*` or `feature/*`, the `check_suite.completed` or `workflow_run.completed` event wakes `orchestrate-command` with `command: "continue"`, `trigger_head_sha`, and `trigger_branch` to run Stage 3 multi-agent review, AI semantic squash, or unified auto-remediation.
+   - When external CI finishes on `task/*` or `feature/*`, the `workflow_run.completed` event wakes `orchestrate-command` with `command: "continue"`, `trigger_head_sha`, and `trigger_branch` to run Stage 3 multi-agent review, AI semantic squash, or unified auto-remediation. The wake-up does nothing unless the issue is `active` and waiting on CI (`waiting_*`) for that exact `trigger_head_sha`; it never resumes a `suspended`, `done`, or `cancelled` issue.
 4. **Pull Request Gates & Controlled Release Promotion**:
    - On `pull_request` events (`dev`, `main`, `feature/**`), `epure-check.yml` (`actions/epure-contract`), `pr-title.yml`, and `ci.yml` execute with `contents: read` and zero privileged secrets.
    - On human `workflow_dispatch` (`semver_tag`, `expected_dev_sha`), `release.yml` calls EPURE's reusable `release-promote.yml`, which runs inside the protected `environment: release` (`EPURE_RELEASE_APP_ID`, `EPURE_RELEASE_APP_PRIVATE_KEY`), checks the role boundary with `actions/verify-app-role`, fast-forwards `dev -> main`, tags, and publishes the GitHub Release.
@@ -639,7 +639,7 @@ In `.github/workflows/epure-issue-command.yml`, the `orchestrate-command` job ru
 | `harness` | `"pi" \| "codex"` | `"pi"` | Agent execution adapter harness used for sandboxed runs. |
 | `merge_policy` | `"strict" \| "relaxed"` | `"strict"` | Stale-base policy for `task/* -> feature/*` integration (`strict` requires up-to-date base; `relaxed` allows clean 3-way merge when approved diff is unchanged). |
 | `task_auto_merge_enabled` | `boolean` | `false` (`true` when CI & branch protections exist) | Enables autonomous squash-merge of validated `task/* -> feature/*` PRs; forced to `false` (`AUTO_MERGE_DISABLED_MISSING_PROTECTIONS`) if required CI or branch protections are missing. |
-| `max_code_fix_attempts` | `integer` | `3` | Maximum number of automated remediation rounds (Stage 1 sandbox, external CI, or multi-agent review) per ticket before escalating to `needs-human` (Q78). |
+| `max_code_fix_attempts` | `integer` | `3` | Maximum number of automated remediation rounds (Stage 1 sandbox, external CI, or multi-agent review) per ticket, and separately for the feature PR, before escalating to `needs-human` (Q78). |
 | `max_epic_phases` | `integer` (`1..3`) | `2` | Maximum number of epic execution phases when `runEpicConvergenceAudit` detects unwired entrypoints (`[Phase 2 - Ticket N]`, ADR-0032). |
 | `max_transient_api_retries` | `integer` | `4` | Per-HTTP-request retry ceiling for transient LLM errors (`5xx`, `408`, network timeout). `HTTP 429` rate limits honor `Retry-After` (up to 10 waits) without consuming this quota. |
 | `transient_retry_backoff_seconds` | `[int, int, int, int]` | `[5, 15, 45, 120]` | Exponential backoff schedule in seconds between transient HTTP retries. |
@@ -720,7 +720,7 @@ URL: https://giskard-ai.github.io/epure/architecture
 
 EPURE is built from the ground up around **Defense-in-Depth**, **Least Privilege**, and **Out-of-Branch Deterministic State**. Every automation boundary is enforced both by GitHub Repository Rulesets and by local runtime sandboxing.
 
-> **Interactive Event & Custom Actions Pipeline Diagram**: See the [`epure-ci-actions-flow` diagram in Commands Reference](./commands#2-end-to-end-github-actions-custom-actions-pipeline-epure-ci-actions-flow) for the complete mapping of GitHub events (`issue_comment`, `check_suite`, `workflow_run`, `pull_request`, `workflow_dispatch`), secretless `authorize-command`, environment-scoped `orchestrate-command` (`environment: <llm-env>`), and `release` promotion.
+> **Interactive Event & Custom Actions Pipeline Diagram**: See the [`epure-ci-actions-flow` diagram in Commands Reference](./commands#2-end-to-end-github-actions-custom-actions-pipeline-epure-ci-actions-flow) for the complete mapping of GitHub events (`issue_comment`, `workflow_run`, `pull_request`, `workflow_dispatch`), secretless `authorize-command`, environment-scoped `orchestrate-command` (`environment: <llm-env>`), and `release` promotion.
 
 ---
 
@@ -804,7 +804,7 @@ EPURE is built from the ground up around **Defense-in-Depth**, **Least Privilege
    - **3-Way Git Branch Sync (`/epure sync`) & Goldfish Isolation**: Keeps `dev -> feature/* -> task/*` synchronized with 3-way LLM conflict resolution validated by Stage 1, and executes each ticket in a fresh zero-context Goldfish session (`runGoldfishSpecAudit` during `/epure to-spec`).
 2. **Stage 2 — Event-Driven External CI Continuation (`waiting_ticket_ci` / `waiting_feature_ci`)**:
    - Once Stage 1 passes and the `task/* -> feature/*` or `feature/* -> dev` Pull Request is opened alongside the `ai-review` check, EPURE records `subphase: "waiting_ticket_ci"` (or `"waiting_feature_ci"`), `active_pr_number`, and `active_head_sha` in `refs/epure/state/<issue>` and immediately exits `0` (`async_ci_continuation: true`).
-   - No runner sits idle polling external workflows. When GitHub emits `check_suite.completed` or `workflow_run.completed` (or a human posts `/epure continue`), EPURE resumes from the exact persisted state.
+   - No runner sits idle polling external workflows. When GitHub emits `workflow_run.completed` (or a human posts `/epure continue`), EPURE resumes from the exact persisted state, re-syncing `dev -> feature/* -> task/*` only if `dev` moved since the last recorded sync.
 3. **Stage 3 — Trusted `dev` Multi-Agent Review Roster & AI Semantic Squash**:
    - Correlates external CI results with the multi-agent specialist review roster loaded from `dev`. If external CI or any reviewer fails, EPURE extracts sanitized failure logs (~12 KB) and executes up to `max_code_fix_attempts = 3` unified remediation rounds before AI semantic squash-merging `task/* -> feature/*`.
 
@@ -981,7 +981,7 @@ Post `/epure approve` on the tracking issue to directly integrate the `plan/*` a
 
 - **Event-Driven External CI Waiting (`waiting_ticket_ci` / `waiting_feature_ci`)**:
   - Whenever EPURE opens a `task/* -> feature/*` PR (`waiting_ticket_ci`) or the final `feature/* -> dev` PR (`waiting_feature_ci`), the orchestrator records the active PR and `head_sha` in `refs/epure/state/<issue>` and immediately exits `0` to release the GitHub Actions runner (`async_ci_continuation: true`).
-  - As soon as external CI workflows complete (`check_suite.completed` or `workflow_run.completed`), EPURE automatically wakes up to run Stage 3 multi-agent review, AI semantic squash, or unified auto-remediation. You can also manually nudge continuation at any time by commenting **`/epure continue`**.
+  - As soon as external CI workflows complete (`workflow_run.completed`), EPURE automatically wakes up to run Stage 3 multi-agent review, AI semantic squash, or unified auto-remediation. You can also manually nudge continuation at any time by commenting **`/epure continue`**.
 - **Synchronizing with `dev` (`/epure sync` / `/epure rebase`)**:
   - If other PRs land on `dev` while your feature is in progress, comment **`/epure sync`** (or `/epure rebase`). EPURE merges `dev -> feature/<issue>-<slug>` (and cascades `feature/* -> active_task_branch`) with additive `GLOSSARY.md` merging, monotonic ADR renumbering, 3-way LLM conflict resolution, and mandatory **Stage 1 Kernel Sandbox** verification before committing.
 - **Inspecting Live Progress (`/epure status`)**:
@@ -996,8 +996,8 @@ EPURE pauses and applies the `needs-human` label (`status: "suspended"`) when hu
 
 1. **Sensitive Path Modification**: A `task/*` branch modified `.github/workflows/**`, `.github/agents.yml`, the reviewer roster directory (`<reviewers_dir>/**`, default `.agents/reviewers/**`), or `CODEOWNERS`.
    - *Resolution*: Inspect the diff. If legitimate, add the `approved-sensitive-change` label to the PR and comment **`/epure continue`** (or `/epure approve`) on the tracking issue.
-2. **Remediation Cap Reached (`max_code_fix_attempts = 3`)**: A ticket failed Stage 1 tests, external CI, or reviewer `must_fix` checks 3 times in a row.
-   - *Resolution*: Push a manual fix commit to the `task/*` or `feature/*` branch (or post a clarifying comment), then comment **`/epure continue`** on the tracking issue. EPURE removes `needs-human`, restores `status: "active"`, skips all already-closed tickets, and resumes from the current milestone.
+2. **Remediation Cap Reached (`max_code_fix_attempts = 3`)**: A ticket (or the feature PR, which has its own budget) failed Stage 1 tests, external CI, or reviewer `must_fix` checks 3 times in a row. EPURE posts this escalation once; later CI events on the same SHA add no new comment.
+   - *Resolution*: Push a manual fix commit to the `task/*` or `feature/*` branch (or post a clarifying comment), then comment **`/epure continue`** on the tracking issue. EPURE removes `needs-human`, restores `status: "active"`, grants the blocked ticket or feature PR a fresh remediation budget (counted as `human_budget_grants` in later escalations), skips all already-closed tickets, and resumes from the current milestone. A plain comment does not resume implementation: only `/epure continue` or `/epure approve` does.
 3. **Zero-Context `EpicConvergenceAudit` & Automatic Phase 2 Tickets (`max_epic_phases`)**:
    - After all Phase 1 tickets are squashed into `feature/*`, EPURE runs a zero-context **`EpicConvergenceAudit`** (`runEpicConvergenceAudit`) against the specification's `EpicGoalContract`.
    - If the audit finds unwired `required_entrypoints` or lingering `forbidden_stubs` (`verdict: "INCOMPLETE"`) and `epic_phase < max_epic_phases` (default `2`), EPURE automatically creates, links, and executes bounded **`[Phase 2 - Ticket N]`** convergence tickets before opening the final `feature/* -> dev` PR. If gaps still remain after `max_epic_phases`, EPURE escalates to `needs-human` (`epic_convergence_exhausted`), where you can push a fix and comment **`/epure continue`**.
@@ -1287,7 +1287,7 @@ Dès qu'un jalon humain est franchi, l'orchestrateur EPURE exécute de manière 
 
 - **Génération de l'Épure, Audit Goldfish de la Spec & DAG de Tickets** : exécution de l'audit de spécification Goldfish zéro-contexte (`runGoldfishSpecAudit`), commit de `GLOSSARY.md`, `docs/adr/` et `docs/specs/<slug>.md` (incluant `EpicGoalContract`) sur `plan/<issue>-<slug>`, puis création des issues GitHub atomiques avec leurs relations natives `sub_issues` et `blocked_by` et le label `ready-for-agent`.
 - **Boucle TDD en Sandbox Noyau Sans Secret** : pour chaque ticket débloqué, application des mutations incrémentales (`write_repo_file`, `patch_repo_file`, `delete_repo_file`) et vérification Stage 1 dans une sandbox noyau Linux en 2 phases (`landrun` / `bubblewrap`) dépourvue de `LLM_API_KEY` et des clés privées PEM des GitHub Apps.
-- **CI Externe Événementielle, Revue Multi-Agents depuis `dev` & Squash Sémantique IA** : libération immédiate du runner pendant la CI externe (`waiting_ticket_ci`), réveil sur `check_suite.completed` / `workflow_run.completed`, exécution parallèle de jusqu'à 4 reviewers spécialisés (chargés exclusivement depuis `dev`) + `spec-parity-reviewer`, puis synthèse d'un titre/corps Conventional Commit (`Refs #<ticket>`) et squash-merge automatique `task/* -> feature/*`.
+- **CI Externe Événementielle, Revue Multi-Agents depuis `dev` & Squash Sémantique IA** : libération immédiate du runner pendant la CI externe (`waiting_ticket_ci`), réveil sur `workflow_run.completed`, exécution parallèle de jusqu'à 4 reviewers spécialisés (chargés exclusivement depuis `dev`) + `spec-parity-reviewer`, puis synthèse d'un titre/corps Conventional Commit (`Refs #<ticket>`) et squash-merge automatique `task/* -> feature/*`.
 - **Audit de Convergence Zéro-Contexte (`EpicConvergenceAudit`) & Revue de Synthèse Finale** : exécution de `runEpicConvergenceAudit` sur `feature/*` pour vérifier le câblage effectif des `required_entrypoints` et l'absence de `forbidden_stubs` (avec création automatique de tickets de Phase 2 si nécessaire), puis ouverture et audit complet de la PR finale `feature/* -> dev` avec les liens `Closes #<issue>` et `Closes #<ticket>`.
 
 ### 3. <span class="epure-badge epure-badge--optional">Étapes Facultatives ou Conditionnelles</span>
@@ -1588,7 +1588,7 @@ EPURE exécute alors les tickets du DAG dans l'ordre topologique (`#25`, puis `#
    - Ouvre la **PR #28** (`task/25-markov-solver -> feature/16-markov-craft-calculator`).
 2. **Stage 2 — Attente CI Externe Événementielle (`waiting_ticket_ci`)** :
    - Persiste `subphase: "waiting_ticket_ci"` dans `refs/epure/state/16` et termine immédiatement (`exit 0`) afin de libérer le runner pendant que GitHub Actions exécute la CI externe sur la PR #28.
-   - Se réveille automatiquement à la réception de l'événement `check_suite.completed` / `workflow_run.completed` sur `task/25-markov-solver`.
+   - Se réveille automatiquement à la réception de l'événement `workflow_run.completed` sur `task/25-markov-solver`.
 3. **Stage 3 — Revue Multi-Agents (chargée depuis `dev`) & Squash Sémantique IA** :
    - Charge les prompts des reviewers (`<reviewers_dir>/*.md`, par défaut `.agents/reviewers/*.md`) exclusivement depuis la branche de confiance `dev` (jamais depuis `task/25-*`).
    - Sélectionne jusqu'à 4 reviewers pertinents (ex. `domain-backend-reviewer`, `standards-reviewer`, `security-reviewer`) + `spec-parity-reviewer`.
@@ -1663,7 +1663,7 @@ Toutes les commandes `/epure` se postent sous forme de commentaires sur une Issu
   slug="epure-ci-actions-flow"
   locale="fr"
   title="Pipeline Événementiel GitHub Actions, Custom Actions & CI d'EPURE"
-  caption="Pipeline complet reliant issue_comment, la continuation CI check_suite/workflow_run, les portes de Pull Request et la promotion de release entre jobs sans secret et environnements cloisonnés."
+  caption="Pipeline complet reliant issue_comment, la continuation CI workflow_run, les portes de Pull Request et la promotion de release entre jobs sans secret et environnements cloisonnés."
 />
 
 ### Fonctionnement Détaillé du Pipeline `epure-issue-command.yml`
@@ -1676,9 +1676,9 @@ Toutes les commandes `/epure` se postent sous forme de commentaires sur une Issu
    - S'exécute sur `ubuntu-26.04` dans l'environnement GitHub dédié (`environment: <llm-env>`, `epure-agent` par défaut ; autres exemples : `llm`, `openai`, `anthropic` ou `gemini`) **uniquement après** validation par `authorize-command` (ou lors d'un événement de continuation CI autorisé).
    - Reçoit les secrets cloisonnés dans l'environnement (`EPURE_AGENT_APP_ID`, `EPURE_AGENT_APP_PRIVATE_KEY` et `LLM_API_KEY` ou clé fournisseur) et installe l'outillage de sandbox noyau (`bubblewrap`, `landrun`, `rtk`).
    - Lors de `/epure to-tickets`, crée les sous-issues GitHub et câble nativement le graphe relationnel GitHub (`sub_issues` parent-enfant + `dependencies/blocked_by`).
-3. **Réveil Événementiel Automatique de la CI (`check_suite.completed` / `workflow_run.completed`)** :
+3. **Réveil Événementiel Automatique de la CI (`workflow_run.completed`)** :
    - Avec `async_ci_continuation: "true"`, dès l'ouverture d'une PR `task/* -> feature/*` (`waiting_ticket_ci`) ou `feature/* -> dev` (`waiting_feature_ci`), l'orchestrateur persiste la PR et le `head_sha` dans `refs/epure/state/<issue>` et termine immédiatement (`exit 0`) pour libérer le runner GitHub Actions.
-   - Dès que la CI externe se termine sur `task/*` ou `feature/*`, l'événement `check_suite.completed` ou `workflow_run.completed` réveille `orchestrate-command` avec `command: "continue"`, `trigger_head_sha` et `trigger_branch` afin d'exécuter la revue multi-agents Stage 3, le squash sémantique IA ou un round d'auto-remédiation unifié.
+   - Dès que la CI externe se termine sur `task/*` ou `feature/*`, l'événement `workflow_run.completed` réveille `orchestrate-command` avec `command: "continue"`, `trigger_head_sha` et `trigger_branch` afin d'exécuter la revue multi-agents Stage 3, le squash sémantique IA ou un round d'auto-remédiation unifié. Le réveil n'agit que si l'issue est `active` en attente de CI (`waiting_*`) sur ce même `trigger_head_sha` ; il ne reprend jamais une issue `suspended`, `done` ou `cancelled`.
 4. **Portes de Contrat PR & Promotion de Release Protégée** :
    - Sur `pull_request` (`dev`, `main`, `feature/**`), `epure-check.yml` (`actions/epure-contract`), `pr-title.yml` et `ci.yml` s'exécutent en `contents: read` sans aucun secret privilégié.
    - Sur `workflow_dispatch` humain (`semver_tag`, `expected_dev_sha`), `release.yml` appelle le workflow réutilisable `release-promote.yml` d'EPURE, qui s'exécute dans l'environnement protégé `environment: release` (`EPURE_RELEASE_APP_ID`, `EPURE_RELEASE_APP_PRIVATE_KEY`), vérifie la frontière de rôle avec `actions/verify-app-role`, promeut `dev -> main` en fast-forward, pose le tag et publie la GitHub Release.
@@ -1857,7 +1857,7 @@ Dans `.github/workflows/epure-issue-command.yml`, le job `orchestrate-command` s
 | `harness` | `"pi" \| "codex"` | `"pi"` | Adaptateur de moteur d'agent utilisé pour les exécutions en sandbox. |
 | `merge_policy` | `"strict" \| "relaxed"` | `"strict"` | Politique de base obsolète pour l'intégration `task/* -> feature/*` (`strict` exige une base à jour ; `relaxed` tolère une fusion 3-way propre si le diff approuvé est inchangé). |
 | `task_auto_merge_enabled` | `boolean` | `false` (`true` si CI & protections actives) | Active le squash-merge autonome des PRs `task/* -> feature/*` validées ; forcé à `false` (`AUTO_MERGE_DISABLED_MISSING_PROTECTIONS`) si la CI requise ou les protections de branches sont absentes. |
-| `max_code_fix_attempts` | `integer` | `3` | Nombre maximal de tours de correction automatique (Sandbox Stage 1, CI externe ou revue multi-agents) par ticket avant escalade `needs-human` (Q78). |
+| `max_code_fix_attempts` | `integer` | `3` | Nombre maximal de tours de correction automatique (Sandbox Stage 1, CI externe ou revue multi-agents) par ticket, et séparément pour la PR de fonctionnalité, avant escalade `needs-human` (Q78). |
 | `max_epic_phases` | `integer` (`1..3`) | `2` | Nombre maximal de phases d'exécution de la fonctionnalité lorsque `runEpicConvergenceAudit` détecte des points d'entrée non câblés (`[Phase 2 - Ticket N]`, ADR-0032). |
 | `max_transient_api_retries` | `integer` | `4` | Plafond de reprises par requête HTTP unitaire en cas d'erreur transitoire (`5xx`, `408`, timeout réseau). Les limitations de débit `HTTP 429` attendent `Retry-After` (jusqu'à 10 attentes) sans consommer ce quota. |
 | `transient_retry_backoff_seconds` | `[int, int, int, int]` | `[5, 15, 45, 120]` | Paliers de backoff exponentiel en secondes entre deux reprises HTTP transitoires. |
@@ -1938,7 +1938,7 @@ URL: https://giskard-ai.github.io/epure/fr/architecture
 
 EPURE a été conçu dès l'origine autour de trois principes d'ingénierie : **Défense en Profondeur**, **Moindre Privilège** et **État Déterministe Hors-Branches**. Chaque frontière d'automatisation est garantie à la fois par les GitHub Repository Rulesets et par l'isolation d'exécution locale.
 
-> **Schéma Interactif du Pipeline Événementiel & Custom Actions** : Consultez le [diagramme `epure-ci-actions-flow` dans la Référence des Commandes](./commands#2-pipeline-evenementiel-github-actions-custom-actions-epure-ci-actions-flow) pour visualiser l'enchaînement complet des événements GitHub (`issue_comment`, `check_suite`, `workflow_run`, `pull_request`, `workflow_dispatch`), du contrôle sans secret `authorize-command`, du job isolé `orchestrate-command` (`environment: <llm-env>`) et de la promotion `release`.
+> **Schéma Interactif du Pipeline Événementiel & Custom Actions** : Consultez le [diagramme `epure-ci-actions-flow` dans la Référence des Commandes](./commands#2-pipeline-evenementiel-github-actions-custom-actions-epure-ci-actions-flow) pour visualiser l'enchaînement complet des événements GitHub (`issue_comment`, `workflow_run`, `pull_request`, `workflow_dispatch`), du contrôle sans secret `authorize-command`, du job isolé `orchestrate-command` (`environment: <llm-env>`) et de la promotion `release`.
 
 ---
 
@@ -2022,7 +2022,7 @@ EPURE a été conçu dès l'origine autour de trois principes d'ingénierie : **
    - **Synchronisation Git 3-way (`/epure sync`) & Isolation Goldfish** : maintient `dev -> feature/* -> task/*` synchronisés avec résolution 3-way assistée par LLM et validée par le Stage 1, et exécute chaque ticket dans une session Goldfish isolée sans mémoire des tickets précédents (`runGoldfishSpecAudit` lors de `/epure to-spec`).
 2. **Stage 2 — Continuation Événementielle de la CI Externe (`waiting_ticket_ci` / `waiting_feature_ci`)** :
    - Dès que le Stage 1 réussit et que la Pull Request `task/* -> feature/*` ou `feature/* -> dev` est ouverte avec son check `ai-review`, EPURE persiste `subphase: "waiting_ticket_ci"` (ou `"waiting_feature_ci"`), `active_pr_number` et `active_head_sha` dans `refs/epure/state/<issue>`, puis termine immédiatement le job avec le code `0` (`async_ci_continuation: true`).
-   - Aucun runner GitHub Actions ne reste bloqué en attente passive. Lorsque GitHub émet `check_suite.completed` ou `workflow_run.completed` (ou qu'un mainteneur poste `/epure continue`), EPURE reprend exactement à l'état persisté.
+   - Aucun runner GitHub Actions ne reste bloqué en attente passive. Lorsque GitHub émet `workflow_run.completed` (ou qu'un mainteneur poste `/epure continue`), EPURE reprend exactement à l'état persisté et ne resynchronise `dev -> feature/* -> task/*` que si `dev` a avancé depuis la dernière synchronisation enregistrée.
 3. **Stage 3 — Roster de Revue Multi-Agents depuis `dev` & Squash Sémantique IA** :
    - Corrèle le résultat des workflows CI externes avec le panel de reviewers spécialisés chargé depuis `dev`. En cas d'échec CI ou de constat `must_fix`, EPURE extrait les journaux d'erreur assainis (~12 Ko) et exécute jusqu'à `max_code_fix_attempts = 3` rondes de remédiation unifiées avant de fusionner `task/* -> feature/*` par squash sémantique IA.
 
@@ -2199,7 +2199,7 @@ Postez `/epure approve` sur l'issue de pilotage pour intégrer directement les a
 
 - **Attente Événementielle de la CI Externe (`waiting_ticket_ci` / `waiting_feature_ci`)** :
   - À chaque ouverture d'une PR `task/* -> feature/*` (`waiting_ticket_ci`) ou de la PR finale `feature/* -> dev` (`waiting_feature_ci`), l'orchestrateur enregistre la PR et le `head_sha` actifs dans `refs/epure/state/<issue>` et termine immédiatement le job (`exit 0`) pour libérer le runner GitHub Actions (`async_ci_continuation: true`).
-  - Dès que les workflows CI externes se terminent (`check_suite.completed` ou `workflow_run.completed`), EPURE se réveille automatiquement pour exécuter la revue multi-agents Stage 3, le squash sémantique IA ou un round d'auto-remédiation. Vous pouvez également relancer manuellement la continuation à tout moment en commentant **`/epure continue`**.
+  - Dès que les workflows CI externes se terminent (`workflow_run.completed`), EPURE se réveille automatiquement pour exécuter la revue multi-agents Stage 3, le squash sémantique IA ou un round d'auto-remédiation. Vous pouvez également relancer manuellement la continuation à tout moment en commentant **`/epure continue`**.
 - **Synchroniser avec `dev` (`/epure sync` / `/epure rebase`)** :
   - Si d'autres PRs sont fusionnées sur `dev` pendant le développement de votre fonctionnalité, commentez **`/epure sync`** (ou `/epure rebase`). EPURE synchronise `dev -> feature/<issue>-<slug>` (et propage `feature/* -> active_task_branch`) avec fusion additive de `GLOSSARY.md`, renumérotation monotone des ADRs, résolution de conflits 3-way assistée par LLM et validation obligatoire dans le **Sandbox Noyau Stage 1** avant commit.
 - **Suivre l'Avancement (`/epure status`)** :
@@ -2214,8 +2214,8 @@ EPURE interrompt l'automatisation et pose le label `needs-human` (`status: "susp
 
 1. **Modification d'un Chemin Sensible** : une branche `task/*` a modifié `.github/workflows/**`, `.github/agents.yml`, le répertoire du roster de reviewers (`<reviewers_dir>/**`, par défaut `.agents/reviewers/**`) ou `CODEOWNERS`.
    - *Résolution* : inspectez le diff. Si la modification est légitime, ajoutez le label `approved-sensitive-change` sur la PR puis commentez **`/epure continue`** (ou `/epure approve`) sur l'issue de pilotage.
-2. **Plafond d'Auto-Remédiation Atteint (`max_code_fix_attempts = 3`)** : un ticket a échoué aux tests Stage 1, à la CI externe ou aux constats `must_fix` 3 fois consécutives.
-   - *Résolution* : poussez un commit de correction sur la branche `task/*` ou `feature/*` (ou publiez une précision en commentaire), puis commentez **`/epure continue`** sur l'issue de pilotage. EPURE retire le label `needs-human`, restaure `status: "active"`, ignore les tickets déjà fermés et reprend exactement au dernier jalon validé.
+2. **Plafond d'Auto-Remédiation Atteint (`max_code_fix_attempts = 3`)** : un ticket (ou la PR de fonctionnalité, qui dispose de son propre budget) a échoué aux tests Stage 1, à la CI externe ou aux constats `must_fix` 3 fois consécutives. EPURE publie cette escalade une seule fois ; les événements CI suivants sur le même SHA n'ajoutent aucun commentaire.
+   - *Résolution* : poussez un commit de correction sur la branche `task/*` ou `feature/*` (ou publiez une précision en commentaire), puis commentez **`/epure continue`** sur l'issue de pilotage. EPURE retire le label `needs-human`, restaure `status: "active"`, accorde un nouveau budget de remédiation au ticket ou à la PR de fonctionnalité bloqué (compté dans `human_budget_grants` lors des escalades suivantes), ignore les tickets déjà fermés et reprend exactement au dernier jalon validé. Un simple commentaire ne reprend pas l'implémentation : seules `/epure continue` ou `/epure approve` le font.
 3. **Audit de Convergence Zéro-Contexte (`EpicConvergenceAudit`) & Tickets Automatiques de Phase 2 (`max_epic_phases`)** :
    - Une fois tous les tickets de Phase 1 fusionnés dans `feature/*`, EPURE exécute un **`EpicConvergenceAudit` zéro-contexte** (`runEpicConvergenceAudit`) face à l'`EpicGoalContract` de la spécification.
    - Si l'audit détecte des `required_entrypoints` non câblés ou des `forbidden_stubs` résiduels (`verdict: "INCOMPLETE"`) et que `epic_phase < max_epic_phases` (`2` par défaut), EPURE génère, chaîne et exécute automatiquement des tickets correctifs **`[Phase 2 - Ticket N]`** avant d'ouvrir la PR finale `feature/* -> dev`. Si un écart subsiste après `max_epic_phases`, EPURE escalade en `needs-human` (`epic_convergence_exhausted`), d'où vous pouvez pousser un correctif et commenter **`/epure continue`**.

@@ -2,7 +2,7 @@
 
 EPURE a été conçu dès l'origine autour de trois principes d'ingénierie : **Défense en Profondeur**, **Moindre Privilège** et **État Déterministe Hors-Branches**. Chaque frontière d'automatisation est garantie à la fois par les GitHub Repository Rulesets et par l'isolation d'exécution locale.
 
-> **Schéma Interactif du Pipeline Événementiel & Custom Actions** : Consultez le [diagramme `epure-ci-actions-flow` dans la Référence des Commandes](./commands#2-pipeline-evenementiel-github-actions-custom-actions-epure-ci-actions-flow) pour visualiser l'enchaînement complet des événements GitHub (`issue_comment`, `check_suite`, `workflow_run`, `pull_request`, `workflow_dispatch`), du contrôle sans secret `authorize-command`, du job isolé `orchestrate-command` (`environment: <llm-env>`) et de la promotion `release`.
+> **Schéma Interactif du Pipeline Événementiel & Custom Actions** : Consultez le [diagramme `epure-ci-actions-flow` dans la Référence des Commandes](./commands#2-pipeline-evenementiel-github-actions-custom-actions-epure-ci-actions-flow) pour visualiser l'enchaînement complet des événements GitHub (`issue_comment`, `workflow_run`, `pull_request`, `workflow_dispatch`), du contrôle sans secret `authorize-command`, du job isolé `orchestrate-command` (`environment: <llm-env>`) et de la promotion `release`.
 
 ---
 
@@ -86,7 +86,7 @@ EPURE a été conçu dès l'origine autour de trois principes d'ingénierie : **
    - **Synchronisation Git 3-way (`/epure sync`) & Isolation Goldfish** : maintient `dev -> feature/* -> task/*` synchronisés avec résolution 3-way assistée par LLM et validée par le Stage 1, et exécute chaque ticket dans une session Goldfish isolée sans mémoire des tickets précédents (`runGoldfishSpecAudit` lors de `/epure to-spec`).
 2. **Stage 2 — Continuation Événementielle de la CI Externe (`waiting_ticket_ci` / `waiting_feature_ci`)** :
    - Dès que le Stage 1 réussit et que la Pull Request `task/* -> feature/*` ou `feature/* -> dev` est ouverte avec son check `ai-review`, EPURE persiste `subphase: "waiting_ticket_ci"` (ou `"waiting_feature_ci"`), `active_pr_number` et `active_head_sha` dans `refs/epure/state/<issue>`, puis termine immédiatement le job avec le code `0` (`async_ci_continuation: true`).
-   - Aucun runner GitHub Actions ne reste bloqué en attente passive. Lorsque GitHub émet `check_suite.completed` ou `workflow_run.completed` (ou qu'un mainteneur poste `/epure continue`), EPURE reprend exactement à l'état persisté.
+   - Aucun runner GitHub Actions ne reste bloqué en attente passive. Lorsque GitHub émet `workflow_run.completed` (ou qu'un mainteneur poste `/epure continue`), EPURE reprend exactement à l'état persisté et ne resynchronise `dev -> feature/* -> task/*` que si `dev` a avancé depuis la dernière synchronisation enregistrée.
 3. **Stage 3 — Roster de Revue Multi-Agents depuis `dev` & Squash Sémantique IA** :
    - Corrèle le résultat des workflows CI externes avec le panel de reviewers spécialisés chargé depuis `dev`. En cas d'échec CI ou de constat `must_fix`, EPURE extrait les journaux d'erreur assainis (~12 Ko) et exécute jusqu'à `max_code_fix_attempts = 3` rondes de remédiation unifiées avant de fusionner `task/* -> feature/*` par squash sémantique IA.
 

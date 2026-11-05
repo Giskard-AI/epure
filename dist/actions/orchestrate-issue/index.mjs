@@ -3966,6 +3966,76 @@ function parseAgentsYaml(yamlContent) {
 }
 
 // src/state/git-ref-state.ts
+function toTerminalState(prev, update) {
+  return {
+    ...prev,
+    ...update,
+    subphase: "idle",
+    active_head_sha: void 0,
+    active_pr_number: void 0,
+    active_task_branch: void 0,
+    active_ticket_number: void 0
+  };
+}
+function isWaitingSubphase(subphase) {
+  return subphase === "waiting_ticket_ci" || subphase === "waiting_feature_ci";
+}
+function isAutomaticallyResumable(state) {
+  return state.status === "active" && isWaitingSubphase(state.subphase);
+}
+function readTicketCodeFixAttempts(state, ticketNumber) {
+  if (state.code_fix_attempts_by_ticket !== void 0) {
+    return state.code_fix_attempts_by_ticket[String(ticketNumber)] ?? 0;
+  }
+  return state.active_ticket_number === ticketNumber && state.subphase !== "waiting_feature_ci" ? state.code_fix_attempts_used : 0;
+}
+function readFeatureCodeFixAttempts(state) {
+  return state.feature_code_fix_attempts_used ?? (state.subphase === "waiting_feature_ci" ? state.code_fix_attempts_used : 0);
+}
+function activeBudgetScope(state) {
+  return state.subphase === "waiting_feature_ci" ? "feature" : "ticket";
+}
+function readActiveCodeFixAttempts(state) {
+  return activeBudgetScope(state) === "feature" ? readFeatureCodeFixAttempts(state) : readTicketCodeFixAttempts(
+    state,
+    state.active_ticket_number ?? state.issue_number
+  );
+}
+function readCodeFixAttemptsByTicket(state) {
+  if (state.code_fix_attempts_by_ticket !== void 0) {
+    return state.code_fix_attempts_by_ticket;
+  }
+  return state.active_ticket_number !== void 0 && state.subphase !== "waiting_feature_ci" ? { [String(state.active_ticket_number)]: state.code_fix_attempts_used } : {};
+}
+function withTicketCodeFixAttempts(prev, ticketNumber, attempts) {
+  return {
+    ...prev,
+    code_fix_attempts_used: attempts,
+    code_fix_attempts_by_ticket: {
+      ...readCodeFixAttemptsByTicket(prev),
+      [String(ticketNumber)]: attempts
+    }
+  };
+}
+function withFeatureCodeFixAttempts(prev, attempts) {
+  return {
+    ...prev,
+    code_fix_attempts_used: attempts,
+    feature_code_fix_attempts_used: attempts
+  };
+}
+function grantHumanBudget(prev) {
+  const escalation = prev.last_escalation;
+  if (!escalation || escalation.reason !== "remediation_exhausted") {
+    return prev;
+  }
+  const granted = escalation.budget_scope === "feature" ? withFeatureCodeFixAttempts(prev, 0) : withTicketCodeFixAttempts(prev, escalation.ticket_number, 0);
+  return {
+    ...granted,
+    human_budget_grants: (prev.human_budget_grants ?? 0) + 1,
+    last_escalation: void 0
+  };
+}
 function buildIssueStateRefName(issueNumber) {
   if (!Number.isInteger(issueNumber) || issueNumber <= 0) {
     throw new Error(`Invalid issueNumber '${issueNumber}' for Git state ref.`);
@@ -8798,6 +8868,11 @@ function formatNeedsHumanEscalationComment(input) {
     `- **Statut d'orchestration** : \`suspended\` (label \`needs-human\` appliqu\xE9)`,
     `- **Cause de l'escalade** : ${reasonHeadline}`
   );
+  if (input.humanBudgetGrants !== void 0) {
+    lines.push(
+      `- **Budgets de correction accord\xE9s par un humain** : \`${input.humanBudgetGrants}\` (\`human_budget_grants\`)`
+    );
+  }
   if (input.reason === "model_config_missing") {
     lines.push(
       "- **Reprise** : ajoutez les cl\xE9s manquantes dans `.github/agents.yml` sur `dev` (ou relancez `setup-repo`), puis republiez la commande `/epure` d'origine (`/epure continue` ne reprend que les ex\xE9cutions en phase d'impl\xE9mentation)."
@@ -11125,6 +11200,32 @@ async function integratePlanBranchIntoFeature(params) {
     ...closedLegacyPlanPrNumber !== void 0 ? { closedLegacyPlanPrNumber } : {}
   };
 }
+function createBaseSyncGuard(input) {
+  let baseSha = null;
+  return {
+    needsSync: async () => {
+      baseSha = await input.gh.getDefaultBranchSha(input.baseBranch);
+      if (!input.automaticResume || baseSha === null) {
+        return true;
+      }
+      const { state } = await input.store.readRef(
+        buildIssueStateRefName(input.issueNumber)
+      );
+      return state?.last_synced_base_sha !== baseSha;
+    },
+    markSynced: async () => {
+      const syncedSha = baseSha;
+      if (syncedSha === null) {
+        return;
+      }
+      await updateIssueStateWithCas({
+        issueNumber: input.issueNumber,
+        store: input.store,
+        mutator: (prev) => ({ ...prev, last_synced_base_sha: syncedSha })
+      });
+    }
+  };
+}
 async function syncBranchWithBase(input) {
   if (!input.gh.mergeBranches) {
     const sha = await input.gh.getDefaultBranchSha(input.targetBranch) ?? "";
@@ -12348,8 +12449,7 @@ ${issue.body}`
       const suspended = await updateIssueStateWithCas({
         issueNumber,
         store,
-        mutator: (prev) => ({
-          ...prev,
+        mutator: (prev) => toTerminalState(prev, {
           phase: "spec",
           status: "suspended",
           active_branch: planBranch,
@@ -12699,8 +12799,7 @@ ${issue.body}`
     const suspended = await updateIssueStateWithCas({
       issueNumber,
       store,
-      mutator: (prev) => ({
-        ...prev,
+      mutator: (prev) => toTerminalState(prev, {
         phase: "tickets",
         status: "suspended",
         active_branch: planBranch,
@@ -13826,6 +13925,7 @@ async function runFeatureIntegrationPhase(params) {
   const reviewersDir = params.parsedDevAgentsConfig?.reviewers_dir ?? DEFAULT_REVIEWERS_DIR;
   let verificationProfile = params.initialVerificationProfile;
   let verificationGuideMarkdown = params.initialVerificationGuideMarkdown;
+  const escalate = (escalation) => params.escalateToNeedsHuman({ ...escalation, budgetScope: "feature" });
   const featurePrGate = prepareFeatureToDevPullRequest({
     repository: params.repository,
     planIssueNumber: params.issueNumber,
@@ -13845,35 +13945,38 @@ async function runFeatureIntegrationPhase(params) {
     attemptAutoMergeToDev: false
   });
   if (!featurePrGate.ready_to_open) {
-    return await params.escalateToNeedsHuman({
+    return await escalate({
       reason: "remediation_exhausted",
       ticketNumber: params.issueNumber,
       branch: params.featureBranch,
       diagnosticExcerpt: `${featurePrGate.error_code}: ${featurePrGate.error_message}`
     });
   }
-  const featureSync = await syncBranchWithBase({
-    gh: params.gh,
-    targetBranch: params.featureBranch,
-    baseBranch: "dev",
-    issueNumber: params.issueNumber,
-    llmApiKey: params.llmApiKey,
-    fetchImpl: params.fetchImpl,
-    model: params.phaseModels.implementationModel,
-    providers: params.phaseModels.providers,
-    maxTransientRetries: params.phaseModels.maxTransientRetries,
-    transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
-    requestTimeoutMs: params.phaseModels.requestTimeoutMs,
-    sandboxRunner: params.sandboxRunner,
-    reviewersDir
-  });
-  if (featureSync.status === "escalated") {
-    return await params.escalateToNeedsHuman({
-      reason: featureSync.escalationReason ?? "merge_conflict_unresolved",
-      ticketNumber: params.issueNumber,
-      branch: params.featureBranch,
-      diagnosticExcerpt: featureSync.diagnosticExcerpt
+  if (await params.baseSyncGuard.needsSync()) {
+    const featureSync = await syncBranchWithBase({
+      gh: params.gh,
+      targetBranch: params.featureBranch,
+      baseBranch: "dev",
+      issueNumber: params.issueNumber,
+      llmApiKey: params.llmApiKey,
+      fetchImpl: params.fetchImpl,
+      model: params.phaseModels.implementationModel,
+      providers: params.phaseModels.providers,
+      maxTransientRetries: params.phaseModels.maxTransientRetries,
+      transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
+      requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+      sandboxRunner: params.sandboxRunner,
+      reviewersDir
     });
+    if (featureSync.status === "escalated") {
+      return await escalate({
+        reason: featureSync.escalationReason ?? "merge_conflict_unresolved",
+        ticketNumber: params.issueNumber,
+        branch: params.featureBranch,
+        diagnosticExcerpt: featureSync.diagnosticExcerpt
+      });
+    }
+    await params.baseSyncGuard.markSynced();
   }
   const effectiveFeatureEntries = params.featureChangedFilesMap.size > 0 ? Array.from(params.featureChangedFilesMap.entries()) : Array.from(params.accumulatedFiles.entries());
   const allFeatureFiles = effectiveFeatureEntries.map(([path, content]) => ({
@@ -14018,14 +14121,14 @@ async function runFeatureIntegrationPhase(params) {
         summary: `Impeccable UI & Accessibility Gate: ${reviewRes.impeccable_conclusion}`
       });
     }
-    const currentAttempts = passParams.reviewFixAttemptsUsed ?? params.initialCodeFixAttemptsUsed ?? 0;
-    const shouldReleaseRunnerForAsyncFeatureCi = Boolean(params.asyncCiContinuation) && verificationProfile.wait_for_external_ci !== false && expectedFeatureWorkflows.length > 0 && (!params.forceOneRemediationRoundOnOpenPr || currentAttempts > (params.initialCodeFixAttemptsUsed ?? 0));
+    const currentAttempts = passParams.reviewFixAttemptsUsed ?? params.initialFeatureCodeFixAttemptsUsed;
+    const shouldReleaseRunnerForAsyncFeatureCi = Boolean(params.asyncCiContinuation) && verificationProfile.wait_for_external_ci !== false && expectedFeatureWorkflows.length > 0 && (!params.forceOneRemediationRoundOnOpenPr || currentAttempts > params.initialFeatureCodeFixAttemptsUsed);
     if (shouldReleaseRunnerForAsyncFeatureCi) {
       const updatedWaitingFeature = await updateIssueStateWithCas({
         issueNumber: params.issueNumber,
         store: params.store,
         mutator: (prev) => ({
-          ...prev,
+          ...withFeatureCodeFixAttempts(prev, currentAttempts),
           phase: "review",
           status: "active",
           active_branch: params.featureBranch,
@@ -14033,8 +14136,7 @@ async function runFeatureIntegrationPhase(params) {
           active_ticket_number: params.issueNumber,
           active_task_branch: void 0,
           active_pr_number: featurePr.number,
-          active_head_sha: passParams.headSha,
-          code_fix_attempts_used: currentAttempts
+          active_head_sha: passParams.headSha
         })
       });
       const asyncFeatureSummary = [
@@ -14045,7 +14147,7 @@ async function runFeatureIntegrationPhase(params) {
         `- **Pull Request** : ${featurePr.html_url} (\`${params.featureBranch}\` -> \`dev\`)`,
         `- **HEAD SHA** : \`${passParams.headSha}\``,
         `- **Revue Multi-Agents (\`ai-review\`)** : \`${reviewRes.conclusion}\``,
-        "- **Action** : Runner GitHub Actions lib\xE9r\xE9 (`exit 0`). Reprise automatique sur `check_suite` / `workflow_run: completed` ou `/epure continue`."
+        "- **Action** : Runner GitHub Actions lib\xE9r\xE9 (`exit 0`). Reprise automatique sur `workflow_run: completed` ou `/epure continue`."
       ].join("\n");
       return {
         reviewResult: reviewRes,
@@ -14098,7 +14200,7 @@ async function runFeatureIntegrationPhase(params) {
     }
     return { reviewResult: reviewRes, ciGateResult: ciRes };
   };
-  let featureReviewFixAttempt = params.initialCodeFixAttemptsUsed ?? 0;
+  let featureReviewFixAttempt = params.initialFeatureCodeFixAttemptsUsed;
   const initialFeaturePass = await runStage2AndStage3ForFeaturePr({
     headSha: currentFeaturePrHeadSha,
     isReReviewPass: false,
@@ -14112,14 +14214,13 @@ async function runFeatureIntegrationPhase(params) {
     ciGateResult: finalFeatureCiGate
   } = initialFeaturePass;
   if (!finalFeatureCiGate.passed && (finalFeatureCiGate.reason === "grace_window_timeout" || finalFeatureCiGate.reason === "wall_clock_budget_exhausted")) {
-    return await params.escalateToNeedsHuman({
+    return await escalate({
       reason: finalFeatureCiGate.reason,
       ticketNumber: params.issueNumber,
       branch: params.featureBranch,
       prNumber: featurePr.number,
       prUrl: featurePr.html_url,
       featurePrUrl: featurePr.html_url,
-      codeFixAttemptsUsed: 0,
       failedChecks: finalFeatureCiGate.failedChecks,
       mustFixFindings: finalFeatureReview.must_fix_findings,
       diagnosticExcerpt: finalFeatureCiGate.formattedDiagnostics
@@ -14132,9 +14233,8 @@ async function runFeatureIntegrationPhase(params) {
       issueNumber: params.issueNumber,
       store: params.store,
       mutator: (prev) => ({
-        ...prev,
-        code_fix_attempts_used: featureReviewFixAttempt,
-        transient_retries_used: params.getTotalTransientRetriesUsed() || prev.transient_retries_used
+        ...withFeatureCodeFixAttempts(prev, featureReviewFixAttempt),
+        transient_retries_used: params.getTotalTransientRetriesUsed()
       })
     });
     process.stdout.write(
@@ -14258,7 +14358,7 @@ ${c}`).join("\n\n");
         reviewersDir
       });
       if (!featureFixPreCheck.allowed) {
-        return await params.escalateToNeedsHuman({
+        return await escalate({
           reason: "sensitive_path_violation",
           ticketNumber: params.issueNumber,
           branch: params.featureBranch,
@@ -14366,7 +14466,7 @@ ${c}`).join("\n\n");
           reviewersDir
         });
         if (!retryPreCheck.allowed) {
-          return await params.escalateToNeedsHuman({
+          return await escalate({
             reason: "sensitive_path_violation",
             ticketNumber: params.issueNumber,
             branch: params.featureBranch,
@@ -14413,7 +14513,7 @@ ${c}`).join("\n\n");
         if (featureReviewFixAttempt < maxFeatureReviewFixAttempts) {
           continue;
         }
-        return await params.escalateToNeedsHuman({
+        return await escalate({
           reason: "remediation_exhausted",
           ticketNumber: params.issueNumber,
           branch: params.featureBranch,
@@ -14493,7 +14593,7 @@ Refs #${params.issueNumber}`
       finalFeatureReview = nextFeaturePass.reviewResult;
       finalFeatureCiGate = nextFeaturePass.ciGateResult;
       if (!finalFeatureCiGate.passed && (finalFeatureCiGate.reason === "grace_window_timeout" || finalFeatureCiGate.reason === "wall_clock_budget_exhausted")) {
-        return await params.escalateToNeedsHuman({
+        return await escalate({
           reason: finalFeatureCiGate.reason,
           ticketNumber: params.issueNumber,
           branch: params.featureBranch,
@@ -14508,7 +14608,7 @@ Refs #${params.issueNumber}`
       }
     } catch (err) {
       if (err instanceof LLMError) {
-        return await params.escalateToNeedsHuman({
+        return await escalate({
           reason: resolveLlmEscalationReason(err),
           ticketNumber: params.issueNumber,
           branch: params.featureBranch,
@@ -14529,7 +14629,7 @@ Refs #${params.issueNumber}`
     }
   }
   if (finalFeatureReview.conclusion === "failure" || !finalFeatureCiGate.passed) {
-    return await params.escalateToNeedsHuman({
+    return await escalate({
       reason: "remediation_exhausted",
       ticketNumber: params.issueNumber,
       branch: params.featureBranch,
@@ -14545,8 +14645,7 @@ Refs #${params.issueNumber}`
   const updatedDone = await updateIssueStateWithCas({
     issueNumber: params.issueNumber,
     store: params.store,
-    mutator: (prev) => ({
-      ...prev,
+    mutator: (prev) => toTerminalState(prev, {
       phase: "completed",
       status: "done",
       active_branch: params.featureBranch,
@@ -14727,8 +14826,7 @@ async function processPendingIssueCommentsBatch(input) {
       latestStateResult = await updateIssueStateWithCas({
         issueNumber: input.issueNumber,
         store: input.store,
-        mutator: (prev) => ({
-          ...prev,
+        mutator: (prev) => toTerminalState(prev, {
           status: "cancelled",
           last_processed_comment_id: cursor
         })
@@ -15089,8 +15187,7 @@ async function runTicketExecutionLoop(params) {
         const updatedSuspended = await updateIssueStateWithCas({
           issueNumber: params.issueNumber,
           store: params.store,
-          mutator: (prev) => ({
-            ...prev,
+          mutator: (prev) => toTerminalState(prev, {
             phase: "implementation",
             status: "suspended",
             active_branch: params.featureBranch,
@@ -15160,64 +15257,70 @@ async function runTicketExecutionLoop(params) {
 `
       );
     }
-    const featureSync = await syncBranchWithBase({
-      gh: params.gh,
-      targetBranch: params.featureBranch,
-      baseBranch: "dev",
-      issueNumber: params.issueNumber,
-      llmApiKey: params.llmApiKey,
-      fetchImpl: params.fetchImpl,
-      model: params.phaseModels.implementationModel,
-      providers: params.phaseModels.providers,
-      maxTransientRetries: params.phaseModels.maxTransientRetries,
-      transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
-      requestTimeoutMs: params.phaseModels.requestTimeoutMs,
-      sandboxRunner: params.sandboxRunner,
-      reviewersDir
-    });
-    if (featureSync.status === "escalated") {
-      const escalated = await params.escalateToNeedsHuman({
-        reason: featureSync.escalationReason ?? "merge_conflict_unresolved",
-        ticketNumber: ticket.ticketIssueNumber,
-        branch: params.featureBranch,
-        diagnosticExcerpt: featureSync.diagnosticExcerpt
+    const syncWithBase = await params.baseSyncGuard.needsSync();
+    if (syncWithBase) {
+      const featureSync = await syncBranchWithBase({
+        gh: params.gh,
+        targetBranch: params.featureBranch,
+        baseBranch: "dev",
+        issueNumber: params.issueNumber,
+        llmApiKey: params.llmApiKey,
+        fetchImpl: params.fetchImpl,
+        model: params.phaseModels.implementationModel,
+        providers: params.phaseModels.providers,
+        maxTransientRetries: params.phaseModels.maxTransientRetries,
+        transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
+        requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+        sandboxRunner: params.sandboxRunner,
+        reviewersDir
       });
-      return {
-        halted: true,
-        result: escalated,
-        verificationProfile,
-        verificationGuideMarkdown
-      };
+      if (featureSync.status === "escalated") {
+        const escalated = await params.escalateToNeedsHuman({
+          reason: featureSync.escalationReason ?? "merge_conflict_unresolved",
+          ticketNumber: ticket.ticketIssueNumber,
+          branch: params.featureBranch,
+          diagnosticExcerpt: featureSync.diagnosticExcerpt
+        });
+        return {
+          halted: true,
+          result: escalated,
+          verificationProfile,
+          verificationGuideMarkdown
+        };
+      }
     }
     await params.gh.ensureBranch(taskBranch, params.featureBranch);
-    const taskSync = await syncBranchWithBase({
-      gh: params.gh,
-      targetBranch: taskBranch,
-      baseBranch: params.featureBranch,
-      issueNumber: ticket.ticketIssueNumber,
-      llmApiKey: params.llmApiKey,
-      fetchImpl: params.fetchImpl,
-      model: params.phaseModels.implementationModel,
-      providers: params.phaseModels.providers,
-      maxTransientRetries: params.phaseModels.maxTransientRetries,
-      transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
-      requestTimeoutMs: params.phaseModels.requestTimeoutMs,
-      sandboxRunner: params.sandboxRunner,
-      reviewersDir
-    });
-    if (taskSync.status === "escalated") {
-      const escalated = await params.escalateToNeedsHuman({
-        reason: taskSync.escalationReason ?? "merge_conflict_unresolved",
-        ticketNumber: ticket.ticketIssueNumber,
-        branch: taskBranch,
-        diagnosticExcerpt: taskSync.diagnosticExcerpt
+    if (syncWithBase) {
+      const taskSync = await syncBranchWithBase({
+        gh: params.gh,
+        targetBranch: taskBranch,
+        baseBranch: params.featureBranch,
+        issueNumber: ticket.ticketIssueNumber,
+        llmApiKey: params.llmApiKey,
+        fetchImpl: params.fetchImpl,
+        model: params.phaseModels.implementationModel,
+        providers: params.phaseModels.providers,
+        maxTransientRetries: params.phaseModels.maxTransientRetries,
+        transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
+        requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+        sandboxRunner: params.sandboxRunner,
+        reviewersDir
       });
-      return {
-        halted: true,
-        result: escalated,
-        verificationProfile,
-        verificationGuideMarkdown
-      };
+      if (taskSync.status === "escalated") {
+        const escalated = await params.escalateToNeedsHuman({
+          reason: taskSync.escalationReason ?? "merge_conflict_unresolved",
+          ticketNumber: ticket.ticketIssueNumber,
+          branch: taskBranch,
+          diagnosticExcerpt: taskSync.diagnosticExcerpt
+        });
+        return {
+          halted: true,
+          result: escalated,
+          verificationProfile,
+          verificationGuideMarkdown
+        };
+      }
+      await params.baseSyncGuard.markSynced();
     }
     const sandboxWorkspace = prepareRepositorySandboxWorkspace({
       repository: params.repository,
@@ -15248,7 +15351,8 @@ async function runTicketExecutionLoop(params) {
     const bootstrappedTargets = /* @__PURE__ */ new Set();
     let taskPr;
     let fixAttempt = 0;
-    let reviewFixAttempt = 0;
+    const initialTicketFixAttempts = params.initialCodeFixAttemptsByTicket[String(ticket.ticketIssueNumber)] ?? 0;
+    let reviewFixAttempt = initialTicketFixAttempts;
     try {
       const ticketChangedFilesMap = /* @__PURE__ */ new Map();
       const ticketDeletedFilesSet = /* @__PURE__ */ new Set();
@@ -15791,13 +15895,17 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
             summary: `Impeccable UI & Accessibility Gate: ${reviewRes.impeccable_conclusion}`
           });
         }
-        const shouldReleaseRunnerForAsyncCi = Boolean(params.asyncCiContinuation) && verificationProfile.wait_for_external_ci !== false && expectedWorkflows.length > 0 && (!params.forceOneRemediationRoundOnOpenPr || passParams.reviewFixAttemptsUsed > (params.initialCodeFixAttemptsUsed ?? 0));
+        const shouldReleaseRunnerForAsyncCi = Boolean(params.asyncCiContinuation) && verificationProfile.wait_for_external_ci !== false && expectedWorkflows.length > 0 && (!params.forceOneRemediationRoundOnOpenPr || passParams.reviewFixAttemptsUsed > initialTicketFixAttempts);
         if (shouldReleaseRunnerForAsyncCi) {
           const updatedWaiting = await updateIssueStateWithCas({
             issueNumber: params.issueNumber,
             store: params.store,
             mutator: (prev) => ({
-              ...prev,
+              ...withTicketCodeFixAttempts(
+                prev,
+                ticket.ticketIssueNumber,
+                passParams.reviewFixAttemptsUsed
+              ),
               phase: "implementation",
               status: "active",
               active_branch: params.featureBranch,
@@ -15805,8 +15913,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
               active_ticket_number: ticket.ticketIssueNumber,
               active_task_branch: taskBranch,
               active_pr_number: taskPr.number,
-              active_head_sha: passParams.headSha,
-              code_fix_attempts_used: passParams.reviewFixAttemptsUsed
+              active_head_sha: passParams.headSha
             })
           });
           const asyncSummary = [
@@ -15817,7 +15924,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
             `- **Branche du ticket** : \`${taskBranch}\` -> \`${params.featureBranch}\``,
             `- **HEAD SHA** : \`${passParams.headSha}\``,
             `- **Revue Multi-Agents (\`ai-review\`)** : \`${reviewRes.conclusion}\``,
-            "- **Action** : Runner GitHub Actions lib\xE9r\xE9 (`exit 0`). Reprise automatique sur `check_suite` / `workflow_run: completed` ou `/epure continue`."
+            "- **Action** : Runner GitHub Actions lib\xE9r\xE9 (`exit 0`). Reprise automatique sur `workflow_run: completed` ou `/epure continue`."
           ].join("\n");
           return {
             reviewResult: reviewRes,
@@ -15877,7 +15984,6 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
           escalateToHuman: reviewGuard.escalate_to_human
         };
       };
-      reviewFixAttempt = params.initialCodeFixAttemptsUsed ?? 0;
       const initialPass = await runStage2AndStage3ForTaskPr({
         headSha: currentPrHeadSha,
         isReReviewPass: false,
@@ -15903,7 +16009,6 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
           branch: taskBranch,
           prNumber: taskPr.number,
           prUrl: taskPr.html_url,
-          codeFixAttemptsUsed: 0,
           failedChecks: ciGateResult.failedChecks,
           mustFixFindings: reviewResult.must_fix_findings,
           diagnosticExcerpt: ciGateResult.formattedDiagnostics
@@ -15922,7 +16027,6 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
           branch: taskBranch,
           prNumber: taskPr.number,
           prUrl: taskPr.html_url,
-          codeFixAttemptsUsed: 0,
           failedChecks: ciGateResult.failedChecks,
           mustFixFindings: reviewResult.must_fix_findings,
           diagnosticExcerpt: ciGateResult.formattedDiagnostics
@@ -15940,9 +16044,12 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
           issueNumber: params.issueNumber,
           store: params.store,
           mutator: (prev) => ({
-            ...prev,
-            code_fix_attempts_used: reviewFixAttempt,
-            transient_retries_used: params.getTotalTransientRetriesUsed() || prev.transient_retries_used
+            ...withTicketCodeFixAttempts(
+              prev,
+              ticket.ticketIssueNumber,
+              reviewFixAttempt
+            ),
+            transient_retries_used: params.getTotalTransientRetriesUsed()
           })
         });
         process.stdout.write(
@@ -16403,17 +16510,15 @@ async function orchestrateIssueCommand(input) {
       githubToken: activeToken,
       fetchImpl: input.fetchImpl
     });
+    const isAutomaticEntry = input.command === "continue" && (input.commentId ?? 0) <= 0;
+    const triggerHeadSha = input.triggerHeadSha?.trim() || void 0;
+    const triggerBranch = input.triggerBranch?.trim() || void 0;
     let resolvedIssueNumber = input.issueNumber;
     if (resolvedIssueNumber <= 0 && input.command === "continue") {
       const allStates = store.listIssueStates ? await store.listIssueStates() : [];
-      const waitingCandidates = allStates.filter(
-        (s) => s.subphase === "waiting_ticket_ci" || s.subphase === "waiting_feature_ci"
-      );
-      const hasTriggerSelector = Boolean(
-        input.triggerHeadSha?.trim() || input.triggerBranch?.trim()
-      );
-      const matched = hasTriggerSelector ? waitingCandidates.find(
-        (s) => input.triggerHeadSha && s.active_head_sha === input.triggerHeadSha || input.triggerBranch && (s.active_task_branch === input.triggerBranch || s.active_branch === input.triggerBranch)
+      const waitingCandidates = allStates.filter(isAutomaticallyResumable);
+      const matched = triggerHeadSha ? waitingCandidates.find((s) => s.active_head_sha === triggerHeadSha) : triggerBranch ? waitingCandidates.find(
+        (s) => s.active_task_branch === triggerBranch || s.active_branch === triggerBranch
       ) : waitingCandidates[0];
       if (!matched) {
         return {
@@ -16434,9 +16539,26 @@ async function orchestrateIssueCommand(input) {
     let featureBranch = `feature/${effectiveInput.issueNumber}`;
     let maxCodeFixAttempts = 3;
     let totalTransientRetriesUsed = 0;
+    let initialTransientRetriesUsed = 0;
+    const cumulativeTransientRetriesUsed = () => initialTransientRetriesUsed + totalTransientRetriesUsed;
     try {
       const currentSnapshot = await store.readRef(refName);
       let currentState = currentSnapshot.state;
+      initialTransientRetriesUsed = currentState?.transient_retries_used ?? 0;
+      if (isAutomaticEntry) {
+        const ignoredReason = !currentState ? "no orchestration state" : !isAutomaticallyResumable(currentState) ? `status \`${currentState.status}\` / subphase \`${currentState.subphase ?? "idle"}\` is not an active wait` : triggerHeadSha && triggerHeadSha !== currentState.active_head_sha ? `trigger SHA \`${triggerHeadSha}\` is not the active head SHA` : void 0;
+        if (ignoredReason) {
+          return {
+            executed: false,
+            phase: currentState?.phase ?? "idle",
+            status: currentState?.status ?? "active",
+            active_branch: currentState?.active_branch ?? "",
+            summary_markdown: `Automatic continuation ignored: ${ignoredReason}.`,
+            created_ticket_numbers: [],
+            feature_pr_url: ""
+          };
+        }
+      }
       if (effectiveInput.command === "status") {
         const updated = await updateIssueStateWithCas({
           issueNumber: effectiveInput.issueNumber,
@@ -16469,8 +16591,7 @@ async function orchestrateIssueCommand(input) {
         const updated = await updateIssueStateWithCas({
           issueNumber: effectiveInput.issueNumber,
           store,
-          mutator: (prev) => ({
-            ...prev,
+          mutator: (prev) => toTerminalState(prev, {
             status: "cancelled",
             last_processed_comment_id: effectiveInput.commentId ?? prev.last_processed_comment_id
           })
@@ -16559,12 +16680,11 @@ async function orchestrateIssueCommand(input) {
             const updatedSuspended = await updateIssueStateWithCas({
               issueNumber: effectiveInput.issueNumber,
               store,
-              mutator: (prev) => ({
-                ...prev,
+              mutator: (prev) => toTerminalState(prev, {
                 phase: suspendedPhase,
                 status: "suspended",
                 active_branch: planBranch,
-                transient_retries_used: totalTransientRetriesUsed || prev.transient_retries_used,
+                transient_retries_used: cumulativeTransientRetriesUsed(),
                 last_processed_comment_id: effectiveInput.commentId ?? prev.last_processed_comment_id
               })
             });
@@ -16649,8 +16769,7 @@ async function orchestrateIssueCommand(input) {
           const updatedSuspended = await updateIssueStateWithCas({
             issueNumber: effectiveInput.issueNumber,
             store,
-            mutator: (prev) => ({
-              ...prev,
+            mutator: (prev) => toTerminalState(prev, {
               status: "suspended",
               active_branch: targetBranch,
               last_processed_comment_id: effectiveInput.commentId ?? prev.last_processed_comment_id
@@ -16714,8 +16833,7 @@ async function orchestrateIssueCommand(input) {
             const updatedTaskSuspended = await updateIssueStateWithCas({
               issueNumber: effectiveInput.issueNumber,
               store,
-              mutator: (prev) => ({
-                ...prev,
+              mutator: (prev) => toTerminalState(prev, {
                 status: "suspended",
                 active_branch: targetBranch,
                 last_processed_comment_id: effectiveInput.commentId ?? prev.last_processed_comment_id
@@ -16792,10 +16910,89 @@ async function orchestrateIssueCommand(input) {
           feature_pr_url: ""
         };
       }
+      const escalateSuspension = async (params) => {
+        let duplicateOfLastEscalation = false;
+        const updatedSuspended = await updateIssueStateWithCas({
+          issueNumber: effectiveInput.issueNumber,
+          store,
+          mutator: (prev) => {
+            const escalation = {
+              reason: params.reason,
+              head_sha: prev.active_head_sha ?? "",
+              ticket_number: params.ticketNumber,
+              budget_scope: params.budgetScope ?? "ticket"
+            };
+            duplicateOfLastEscalation = isAutomaticEntry && prev.last_escalation?.reason === escalation.reason && prev.last_escalation?.head_sha === escalation.head_sha;
+            return toTerminalState(prev, {
+              phase: params.phase ?? "implementation",
+              status: "suspended",
+              active_branch: params.branch,
+              code_fix_attempts_used: params.codeFixAttemptsUsed ?? prev.code_fix_attempts_used,
+              transient_retries_used: cumulativeTransientRetriesUsed(),
+              last_escalation: escalation,
+              last_processed_comment_id: effectiveInput.commentId ?? prev.last_processed_comment_id
+            });
+          }
+        });
+        if (!duplicateOfLastEscalation) {
+          await gh.ensureLabel(
+            "needs-human",
+            "D93F0B",
+            "Requires human maintainer intervention"
+          );
+          await gh.addIssueLabels(effectiveInput.issueNumber, ["needs-human"]);
+          if (params.ticketNumber !== effectiveInput.issueNumber) {
+            await gh.addIssueLabels(params.ticketNumber, ["needs-human"]);
+          }
+        }
+        const escalationMarkdown = appendEpureCommandsSpoiler(
+          [
+            updatedSuspended.issue_mirror_markdown,
+            "",
+            formatNeedsHumanEscalationComment({
+              reason: params.reason,
+              issueNumber: effectiveInput.issueNumber,
+              ticketIssueNumber: params.ticketNumber,
+              prNumber: params.prNumber,
+              prUrl: params.prUrl,
+              branch: params.branch,
+              codeFixAttemptsUsed: updatedSuspended.state.code_fix_attempts_used,
+              maxCodeFixAttempts,
+              humanBudgetGrants: updatedSuspended.state.human_budget_grants ?? 0,
+              graceWindowSeconds: params.graceWindowSeconds,
+              failedChecks: params.failedChecks,
+              mustFixFindings: params.mustFixFindings,
+              sensitivePaths: params.sensitivePaths,
+              traversalPaths: params.traversalPaths,
+              diagnosticExcerpt: params.diagnosticExcerpt,
+              epicConvergenceDetails: params.epicConvergenceDetails
+            })
+          ].join("\n"),
+          {
+            phase: "suspended",
+            status: "suspended",
+            issueNumber: effectiveInput.issueNumber
+          }
+        );
+        if (!duplicateOfLastEscalation) {
+          await gh.postIssueComment(
+            effectiveInput.issueNumber,
+            escalationMarkdown
+          );
+        }
+        return {
+          executed: true,
+          phase: updatedSuspended.state.phase,
+          status: updatedSuspended.state.status,
+          active_branch: params.branch,
+          summary_markdown: escalationMarkdown,
+          created_ticket_numbers: params.createdTicketNumbers ?? [],
+          feature_pr_url: params.featurePrUrl ?? params.prUrl ?? ""
+        };
+      };
       let forceOneRemediationRoundOnOpenPr = false;
-      let initialCodeFixAttemptsUsed = currentState?.code_fix_attempts_used ?? 0;
       if (effectiveInput.command === "continue") {
-        const isWaitingExternalCi = currentState?.subphase === "waiting_ticket_ci" || currentState?.subphase === "waiting_feature_ci";
+        const isWaitingExternalCi = currentState !== null && isAutomaticallyResumable(currentState);
         const isManualContinueInImplementation = !isWaitingExternalCi && (effectiveInput.commentId ?? 0) > 0 && currentState?.phase === "implementation";
         if (!isWaitingExternalCi && !isManualContinueInImplementation) {
           return {
@@ -16962,13 +17159,25 @@ async function orchestrateIssueCommand(input) {
               })
             });
             currentState = updatedAfterTicketMerge.state;
-            initialCodeFixAttemptsUsed = 0;
           } else {
+            const attemptsUsed = readActiveCodeFixAttempts(currentState);
+            if (attemptsUsed >= maxCodeFixAttempts) {
+              return await escalateSuspension({
+                reason: "remediation_exhausted",
+                ticketNumber: currentState.active_ticket_number ?? effectiveInput.issueNumber,
+                branch: currentState.active_task_branch || currentState.active_branch || featureBranch,
+                budgetScope: activeBudgetScope(currentState),
+                prNumber: currentState.active_pr_number,
+                codeFixAttemptsUsed: attemptsUsed,
+                failedChecks: snapshot.failedChecks,
+                diagnosticExcerpt: snapshot.formattedDiagnostics
+              });
+            }
             forceOneRemediationRoundOnOpenPr = true;
           }
         }
       }
-      if (effectiveInput.command === "approve" || effectiveInput.command === "continue" || effectiveInput.command === "reply" && currentState?.phase === "implementation" && currentState?.status === "suspended") {
+      if (effectiveInput.command === "approve" || effectiveInput.command === "continue") {
         const phaseModels = requirePhaseModels();
         if (currentState?.status === "suspended") {
           await gh.removeIssueLabel?.(effectiveInput.issueNumber, "needs-human");
@@ -17057,76 +17266,17 @@ async function orchestrateIssueCommand(input) {
         const effectiveSleepFn = effectiveInput.sleepFn ?? (effectiveInput.fetchImpl ? async () => {
         } : void 0);
         const infraRerunsBySha = /* @__PURE__ */ new Map();
-        const escalateToNeedsHuman = async (params) => {
-          await gh.ensureLabel(
-            "needs-human",
-            "D93F0B",
-            "Requires human maintainer intervention"
-          );
-          await gh.addIssueLabels(effectiveInput.issueNumber, ["needs-human"]);
-          if (params.ticketNumber !== effectiveInput.issueNumber) {
-            await gh.addIssueLabels(params.ticketNumber, ["needs-human"]);
-          }
-          const updatedSuspended = await updateIssueStateWithCas({
-            issueNumber: effectiveInput.issueNumber,
-            store,
-            mutator: (prev) => ({
-              ...prev,
-              phase: params.phase ?? "implementation",
-              status: "suspended",
-              active_branch: params.branch,
-              code_fix_attempts_used: params.codeFixAttemptsUsed ?? prev.code_fix_attempts_used,
-              transient_retries_used: totalTransientRetriesUsed || prev.transient_retries_used,
-              last_processed_comment_id: effectiveInput.commentId ?? prev.last_processed_comment_id
-            })
-          });
-          const escalationMarkdown = appendEpureCommandsSpoiler(
-            [
-              updatedSuspended.issue_mirror_markdown,
-              "",
-              formatNeedsHumanEscalationComment({
-                reason: params.reason,
-                issueNumber: effectiveInput.issueNumber,
-                ticketIssueNumber: params.ticketNumber,
-                prNumber: params.prNumber,
-                prUrl: params.prUrl,
-                branch: params.branch,
-                codeFixAttemptsUsed: params.codeFixAttemptsUsed,
-                maxCodeFixAttempts,
-                graceWindowSeconds: verificationProfile.grace_window_seconds,
-                failedChecks: params.failedChecks,
-                mustFixFindings: params.mustFixFindings,
-                sensitivePaths: params.sensitivePaths,
-                traversalPaths: params.traversalPaths,
-                diagnosticExcerpt: params.diagnosticExcerpt,
-                epicConvergenceDetails: params.epicConvergenceDetails
-              })
-            ].join("\n"),
-            {
-              phase: "suspended",
-              status: "suspended",
-              issueNumber: effectiveInput.issueNumber
-            }
-          );
-          await gh.postIssueComment(effectiveInput.issueNumber, escalationMarkdown);
-          return {
-            executed: true,
-            phase: updatedSuspended.state.phase,
-            status: updatedSuspended.state.status,
-            active_branch: params.branch,
-            summary_markdown: escalationMarkdown,
-            created_ticket_numbers: ticketsManifest.map(
-              (t) => t.ticketIssueNumber
-            ),
-            feature_pr_url: params.featurePrUrl ?? params.prUrl ?? ""
-          };
-        };
+        const escalateToNeedsHuman = (params) => escalateSuspension({
+          ...params,
+          graceWindowSeconds: verificationProfile.grace_window_seconds,
+          createdTicketNumbers: ticketsManifest.map((t) => t.ticketIssueNumber)
+        });
         await gh.ensureBranch(featureBranch, "dev");
         const updatedStart = await updateIssueStateWithCas({
           issueNumber: effectiveInput.issueNumber,
           store,
           mutator: (prev) => ({
-            ...prev,
+            ...prev.status === "suspended" ? grantHumanBudget(prev) : prev,
             phase: "implementation",
             status: "active",
             active_branch: featureBranch,
@@ -17134,6 +17284,19 @@ async function orchestrateIssueCommand(input) {
             last_processed_comment_id: effectiveInput.commentId ?? prev.last_processed_comment_id
           })
         });
+        const baseSyncGuard = createBaseSyncGuard({
+          gh,
+          store,
+          issueNumber: effectiveInput.issueNumber,
+          baseBranch: "dev",
+          automaticResume: isAutomaticEntry
+        });
+        const initialCodeFixAttemptsByTicket = readCodeFixAttemptsByTicket(
+          updatedStart.state
+        );
+        const initialFeatureCodeFixAttemptsUsed = readFeatureCodeFixAttempts(
+          updatedStart.state
+        );
         const hintForWorkspace = [
           issue.title,
           issue.body,
@@ -17225,7 +17388,7 @@ ${t.filesToTouch.join(" ")}`
           maxCodeFixAttempts,
           hintForWorkspace,
           infraRerunsBySha,
-          getTotalTransientRetriesUsed: () => totalTransientRetriesUsed,
+          getTotalTransientRetriesUsed: cumulativeTransientRetriesUsed,
           addTransientRetriesUsed: (delta) => {
             totalTransientRetriesUsed += delta;
           },
@@ -17240,7 +17403,8 @@ ${t.filesToTouch.join(" ")}`
           sandboxRunner: effectiveInput.sandboxRunner,
           asyncCiContinuation: asyncCiEnabled,
           forceOneRemediationRoundOnOpenPr,
-          initialCodeFixAttemptsUsed
+          initialCodeFixAttemptsByTicket,
+          baseSyncGuard
         });
         if (loopOutcome.halted && loopOutcome.result) {
           return loopOutcome.result;
@@ -17374,7 +17538,7 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
               maxCodeFixAttempts,
               hintForWorkspace,
               infraRerunsBySha,
-              getTotalTransientRetriesUsed: () => totalTransientRetriesUsed,
+              getTotalTransientRetriesUsed: cumulativeTransientRetriesUsed,
               addTransientRetriesUsed: (delta) => {
                 totalTransientRetriesUsed += delta;
               },
@@ -17389,7 +17553,8 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
               sandboxRunner: effectiveInput.sandboxRunner,
               asyncCiContinuation: asyncCiEnabled,
               forceOneRemediationRoundOnOpenPr: false,
-              initialCodeFixAttemptsUsed: 0
+              initialCodeFixAttemptsByTicket,
+              baseSyncGuard
             });
             if (loopOutcome.halted && loopOutcome.result) {
               return loopOutcome.result;
@@ -17422,7 +17587,7 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
             initialVerificationGuideMarkdown: loopOutcome.verificationGuideMarkdown,
             maxCodeFixAttempts,
             infraRerunsBySha,
-            getTotalTransientRetriesUsed: () => totalTransientRetriesUsed,
+            getTotalTransientRetriesUsed: cumulativeTransientRetriesUsed,
             addTransientRetriesUsed: (delta) => {
               totalTransientRetriesUsed += delta;
             },
@@ -17437,7 +17602,8 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
             sandboxRunner: effectiveInput.sandboxRunner,
             asyncCiContinuation: asyncCiEnabled,
             forceOneRemediationRoundOnOpenPr,
-            initialCodeFixAttemptsUsed
+            initialFeatureCodeFixAttemptsUsed,
+            baseSyncGuard
           });
         } catch (err) {
           if (err instanceof LLMError) {
@@ -17477,12 +17643,11 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
       const updatedSuspended = await updateIssueStateWithCas({
         issueNumber: effectiveInput.issueNumber,
         store,
-        mutator: (prev) => ({
-          ...prev,
+        mutator: (prev) => toTerminalState(prev, {
           phase: prev.phase !== "idle" ? prev.phase : fallbackPhase,
           status: "suspended",
           active_branch: prev.active_branch || fallbackBranch,
-          transient_retries_used: totalTransientRetriesUsed || prev.transient_retries_used,
+          transient_retries_used: cumulativeTransientRetriesUsed(),
           last_processed_comment_id: effectiveInput.commentId ?? prev.last_processed_comment_id
         })
       });

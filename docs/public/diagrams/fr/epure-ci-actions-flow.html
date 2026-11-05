@@ -5302,8 +5302,8 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <text data-detail="fine" x="114" y="142" class="t-external" font-size="7" text-anchor="middle">issue_comment</text>
         </g>
 
-        <g id="node-ci_wakeup_event" data-node-id="ci_wakeup_event" data-node-label="Réveil Webhook CI" tabindex="0" role="button" aria-label="Focus Réveil Webhook CI, check_suite.completed, Événements GitHub &amp; Commandes Mainteneur › 2. Sandbox &amp; CI Async" aria-pressed="false" data-node-kind="external" data-node-sublabel="check_suite.completed" data-node-tag="workflow_run" data-node-context="Événements GitHub &amp; Commandes Mainteneur › 2. Sandbox &amp; CI Async">
-          <title>Réveil Webhook CI · check_suite.completed · Événements GitHub &amp; Commandes Mainteneur › 2. Sandbox &amp; CI Async · workflow_run</title>
+        <g id="node-ci_wakeup_event" data-node-id="ci_wakeup_event" data-node-label="Réveil Webhook CI" tabindex="0" role="button" aria-label="Focus Réveil Webhook CI, workflow_run.completed, Événements GitHub &amp; Commandes Mainteneur › 2. Sandbox &amp; CI Async" aria-pressed="false" data-node-kind="external" data-node-sublabel="workflow_run.completed" data-node-tag="workflow_run" data-node-context="Événements GitHub &amp; Commandes Mainteneur › 2. Sandbox &amp; CI Async">
+          <title>Réveil Webhook CI · workflow_run.completed · Événements GitHub &amp; Commandes Mainteneur › 2. Sandbox &amp; CI Async · workflow_run</title>
           <rect x="481.20000000000005" y="86" width="132" height="68" rx="8" class="c-mask"/>
           <rect x="481.20000000000005" y="86" width="132" height="68" rx="8" class="c-external" data-animate="node" style="--step:7" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(487.20000000000005 92) scale(0.6875)">
@@ -5311,7 +5311,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
             <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
           </g>
           <text data-node-label="" data-detail-anchor="" x="547.2" y="118.2" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Réveil Webhook CI</text>
-          <text data-detail="context" x="547.2" y="133.1" class="t-muted" font-size="8" text-anchor="middle">check_suite.completed</text>
+          <text data-detail="context" x="547.2" y="133.1" class="t-muted" font-size="8" text-anchor="middle">workflow_run.completed</text>
         <text data-detail="fine" x="547.2" y="145.9" class="t-external" font-size="7" text-anchor="middle">workflow_run</text>
         </g>
 
@@ -5653,7 +5653,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <h3>Triggers GitHub, Commandes &amp; Split d&#39;Auth 2-Jobs</h3>
         </div>
         <ul>
-          <li>Triggers : issue_comment, check_suite / workflow_run, pull_request, workflow_dispatch</li>
+          <li>Triggers : issue_comment, workflow_run, pull_request, workflow_dispatch</li>
           <li>Commandes : /epure plan, réponses Grill/Spec, /epure to-spec, to-tickets, approve, continue, sync, status, cancel</li>
           <li>epure-issue-command.yml sépare Job 1 authorize-command (0 secret) et Job 2 orchestrate-command (env: &lt;llm-env&gt;)</li>
         </ul>
@@ -5667,7 +5667,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <ul>
           <li>Stage 1 : sandbox Ubuntu 26.04 à 2 phases (bwrap/landrun --unshare-net + rtk) &amp; write/patch/delete_repo_file</li>
           <li>Stage 2 : ouvre la PR et quitte (code 0) en waiting_ticket_ci / waiting_feature_ci pendant les checks externes</li>
-          <li>Exécute ci.yml, epure-check.yml, pr-title.yml &amp; actions/impeccable ; réveillé par check_suite.completed / workflow_run.completed</li>
+          <li>Exécute ci.yml, epure-check.yml, pr-title.yml &amp; actions/impeccable ; réveillé par workflow_run.completed</li>
         </ul>
       </div>
 
