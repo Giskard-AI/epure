@@ -1,7 +1,7 @@
 import { appendFileSync } from "node:fs";
-import type { EpureCommandName } from "../../src/auth/issue-command-gate.js";
 import { redactSecrets } from "../../src/auth/issue-command-gate.js";
 import { orchestrateIssueCommand } from "../../src/orchestrator/issue-orchestrator.js";
+import type { OrchestratorCommand } from "../../src/orchestrator/types.js";
 
 function writeGitHubOutputs(
   outputs: Record<string, string>,
@@ -33,7 +33,7 @@ async function run(): Promise<void> {
     process.env.INPUT_REPOSITORY ?? process.env.GITHUB_REPOSITORY ?? "";
   const issueNumber =
     Number.parseInt(process.env.INPUT_ISSUE_NUMBER ?? "0", 10) || 0;
-  const command = (process.env.INPUT_COMMAND ?? "status").trim() as EpureCommandName;
+  const command = (process.env.INPUT_COMMAND ?? "status").trim() as OrchestratorCommand;
   const commandArgs = process.env.INPUT_COMMAND_ARGS ?? "";
   const commentId =
     Number.parseInt(process.env.INPUT_COMMENT_ID ?? "0", 10) || 0;

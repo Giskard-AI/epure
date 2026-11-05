@@ -943,6 +943,36 @@ export function createGitHubRestHelper(params: {
       return null;
     },
 
+    async findMergedPullRequestByHead(
+      headBranch: string,
+      baseBranch: string
+    ): Promise<{ number: number; html_url: string } | null> {
+      const closed = await apiRequest<
+        Array<{ number: number; html_url: string; merged_at?: string | null }>
+      >(
+        "GET",
+        `/repos/${owner}/${repo}/pulls?state=closed&head=${encodeURIComponent(
+          `${owner}:${headBranch}`
+        )}&base=${encodeURIComponent(baseBranch)}`,
+        undefined,
+        true
+      );
+      const merged = closed.data?.find((pr) => pr.merged_at);
+      return merged ? { number: merged.number, html_url: merged.html_url } : null;
+    },
+
+    async listOpenPullRequestsByBase(
+      baseBranch: string
+    ): Promise<ReadonlyArray<{ number: number; html_url: string }>> {
+      const open = await apiRequest<Array<{ number: number; html_url: string }>>(
+        "GET",
+        `/repos/${owner}/${repo}/pulls?state=open&base=${encodeURIComponent(baseBranch)}&per_page=100`,
+        undefined,
+        true
+      );
+      return (open.data ?? []).map((pr) => ({ number: pr.number, html_url: pr.html_url }));
+    },
+
     async openPullRequest(input): Promise<{
       number: number;
       html_url: string;
@@ -1058,11 +1088,13 @@ export function createGitHubRestHelper(params: {
     ): Promise<{
       mergeBaseSha: string;
       changedFiles: readonly string[];
+      aheadBy: number;
     }> {
       try {
         const res = await apiRequest<{
           merge_base_commit?: { sha?: string };
           files?: Array<{ filename?: string }>;
+          ahead_by?: number;
         }>(
           "GET",
           `/repos/${owner}/${repo}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`,
@@ -1075,9 +1107,9 @@ export function createGitHubRestHelper(params: {
               .map((f) => f.filename?.trim().replace(/^\/+/, "") ?? "")
               .filter((p) => p.length > 0)
           : [];
-        return { mergeBaseSha, changedFiles };
+        return { mergeBaseSha, changedFiles, aheadBy: res.data?.ahead_by ?? 0 };
       } catch {
-        return { mergeBaseSha: base, changedFiles: [] };
+        return { mergeBaseSha: base, changedFiles: [], aheadBy: 0 };
       }
     },
 

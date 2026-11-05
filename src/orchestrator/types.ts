@@ -65,7 +65,8 @@ export {
   type UserAdvocatePayload
 } from "./prompts/schemas.js";
 
-export type OrchestratorCommand = EpureCommandName;
+/** `closed` is the internal command for an `issues: closed` event, never a `/epure` comment. */
+export type OrchestratorCommand = EpureCommandName | "closed";
 
 export interface IssueCommentRecord {
   readonly id: number;
@@ -127,7 +128,7 @@ export interface ExecutedTicketRecord {
 export interface OrchestrateIssueInput {
   readonly repository: string;
   readonly issueNumber: number;
-  readonly command: EpureCommandName;
+  readonly command: OrchestratorCommand;
   readonly commandArgs: string;
   readonly commentId?: number | undefined;
   readonly actor: string;
@@ -237,6 +238,13 @@ export interface GitHubRestHelper {
     title: string;
     body: string;
   } | null>;
+  findMergedPullRequestByHead(
+    headBranch: string,
+    baseBranch: string
+  ): Promise<{ number: number; html_url: string } | null>;
+  listOpenPullRequestsByBase(
+    baseBranch: string
+  ): Promise<ReadonlyArray<{ number: number; html_url: string }>>;
   openPullRequest(params: {
     head: string;
     base: string;
@@ -265,6 +273,7 @@ export interface GitHubRestHelper {
   ): Promise<{
     mergeBaseSha: string;
     changedFiles: readonly string[];
+    aheadBy: number;
   }>;
   postPullRequestReview(
     prNumber: number,

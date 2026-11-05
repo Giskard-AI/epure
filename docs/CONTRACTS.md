@@ -97,7 +97,7 @@ Entrypoints:
    - Rejects `read`, `triage`, or `none` effective permissions with `INSUFFICIENT_EFFECTIVE_PERMISSION`, regardless of `author_association` (`COLLABORATOR`, `CONTRIBUTOR`) or issue labels (`ready-for-agent`, `approved`).
    - Scrubs any token or secret from diagnostic outputs (`redactSecrets`).
 2. **Environment-Scoped Orchestrator (`orchestrate-command`)**:
-   - Executes inside the dedicated agent GitHub Environment (`environment: <llm-env>`) **only when** `needs.authorize-command.outputs.authorized == 'true'` OR upon an automatic event-driven CI continuation trigger (`workflow_run` `completed` on `task/*` or `feature/*` branches).
+   - Executes inside the dedicated agent GitHub Environment (`environment: <llm-env>`) **only when** `needs.authorize-command.outputs.authorized == 'true'` OR upon an automatic event-driven CI continuation trigger (`workflow_run` `completed` on `task/*` or `feature/*` branches), OR when a human closes the issue (`issues` `closed`, `sender.type == 'User'`, internal command `closed`: cancels the plan with an alert when its `feature/*` is not merged into `dev`, keeping branches and open PRs).
    - Passes `async_ci_continuation: "true"`, `trigger_head_sha`, `trigger_branch`, and the environment-scoped credentials (`EPURE_AGENT_APP_ID`, `EPURE_AGENT_APP_PRIVATE_KEY`, `LLM_API_KEY`) to `actions/orchestrate-issue`.
 
 ---

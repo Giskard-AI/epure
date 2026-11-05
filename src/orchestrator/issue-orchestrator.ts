@@ -59,6 +59,7 @@ import {
   slugifyTitle,
   verifyPublisherMergeBoundary
 } from "./github/rest-client.js";
+import { handleEpicClosedByHuman } from "./phases/epic-closure.js";
 import {
   runEpicConvergenceAudit,
   spawnPhase2ConvergenceTickets
@@ -383,6 +384,16 @@ export async function orchestrateIssueCommand(
           created_ticket_numbers: [],
           feature_pr_url: ""
         };
+      }
+
+      if (effectiveInput.command === "closed") {
+        return await handleEpicClosedByHuman({
+          issueNumber: effectiveInput.issueNumber,
+          actor: effectiveInput.actor,
+          currentState,
+          gh,
+          store
+        });
       }
 
       const issue = await gh.getIssue(effectiveInput.issueNumber);

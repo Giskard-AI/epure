@@ -9,7 +9,7 @@ inputs:
     description: "GitHub Issue number"
     required: true
   command:
-    description: "Authorized EPURE command ('status', 'plan', 'to-spec', 'to-tickets', 'approve', 'sync', 'rebase', 'continue', 'cancel', 'reply')"
+    description: "Authorized EPURE command ('status', 'plan', 'to-spec', 'to-tickets', 'approve', 'sync', 'rebase', 'continue', 'cancel', 'reply'), or 'closed' for an issues: closed event"
     required: true
   command_args:
     description: "Command arguments or human reply body"

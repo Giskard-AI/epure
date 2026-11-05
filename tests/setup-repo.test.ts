@@ -205,6 +205,27 @@ describe("1. Dry-run simulation & guided application (planAndApplyRepoSetup)", (
       rmSync(tempRepoDir, { recursive: true, force: true });
     }
   });
+
+  it.each([
+    { id: "listens-to-issues-closed-events", expected: "  issues:\n    types: [closed]\n" },
+    { id: "runs-the-orchestrator-for-a-human-closing-the-issue", expected: "(github.event_name == 'issues' && github.event.sender.type == 'User')" },
+    { id: "maps-an-issues-event-to-the-internal-closed-command", expected: "command: ${{ github.event_name == 'issues' && 'closed' ||" }
+  ])("caller issue workflow [$id]", ({ expected }) => {
+    const tempRepoDir = mkdtempSync(join(tmpdir(), "epure-setup-closed-"));
+    try {
+      const result = planAndApplyRepoSetup({
+        repository: "acme-org/payments",
+        repoRootDir: tempRepoDir,
+        dryRun: true
+      });
+      const issueWorkflow = result.planned_workflows.find(
+        (w) => w.path === ".github/workflows/epure-issue-command.yml"
+      );
+      expect(issueWorkflow?.content).toContain(expected);
+    } finally {
+      rmSync(tempRepoDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("2. .github/agents.yml defaults (Q78) and non-weakenable security invariants (resolveAgentsConfig)", () => {

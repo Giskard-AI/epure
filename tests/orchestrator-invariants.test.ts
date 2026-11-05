@@ -815,6 +815,77 @@ describe("Lot 1 — escalation comments remind the exact resume command", () => 
   });
 });
 
+describe("Lot 1 — a human closing the epic before its feature branch reaches dev cancels the plan with an alert", () => {
+  function declareClosureReads(
+    router: GitHubMockRouter,
+    params: { readonly mergedFeaturePr: boolean; readonly aheadBy: number; readonly featurePr: boolean; readonly taskPrs: readonly number[] }
+  ): GitHubMockRouter {
+    return declareIssueWrites(router)
+      .on("GET", /\/pulls\?state=closed&head=/, json(params.mergedFeaturePr ? [{ number: 105, html_url: "pr105", merged_at: "2026-11-01T00:00:00Z" }] : []))
+      .on("GET", new RegExp(`/compare/dev\\.\\.\\.${encodeURIComponent(FEATURE_BRANCH)}$`), json({ ahead_by: params.aheadBy, files: [] }))
+      .on("GET", /\/pulls\?state=open&head=/, json(params.featurePr ? [{ number: 105, html_url: "pr105", head: { sha: HEAD_SHA } }] : []))
+      .on("GET", /\/pulls\?state=open&base=/, json(params.taskPrs.map((n) => ({ number: n, html_url: `pr${n}` }))));
+  }
+
+  it.each([
+    {
+      id: "implementation-waiting_ticket_ci-with-unmerged-commits-lists-feature-and-task-prs",
+      seed: { status: "active", subphase: "waiting_ticket_ci", active_ticket_number: 78, active_task_branch: TASK_BRANCH },
+      reads: { mergedFeaturePr: false, aheadBy: 4, featurePr: true, taskPrs: [106] },
+      expectedLines: ["4 commit(s) non intégré(s)", "[#105](pr105), [#106](pr106)"]
+    },
+    {
+      id: "suspended-implementation-without-open-prs-reports-none",
+      seed: { status: "suspended", subphase: "idle" },
+      reads: { mergedFeaturePr: false, aheadBy: 2, featurePr: false, taskPrs: [] },
+      expectedLines: ["2 commit(s) non intégré(s)", "**Pull Requests ouvertes** : aucune"]
+    },
+    {
+      id: "done-with-unmerged-feature-pr-keeps-it-open",
+      seed: { status: "done", phase: "completed", subphase: "idle" },
+      reads: { mergedFeaturePr: false, aheadBy: 7, featurePr: true, taskPrs: [] },
+      expectedLines: ["7 commit(s) non intégré(s)", "[#105](pr105)"]
+    }
+  ] as const)("$id", async ({ seed, reads, expectedLines }) => {
+    const store = await seedState(seed);
+    const router = declareClosureReads(createGitHubMockRouter(), reads);
+
+    const res = await run(router, store, { command: "closed", actor: "maintainer", issueNumber: ISSUE, commentId: 0 });
+    const posted = router.requests.filter((r) => r.method === "POST" && r.path === `${R}/issues/${ISSUE}/comments`);
+    const body = (posted.at(-1)?.body as { body: string }).body;
+    const after = await readState(store);
+
+    expect(router.unmatched).toEqual([]);
+    expect(res.executed).toBe(true);
+    expect(after.status).toBe("cancelled");
+    expect(terminalResidue(after)).toEqual(CLEAN_TERMINAL);
+    expect(posted).toHaveLength(1);
+    expect(body).toContain(`\`${FEATURE_BRANCH}\``);
+    expect(body).toContain("rouvrez l'issue #77, puis postez `/epure continue`");
+    for (const line of expectedLines) {
+      expect(body).toContain(line);
+    }
+    expect(router.requests.filter((r) => r.method === "DELETE" || r.method === "PATCH")).toEqual([]);
+  });
+
+  it.each([
+    { id: "feature-pr-already-merged-into-dev-is-ignored", seed: { status: "done", phase: "completed", subphase: "idle" }, mergedFeaturePr: true },
+    { id: "grilling-phase-without-feature-branch-is-ignored", seed: { status: "active", phase: "grilling", subphase: "idle" }, mergedFeaturePr: false },
+    { id: "already-cancelled-plan-is-ignored", seed: { status: "cancelled", subphase: "idle" }, mergedFeaturePr: false }
+  ] as const)("$id", async ({ seed, mergedFeaturePr }) => {
+    const store = await seedState(seed);
+    const before = await readState(store);
+    const router = declareClosureReads(createGitHubMockRouter(), { mergedFeaturePr, aheadBy: 0, featurePr: false, taskPrs: [] });
+
+    const res = await run(router, store, { command: "closed", actor: "maintainer", issueNumber: ISSUE, commentId: 0 });
+
+    expect(router.unmatched).toEqual([]);
+    expect(res.executed).toBe(false);
+    expect(router.calls("POST", `${R}/issues/${ISSUE}/comments`)).toBe(0);
+    expect(await readState(store)).toEqual(before);
+  });
+});
+
 describe("Lot 1 — GitHub API rate limits are waited out within 5 minutes, then escalate github_rate_limited", () => {
   const nowSeconds = () => Math.floor(Date.now() / 1000);
   const seedWaitingTicket = () =>
