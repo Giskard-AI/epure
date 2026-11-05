@@ -4186,7 +4186,7 @@ function createGitHubApiRefStateStore(options) {
       const migrateResp = await fetchFn(`${repoUrl}/git/${refName}`, {
         method: "PATCH",
         headers,
-        body: JSON.stringify({ sha: newSha, force: true })
+        body: JSON.stringify({ sha: newSha })
       });
       return migrateResp.ok;
     }
@@ -4199,7 +4199,7 @@ function createGitHubApiRefStateStore(options) {
         variables: {
           repositoryId: repositoryNodeId,
           refUpdates: [
-            { name: refName, beforeOid: current.sha, afterOid: newSha, force: true }
+            { name: refName, beforeOid: current.sha, afterOid: newSha }
           ]
         }
       })
@@ -4279,6 +4279,66 @@ function createGitHubApiRefStateStore(options) {
   };
 }
 
+// src/orchestrator/github/rate-limit.ts
+var GITHUB_RATE_LIMIT_MAX_WAIT_MS = 5 * 60 * 1e3;
+var SECONDARY_RATE_LIMIT_DEFAULT_WAIT_MS = 60 * 1e3;
+var MIN_RATE_LIMIT_WAIT_MS = 1e3;
+var GitHubRateLimitError = class extends Error {
+  constructor(method, url, retryAfterMs) {
+    super(
+      `GitHub API ${method} ${url} is rate limited: the next retry in ${Math.ceil(retryAfterMs / 1e3)}s would exceed the ${GITHUB_RATE_LIMIT_MAX_WAIT_MS / 1e3}s wait budget`
+    );
+    this.method = method;
+    this.url = url;
+    this.retryAfterMs = retryAfterMs;
+  }
+  method;
+  url;
+  retryAfterMs;
+  name = "GitHubRateLimitError";
+};
+async function githubRateLimitWaitMs(resp, nowMs) {
+  if (resp.status !== 403 && resp.status !== 429) {
+    return null;
+  }
+  const retryAfterSeconds = Number(resp.headers.get("retry-after") ?? Number.NaN);
+  if (Number.isFinite(retryAfterSeconds)) {
+    return Math.max(MIN_RATE_LIMIT_WAIT_MS, retryAfterSeconds * 1e3);
+  }
+  const resetSeconds = Number(resp.headers.get("x-ratelimit-reset") ?? Number.NaN);
+  if (resp.headers.get("x-ratelimit-remaining") === "0" && Number.isFinite(resetSeconds)) {
+    return Math.max(MIN_RATE_LIMIT_WAIT_MS, resetSeconds * 1e3 - nowMs);
+  }
+  if (resp.status === 429) {
+    return SECONDARY_RATE_LIMIT_DEFAULT_WAIT_MS;
+  }
+  const body = await resp.clone().text();
+  return /rate limit/i.test(body) ? SECONDARY_RATE_LIMIT_DEFAULT_WAIT_MS : null;
+}
+function createGitHubRateLimitedFetch(params) {
+  const sleep = params.sleepFn ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+  const now = params.now ?? Date.now;
+  let waitedMs = 0;
+  return async (input, init) => {
+    for (; ; ) {
+      const resp = await params.fetchImpl(input, init);
+      const waitMs = await githubRateLimitWaitMs(resp, now());
+      if (waitMs === null) {
+        return resp;
+      }
+      if (waitedMs + waitMs > GITHUB_RATE_LIMIT_MAX_WAIT_MS) {
+        throw new GitHubRateLimitError(
+          (init?.method ?? "GET").toUpperCase(),
+          input instanceof Request ? input.url : String(input),
+          waitMs
+        );
+      }
+      waitedMs += waitMs;
+      await sleep(waitMs);
+    }
+  };
+}
+
 // src/orchestrator/github/rest-client.ts
 var COLLABORATOR_PERMISSIONS = /* @__PURE__ */ new Set([
   "admin",
@@ -4332,6 +4392,9 @@ function createGitHubRestHelper(params) {
         }
         break;
       } catch (err) {
+        if (err instanceof GitHubRateLimitError) {
+          throw err;
+        }
         lastErr = err;
         if (attempt < 3) {
           await new Promise((r) => setTimeout(r, 350 * (attempt + 1)));
@@ -5010,6 +5073,27 @@ function createGitHubRestHelper(params) {
       }
       return null;
     },
+    async findMergedPullRequestByHead(headBranch, baseBranch) {
+      const closed = await apiRequest(
+        "GET",
+        `/repos/${owner}/${repo}/pulls?state=closed&head=${encodeURIComponent(
+          `${owner}:${headBranch}`
+        )}&base=${encodeURIComponent(baseBranch)}`,
+        void 0,
+        true
+      );
+      const merged = closed.data?.find((pr) => pr.merged_at);
+      return merged ? { number: merged.number, html_url: merged.html_url } : null;
+    },
+    async listOpenPullRequestsByBase(baseBranch) {
+      const open = await apiRequest(
+        "GET",
+        `/repos/${owner}/${repo}/pulls?state=open&base=${encodeURIComponent(baseBranch)}&per_page=100`,
+        void 0,
+        true
+      );
+      return (open.data ?? []).map((pr) => ({ number: pr.number, html_url: pr.html_url }));
+    },
     async openPullRequest(input) {
       const existingPr = await this.findOpenPullRequestByHead(
         input.head,
@@ -5100,9 +5184,9 @@ function createGitHubRestHelper(params) {
         );
         const mergeBaseSha = res.data?.merge_base_commit?.sha ?? base;
         const changedFiles = Array.isArray(res.data?.files) ? res.data.files.map((f) => f.filename?.trim().replace(/^\/+/, "") ?? "").filter((p) => p.length > 0) : [];
-        return { mergeBaseSha, changedFiles };
+        return { mergeBaseSha, changedFiles, aheadBy: res.data?.ahead_by ?? 0 };
       } catch {
-        return { mergeBaseSha: base, changedFiles: [] };
+        return { mergeBaseSha: base, changedFiles: [], aheadBy: 0 };
       }
     },
     async postPullRequestReview(prNumber, input) {
@@ -9008,6 +9092,8 @@ function formatNeedsHumanEscalationComment(input) {
   } else if (input.reason === "model_config_missing") {
     const keys = (input.missingModelKeys ?? []).map((k) => `\`${k}\``).join(", ");
     reasonHeadline = `LLM model configuration missing \u2014 set ${keys} in \`.github/agents.yml\` (or the action \`model\` input); no fallback model`;
+  } else if (input.reason === "github_rate_limited") {
+    reasonHeadline = "GitHub API rate limit still exceeded after waiting up to 5 minutes (`github_rate_limited`) \u2014 code-fix budget preserved";
   } else if (input.reason === "internal_error") {
     reasonHeadline = "Internal orchestrator error \u2014 code-fix budget preserved";
   } else {
@@ -11801,6 +11887,70 @@ ${stage1Result.output.slice(0, 4e3)}`;
     status: "resolved",
     headSha,
     conflictsResolved: resolvedFiles.map((f) => f.path)
+  };
+}
+
+// src/orchestrator/phases/epic-closure.ts
+var FEATURE_BRANCH_PHASES = /* @__PURE__ */ new Set([
+  "implementation",
+  "completed"
+]);
+async function handleEpicClosedByHuman(params) {
+  const state = params.currentState;
+  const featureBranch = state?.active_branch ?? "";
+  const ignore = (reason) => ({
+    executed: false,
+    phase: state?.phase ?? "idle",
+    status: state?.status ?? "active",
+    active_branch: featureBranch,
+    summary_markdown: `Epic closure ignored: ${reason}.`,
+    created_ticket_numbers: [],
+    feature_pr_url: ""
+  });
+  if (!state || state.status === "cancelled" || !FEATURE_BRANCH_PHASES.has(state.phase)) {
+    return ignore("no feature branch in progress");
+  }
+  const mergedPr = await params.gh.findMergedPullRequestByHead(featureBranch, "dev");
+  if (mergedPr) {
+    return ignore(`feature PR #${mergedPr.number} is already merged into dev`);
+  }
+  const [comparison, featurePr, taskPrs] = await Promise.all([
+    params.gh.compareCommits?.("dev", featureBranch),
+    params.gh.findOpenPullRequestByHead(featureBranch, "dev"),
+    params.gh.listOpenPullRequestsByBase(featureBranch)
+  ]);
+  const openPrs = [...featurePr ? [featurePr] : [], ...taskPrs];
+  const updated = await updateIssueStateWithCas({
+    issueNumber: params.issueNumber,
+    store: params.store,
+    mutator: (prev) => toTerminalState(prev, { status: "cancelled" })
+  });
+  const body = appendEpureCommandsSpoiler(
+    [
+      updated.issue_mirror_markdown,
+      "",
+      `### \u{1F6D1} Issue de pilotage #${params.issueNumber} ferm\xE9e par \`@${params.actor}\` avant l'int\xE9gration dans \`dev\``,
+      "",
+      `- **Branche de fonctionnalit\xE9** : \`${featureBranch}\` \u2014 ${comparison?.aheadBy ?? 0} commit(s) non int\xE9gr\xE9(s) dans \`dev\``,
+      "- **Statut d'orchestration** : `cancelled` (Plan annul\xE9) ; aucune branche n'a \xE9t\xE9 supprim\xE9e.",
+      openPrs.length > 0 ? `- **Pull Requests ouvertes, laiss\xE9es ouvertes** : ${openPrs.map((pr) => `[#${pr.number}](${pr.html_url})`).join(", ")}` : "- **Pull Requests ouvertes** : aucune",
+      `- **Reprise** : rouvrez l'issue #${params.issueNumber}, puis postez \`/epure continue\`.`
+    ].join("\n"),
+    {
+      phase: "cancelled",
+      status: "cancelled",
+      issueNumber: params.issueNumber
+    }
+  );
+  await params.gh.postIssueComment(params.issueNumber, body);
+  return {
+    executed: true,
+    phase: updated.state.phase,
+    status: updated.state.status,
+    active_branch: featureBranch,
+    summary_markdown: body,
+    created_ticket_numbers: [],
+    feature_pr_url: featurePr?.html_url ?? ""
   };
 }
 
@@ -16593,15 +16743,19 @@ async function orchestrateIssueCommand(input) {
         "Missing GitHub authentication: configure EPURE_AGENT_APP_ID + EPURE_AGENT_APP_PRIVATE_KEY (or fallback GITHUB_TOKEN)."
       );
     }
+    const githubFetch = createGitHubRateLimitedFetch({
+      fetchImpl: input.fetchImpl ?? fetch,
+      sleepFn: input.sleepFn
+    });
     const gh = createGitHubRestHelper({
       repository: input.repository,
       token: activeToken,
-      fetchImpl: input.fetchImpl
+      fetchImpl: githubFetch
     });
     const store = input.stateStore ?? createGitHubApiRefStateStore({
       repository: input.repository,
       githubToken: activeToken,
-      fetchImpl: input.fetchImpl
+      fetchImpl: githubFetch
     });
     const isAutomaticEntry = input.command === "continue" && (input.commentId ?? 0) <= 0;
     const triggerHeadSha = input.triggerHeadSha?.trim() || void 0;
@@ -16711,6 +16865,15 @@ async function orchestrateIssueCommand(input) {
           created_ticket_numbers: [],
           feature_pr_url: ""
         };
+      }
+      if (effectiveInput.command === "closed") {
+        return await handleEpicClosedByHuman({
+          issueNumber: effectiveInput.issueNumber,
+          actor: effectiveInput.actor,
+          currentState,
+          gh,
+          store
+        });
       }
       const issue = await gh.getIssue(effectiveInput.issueNumber);
       const allComments = await gh.listIssueComments(effectiveInput.issueNumber);
@@ -17316,6 +17479,41 @@ async function orchestrateIssueCommand(input) {
           featureBranch,
           "dev"
         );
+        const mergedFeaturePr = existingFeaturePrCheck ? null : await gh.findMergedPullRequestByHead(featureBranch, "dev");
+        if (mergedFeaturePr) {
+          const updatedDone = await updateIssueStateWithCas({
+            issueNumber: effectiveInput.issueNumber,
+            store,
+            mutator: (prev) => toTerminalState(prev, {
+              phase: "completed",
+              status: "done",
+              active_branch: featureBranch,
+              last_processed_comment_id: Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
+            })
+          });
+          const mergedComment = appendEpureCommandsSpoiler(
+            [
+              updatedDone.issue_mirror_markdown,
+              "",
+              `La Pull Request de fonctionnalit\xE9 [#${mergedFeaturePr.number}](${mergedFeaturePr.html_url}) de \`${featureBranch}\` est d\xE9j\xE0 fusionn\xE9e dans \`dev\` : aucune nouvelle Pull Request n'est ouverte.`
+            ].join("\n"),
+            {
+              phase: "completed",
+              status: "completed",
+              issueNumber: effectiveInput.issueNumber
+            }
+          );
+          await gh.postIssueComment(effectiveInput.issueNumber, mergedComment);
+          return {
+            executed: true,
+            phase: updatedDone.state.phase,
+            status: updatedDone.state.status,
+            active_branch: featureBranch,
+            summary_markdown: mergedComment,
+            created_ticket_numbers: [],
+            feature_pr_url: mergedFeaturePr.html_url
+          };
+        }
         if (hasExplicitPlanManifest && !existingFeaturePrCheck) {
           await integratePlanBranchIntoFeature({
             gh,
@@ -17742,7 +17940,7 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
       };
     } catch (err) {
       const rawErrMessage = err instanceof Error ? err.message : String(err);
-      const escalationReason = err instanceof LLMError ? resolveLlmEscalationReason(err) : err instanceof MissingModelConfigError ? "model_config_missing" : "internal_error";
+      const escalationReason = err instanceof LLMError ? resolveLlmEscalationReason(err) : err instanceof GitHubRateLimitError ? "github_rate_limited" : err instanceof MissingModelConfigError ? "model_config_missing" : "internal_error";
       const latestSnap = await store.readRef(refName);
       const fallbackPhase = latestSnap.state?.phase && latestSnap.state.phase !== "idle" ? latestSnap.state.phase : effectiveInput.command === "approve" || effectiveInput.command === "continue" ? "implementation" : effectiveInput.command === "to-tickets" ? "tickets" : effectiveInput.command === "to-spec" ? "spec" : "grilling";
       const fallbackBranch = latestSnap.state?.active_branch || (fallbackPhase === "implementation" ? featureBranch : planBranch);

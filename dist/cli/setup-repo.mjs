@@ -92,6 +92,10 @@ var PROVIDER_EFFORTS = [
   "max"
 ];
 
+// src/orchestrator/github/rate-limit.ts
+var GITHUB_RATE_LIMIT_MAX_WAIT_MS = 5 * 60 * 1e3;
+var SECONDARY_RATE_LIMIT_DEFAULT_WAIT_MS = 60 * 1e3;
+
 // src/orchestrator/prompts/schemas.ts
 function asRecord(value, schemaName) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -2650,6 +2654,8 @@ function buildCallerWorkflows(pinnedSha, stack, jobTimeoutMinutes = DEFAULT_AGEN
         "on:",
         "  issue_comment:",
         "    types: [created]",
+        "  issues:",
+        "    types: [closed]",
         "  workflow_run:",
         '    workflows: ["CI"]',
         "    types: [completed]",
@@ -2687,7 +2693,7 @@ function buildCallerWorkflows(pinnedSha, stack, jobTimeoutMinutes = DEFAULT_AGEN
         "  orchestrate-command:",
         '    name: "Orchestrate Authorized /epure Lifecycle"',
         "    needs: [authorize-command]",
-        "    if: ${{ always() && (needs.authorize-command.outputs.authorized == 'true' || (github.event_name == 'workflow_run' && (startsWith(github.event.workflow_run.head_branch, 'task/') || startsWith(github.event.workflow_run.head_branch, 'feature/')))) }}",
+        "    if: ${{ always() && (needs.authorize-command.outputs.authorized == 'true' || (github.event_name == 'issues' && github.event.sender.type == 'User') || (github.event_name == 'workflow_run' && (startsWith(github.event.workflow_run.head_branch, 'task/') || startsWith(github.event.workflow_run.head_branch, 'feature/')))) }}",
         "    runs-on: ubuntu-26.04",
         `    timeout-minutes: ${jobTimeoutMinutes}`,
         `    environment: ${llmEnvironment}`,
@@ -2707,7 +2713,7 @@ function buildCallerWorkflows(pinnedSha, stack, jobTimeoutMinutes = DEFAULT_AGEN
         "        with:",
         "          repository: ${{ github.repository }}",
         "          issue_number: ${{ github.event.issue.number || 0 }}",
-        "          command: ${{ github.event_name == 'issue_comment' && needs.authorize-command.outputs.command || 'continue' }}",
+        "          command: ${{ github.event_name == 'issues' && 'closed' || github.event_name == 'issue_comment' && needs.authorize-command.outputs.command || 'continue' }}",
         "          command_args: ${{ needs.authorize-command.outputs.command_args || '' }}",
         "          comment_id: ${{ github.event.comment.id || 0 }}",
         "          actor: ${{ github.event.comment.user.login || github.actor }}",

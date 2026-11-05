@@ -51,6 +51,10 @@ var PROMPT_INJECTION_IMMUNITY_CLAUSE = [
 // src/review/reviewers-dir.ts
 var DEFAULT_REVIEWERS_DIR = ".agents/reviewers";
 
+// src/orchestrator/github/rate-limit.ts
+var GITHUB_RATE_LIMIT_MAX_WAIT_MS = 5 * 60 * 1e3;
+var SECONDARY_RATE_LIMIT_DEFAULT_WAIT_MS = 60 * 1e3;
+
 // src/orchestrator/prompts/schemas.ts
 function asRecord(value, schemaName) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
