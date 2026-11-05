@@ -464,7 +464,7 @@ export function createGitHubApiRefStateStore(
       const migrateResp = await fetchFn(`${repoUrl}/git/${refName}`, {
         method: "PATCH",
         headers,
-        body: JSON.stringify({ sha: newSha, force: true })
+        body: JSON.stringify({ sha: newSha })
       });
       return migrateResp.ok;
     }
@@ -477,7 +477,7 @@ export function createGitHubApiRefStateStore(
         variables: {
           repositoryId: repositoryNodeId,
           refUpdates: [
-            { name: refName, beforeOid: current.sha, afterOid: newSha, force: true }
+            { name: refName, beforeOid: current.sha, afterOid: newSha }
           ]
         }
       })

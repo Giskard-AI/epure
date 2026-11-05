@@ -381,16 +381,19 @@ export function installFakeGitDataApi(
     // with HTTP 200 and an opaque error.
     .on("POST", "/graphql", (req) => {
       const { variables } = req.body as {
-        variables: { refUpdates: ReadonlyArray<{ name: string; beforeOid: string; afterOid: string }> };
+        variables: {
+          refUpdates: ReadonlyArray<{ name: string; beforeOid: string; afterOid: string; force?: boolean }>;
+        };
       };
       for (const update of variables.refUpdates) {
         runRefWriteHook(update.name);
       }
       const rejected = variables.refUpdates.some(
-        ({ name, beforeOid, afterOid }) =>
+        ({ name, beforeOid, afterOid, force }) =>
           refs.get(name) !== beforeOid ||
           objects.get(beforeOid)?.type !== "commit" ||
-          objects.get(afterOid)?.type !== "commit"
+          objects.get(afterOid)?.type !== "commit" ||
+          (force !== true && !isAncestor(beforeOid, afterOid))
       );
       if (rejected) {
         return json({ errors: [{ message: "Something went wrong while executing your query." }] });
