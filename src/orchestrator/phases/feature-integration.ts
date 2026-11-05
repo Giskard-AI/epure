@@ -449,6 +449,17 @@ export async function runFeatureIntegrationPhase(
   };
 
   let featureReviewFixAttempt = params.initialFeatureCodeFixAttemptsUsed;
+  const consumeFeatureFixAttempt = async (): Promise<void> => {
+    featureReviewFixAttempt += 1;
+    await updateIssueStateWithCas({
+      issueNumber: params.issueNumber,
+      store: params.store,
+      mutator: (prev) => ({
+        ...withFeatureCodeFixAttempts(prev, featureReviewFixAttempt),
+        transient_retries_used: params.getTotalTransientRetriesUsed()
+      })
+    });
+  };
 
   const initialFeaturePass = await runStage2AndStage3ForFeaturePr({
     headSha: currentFeaturePrHeadSha,
@@ -487,15 +498,7 @@ export async function runFeatureIntegrationPhase(
       !finalFeatureCiGate.passed) &&
     featureReviewFixAttempt < maxFeatureReviewFixAttempts
   ) {
-    featureReviewFixAttempt += 1;
-    await updateIssueStateWithCas({
-      issueNumber: params.issueNumber,
-      store: params.store,
-      mutator: (prev) => ({
-        ...withFeatureCodeFixAttempts(prev, featureReviewFixAttempt),
-        transient_retries_used: params.getTotalTransientRetriesUsed()
-      })
-    });
+    await consumeFeatureFixAttempt();
 
     process.stdout.write(
       `[EPURE][Feature PR #${featurePr.number}] Multi-agent synthesis review + CI fix iteration ${featureReviewFixAttempt}/${maxFeatureReviewFixAttempts} (${finalFeatureReview.must_fix_findings.length} must_fix finding(s), CI passed=${finalFeatureCiGate.passed})\n`
@@ -693,9 +696,11 @@ export async function runFeatureIntegrationPhase(
         label: `Feature PR #${featurePr.number} review-fix iteration ${featureReviewFixAttempt}/${maxFeatureReviewFixAttempts}`
       });
 
-      let featureTestRetry = 0;
-      while (!featureTestCheck.passed && featureTestRetry < 2) {
-        featureTestRetry += 1;
+      while (
+        !featureTestCheck.passed &&
+        featureReviewFixAttempt < maxFeatureReviewFixAttempts
+      ) {
+        await consumeFeatureFixAttempt();
         const retryFilesContext = Array.from(
           params.accumulatedFiles.entries()
         )
@@ -713,10 +718,10 @@ export async function runFeatureIntegrationPhase(
             onTransientRetriesUsed: (used) =>
               params.addTransientRetriesUsed(used),
             thinkingLevel: "HIGH",
-            logLabel: `feature-review-test-retry:#PR${featurePr.number}/iter-${featureReviewFixAttempt}-retry-${featureTestRetry}`,
+            logLabel: `feature-review-test-retry:#PR${featurePr.number}/iter-${featureReviewFixAttempt}`,
             systemInstruction: featureFixSystemInstruction,
             prompt: [
-              `La correction de review finale a échoué à la vérification Stage 1 (tentative ${featureTestRetry}/2) :`,
+              `La correction de review finale a échoué à la vérification Stage 1 (tentative ${featureReviewFixAttempt}/${maxFeatureReviewFixAttempts}) :`,
               wrapUntrustedContent(
                 "untrusted_test_output",
                 featureTestCheck.output
@@ -805,14 +810,11 @@ export async function runFeatureIntegrationPhase(
           verificationProfile,
           sandboxRunner: params.sandboxRunner,
           llmApiKey: params.llmApiKey,
-          label: `Feature PR #${featurePr.number} review-fix iteration ${featureReviewFixAttempt} test retry ${featureTestRetry}/2`
+          label: `Feature PR #${featurePr.number} review-fix test retry ${featureReviewFixAttempt}/${maxFeatureReviewFixAttempts}`
         });
       }
 
       if (!featureTestCheck.passed) {
-        if (featureReviewFixAttempt < maxFeatureReviewFixAttempts) {
-          continue;
-        }
         return await escalate({
           reason: "remediation_exhausted",
           ticketNumber: params.issueNumber,

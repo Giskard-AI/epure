@@ -1596,12 +1596,13 @@ export async function orchestrateIssueCommand(
         feature_pr_url: ""
       };
     } catch (err) {
-      await gh.ensureLabel(
-        "needs-human",
-        "D93F0B",
-        "Requires human maintainer intervention"
-      );
-      await gh.addIssueLabels(effectiveInput.issueNumber, ["needs-human"]);
+      const rawErrMessage = err instanceof Error ? err.message : String(err);
+      const escalationReason =
+        err instanceof LLMError
+          ? resolveLlmEscalationReason(err)
+          : err instanceof MissingModelConfigError
+            ? "model_config_missing"
+            : "internal_error";
 
       const latestSnap = await store.readRef(refName);
       const fallbackPhase: EpureIssueState["phase"] =
@@ -1619,27 +1620,32 @@ export async function orchestrateIssueCommand(
         latestSnap.state?.active_branch ||
         (fallbackPhase === "implementation" ? featureBranch : planBranch);
 
+      let duplicateOfLastEscalation = false;
       const updatedSuspended = await updateIssueStateWithCas({
         issueNumber: effectiveInput.issueNumber,
         store,
-        mutator: (prev) =>
-          toTerminalState(prev, {
+        mutator: (prev) => {
+          const escalation = {
+            reason: escalationReason,
+            head_sha: prev.active_head_sha ?? "",
+            ticket_number: prev.active_ticket_number ?? effectiveInput.issueNumber,
+            budget_scope: activeBudgetScope(prev)
+          };
+          duplicateOfLastEscalation =
+            isAutomaticEntry &&
+            prev.last_escalation?.reason === escalation.reason &&
+            prev.last_escalation?.head_sha === escalation.head_sha;
+          return toTerminalState(prev, {
             phase: prev.phase !== "idle" ? prev.phase : fallbackPhase,
             status: "suspended",
             active_branch: prev.active_branch || fallbackBranch,
             transient_retries_used: cumulativeTransientRetriesUsed(),
+            last_escalation: escalation,
             last_processed_comment_id:
               Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
-          })
+          });
+        }
       });
-
-      const rawErrMessage = err instanceof Error ? err.message : String(err);
-      const escalationReason =
-        err instanceof LLMError
-          ? resolveLlmEscalationReason(err)
-          : err instanceof MissingModelConfigError
-            ? "model_config_missing"
-            : "internal_error";
 
       const escalationMarkdown = appendEpureCommandsSpoiler(
         [
@@ -1669,7 +1675,15 @@ export async function orchestrateIssueCommand(
         }
       );
 
-      await gh.postIssueComment(effectiveInput.issueNumber, escalationMarkdown);
+      if (!duplicateOfLastEscalation) {
+        await gh.ensureLabel(
+          "needs-human",
+          "D93F0B",
+          "Requires human maintainer intervention"
+        );
+        await gh.addIssueLabels(effectiveInput.issueNumber, ["needs-human"]);
+        await gh.postIssueComment(effectiveInput.issueNumber, escalationMarkdown);
+      }
       return {
         executed: true,
         phase: updatedSuspended.state.phase,

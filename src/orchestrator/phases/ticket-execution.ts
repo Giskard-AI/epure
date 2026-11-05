@@ -749,11 +749,25 @@ export async function runTicketExecutionLoop(
     const bootstrappedTargets = new Set<string>();
 
     let taskPr: { number: number; html_url: string; head_sha: string } | undefined;
-    let fixAttempt = 0;
     const initialTicketFixAttempts =
       params.initialCodeFixAttemptsByTicket[String(ticket.ticketIssueNumber)] ??
       0;
     let reviewFixAttempt = initialTicketFixAttempts;
+    const consumeTicketFixAttempt = async (): Promise<void> => {
+      reviewFixAttempt += 1;
+      await updateIssueStateWithCas({
+        issueNumber: params.issueNumber,
+        store: params.store,
+        mutator: (prev) => ({
+          ...withTicketCodeFixAttempts(
+            prev,
+            ticket.ticketIssueNumber,
+            reviewFixAttempt
+          ),
+          transient_retries_used: params.getTotalTransientRetriesUsed()
+        })
+      });
+    };
 
     try {
       const ticketChangedFilesMap = new Map<string, string>();
@@ -1094,8 +1108,11 @@ export async function runTicketExecutionLoop(
             `Ticket #${ticket.ticketIssueNumber} initial TDD suite`
           );
 
-        while (!testCheck.passed && fixAttempt < params.maxCodeFixAttempts) {
-          fixAttempt += 1;
+        while (
+          !testCheck.passed &&
+          reviewFixAttempt < params.maxCodeFixAttempts
+        ) {
+          await consumeTicketFixAttempt();
           restoreViolatedBaselineFiles(integrityCheck);
           const currentFilesContext = buildCompactWorkspaceFilesContext({
             reviewersDir,
@@ -1151,7 +1168,7 @@ export async function runTicketExecutionLoop(
             featureBranch: params.featureBranch,
             systemInstruction: fixSystemInstruction,
             prompt: fixPrompt,
-            logLabel: `stage1-fix:#${ticket.ticketIssueNumber}/iter-${fixAttempt}`,
+            logLabel: `stage1-fix:#${ticket.ticketIssueNumber}/iter-${reviewFixAttempt}`,
             accumulatedFiles: params.accumulatedFiles,
             deletedFilesSet: ticketDeletedFilesSet,
             devBranchPaths: params.devBranchPaths,
@@ -1180,7 +1197,7 @@ export async function runTicketExecutionLoop(
               reason: "sensitive_path_violation",
               ticketNumber: ticket.ticketIssueNumber,
               branch: taskBranch,
-              codeFixAttemptsUsed: fixAttempt,
+              codeFixAttemptsUsed: reviewFixAttempt,
               sensitivePaths: fixPreCheck.sensitivePaths,
               traversalPaths: fixPreCheck.traversalPaths
             });
@@ -1215,7 +1232,7 @@ export async function runTicketExecutionLoop(
           };
 
           const nextEval = await evaluateIntegrityAndStage1Suite(
-            `Ticket #${ticket.ticketIssueNumber} TDD auto-fix attempt ${fixAttempt}/${params.maxCodeFixAttempts}`
+            `Ticket #${ticket.ticketIssueNumber} TDD auto-fix attempt ${reviewFixAttempt}/${params.maxCodeFixAttempts}`
           );
           integrityCheck = nextEval.integrityCheck;
           testCheck = nextEval.testCheck;
@@ -1226,7 +1243,7 @@ export async function runTicketExecutionLoop(
             reason: "remediation_exhausted",
             ticketNumber: ticket.ticketIssueNumber,
             branch: taskBranch,
-            codeFixAttemptsUsed: fixAttempt,
+            codeFixAttemptsUsed: reviewFixAttempt,
             diagnosticExcerpt: testCheck.output.slice(-2000)
           });
           return {
@@ -1529,19 +1546,7 @@ export async function runTicketExecutionLoop(
         (reviewResult.conclusion === "failure" || !ciGateResult.passed) &&
         reviewFixAttempt < params.maxCodeFixAttempts
       ) {
-        reviewFixAttempt += 1;
-        await updateIssueStateWithCas({
-          issueNumber: params.issueNumber,
-          store: params.store,
-          mutator: (prev) => ({
-            ...withTicketCodeFixAttempts(
-              prev,
-              ticket.ticketIssueNumber,
-              reviewFixAttempt
-            ),
-            transient_retries_used: params.getTotalTransientRetriesUsed()
-          })
-        });
+        await consumeTicketFixAttempt();
 
         process.stdout.write(
           `[EPURE][Ticket #${ticket.ticketIssueNumber}][PR #${taskPr.number}] Post-PR remediation round ${reviewFixAttempt}/${params.maxCodeFixAttempts} (${reviewResult.must_fix_findings.length} must_fix finding(s), CI passed=${ciGateResult.passed})\n`
@@ -1693,9 +1698,11 @@ export async function runTicketExecutionLoop(
         } = await evaluateIntegrityAndStage1Suite(
           `Ticket #${ticket.ticketIssueNumber} review-fix iteration ${reviewFixAttempt}/${params.maxCodeFixAttempts}`
         );
-        let reviewTestRetry = 0;
-        while (!testCheck.passed && reviewTestRetry < 2) {
-          reviewTestRetry += 1;
+        while (
+          !testCheck.passed &&
+          reviewFixAttempt < params.maxCodeFixAttempts
+        ) {
+          await consumeTicketFixAttempt();
           restoreViolatedBaselineFiles(reviewIntegrityCheck);
           const retryFilesContext = buildCompactWorkspaceFilesContext({
             reviewersDir,
@@ -1711,10 +1718,10 @@ export async function runTicketExecutionLoop(
             branch: taskBranch,
             featureBranch: params.featureBranch,
             thinkingLevel: "HIGH",
-            logLabel: `review-fix-retry:#${ticket.ticketIssueNumber}/iter-${reviewFixAttempt}/retry-${reviewTestRetry}`,
+            logLabel: `review-fix-retry:#${ticket.ticketIssueNumber}/iter-${reviewFixAttempt}`,
             systemInstruction: reviewFixSystemInstruction,
             prompt: [
-              `La correction a fait échouer la vérification Stage 1 en sandbox (tentative ${reviewTestRetry}/2) :`,
+              `La correction a fait échouer la vérification Stage 1 en sandbox (tentative ${reviewFixAttempt}/${params.maxCodeFixAttempts}) :`,
               wrapUntrustedContent(
                 "untrusted_test_output",
                 testCheck.output
@@ -1800,7 +1807,7 @@ export async function runTicketExecutionLoop(
             files: updatedRetryFiles
           };
           const retryEval = await evaluateIntegrityAndStage1Suite(
-            `Ticket #${ticket.ticketIssueNumber} review-fix iteration ${reviewFixAttempt} test retry ${reviewTestRetry}/2`
+            `Ticket #${ticket.ticketIssueNumber} review-fix test retry ${reviewFixAttempt}/${params.maxCodeFixAttempts}`
           );
           reviewIntegrityCheck = retryEval.integrityCheck;
           testCheck = retryEval.testCheck;
@@ -1816,9 +1823,6 @@ export async function runTicketExecutionLoop(
               files: impl.files,
               deletedFiles: Array.from(ticketDeletedFilesSet)
             });
-          }
-          if (reviewFixAttempt < params.maxCodeFixAttempts) {
-            continue;
           }
           const escalated = await params.escalateToNeedsHuman({
             reason: "remediation_exhausted",
@@ -1981,7 +1985,7 @@ export async function runTicketExecutionLoop(
           phase: "implementation",
           prNumber: taskPr?.number,
           prUrl: taskPr?.html_url,
-          codeFixAttemptsUsed: Math.max(fixAttempt, reviewFixAttempt),
+          codeFixAttemptsUsed: reviewFixAttempt,
           diagnosticExcerpt: redactSecrets(err.message, [
             params.activeToken,
             params.llmApiKey

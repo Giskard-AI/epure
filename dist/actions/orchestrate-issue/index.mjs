@@ -14372,6 +14372,17 @@ async function runFeatureIntegrationPhase(params) {
     return { reviewResult: reviewRes, ciGateResult: ciRes };
   };
   let featureReviewFixAttempt = params.initialFeatureCodeFixAttemptsUsed;
+  const consumeFeatureFixAttempt = async () => {
+    featureReviewFixAttempt += 1;
+    await updateIssueStateWithCas({
+      issueNumber: params.issueNumber,
+      store: params.store,
+      mutator: (prev) => ({
+        ...withFeatureCodeFixAttempts(prev, featureReviewFixAttempt),
+        transient_retries_used: params.getTotalTransientRetriesUsed()
+      })
+    });
+  };
   const initialFeaturePass = await runStage2AndStage3ForFeaturePr({
     headSha: currentFeaturePrHeadSha,
     isReReviewPass: false,
@@ -14399,15 +14410,7 @@ async function runFeatureIntegrationPhase(params) {
   }
   const maxFeatureReviewFixAttempts = params.maxCodeFixAttempts;
   while ((finalFeatureReview.conclusion === "failure" || !finalFeatureCiGate.passed) && featureReviewFixAttempt < maxFeatureReviewFixAttempts) {
-    featureReviewFixAttempt += 1;
-    await updateIssueStateWithCas({
-      issueNumber: params.issueNumber,
-      store: params.store,
-      mutator: (prev) => ({
-        ...withFeatureCodeFixAttempts(prev, featureReviewFixAttempt),
-        transient_retries_used: params.getTotalTransientRetriesUsed()
-      })
-    });
+    await consumeFeatureFixAttempt();
     process.stdout.write(
       `[EPURE][Feature PR #${featurePr.number}] Multi-agent synthesis review + CI fix iteration ${featureReviewFixAttempt}/${maxFeatureReviewFixAttempts} (${finalFeatureReview.must_fix_findings.length} must_fix finding(s), CI passed=${finalFeatureCiGate.passed})
 `
@@ -14575,9 +14578,8 @@ ${c}`).join("\n\n");
         llmApiKey: params.llmApiKey,
         label: `Feature PR #${featurePr.number} review-fix iteration ${featureReviewFixAttempt}/${maxFeatureReviewFixAttempts}`
       });
-      let featureTestRetry = 0;
-      while (!featureTestCheck.passed && featureTestRetry < 2) {
-        featureTestRetry += 1;
+      while (!featureTestCheck.passed && featureReviewFixAttempt < maxFeatureReviewFixAttempts) {
+        await consumeFeatureFixAttempt();
         const retryFilesContext = Array.from(
           params.accumulatedFiles.entries()
         ).map(([p, c]) => `--- FILE: ${p} ---
@@ -14591,10 +14593,10 @@ ${c}`).join("\n\n");
           requestTimeoutMs: params.phaseModels.requestTimeoutMs,
           onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
           thinkingLevel: "HIGH",
-          logLabel: `feature-review-test-retry:#PR${featurePr.number}/iter-${featureReviewFixAttempt}-retry-${featureTestRetry}`,
+          logLabel: `feature-review-test-retry:#PR${featurePr.number}/iter-${featureReviewFixAttempt}`,
           systemInstruction: featureFixSystemInstruction,
           prompt: [
-            `La correction de review finale a \xE9chou\xE9 \xE0 la v\xE9rification Stage 1 (tentative ${featureTestRetry}/2) :`,
+            `La correction de review finale a \xE9chou\xE9 \xE0 la v\xE9rification Stage 1 (tentative ${featureReviewFixAttempt}/${maxFeatureReviewFixAttempts}) :`,
             wrapUntrustedContent(
               "untrusted_test_output",
               featureTestCheck.output
@@ -14679,13 +14681,10 @@ ${c}`).join("\n\n");
           verificationProfile,
           sandboxRunner: params.sandboxRunner,
           llmApiKey: params.llmApiKey,
-          label: `Feature PR #${featurePr.number} review-fix iteration ${featureReviewFixAttempt} test retry ${featureTestRetry}/2`
+          label: `Feature PR #${featurePr.number} review-fix test retry ${featureReviewFixAttempt}/${maxFeatureReviewFixAttempts}`
         });
       }
       if (!featureTestCheck.passed) {
-        if (featureReviewFixAttempt < maxFeatureReviewFixAttempts) {
-          continue;
-        }
         return await escalate({
           reason: "remediation_exhausted",
           ticketNumber: params.issueNumber,
@@ -15445,9 +15444,23 @@ async function runTicketExecutionLoop(params) {
     }
     const bootstrappedTargets = /* @__PURE__ */ new Set();
     let taskPr;
-    let fixAttempt = 0;
     const initialTicketFixAttempts = params.initialCodeFixAttemptsByTicket[String(ticket.ticketIssueNumber)] ?? 0;
     let reviewFixAttempt = initialTicketFixAttempts;
+    const consumeTicketFixAttempt = async () => {
+      reviewFixAttempt += 1;
+      await updateIssueStateWithCas({
+        issueNumber: params.issueNumber,
+        store: params.store,
+        mutator: (prev) => ({
+          ...withTicketCodeFixAttempts(
+            prev,
+            ticket.ticketIssueNumber,
+            reviewFixAttempt
+          ),
+          transient_retries_used: params.getTotalTransientRetriesUsed()
+        })
+      });
+    };
     try {
       const ticketChangedFilesMap = /* @__PURE__ */ new Map();
       const ticketDeletedFilesSet = /* @__PURE__ */ new Set();
@@ -15758,8 +15771,8 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
         let { integrityCheck, testCheck } = await evaluateIntegrityAndStage1Suite(
           `Ticket #${ticket.ticketIssueNumber} initial TDD suite`
         );
-        while (!testCheck.passed && fixAttempt < params.maxCodeFixAttempts) {
-          fixAttempt += 1;
+        while (!testCheck.passed && reviewFixAttempt < params.maxCodeFixAttempts) {
+          await consumeTicketFixAttempt();
           restoreViolatedBaselineFiles(integrityCheck);
           const currentFilesContext = buildCompactWorkspaceFilesContext({
             reviewersDir,
@@ -15812,7 +15825,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
             featureBranch: params.featureBranch,
             systemInstruction: fixSystemInstruction,
             prompt: fixPrompt,
-            logLabel: `stage1-fix:#${ticket.ticketIssueNumber}/iter-${fixAttempt}`,
+            logLabel: `stage1-fix:#${ticket.ticketIssueNumber}/iter-${reviewFixAttempt}`,
             accumulatedFiles: params.accumulatedFiles,
             deletedFilesSet: ticketDeletedFilesSet,
             devBranchPaths: params.devBranchPaths,
@@ -15840,7 +15853,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
               reason: "sensitive_path_violation",
               ticketNumber: ticket.ticketIssueNumber,
               branch: taskBranch,
-              codeFixAttemptsUsed: fixAttempt,
+              codeFixAttemptsUsed: reviewFixAttempt,
               sensitivePaths: fixPreCheck.sensitivePaths,
               traversalPaths: fixPreCheck.traversalPaths
             });
@@ -15872,7 +15885,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
             files: updatedFiles
           };
           const nextEval = await evaluateIntegrityAndStage1Suite(
-            `Ticket #${ticket.ticketIssueNumber} TDD auto-fix attempt ${fixAttempt}/${params.maxCodeFixAttempts}`
+            `Ticket #${ticket.ticketIssueNumber} TDD auto-fix attempt ${reviewFixAttempt}/${params.maxCodeFixAttempts}`
           );
           integrityCheck = nextEval.integrityCheck;
           testCheck = nextEval.testCheck;
@@ -15882,7 +15895,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
             reason: "remediation_exhausted",
             ticketNumber: ticket.ticketIssueNumber,
             branch: taskBranch,
-            codeFixAttemptsUsed: fixAttempt,
+            codeFixAttemptsUsed: reviewFixAttempt,
             diagnosticExcerpt: testCheck.output.slice(-2e3)
           });
           return {
@@ -16135,19 +16148,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
         };
       }
       while ((reviewResult.conclusion === "failure" || !ciGateResult.passed) && reviewFixAttempt < params.maxCodeFixAttempts) {
-        reviewFixAttempt += 1;
-        await updateIssueStateWithCas({
-          issueNumber: params.issueNumber,
-          store: params.store,
-          mutator: (prev) => ({
-            ...withTicketCodeFixAttempts(
-              prev,
-              ticket.ticketIssueNumber,
-              reviewFixAttempt
-            ),
-            transient_retries_used: params.getTotalTransientRetriesUsed()
-          })
-        });
+        await consumeTicketFixAttempt();
         process.stdout.write(
           `[EPURE][Ticket #${ticket.ticketIssueNumber}][PR #${taskPr.number}] Post-PR remediation round ${reviewFixAttempt}/${params.maxCodeFixAttempts} (${reviewResult.must_fix_findings.length} must_fix finding(s), CI passed=${ciGateResult.passed})
 `
@@ -16286,9 +16287,8 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
         } = await evaluateIntegrityAndStage1Suite(
           `Ticket #${ticket.ticketIssueNumber} review-fix iteration ${reviewFixAttempt}/${params.maxCodeFixAttempts}`
         );
-        let reviewTestRetry = 0;
-        while (!testCheck.passed && reviewTestRetry < 2) {
-          reviewTestRetry += 1;
+        while (!testCheck.passed && reviewFixAttempt < params.maxCodeFixAttempts) {
+          await consumeTicketFixAttempt();
           restoreViolatedBaselineFiles(reviewIntegrityCheck);
           const retryFilesContext = buildCompactWorkspaceFilesContext({
             reviewersDir,
@@ -16304,10 +16304,10 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
             branch: taskBranch,
             featureBranch: params.featureBranch,
             thinkingLevel: "HIGH",
-            logLabel: `review-fix-retry:#${ticket.ticketIssueNumber}/iter-${reviewFixAttempt}/retry-${reviewTestRetry}`,
+            logLabel: `review-fix-retry:#${ticket.ticketIssueNumber}/iter-${reviewFixAttempt}`,
             systemInstruction: reviewFixSystemInstruction,
             prompt: [
-              `La correction a fait \xE9chouer la v\xE9rification Stage 1 en sandbox (tentative ${reviewTestRetry}/2) :`,
+              `La correction a fait \xE9chouer la v\xE9rification Stage 1 en sandbox (tentative ${reviewFixAttempt}/${params.maxCodeFixAttempts}) :`,
               wrapUntrustedContent(
                 "untrusted_test_output",
                 testCheck.output
@@ -16388,7 +16388,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
             files: updatedRetryFiles
           };
           const retryEval = await evaluateIntegrityAndStage1Suite(
-            `Ticket #${ticket.ticketIssueNumber} review-fix iteration ${reviewFixAttempt} test retry ${reviewTestRetry}/2`
+            `Ticket #${ticket.ticketIssueNumber} review-fix test retry ${reviewFixAttempt}/${params.maxCodeFixAttempts}`
           );
           reviewIntegrityCheck = retryEval.integrityCheck;
           testCheck = retryEval.testCheck;
@@ -16404,9 +16404,6 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
               files: impl.files,
               deletedFiles: Array.from(ticketDeletedFilesSet)
             });
-          }
-          if (reviewFixAttempt < params.maxCodeFixAttempts) {
-            continue;
           }
           const escalated = await params.escalateToNeedsHuman({
             reason: "remediation_exhausted",
@@ -16551,7 +16548,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
           phase: "implementation",
           prNumber: taskPr?.number,
           prUrl: taskPr?.html_url,
-          codeFixAttemptsUsed: Math.max(fixAttempt, reviewFixAttempt),
+          codeFixAttemptsUsed: reviewFixAttempt,
           diagnosticExcerpt: redactSecrets(err.message, [
             params.activeToken,
             params.llmApiKey
@@ -17744,28 +17741,33 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
         feature_pr_url: ""
       };
     } catch (err) {
-      await gh.ensureLabel(
-        "needs-human",
-        "D93F0B",
-        "Requires human maintainer intervention"
-      );
-      await gh.addIssueLabels(effectiveInput.issueNumber, ["needs-human"]);
+      const rawErrMessage = err instanceof Error ? err.message : String(err);
+      const escalationReason = err instanceof LLMError ? resolveLlmEscalationReason(err) : err instanceof MissingModelConfigError ? "model_config_missing" : "internal_error";
       const latestSnap = await store.readRef(refName);
       const fallbackPhase = latestSnap.state?.phase && latestSnap.state.phase !== "idle" ? latestSnap.state.phase : effectiveInput.command === "approve" || effectiveInput.command === "continue" ? "implementation" : effectiveInput.command === "to-tickets" ? "tickets" : effectiveInput.command === "to-spec" ? "spec" : "grilling";
       const fallbackBranch = latestSnap.state?.active_branch || (fallbackPhase === "implementation" ? featureBranch : planBranch);
+      let duplicateOfLastEscalation = false;
       const updatedSuspended = await updateIssueStateWithCas({
         issueNumber: effectiveInput.issueNumber,
         store,
-        mutator: (prev) => toTerminalState(prev, {
-          phase: prev.phase !== "idle" ? prev.phase : fallbackPhase,
-          status: "suspended",
-          active_branch: prev.active_branch || fallbackBranch,
-          transient_retries_used: cumulativeTransientRetriesUsed(),
-          last_processed_comment_id: Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
-        })
+        mutator: (prev) => {
+          const escalation = {
+            reason: escalationReason,
+            head_sha: prev.active_head_sha ?? "",
+            ticket_number: prev.active_ticket_number ?? effectiveInput.issueNumber,
+            budget_scope: activeBudgetScope(prev)
+          };
+          duplicateOfLastEscalation = isAutomaticEntry && prev.last_escalation?.reason === escalation.reason && prev.last_escalation?.head_sha === escalation.head_sha;
+          return toTerminalState(prev, {
+            phase: prev.phase !== "idle" ? prev.phase : fallbackPhase,
+            status: "suspended",
+            active_branch: prev.active_branch || fallbackBranch,
+            transient_retries_used: cumulativeTransientRetriesUsed(),
+            last_escalation: escalation,
+            last_processed_comment_id: Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
+          });
+        }
       });
-      const rawErrMessage = err instanceof Error ? err.message : String(err);
-      const escalationReason = err instanceof LLMError ? resolveLlmEscalationReason(err) : err instanceof MissingModelConfigError ? "model_config_missing" : "internal_error";
       const escalationMarkdown = appendEpureCommandsSpoiler(
         [
           updatedSuspended.issue_mirror_markdown,
@@ -17790,7 +17792,15 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
           issueNumber: effectiveInput.issueNumber
         }
       );
-      await gh.postIssueComment(effectiveInput.issueNumber, escalationMarkdown);
+      if (!duplicateOfLastEscalation) {
+        await gh.ensureLabel(
+          "needs-human",
+          "D93F0B",
+          "Requires human maintainer intervention"
+        );
+        await gh.addIssueLabels(effectiveInput.issueNumber, ["needs-human"]);
+        await gh.postIssueComment(effectiveInput.issueNumber, escalationMarkdown);
+      }
       return {
         executed: true,
         phase: updatedSuspended.state.phase,

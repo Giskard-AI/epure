@@ -641,6 +641,155 @@ describe("Lot 1 — resume context: comments since the escalation reach the resu
   });
 });
 
+const FAILING_SANDBOX: NonNullable<OrchestrateIssueInput["sandboxRunner"]> = async () => ({
+  isolated: true,
+  error_code: "NONE",
+  error_message: "",
+  proxy_url: "http://127.0.0.1:0/v1/llm",
+  exit_code: 1,
+  stdout: "",
+  stderr: "FAIL src/a.test.ts",
+  duration_ms: 5,
+  sanitized_env: {}
+});
+
+function declareFailingFixFlow(openPrs = { taskPr: true, featurePr: true }): GitHubMockRouter {
+  return declareImplementationFlow(createGitHubMockRouter(), "failure", openPrs)
+    .on("GET", /\/git\/commits\/[^/]+$/, json({ sha: "branch-sha", tree: { sha: "tree-sha" } }))
+    .on("POST", `${R}/git/blobs`, json({ sha: "blob-sha" }, 201))
+    .on("POST", `${R}/git/trees`, json({ sha: "new-tree-sha" }, 201))
+    .on("POST", `${R}/git/commits`, json({ sha: "wip-sha" }, 201))
+    .on("PATCH", /\/git\/refs\/heads\//, json({ object: { sha: "wip-sha" } }))
+    .onHost("api.openai.com", "POST", "/v1/chat/completions", (req) => {
+      const payload =
+        schemaName(req.body) === "generated_ticket_implementation"
+          ? { commit_message: "fix: x", test_summary: "x", files: [{ path: "src/a.ts", content: "export const a = 1;\n" }] }
+          : { summary: "ok", findings: [] };
+      return json({ choices: [{ message: { content: JSON.stringify(payload) } }] });
+    });
+}
+
+function implementationCalls(router: GitHubMockRouter): number {
+  return router.requests.filter((r) => r.host === "api.openai.com" && schemaName(r.body) === "generated_ticket_implementation").length;
+}
+
+describe("Lot 1 — one remediation budget per ticket shared by fix rounds and Stage 1 retries", () => {
+  it.each([
+    { id: "fresh-ticket-budget-spends-3-attempts-across-fix-round-and-stage1-retries-then-escalates-once", attempts: 0, expectedImplementationCalls: 3 },
+    { id: "ticket-at-1-of-3-spends-its-last-2-attempts-across-fix-round-and-stage1-retry-then-escalates-once", attempts: 1, expectedImplementationCalls: 2 },
+    { id: "ticket-at-2-of-3-spends-its-last-attempt-on-the-fix-round-then-escalates-once", attempts: 2, expectedImplementationCalls: 1 }
+  ] as const)("$id", async ({ attempts, expectedImplementationCalls }) => {
+    const store = await seedState({
+      status: "active",
+      subphase: "waiting_ticket_ci",
+      active_ticket_number: ISSUE,
+      active_task_branch: TASK_BRANCH,
+      active_pr_number: 106,
+      code_fix_attempts_by_ticket: { [String(ISSUE)]: attempts }
+    });
+    const router = declareFailingFixFlow();
+
+    await orchestrateIssueCommand({
+      repository: REPO,
+      commandArgs: "",
+      fallbackGithubToken: "ghs_test",
+      llmApiKey: "key_test",
+      model: "openai/gpt-test",
+      stateStore: store,
+      fetchImpl: router.fetch,
+      sandboxRunner: FAILING_SANDBOX,
+      command: "continue",
+      actor: "github-actions[bot]",
+      ...TRIGGERS.workflowRun
+    });
+    const after = await readState(store);
+
+    expect(router.unmatched).toEqual([]);
+    expect(implementationCalls(router)).toBe(expectedImplementationCalls);
+    expect(router.calls("POST", `${R}/issues/${ISSUE}/comments`)).toBe(1);
+    expect(after).toMatchObject({
+      status: "suspended",
+      code_fix_attempts_by_ticket: { [String(ISSUE)]: 3 },
+      last_escalation: { reason: "remediation_exhausted", ticket_number: ISSUE, budget_scope: "ticket" }
+    });
+  });
+});
+
+describe("Lot 1 — one remediation budget per feature PR shared by fix rounds and Stage 1 retries", () => {
+  it.each([
+    { id: "fresh-feature-budget-spends-3-attempts-across-fix-round-and-stage1-retries-then-escalates-once", attempts: 0, expectedImplementationCalls: 3 },
+    { id: "feature-at-2-of-3-spends-its-last-attempt-on-the-fix-round-then-escalates-once", attempts: 2, expectedImplementationCalls: 1 }
+  ] as const)("$id", async ({ attempts, expectedImplementationCalls }) => {
+    const store = await seedState(seedFor({ status: "active", subphase: "waiting_feature_ci", attempts }));
+    const router = declareFailingFixFlow({ taskPr: false, featurePr: true });
+
+    await orchestrateIssueCommand({
+      repository: REPO,
+      commandArgs: "",
+      fallbackGithubToken: "ghs_test",
+      llmApiKey: "key_test",
+      model: "openai/gpt-test",
+      stateStore: store,
+      fetchImpl: router.fetch,
+      sandboxRunner: FAILING_SANDBOX,
+      command: "continue",
+      actor: "github-actions[bot]",
+      ...TRIGGERS.workflowRun
+    });
+    const after = await readState(store);
+
+    expect(router.unmatched).toEqual([]);
+    expect(implementationCalls(router)).toBe(expectedImplementationCalls);
+    expect(router.calls("POST", `${R}/issues/${ISSUE}/comments`)).toBe(1);
+    expect(after).toMatchObject({
+      status: "suspended",
+      feature_code_fix_attempts_used: 3,
+      last_escalation: { reason: "remediation_exhausted", budget_scope: "feature" }
+    });
+  });
+});
+
+describe("Lot 1 — a resume command after budget exhaustion grants one fresh budget and records it", () => {
+  it.each([
+    { id: "continue-after-remediation_exhausted-resets-the-ticket-budget-and-counts-the-grant", command: "continue", reason: "remediation_exhausted", expectedImplementationCalls: 3, expectedGrants: 1 },
+    { id: "approve-after-remediation_exhausted-resets-the-ticket-budget-and-counts-the-grant", command: "approve", reason: "remediation_exhausted", expectedImplementationCalls: 3, expectedGrants: 1 },
+    { id: "continue-after-another-escalation-reason-keeps-the-exhausted-budget", command: "continue", reason: "llm_request_invalid", expectedImplementationCalls: 0, expectedGrants: 0 }
+  ] as const)("$id", async ({ command, reason, expectedImplementationCalls, expectedGrants }) => {
+    const store = await seedState({
+      status: "suspended",
+      subphase: "idle",
+      code_fix_attempts_by_ticket: { [String(ISSUE)]: 3 },
+      last_escalation: { reason, head_sha: HEAD_SHA, ticket_number: ISSUE, budget_scope: "ticket" }
+    });
+    const router = declareFailingFixFlow();
+
+    await orchestrateIssueCommand({
+      repository: REPO,
+      commandArgs: "",
+      fallbackGithubToken: "ghs_test",
+      llmApiKey: "key_test",
+      model: "openai/gpt-test",
+      stateStore: store,
+      fetchImpl: router.fetch,
+      sandboxRunner: FAILING_SANDBOX,
+      command,
+      actor: "maintainer",
+      issueNumber: ISSUE,
+      commentId: 900
+    });
+    const after = await readState(store);
+
+    expect(router.unmatched).toEqual([]);
+    expect(implementationCalls(router)).toBe(expectedImplementationCalls);
+    expect(after.human_budget_grants ?? 0).toBe(expectedGrants);
+    expect(after).toMatchObject({
+      status: "suspended",
+      code_fix_attempts_by_ticket: { [String(ISSUE)]: 3 },
+      last_escalation: { reason: "remediation_exhausted" }
+    });
+  });
+});
+
 describe("Lot 1 — escalation comments remind the exact resume command", () => {
   it.each([
     { id: "remediation_exhausted-reminds-continue-and-the-budget-reset", attempts: 3, expectedReason: "remediation_exhausted", mentionsBudgetReset: true },
