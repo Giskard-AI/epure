@@ -35,7 +35,7 @@ type Trigger = Pick<
 const TRIGGERS = {
   continueWithoutComment: { issueNumber: ISSUE, commentId: 0 },
   workflowRun: { issueNumber: 0, commentId: 0, triggerHeadSha: HEAD_SHA, triggerBranch: FEATURE_BRANCH },
-  checkSuite: { issueNumber: 0, commentId: 0, triggerBranch: FEATURE_BRANCH }
+  branchOnly: { issueNumber: 0, commentId: 0, triggerBranch: FEATURE_BRANCH }
 } satisfies Record<string, Trigger>;
 
 async function seedState(
@@ -119,7 +119,7 @@ describe("Invariant 1 — automatic continuation runs only when status is active
   it.each([
     { id: "suspended-waiting_feature_ci-not-resumed-by-continue-without-comment", status: "suspended", trigger: TRIGGERS.continueWithoutComment },
     { id: "suspended-waiting_feature_ci-not-resumed-by-workflow_run-head-sha", status: "suspended", trigger: TRIGGERS.workflowRun },
-    { id: "suspended-waiting_feature_ci-not-resumed-by-check_suite-branch", status: "suspended", trigger: TRIGGERS.checkSuite },
+    { id: "suspended-waiting_feature_ci-not-resumed-by-branch-only-trigger", status: "suspended", trigger: TRIGGERS.branchOnly },
     { id: "awaiting_human_approval-waiting_feature_ci-not-resumed-by-workflow_run", status: "awaiting_human_approval", trigger: TRIGGERS.workflowRun }
   ] as const)("$id", async ({ status, trigger }) => {
     const store = await seedState({ status, subphase: "waiting_feature_ci" });
@@ -288,7 +288,7 @@ describe("Invariant 3 — only an explicit human command gets an issue out of ca
   it.each([
     { id: "cancelled-with-stale-waiting_feature_ci-not-reactivated-by-workflow_run", status: "cancelled", phase: "implementation", trigger: TRIGGERS.workflowRun },
     { id: "cancelled-with-stale-waiting_feature_ci-not-reactivated-by-continue-without-comment", status: "cancelled", phase: "implementation", trigger: TRIGGERS.continueWithoutComment },
-    { id: "done-with-stale-waiting_feature_ci-not-reactivated-by-check_suite", status: "done", phase: "completed", trigger: TRIGGERS.checkSuite }
+    { id: "done-with-stale-waiting_feature_ci-not-reactivated-by-branch-only-trigger", status: "done", phase: "completed", trigger: TRIGGERS.branchOnly }
   ] as const)("$id", async ({ status, phase, trigger }) => {
     const store = await seedState({ status, phase, subphase: "waiting_feature_ci" });
     const router = declareIssueWrites(declareCiSnapshot(declareIssueReads(createGitHubMockRouter()), "success"))
