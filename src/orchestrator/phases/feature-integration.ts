@@ -44,6 +44,7 @@ import {
   type BaseSyncGuard
 } from "../github/branch-sync.js";
 import { EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT } from "../prompts/code-discipline.js";
+import { formatResumeContextPromptLines } from "../prompts/resume-context.js";
 import {
   GENERATED_TICKET_IMPLEMENTATION_SCHEMA,
   type EscalateToNeedsHumanFn,
@@ -108,6 +109,7 @@ export interface RunFeatureIntegrationPhaseParams {
   readonly forceOneRemediationRoundOnOpenPr?: boolean | undefined;
   readonly initialFeatureCodeFixAttemptsUsed: number;
   readonly baseSyncGuard: BaseSyncGuard;
+  readonly resumeContextMarkdown?: string | undefined;
 }
 
 export async function runFeatureIntegrationPhase(
@@ -574,7 +576,9 @@ export async function runFeatureIntegrationPhase(
         EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
       ].join("\n");
 
-      const featureFixPromptParts: string[] = [];
+      const featureFixPromptParts: string[] = formatResumeContextPromptLines(
+        params.resumeContextMarkdown
+      );
       if (finalFeatureReview.must_fix_findings.length > 0) {
         featureFixPromptParts.push(
           `Les reviewers multi-agents EPURE ont émis ${finalFeatureReview.must_fix_findings.length} constat(s) bloquant(s) ('must_fix') sur la PR finale #${featurePr.number} (\`${params.featureBranch} -> dev\`) :`,
@@ -970,7 +974,7 @@ export async function runFeatureIntegrationPhase(
         status: "done",
         active_branch: params.featureBranch,
         last_processed_comment_id:
-          params.commentId ?? prev.last_processed_comment_id
+          Math.max(params.commentId ?? 0, prev.last_processed_comment_id)
       })
   });
 

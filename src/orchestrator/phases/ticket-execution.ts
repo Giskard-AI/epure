@@ -50,6 +50,7 @@ import {
 } from "../github/branch-sync.js";
 import { loadOrchestratorStateFromGitRef } from "../github/rest-client.js";
 import { EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT } from "../prompts/code-discipline.js";
+import { formatResumeContextPromptLines } from "../prompts/resume-context.js";
 import {
   createGeneratedTicketImplementationSchema,
   type EscalateToNeedsHumanFn,
@@ -112,6 +113,7 @@ export interface RunTicketExecutionLoopParams {
   readonly forceOneRemediationRoundOnOpenPr?: boolean | undefined;
   readonly initialCodeFixAttemptsByTicket: Readonly<Record<string, number>>;
   readonly baseSyncGuard: BaseSyncGuard;
+  readonly resumeContextMarkdown?: string | undefined;
 }
 
 export interface RunTicketExecutionLoopOutcome {
@@ -455,6 +457,9 @@ export async function runTicketExecutionLoop(
   let verificationProfile = params.initialVerificationProfile;
   let verificationGuideMarkdown = params.initialVerificationGuideMarkdown;
   const completedTicketNumbers = new Set<number>();
+  const resumeContextPromptLines = formatResumeContextPromptLines(
+    params.resumeContextMarkdown
+  );
 
   for (const ticket of params.skipTicketLoopForExistingFeaturePr
     ? []
@@ -555,7 +560,7 @@ export async function runTicketExecutionLoop(
               status: "suspended",
               active_branch: params.featureBranch,
               last_processed_comment_id:
-                params.commentId ?? prev.last_processed_comment_id
+                Math.max(params.commentId ?? 0, prev.last_processed_comment_id)
             })
         });
 
@@ -1003,6 +1008,7 @@ export async function runTicketExecutionLoop(
             ].join("\n")
           ),
           "",
+          ...resumeContextPromptLines,
           verificationGuideMarkdown,
           "",
           existingFilesContext
@@ -1583,7 +1589,7 @@ export async function runTicketExecutionLoop(
           EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
         ].join("\n");
 
-        const promptParts: string[] = [];
+        const promptParts: string[] = [...resumeContextPromptLines];
         if (reviewResult.must_fix_findings.length > 0) {
           promptParts.push(
             `Les reviewers multi-agents EPURE ont émis ${reviewResult.must_fix_findings.length} constat(s) bloquant(s) ('must_fix') sur la PR #${taskPr.number} du Ticket #${ticket.ticketIssueNumber} :`,

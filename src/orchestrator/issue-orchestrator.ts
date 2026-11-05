@@ -36,6 +36,10 @@ import {
   type EpureIssueState,
   type GitRefStateStore
 } from "../state/git-ref-state.js";
+import {
+  formatResumeContextMarkdown,
+  selectResumeContextComments
+} from "../state/comment-batch-cursor.js";
 import { appendEpureCommandsSpoiler } from "./formatting/comments.js";
 import {
   createBaseSyncGuard,
@@ -314,7 +318,7 @@ export async function orchestrateIssueCommand(
           mutator: (prev) => ({
             ...prev,
             last_processed_comment_id:
-              effectiveInput.commentId ?? prev.last_processed_comment_id
+              Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
           })
         });
         const statusBody = appendEpureCommandsSpoiler(
@@ -346,7 +350,7 @@ export async function orchestrateIssueCommand(
             toTerminalState(prev, {
               status: "cancelled",
               last_processed_comment_id:
-                effectiveInput.commentId ?? prev.last_processed_comment_id
+                Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
             })
         });
         const body = appendEpureCommandsSpoiler(
@@ -462,7 +466,7 @@ export async function orchestrateIssueCommand(
                 active_branch: planBranch,
                 transient_retries_used: cumulativeTransientRetriesUsed(),
                 last_processed_comment_id:
-                  effectiveInput.commentId ?? prev.last_processed_comment_id
+                  Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
               })
           });
 
@@ -476,6 +480,12 @@ export async function orchestrateIssueCommand(
                 ticketIssueNumber: effectiveInput.issueNumber,
                 branch: planBranch,
                 maxCodeFixAttempts,
+                resumeCommand:
+                  suspendedPhase === "tickets"
+                    ? "/epure to-tickets"
+                    : suspendedPhase === "spec"
+                      ? "/epure to-spec"
+                      : "/epure plan",
                 diagnosticExcerpt: redactSecrets(err.message, [
                   activeToken,
                   effectiveInput.llmApiKey
@@ -567,7 +577,7 @@ export async function orchestrateIssueCommand(
                 status: "suspended",
                 active_branch: targetBranch,
                 last_processed_comment_id:
-                  effectiveInput.commentId ?? prev.last_processed_comment_id
+                  Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
               })
           });
           const escalationMd = appendEpureCommandsSpoiler(
@@ -637,7 +647,7 @@ export async function orchestrateIssueCommand(
                   status: "suspended",
                   active_branch: targetBranch,
                   last_processed_comment_id:
-                    effectiveInput.commentId ?? prev.last_processed_comment_id
+                    Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
                 })
             });
             const taskEscalationMd = appendEpureCommandsSpoiler(
@@ -685,7 +695,7 @@ export async function orchestrateIssueCommand(
             ...prev,
             active_branch: targetBranch,
             last_processed_comment_id:
-              effectiveInput.commentId ?? prev.last_processed_comment_id
+              Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
           })
         });
 
@@ -750,7 +760,7 @@ export async function orchestrateIssueCommand(
               transient_retries_used: cumulativeTransientRetriesUsed(),
               last_escalation: escalation,
               last_processed_comment_id:
-                effectiveInput.commentId ?? prev.last_processed_comment_id
+                Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
             });
           }
         });
@@ -1174,6 +1184,23 @@ export async function orchestrateIssueCommand(
 
       await gh.ensureBranch(featureBranch, "dev");
 
+      const resumeContextMarkdown =
+        currentState?.status === "suspended" && (effectiveInput.commentId ?? 0) > 0
+          ? formatResumeContextMarkdown(
+              await selectResumeContextComments({
+                comments: allComments.map((c) => ({
+                  id: c.id,
+                  authorLogin: c.user.login,
+                  authorType: c.user.type ?? "User",
+                  body: c.body
+                })),
+                afterCommentId: currentState.last_processed_comment_id,
+                resumeCommentId: effectiveInput.commentId ?? 0,
+                resolvePermission: (login) => gh.getCollaboratorPermission(login)
+              })
+            )
+          : "";
+
       const updatedStart = await updateIssueStateWithCas({
         issueNumber: effectiveInput.issueNumber,
         store,
@@ -1184,7 +1211,7 @@ export async function orchestrateIssueCommand(
           active_branch: featureBranch,
           epic_phase: prev.epic_phase ?? 1,
           last_processed_comment_id:
-            effectiveInput.commentId ?? prev.last_processed_comment_id
+            Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
         })
       });
       const baseSyncGuard = createBaseSyncGuard({
@@ -1314,7 +1341,8 @@ export async function orchestrateIssueCommand(
         asyncCiContinuation: asyncCiEnabled,
         forceOneRemediationRoundOnOpenPr,
         initialCodeFixAttemptsByTicket,
-        baseSyncGuard
+        baseSyncGuard,
+        resumeContextMarkdown
       });
 
       if (loopOutcome.halted && loopOutcome.result) {
@@ -1484,7 +1512,8 @@ export async function orchestrateIssueCommand(
             asyncCiContinuation: asyncCiEnabled,
             forceOneRemediationRoundOnOpenPr: false,
             initialCodeFixAttemptsByTicket,
-            baseSyncGuard
+            baseSyncGuard,
+            resumeContextMarkdown
           });
 
           if (loopOutcome.halted && loopOutcome.result) {
@@ -1537,7 +1566,8 @@ export async function orchestrateIssueCommand(
           asyncCiContinuation: asyncCiEnabled,
           forceOneRemediationRoundOnOpenPr,
           initialFeatureCodeFixAttemptsUsed,
-          baseSyncGuard
+          baseSyncGuard,
+          resumeContextMarkdown
         });
       } catch (err) {
         if (err instanceof LLMError) {
@@ -1599,7 +1629,7 @@ export async function orchestrateIssueCommand(
             active_branch: prev.active_branch || fallbackBranch,
             transient_retries_used: cumulativeTransientRetriesUsed(),
             last_processed_comment_id:
-              effectiveInput.commentId ?? prev.last_processed_comment_id
+              Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
           })
       });
 

@@ -531,3 +531,134 @@ describe("Lot 1 — automatic resume skips dev -> feature -> task sync unless de
     expect((await readState(store)).last_synced_base_sha).toBe("branch-sha");
   });
 });
+
+type CommentSpec = { readonly id: number; readonly login: string; readonly body: string; readonly type?: string };
+
+const PERMISSIONS: Readonly<Record<string, string>> = { maintainer: "write", owner: "admin", reader: "read" };
+
+function schemaName(body: unknown): string | undefined {
+  return (body as { response_format?: { json_schema?: { name?: string } } }).response_format?.json_schema?.name;
+}
+
+function declareResumeFlow(comments: readonly CommentSpec[]): GitHubMockRouter {
+  return declareImplementationFlow(createGitHubMockRouter(), "failure", { taskPr: true, featurePr: true })
+    .on("POST", `${R}/issues/${TICKET}/labels`, json([]))
+    .onHost("api.openai.com", "POST", "/v1/chat/completions", (req) =>
+      schemaName(req.body) === "generated_ticket_implementation"
+        ? json({ error: { message: "stop after capturing the implementation prompt" } }, 400)
+        : json({ choices: [{ message: { content: JSON.stringify({ summary: "ok", findings: [] }) } }] })
+    )
+    .on("GET", `${R}/issues/${ISSUE}/comments?per_page=100`, json(comments.map((c) => ({ id: c.id, body: c.body, user: { login: c.login, type: c.type ?? "User" }, created_at: "2026-11-05T10:00:00Z" }))))
+    .on("GET", new RegExp(`^${R_RX}/collaborators/([^/]+)/permission$`), (_req, m) => {
+      const level = PERMISSIONS[decodeURIComponent(m![1]!)] ?? "none";
+      return json({ permission: level, role_name: level });
+    });
+}
+
+function implementationPrompt(router: GitHubMockRouter): string {
+  const request = router.requests.find((r) => r.host === "api.openai.com" && schemaName(r.body) === "generated_ticket_implementation");
+  expect(request).toBeDefined();
+  return JSON.stringify(request!.body);
+}
+
+const ESCALATED_AT_CURSOR = 500;
+const RESUME_COMMENT = 600;
+
+describe("Lot 1 — resume context: comments since the escalation reach the resumed implementation session", () => {
+  it.each([
+    {
+      id: "write-and-admin-free-text-since-escalation-injected-bots-readers-commands-and-out-of-window-excluded",
+      comments: [
+        { id: 450, login: "maintainer", body: "BEFORE-ESCALATION guidance" },
+        { id: 510, login: "maintainer", body: "GUIDANCE-A use the zod schema" },
+        { id: 520, login: "epure-agent[bot]", body: "BOT-NOISE", type: "Bot" },
+        { id: 530, login: "reader", body: "READER-NOISE" },
+        { id: 540, login: "maintainer", body: "/epure status" },
+        { id: 550, login: "owner", body: "GUIDANCE-B keep the public API" },
+        { id: RESUME_COMMENT, login: "maintainer", body: "/epure continue" },
+        { id: 610, login: "maintainer", body: "AFTER-RESUME guidance" }
+      ],
+      included: ["GUIDANCE-A use the zod schema", "GUIDANCE-B keep the public API"],
+      excluded: ["BEFORE-ESCALATION", "BOT-NOISE", "READER-NOISE", "/epure status", "AFTER-RESUME"]
+    },
+    {
+      id: "more-than-10-eligible-comments-keeps-the-10-most-recent",
+      comments: [
+        ...Array.from({ length: 12 }, (_, i) => ({ id: 501 + i, login: "maintainer", body: `NOTE-${String(i + 1).padStart(2, "0")}` })),
+        { id: RESUME_COMMENT, login: "maintainer", body: "/epure continue" }
+      ],
+      included: ["NOTE-03", "NOTE-12"],
+      excluded: ["NOTE-01", "NOTE-02"]
+    },
+    {
+      id: "context-is-capped-at-8000-characters-keeping-the-most-recent-text",
+      comments: [
+        { id: 510, login: "maintainer", body: `OLDEST-${"x".repeat(3000)}` },
+        { id: 520, login: "maintainer", body: `MIDDLE-${"y".repeat(5000)}-MIDDLE-END` },
+        { id: 530, login: "maintainer", body: `NEWEST-${"z".repeat(3500)}` },
+        { id: RESUME_COMMENT, login: "maintainer", body: "/epure approve" }
+      ],
+      included: ["NEWEST-", "MIDDLE-"],
+      excluded: ["OLDEST-", "-MIDDLE-END"]
+    }
+  ] satisfies ReadonlyArray<{ id: string; comments: readonly CommentSpec[]; included: readonly string[]; excluded: readonly string[] }>)(
+    "$id",
+    async ({ comments, included, excluded }) => {
+      const store = await seedState({
+        status: "suspended",
+        subphase: "idle",
+        last_processed_comment_id: ESCALATED_AT_CURSOR,
+        last_escalation: { reason: "remediation_exhausted", head_sha: HEAD_SHA, ticket_number: ISSUE, budget_scope: "ticket" }
+      });
+      const router = declareResumeFlow(comments);
+      const command = comments.find((c) => c.id === RESUME_COMMENT)!.body.split(" ")[1] as "continue" | "approve";
+
+      await run(router, store, { command, actor: "maintainer", issueNumber: ISSUE, commentId: RESUME_COMMENT });
+      const prompt = implementationPrompt(router);
+
+      expect(router.unmatched).toEqual([]);
+      for (const text of included) {
+        expect(prompt).toContain(text);
+      }
+      for (const text of excluded) {
+        expect(prompt).not.toContain(text);
+      }
+    }
+  );
+
+  it.each([
+    { id: "continue-without-new-comments-injects-no-context-section", command: "continue" },
+    { id: "approve-without-new-comments-injects-no-context-section", command: "approve" }
+  ] as const)("$id", async ({ command }) => {
+    const store = await seedState({ status: "suspended", subphase: "idle", last_processed_comment_id: ESCALATED_AT_CURSOR });
+    const router = declareResumeFlow([{ id: RESUME_COMMENT, login: "maintainer", body: `/epure ${command}` }]);
+
+    await run(router, store, { command, actor: "maintainer", issueNumber: ISSUE, commentId: RESUME_COMMENT });
+
+    expect(router.unmatched).toEqual([]);
+    expect(implementationPrompt(router)).not.toContain("Consignes humaines publiées depuis l'escalade");
+    expect(router.calls("GET", new RegExp(`^${R_RX}/collaborators/`))).toBe(0);
+  });
+});
+
+describe("Lot 1 — escalation comments remind the exact resume command", () => {
+  it.each([
+    { id: "remediation_exhausted-reminds-continue-and-the-budget-reset", attempts: 3, expectedReason: "remediation_exhausted", mentionsBudgetReset: true },
+    { id: "llm_request_invalid-during-a-fix-round-reminds-continue-without-budget-reset", attempts: 2, expectedReason: "llm_request_invalid", mentionsBudgetReset: false }
+  ] as const)("$id", async ({ attempts, expectedReason, mentionsBudgetReset }) => {
+    const store = await seedState({ ...seedFor({ status: "active", subphase: "waiting_ticket_ci", attempts }), last_processed_comment_id: 321 });
+    const router = declareFullFlow("failure");
+
+    await run(router, store, { command: "continue", actor: "github-actions[bot]", ...TRIGGERS.workflowRun });
+    const posted = router.requests.filter((r) => r.method === "POST" && r.path === `${R}/issues/${ISSUE}/comments`);
+    const body = (posted.at(-1)?.body as { body: string }).body;
+    const after = await readState(store);
+
+    expect(router.unmatched).toEqual([]);
+    expect(posted).toHaveLength(1);
+    expect(after).toMatchObject({ status: "suspended", last_processed_comment_id: 321, last_escalation: { reason: expectedReason } });
+    expect(body).toContain("Postez `/epure continue` (ou `/epure approve`)");
+    expect(body).toContain("Une réponse libre ne reprend pas l'exécution");
+    expect(body.includes("remet à zéro le budget de remédiation")).toBe(mentionsBudgetReset);
+  });
+});

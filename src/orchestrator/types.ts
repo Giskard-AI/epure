@@ -79,6 +79,14 @@ export interface IssueCommentRecord {
 
 export type IssueCommentSummary = IssueCommentRecord;
 
+export type CollaboratorPermission =
+  | "admin"
+  | "maintain"
+  | "write"
+  | "triage"
+  | "read"
+  | "none";
+
 export interface IssueMetadata {
   readonly id?: number | undefined;
   readonly number: number;
@@ -158,6 +166,7 @@ export interface GitHubRestHelper {
   readonly token: string;
   getIssue(issueNumber: number): Promise<IssueMetadata>;
   listIssueComments(issueNumber: number): Promise<IssueCommentRecord[]>;
+  getCollaboratorPermission(username: string): Promise<CollaboratorPermission>;
   postIssueComment(issueNumber: number, body: string): Promise<string>;
   ensureLabel(name: string, color: string, description: string): Promise<void>;
   addIssueLabels(issueNumber: number, labels: readonly string[]): Promise<void>;

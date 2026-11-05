@@ -4280,6 +4280,14 @@ function createGitHubApiRefStateStore(options) {
 }
 
 // src/orchestrator/github/rest-client.ts
+var COLLABORATOR_PERMISSIONS = /* @__PURE__ */ new Set([
+  "admin",
+  "maintain",
+  "write",
+  "triage",
+  "read",
+  "none"
+]);
 function verifyPublisherMergeBoundary(params) {
   const cleanHead = params.headBranch.trim().replace(/^refs\/heads\//, "");
   const cleanBase = params.baseBranch.trim().replace(/^refs\/heads\//, "");
@@ -4368,6 +4376,16 @@ function createGitHubRestHelper(params) {
         `/repos/${owner}/${repo}/issues/${issueNumber}/comments?per_page=100`
       );
       return data ?? [];
+    },
+    async getCollaboratorPermission(username) {
+      const { data } = await apiRequest(
+        "GET",
+        `/repos/${owner}/${repo}/collaborators/${encodeURIComponent(username)}/permission`,
+        void 0,
+        true
+      );
+      const level = data?.role_name || data?.permission || "none";
+      return COLLABORATOR_PERMISSIONS.has(level) ? level : "none";
     },
     async postIssueComment(issueNumber, body) {
       const { data } = await apiRequest(
@@ -8136,6 +8154,123 @@ ${formattedOutput}`;
   }
 }
 
+// src/state/comment-batch-cursor.ts
+var CANCEL_OR_STOP_PATTERN = /(?:^|\s)\/epure\s+(?:cancel|stop)(?:\s|$)/i;
+function isAuthorizedHumanComment(comment) {
+  if (isBotActor({ login: comment.authorLogin, type: comment.authorType })) {
+    return false;
+  }
+  return comment.effectivePermission === "admin" || comment.effectivePermission === "maintain" || comment.effectivePermission === "write";
+}
+var RESUME_CONTEXT_MAX_COMMENTS = 10;
+var RESUME_CONTEXT_MAX_CHARS = 8e3;
+var EPURE_COMMAND_PATTERN = /^\s*\/epure\b/i;
+async function selectResumeContextComments(input) {
+  const candidates = input.comments.filter(
+    (c) => c.id > input.afterCommentId && c.id < input.resumeCommentId && !EPURE_COMMAND_PATTERN.test(c.body) && !isBotActor({ login: c.authorLogin, type: c.authorType })
+  ).sort((a, b) => b.id - a.id);
+  const permissions = /* @__PURE__ */ new Map();
+  const selected = [];
+  let remainingChars = RESUME_CONTEXT_MAX_CHARS;
+  for (const candidate of candidates) {
+    if (selected.length === RESUME_CONTEXT_MAX_COMMENTS || remainingChars <= 0) {
+      break;
+    }
+    if (!permissions.has(candidate.authorLogin)) {
+      permissions.set(
+        candidate.authorLogin,
+        await input.resolvePermission(candidate.authorLogin)
+      );
+    }
+    const comment = {
+      ...candidate,
+      effectivePermission: permissions.get(candidate.authorLogin),
+      body: candidate.body.trim().slice(0, remainingChars)
+    };
+    if (isAuthorizedHumanComment(comment)) {
+      selected.push(comment);
+      remainingChars -= comment.body.length;
+    }
+  }
+  return selected.reverse();
+}
+function formatResumeContextMarkdown(comments) {
+  return comments.map((c) => `@${c.authorLogin} (commentaire ${c.id}) :
+${c.body}`).join("\n\n");
+}
+async function processPendingIssueCommentsBatch(input) {
+  if (typeof input.initialCursor === "number" && input.initialCursor > 0) {
+    await updateIssueStateWithCas({
+      issueNumber: input.issueNumber,
+      store: input.store,
+      mutator: (prev) => ({
+        ...prev,
+        last_processed_comment_id: Math.max(
+          prev.last_processed_comment_id,
+          input.initialCursor ?? 0
+        )
+      })
+    });
+  }
+  const processedIds = [];
+  const processedBodies = [];
+  let cursor = input.initialCursor ?? 0;
+  let cancelled = false;
+  let latestStateResult = await updateIssueStateWithCas({
+    issueNumber: input.issueNumber,
+    store: input.store,
+    mutator: (prev) => prev
+  });
+  for (let pass = 0; pass < 3; pass += 1) {
+    const rawComments = await input.fetchCommentsSinceCursor(cursor);
+    const unseen = rawComments.filter((c) => c.id > cursor).sort((a, b) => a.id - b.id);
+    if (unseen.length === 0) {
+      break;
+    }
+    const maxSeenId = unseen[unseen.length - 1]?.id ?? cursor;
+    const authorized = unseen.filter(isAuthorizedHumanComment);
+    const cancelComment = authorized.find(
+      (c) => CANCEL_OR_STOP_PATTERN.test(c.body)
+    );
+    if (cancelComment) {
+      processedIds.push(cancelComment.id);
+      processedBodies.push(cancelComment.body);
+      cursor = maxSeenId;
+      cancelled = true;
+      latestStateResult = await updateIssueStateWithCas({
+        issueNumber: input.issueNumber,
+        store: input.store,
+        mutator: (prev) => toTerminalState(prev, {
+          status: "cancelled",
+          last_processed_comment_id: cursor
+        })
+      });
+      break;
+    }
+    for (const comment of authorized) {
+      processedIds.push(comment.id);
+      processedBodies.push(comment.body);
+    }
+    cursor = maxSeenId;
+    latestStateResult = await updateIssueStateWithCas({
+      issueNumber: input.issueNumber,
+      store: input.store,
+      mutator: (prev) => ({
+        ...prev,
+        status: "active",
+        last_processed_comment_id: cursor
+      })
+    });
+  }
+  return {
+    processed_comment_ids: processedIds,
+    processed_bodies: processedBodies,
+    last_processed_comment_id: cursor,
+    cancelled,
+    state: latestStateResult.state
+  };
+}
+
 // src/execution/external-ci-gate.ts
 function resolveLlmEscalationReason(err) {
   if (err instanceof AuthenticationError || err instanceof QuotaExhaustedError) {
@@ -8963,13 +9098,19 @@ function formatNeedsHumanEscalationComment(input) {
       "</details>"
     );
   }
+  const resumeCommand = input.resumeCommand ?? "/epure continue";
   lines.push(
     "",
-    "#### \u{1F6E0}\uFE0F Playbook de reprise (`/epure approve`)",
+    `#### \u{1F6E0}\uFE0F Playbook de reprise (\`${resumeCommand}\`)`,
     "1. Inspectez les checks ou fichiers signal\xE9s ci-dessus (ou ajustez `verification.targets` dans `.github/agents.yml` sur `dev` si n\xE9cessaire).",
     `2. Poussez un correctif sur \`${input.branch}\` ou mettez \xE0 jour la configuration sur \`dev\`.`,
-    `3. Postez \`/epure approve\` sur cette issue (#${input.issueNumber}) : l'orchestrateur r\xE9conciliera automatiquement la PR existante et reprendra la validation sans dupliquer le travail (ADR-0028, Q110).`
+    input.resumeCommand ? `3. Republiez \`${resumeCommand}\` sur cette issue (#${input.issueNumber}) pour reprendre (une r\xE9ponse libre suffit pendant le grill et la revue de sp\xE9cification).` : `3. Postez \`/epure continue\` (ou \`/epure approve\`) sur cette issue (#${input.issueNumber}) : l'orchestrateur r\xE9conciliera automatiquement la PR existante et reprendra la validation sans dupliquer le travail (ADR-0028, Q110). Une r\xE9ponse libre ne reprend pas l'ex\xE9cution ; les commentaires publi\xE9s d'ici l\xE0 par un contributeur \`write\` ou sup\xE9rieur (hors commandes \`/epure\` et bots, ${RESUME_CONTEXT_MAX_COMMENTS} derniers, ${RESUME_CONTEXT_MAX_CHARS} caract\xE8res au plus) sont transmis \xE0 la session reprise.`
   );
+  if (input.reason === "remediation_exhausted" && !input.resumeCommand) {
+    lines.push(
+      "4. La reprise remet \xE0 z\xE9ro le budget de rem\xE9diation de l'\xE9l\xE9ment bloqu\xE9 et l'enregistre dans `human_budget_grants`."
+    );
+  }
   return appendEpureCommandsSpoiler(lines.join("\n"), {
     phase: "suspended",
     status: "suspended",
@@ -13941,6 +14082,15 @@ async function runMultiAgentPrReviewPass(input) {
   };
 }
 
+// src/orchestrator/prompts/resume-context.ts
+function formatResumeContextPromptLines(resumeContextMarkdown) {
+  return resumeContextMarkdown ? [
+    "Consignes humaines publi\xE9es depuis l'escalade (\xE0 prendre en compte pour cette reprise) :",
+    wrapUntrustedContent("untrusted_issue_content", resumeContextMarkdown),
+    ""
+  ] : [];
+}
+
 // src/orchestrator/phases/feature-integration.ts
 async function runFeatureIntegrationPhase(params) {
   const reviewersDir = params.parsedDevAgentsConfig?.reviewers_dir ?? DEFAULT_REVIEWERS_DIR;
@@ -14319,7 +14469,9 @@ ${c}`).join("\n\n");
         "",
         EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
       ].join("\n");
-      const featureFixPromptParts = [];
+      const featureFixPromptParts = formatResumeContextPromptLines(
+        params.resumeContextMarkdown
+      );
       if (finalFeatureReview.must_fix_findings.length > 0) {
         featureFixPromptParts.push(
           `Les reviewers multi-agents EPURE ont \xE9mis ${finalFeatureReview.must_fix_findings.length} constat(s) bloquant(s) ('must_fix') sur la PR finale #${featurePr.number} (\`${params.featureBranch} -> dev\`) :`,
@@ -14670,7 +14822,7 @@ Refs #${params.issueNumber}`
       phase: "completed",
       status: "done",
       active_branch: params.featureBranch,
-      last_processed_comment_id: params.commentId ?? prev.last_processed_comment_id
+      last_processed_comment_id: Math.max(params.commentId ?? 0, prev.last_processed_comment_id)
     })
   });
   const finalComment = appendEpureCommandsSpoiler(
@@ -14794,87 +14946,6 @@ function evaluateReviewFeedbackTrigger(input) {
     error_message: "",
     escalate_to_human: false,
     updated_reviewed_commit_shas: nextShas
-  };
-}
-
-// src/state/comment-batch-cursor.ts
-var CANCEL_OR_STOP_PATTERN = /(?:^|\s)\/epure\s+(?:cancel|stop)(?:\s|$)/i;
-function isAuthorizedHumanComment(comment) {
-  if (isBotActor({ login: comment.authorLogin, type: comment.authorType })) {
-    return false;
-  }
-  return comment.effectivePermission === "admin" || comment.effectivePermission === "maintain" || comment.effectivePermission === "write";
-}
-async function processPendingIssueCommentsBatch(input) {
-  if (typeof input.initialCursor === "number" && input.initialCursor > 0) {
-    await updateIssueStateWithCas({
-      issueNumber: input.issueNumber,
-      store: input.store,
-      mutator: (prev) => ({
-        ...prev,
-        last_processed_comment_id: Math.max(
-          prev.last_processed_comment_id,
-          input.initialCursor ?? 0
-        )
-      })
-    });
-  }
-  const processedIds = [];
-  const processedBodies = [];
-  let cursor = input.initialCursor ?? 0;
-  let cancelled = false;
-  let latestStateResult = await updateIssueStateWithCas({
-    issueNumber: input.issueNumber,
-    store: input.store,
-    mutator: (prev) => prev
-  });
-  for (let pass = 0; pass < 3; pass += 1) {
-    const rawComments = await input.fetchCommentsSinceCursor(cursor);
-    const unseen = rawComments.filter((c) => c.id > cursor).sort((a, b) => a.id - b.id);
-    if (unseen.length === 0) {
-      break;
-    }
-    const maxSeenId = unseen[unseen.length - 1]?.id ?? cursor;
-    const authorized = unseen.filter(isAuthorizedHumanComment);
-    const cancelComment = authorized.find(
-      (c) => CANCEL_OR_STOP_PATTERN.test(c.body)
-    );
-    if (cancelComment) {
-      processedIds.push(cancelComment.id);
-      processedBodies.push(cancelComment.body);
-      cursor = maxSeenId;
-      cancelled = true;
-      latestStateResult = await updateIssueStateWithCas({
-        issueNumber: input.issueNumber,
-        store: input.store,
-        mutator: (prev) => toTerminalState(prev, {
-          status: "cancelled",
-          last_processed_comment_id: cursor
-        })
-      });
-      break;
-    }
-    for (const comment of authorized) {
-      processedIds.push(comment.id);
-      processedBodies.push(comment.body);
-    }
-    cursor = maxSeenId;
-    latestStateResult = await updateIssueStateWithCas({
-      issueNumber: input.issueNumber,
-      store: input.store,
-      mutator: (prev) => ({
-        ...prev,
-        status: "active",
-        last_processed_comment_id: cursor
-      })
-    });
-  }
-  return {
-    processed_comment_ids: processedIds,
-    processed_bodies: processedBodies,
-    last_processed_comment_id: cursor,
-    cancelled,
-    state: latestStateResult.state
   };
 }
 
@@ -15134,6 +15205,9 @@ async function runTicketExecutionLoop(params) {
   let verificationProfile = params.initialVerificationProfile;
   let verificationGuideMarkdown = params.initialVerificationGuideMarkdown;
   const completedTicketNumbers = /* @__PURE__ */ new Set();
+  const resumeContextPromptLines = formatResumeContextPromptLines(
+    params.resumeContextMarkdown
+  );
   for (const ticket of params.skipTicketLoopForExistingFeaturePr ? [] : params.ticketsManifest) {
     const cancelledBeforeTicket = await checkMidLoopCancellation({
       issueNumber: params.issueNumber,
@@ -15212,7 +15286,7 @@ async function runTicketExecutionLoop(params) {
             phase: "implementation",
             status: "suspended",
             active_branch: params.featureBranch,
-            last_processed_comment_id: params.commentId ?? prev.last_processed_comment_id
+            last_processed_comment_id: Math.max(params.commentId ?? 0, prev.last_processed_comment_id)
           })
         });
         const unprovenList = depReconciliation.unproven_blocker_ticket_ids.length > 0 ? depReconciliation.unproven_blocker_ticket_ids.map((id) => `#${id} (\`not_planned\`)`).join(", ") : ticket.blockedByIssueNumbers.map((id) => `#${id}`).join(", ");
@@ -15604,6 +15678,7 @@ ${params.issue.body}`
             ].join("\n")
           ),
           "",
+          ...resumeContextPromptLines,
           verificationGuideMarkdown,
           "",
           existingFilesContext ? `Fichiers d\xE9j\xE0 pr\xE9sents sur la branche feature :
@@ -16114,7 +16189,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
           "",
           EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
         ].join("\n");
-        const promptParts = [];
+        const promptParts = [...resumeContextPromptLines];
         if (reviewResult.must_fix_findings.length > 0) {
           promptParts.push(
             `Les reviewers multi-agents EPURE ont \xE9mis ${reviewResult.must_fix_findings.length} constat(s) bloquant(s) ('must_fix') sur la PR #${taskPr.number} du Ticket #${ticket.ticketIssueNumber} :`,
@@ -16586,7 +16661,7 @@ async function orchestrateIssueCommand(input) {
           store,
           mutator: (prev) => ({
             ...prev,
-            last_processed_comment_id: effectiveInput.commentId ?? prev.last_processed_comment_id
+            last_processed_comment_id: Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
           })
         });
         const statusBody = appendEpureCommandsSpoiler(
@@ -16614,7 +16689,7 @@ async function orchestrateIssueCommand(input) {
           store,
           mutator: (prev) => toTerminalState(prev, {
             status: "cancelled",
-            last_processed_comment_id: effectiveInput.commentId ?? prev.last_processed_comment_id
+            last_processed_comment_id: Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
           })
         });
         const body = appendEpureCommandsSpoiler(
@@ -16706,7 +16781,7 @@ async function orchestrateIssueCommand(input) {
                 status: "suspended",
                 active_branch: planBranch,
                 transient_retries_used: cumulativeTransientRetriesUsed(),
-                last_processed_comment_id: effectiveInput.commentId ?? prev.last_processed_comment_id
+                last_processed_comment_id: Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
               })
             });
             const escalationMarkdown = appendEpureCommandsSpoiler(
@@ -16719,6 +16794,7 @@ async function orchestrateIssueCommand(input) {
                   ticketIssueNumber: effectiveInput.issueNumber,
                   branch: planBranch,
                   maxCodeFixAttempts,
+                  resumeCommand: suspendedPhase === "tickets" ? "/epure to-tickets" : suspendedPhase === "spec" ? "/epure to-spec" : "/epure plan",
                   diagnosticExcerpt: redactSecrets(err.message, [
                     activeToken,
                     effectiveInput.llmApiKey
@@ -16793,7 +16869,7 @@ async function orchestrateIssueCommand(input) {
             mutator: (prev) => toTerminalState(prev, {
               status: "suspended",
               active_branch: targetBranch,
-              last_processed_comment_id: effectiveInput.commentId ?? prev.last_processed_comment_id
+              last_processed_comment_id: Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
             })
           });
           const escalationMd = appendEpureCommandsSpoiler(
@@ -16857,7 +16933,7 @@ async function orchestrateIssueCommand(input) {
               mutator: (prev) => toTerminalState(prev, {
                 status: "suspended",
                 active_branch: targetBranch,
-                last_processed_comment_id: effectiveInput.commentId ?? prev.last_processed_comment_id
+                last_processed_comment_id: Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
               })
             });
             const taskEscalationMd = appendEpureCommandsSpoiler(
@@ -16900,7 +16976,7 @@ async function orchestrateIssueCommand(input) {
           mutator: (prev) => ({
             ...prev,
             active_branch: targetBranch,
-            last_processed_comment_id: effectiveInput.commentId ?? prev.last_processed_comment_id
+            last_processed_comment_id: Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
           })
         });
         const syncBody = appendEpureCommandsSpoiler(
@@ -16951,7 +17027,7 @@ async function orchestrateIssueCommand(input) {
               code_fix_attempts_used: params.codeFixAttemptsUsed ?? prev.code_fix_attempts_used,
               transient_retries_used: cumulativeTransientRetriesUsed(),
               last_escalation: escalation,
-              last_processed_comment_id: effectiveInput.commentId ?? prev.last_processed_comment_id
+              last_processed_comment_id: Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
             });
           }
         });
@@ -17293,6 +17369,19 @@ async function orchestrateIssueCommand(input) {
           createdTicketNumbers: ticketsManifest.map((t) => t.ticketIssueNumber)
         });
         await gh.ensureBranch(featureBranch, "dev");
+        const resumeContextMarkdown = currentState?.status === "suspended" && (effectiveInput.commentId ?? 0) > 0 ? formatResumeContextMarkdown(
+          await selectResumeContextComments({
+            comments: allComments.map((c) => ({
+              id: c.id,
+              authorLogin: c.user.login,
+              authorType: c.user.type ?? "User",
+              body: c.body
+            })),
+            afterCommentId: currentState.last_processed_comment_id,
+            resumeCommentId: effectiveInput.commentId ?? 0,
+            resolvePermission: (login) => gh.getCollaboratorPermission(login)
+          })
+        ) : "";
         const updatedStart = await updateIssueStateWithCas({
           issueNumber: effectiveInput.issueNumber,
           store,
@@ -17302,7 +17391,7 @@ async function orchestrateIssueCommand(input) {
             status: "active",
             active_branch: featureBranch,
             epic_phase: prev.epic_phase ?? 1,
-            last_processed_comment_id: effectiveInput.commentId ?? prev.last_processed_comment_id
+            last_processed_comment_id: Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
           })
         });
         const baseSyncGuard = createBaseSyncGuard({
@@ -17425,7 +17514,8 @@ ${t.filesToTouch.join(" ")}`
           asyncCiContinuation: asyncCiEnabled,
           forceOneRemediationRoundOnOpenPr,
           initialCodeFixAttemptsByTicket,
-          baseSyncGuard
+          baseSyncGuard,
+          resumeContextMarkdown
         });
         if (loopOutcome.halted && loopOutcome.result) {
           return loopOutcome.result;
@@ -17575,7 +17665,8 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
               asyncCiContinuation: asyncCiEnabled,
               forceOneRemediationRoundOnOpenPr: false,
               initialCodeFixAttemptsByTicket,
-              baseSyncGuard
+              baseSyncGuard,
+              resumeContextMarkdown
             });
             if (loopOutcome.halted && loopOutcome.result) {
               return loopOutcome.result;
@@ -17624,7 +17715,8 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
             asyncCiContinuation: asyncCiEnabled,
             forceOneRemediationRoundOnOpenPr,
             initialFeatureCodeFixAttemptsUsed,
-            baseSyncGuard
+            baseSyncGuard,
+            resumeContextMarkdown
           });
         } catch (err) {
           if (err instanceof LLMError) {
@@ -17669,7 +17761,7 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
           status: "suspended",
           active_branch: prev.active_branch || fallbackBranch,
           transient_retries_used: cumulativeTransientRetriesUsed(),
-          last_processed_comment_id: effectiveInput.commentId ?? prev.last_processed_comment_id
+          last_processed_comment_id: Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
         })
       });
       const rawErrMessage = err instanceof Error ? err.message : String(err);

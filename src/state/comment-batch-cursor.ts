@@ -45,6 +45,74 @@ function isAuthorizedHumanComment(comment: IncomingIssueComment): boolean {
   );
 }
 
+export const RESUME_CONTEXT_MAX_COMMENTS = 10;
+export const RESUME_CONTEXT_MAX_CHARS = 8000;
+const EPURE_COMMAND_PATTERN = /^\s*\/epure\b/i;
+
+export interface ResumeContextCandidate {
+  readonly id: number;
+  readonly authorLogin: string;
+  readonly authorType: string;
+  readonly body: string;
+}
+
+/**
+ * Selects the human guidance injected into a resumed implementation session: comments posted
+ * after `afterCommentId` and before the resume command, by authors with `write` or higher,
+ * excluding `/epure` commands and bots. Keeps the most recent ones within both caps, oldest first.
+ */
+export async function selectResumeContextComments(input: {
+  readonly comments: readonly ResumeContextCandidate[];
+  readonly afterCommentId: number;
+  readonly resumeCommentId: number;
+  readonly resolvePermission: (
+    login: string
+  ) => Promise<IncomingIssueComment["effectivePermission"]>;
+}): Promise<readonly IncomingIssueComment[]> {
+  const candidates = input.comments
+    .filter(
+      (c) =>
+        c.id > input.afterCommentId &&
+        c.id < input.resumeCommentId &&
+        !EPURE_COMMAND_PATTERN.test(c.body) &&
+        !isBotActor({ login: c.authorLogin, type: c.authorType })
+    )
+    .sort((a, b) => b.id - a.id);
+
+  const permissions = new Map<string, IncomingIssueComment["effectivePermission"]>();
+  const selected: IncomingIssueComment[] = [];
+  let remainingChars = RESUME_CONTEXT_MAX_CHARS;
+  for (const candidate of candidates) {
+    if (selected.length === RESUME_CONTEXT_MAX_COMMENTS || remainingChars <= 0) {
+      break;
+    }
+    if (!permissions.has(candidate.authorLogin)) {
+      permissions.set(
+        candidate.authorLogin,
+        await input.resolvePermission(candidate.authorLogin)
+      );
+    }
+    const comment: IncomingIssueComment = {
+      ...candidate,
+      effectivePermission: permissions.get(candidate.authorLogin)!,
+      body: candidate.body.trim().slice(0, remainingChars)
+    };
+    if (isAuthorizedHumanComment(comment)) {
+      selected.push(comment);
+      remainingChars -= comment.body.length;
+    }
+  }
+  return selected.reverse();
+}
+
+export function formatResumeContextMarkdown(
+  comments: readonly IncomingIssueComment[]
+): string {
+  return comments
+    .map((c) => `@${c.authorLogin} (commentaire ${c.id}) :\n${c.body}`)
+    .join("\n\n");
+}
+
 export async function processPendingIssueCommentsBatch(
   input: ProcessPendingIssueCommentsInput
 ): Promise<ProcessPendingIssueCommentsResult> {

@@ -9,6 +9,10 @@ import {
 } from "../llm/errors.js";
 import { matchesPathPattern } from "../sandbox/polyglot-workspace-runner.js";
 import { wrapUntrustedContent } from "../security/prompt-injection-guard.js";
+import {
+  RESUME_CONTEXT_MAX_CHARS,
+  RESUME_CONTEXT_MAX_COMMENTS
+} from "../state/comment-batch-cursor.js";
 
 export interface ExpectedExternalWorkflow {
   readonly path: string;
@@ -205,6 +209,7 @@ export interface FormatNeedsHumanEscalationInput {
   readonly codeFixAttemptsUsed?: number | undefined;
   readonly maxCodeFixAttempts?: number | undefined;
   readonly humanBudgetGrants?: number | undefined;
+  readonly resumeCommand?: string | undefined;
   readonly graceWindowSeconds?: number | undefined;
   readonly expectedWorkflows?: readonly string[] | undefined;
   readonly sensitivePaths?: readonly string[] | undefined;
@@ -1368,13 +1373,21 @@ export function formatNeedsHumanEscalationComment(
     );
   }
 
+  const resumeCommand = input.resumeCommand ?? "/epure continue";
   lines.push(
     "",
-    "#### 🛠️ Playbook de reprise (`/epure approve`)",
+    `#### 🛠️ Playbook de reprise (\`${resumeCommand}\`)`,
     "1. Inspectez les checks ou fichiers signalés ci-dessus (ou ajustez `verification.targets` dans `.github/agents.yml` sur `dev` si nécessaire).",
     `2. Poussez un correctif sur \`${input.branch}\` ou mettez à jour la configuration sur \`dev\`.`,
-    `3. Postez \`/epure approve\` sur cette issue (#${input.issueNumber}) : l'orchestrateur réconciliera automatiquement la PR existante et reprendra la validation sans dupliquer le travail (ADR-0028, Q110).`
+    input.resumeCommand
+      ? `3. Republiez \`${resumeCommand}\` sur cette issue (#${input.issueNumber}) pour reprendre (une réponse libre suffit pendant le grill et la revue de spécification).`
+      : `3. Postez \`/epure continue\` (ou \`/epure approve\`) sur cette issue (#${input.issueNumber}) : l'orchestrateur réconciliera automatiquement la PR existante et reprendra la validation sans dupliquer le travail (ADR-0028, Q110). Une réponse libre ne reprend pas l'exécution ; les commentaires publiés d'ici là par un contributeur \`write\` ou supérieur (hors commandes \`/epure\` et bots, ${RESUME_CONTEXT_MAX_COMMENTS} derniers, ${RESUME_CONTEXT_MAX_CHARS} caractères au plus) sont transmis à la session reprise.`
   );
+  if (input.reason === "remediation_exhausted" && !input.resumeCommand) {
+    lines.push(
+      "4. La reprise remet à zéro le budget de remédiation de l'élément bloqué et l'enregistre dans `human_budget_grants`."
+    );
+  }
 
   return appendEpureCommandsSpoiler(lines.join("\n"), {
     phase: "suspended",

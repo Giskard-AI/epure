@@ -13,10 +13,20 @@ import {
   type GitRefStateStore
 } from "../../state/git-ref-state.js";
 import type {
+  CollaboratorPermission,
   GitHubRestHelper,
   IssueCommentRecord,
   IssueMetadata
 } from "../types.js";
+
+const COLLABORATOR_PERMISSIONS: ReadonlySet<string> = new Set<CollaboratorPermission>([
+  "admin",
+  "maintain",
+  "write",
+  "triage",
+  "read",
+  "none"
+]);
 
 export function verifyPublisherMergeBoundary(params: {
   readonly headBranch: string;
@@ -151,6 +161,24 @@ export function createGitHubRestHelper(params: {
         `/repos/${owner}/${repo}/issues/${issueNumber}/comments?per_page=100`
       );
       return data ?? [];
+    },
+
+    async getCollaboratorPermission(
+      username: string
+    ): Promise<CollaboratorPermission> {
+      const { data } = await apiRequest<{
+        permission?: string;
+        role_name?: string;
+      }>(
+        "GET",
+        `/repos/${owner}/${repo}/collaborators/${encodeURIComponent(username)}/permission`,
+        undefined,
+        true
+      );
+      const level = data?.role_name || data?.permission || "none";
+      return COLLABORATOR_PERMISSIONS.has(level)
+        ? (level as CollaboratorPermission)
+        : "none";
     },
 
     async postIssueComment(issueNumber: number, body: string): Promise<string> {
