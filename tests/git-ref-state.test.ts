@@ -4,11 +4,7 @@ import {
   createGitHubApiRefStateStore,
   createInMemoryGitRefStateStore,
   formatIssueStateMirrorMarkdown,
-  grantHumanBudget,
-  readActiveCodeFixAttempts,
-  toTerminalState,
   updateIssueStateWithCas,
-  withTicketCodeFixAttempts,
   type EpureIssueState
 } from "../src/state/git-ref-state.js";
 import {
@@ -260,92 +256,3 @@ const WAITING_TICKET_STATE: EpureIssueState = {
   active_pr_number: 21,
   active_head_sha: "sha-21"
 };
-
-describe("Lot 1 — terminal states and per-element remediation budgets", () => {
-  it.each([
-    { id: "suspended-from-waiting_ticket_ci", status: "suspended" },
-    { id: "done-from-waiting_ticket_ci", status: "done" },
-    { id: "cancelled-from-waiting_ticket_ci", status: "cancelled" }
-  ] as const)(
-    "toTerminalState [$id]: forces subphase idle and clears every active_* field",
-    ({ status }) => {
-      const next = toTerminalState(WAITING_TICKET_STATE, { status, phase: "implementation" });
-
-      expect(next).toMatchObject({ status, phase: "implementation", subphase: "idle", active_branch: "feature/10-auth" });
-      expect([next.active_head_sha, next.active_pr_number, next.active_task_branch, next.active_ticket_number]).toEqual([
-        undefined,
-        undefined,
-        undefined,
-        undefined
-      ]);
-    }
-  );
-
-  it.each([
-    { id: "legacy-state-active-ticket-reads-single-counter", state: WAITING_TICKET_STATE, expected: 2 },
-    {
-      id: "legacy-state-waiting_feature_ci-reads-single-counter",
-      state: { ...WAITING_TICKET_STATE, phase: "review", subphase: "waiting_feature_ci", active_ticket_number: 10 },
-      expected: 2
-    },
-    {
-      id: "per-ticket-map-isolates-active-ticket-from-exhausted-sibling",
-      state: { ...WAITING_TICKET_STATE, code_fix_attempts_used: 3, code_fix_attempts_by_ticket: { "12": 3 } },
-      expected: 0
-    },
-    {
-      id: "per-ticket-map-reads-active-ticket-entry",
-      state: { ...WAITING_TICKET_STATE, code_fix_attempts_by_ticket: { "11": 3, "12": 1 } },
-      expected: 3
-    },
-    {
-      id: "feature-counter-is-independent-of-ticket-map",
-      state: {
-        ...WAITING_TICKET_STATE,
-        subphase: "waiting_feature_ci",
-        code_fix_attempts_by_ticket: { "11": 3 },
-        feature_code_fix_attempts_used: 1
-      },
-      expected: 1
-    }
-  ] satisfies ReadonlyArray<{ id: string; state: EpureIssueState; expected: number }>)(
-    "readActiveCodeFixAttempts [$id]",
-    ({ state, expected }) => {
-      expect(readActiveCodeFixAttempts(state)).toBe(expected);
-    }
-  );
-
-  it.each([
-    {
-      id: "remediation_exhausted-on-ticket-resets-that-ticket-and-counts-a-grant",
-      escalation: { reason: "remediation_exhausted", head_sha: "sha-21", ticket_number: 11, budget_scope: "ticket" },
-      expected: { byTicket: { "11": 0, "12": 2 }, feature: 3, grants: 2, escalationCleared: true }
-    },
-    {
-      id: "remediation_exhausted-on-feature-pr-resets-feature-budget-only",
-      escalation: { reason: "remediation_exhausted", head_sha: "sha-30", ticket_number: 10, budget_scope: "feature" },
-      expected: { byTicket: { "11": 3, "12": 2 }, feature: 0, grants: 2, escalationCleared: true }
-    },
-    {
-      id: "other-escalation-reason-grants-no-budget",
-      escalation: { reason: "grace_window_timeout", head_sha: "sha-21", ticket_number: 11, budget_scope: "ticket" },
-      expected: { byTicket: { "11": 3, "12": 2 }, feature: 3, grants: 1, escalationCleared: false }
-    }
-  ] as const)("grantHumanBudget [$id]", ({ escalation, expected }) => {
-    const suspended = toTerminalState(
-      {
-        ...withTicketCodeFixAttempts({ ...WAITING_TICKET_STATE, code_fix_attempts_by_ticket: { "12": 2 } }, 11, 3),
-        feature_code_fix_attempts_used: 3,
-        human_budget_grants: 1
-      },
-      { status: "suspended", last_escalation: escalation }
-    );
-
-    const granted = grantHumanBudget(suspended);
-
-    expect(granted.code_fix_attempts_by_ticket).toEqual(expected.byTicket);
-    expect(granted.feature_code_fix_attempts_used).toBe(expected.feature);
-    expect(granted.human_budget_grants).toBe(expected.grants);
-    expect(granted.last_escalation === undefined).toBe(expected.escalationCleared);
-  });
-});

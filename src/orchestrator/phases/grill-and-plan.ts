@@ -19,6 +19,7 @@ import {
   wrapUntrustedContent
 } from "../../security/prompt-injection-guard.js";
 import {
+  advanceCommentCursor,
   toTerminalState,
   updateIssueStateWithCas,
   type GitRefStateStore
@@ -413,7 +414,8 @@ export async function runGrillAndPlanPhase(params: {
         phase: "grilling",
         status: "active",
         active_branch: planBranch,
-        last_processed_comment_id: commentId ?? prev.last_processed_comment_id
+        plan_branch: prev.plan_branch ?? planBranch,
+        last_processed_comment_id: advanceCommentCursor(prev, commentId)
       })
     });
 
@@ -567,7 +569,8 @@ export async function runGrillAndPlanPhase(params: {
           phase: "grilling",
           status: "active",
           active_branch: planBranch,
-          last_processed_comment_id: commentId ?? prev.last_processed_comment_id
+          plan_branch: prev.plan_branch ?? planBranch,
+          last_processed_comment_id: advanceCommentCursor(prev, commentId)
         })
       });
 
@@ -610,7 +613,8 @@ export async function runGrillAndPlanPhase(params: {
         phase: "grilling",
         status: "awaiting_human_approval",
         active_branch: planBranch,
-        last_processed_comment_id: commentId ?? prev.last_processed_comment_id
+        plan_branch: prev.plan_branch ?? planBranch,
+        last_processed_comment_id: advanceCommentCursor(prev, commentId)
       })
     });
 
@@ -857,8 +861,8 @@ export async function runGrillAndPlanPhase(params: {
             phase: "spec",
             status: "suspended",
             active_branch: planBranch,
-            last_processed_comment_id:
-              commentId ?? prev.last_processed_comment_id
+            plan_branch: prev.plan_branch ?? planBranch,
+            last_processed_comment_id: advanceCommentCursor(prev, commentId)
           })
       });
 
@@ -985,7 +989,8 @@ export async function runGrillAndPlanPhase(params: {
         phase: "spec",
         status: "awaiting_human_approval",
         active_branch: planBranch,
-        last_processed_comment_id: commentId ?? prev.last_processed_comment_id
+        plan_branch: prev.plan_branch ?? planBranch,
+        last_processed_comment_id: advanceCommentCursor(prev, commentId)
       })
     });
 
@@ -1266,7 +1271,8 @@ export async function runGrillAndPlanPhase(params: {
           phase: "tickets",
           status: "suspended",
           active_branch: planBranch,
-          last_processed_comment_id: commentId ?? prev.last_processed_comment_id
+          plan_branch: prev.plan_branch ?? planBranch,
+          last_processed_comment_id: advanceCommentCursor(prev, commentId)
         })
     });
 
@@ -1440,7 +1446,8 @@ export async function runGrillAndPlanPhase(params: {
       phase: "tickets",
       status: "awaiting_human_approval",
       active_branch: planBranch,
-      last_processed_comment_id: commentId ?? prev.last_processed_comment_id
+      plan_branch: prev.plan_branch ?? planBranch,
+      last_processed_comment_id: advanceCommentCursor(prev, commentId)
     })
   });
 

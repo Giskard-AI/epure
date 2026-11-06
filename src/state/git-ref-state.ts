@@ -50,6 +50,23 @@ export interface EpureIssueState {
   readonly last_synced_base_sha?: string | undefined;
   // Head of `plan/*` whose artifacts are already on `feature/*`; integration runs again only when `plan/*` moves.
   readonly integrated_plan_sha?: string | undefined;
+  // Written once when the branch is created: a renamed epic keeps them, `active_branch` is display only.
+  readonly plan_branch?: string | undefined;
+  readonly feature_branch?: string | undefined;
+  readonly cancelled_from?: CancelledFrom | undefined;
+  readonly human_budget_grant_log?: readonly HumanBudgetGrant[] | undefined;
+}
+
+export interface CancelledFrom {
+  readonly phase: IssueOrchestrationPhase;
+  readonly status: Exclude<IssueOrchestrationStatus, "cancelled">;
+}
+
+export interface HumanBudgetGrant {
+  readonly actor: string;
+  readonly comment_id: number;
+  readonly scope: EpureEscalationRecord["budget_scope"];
+  readonly ticket: number;
 }
 
 export interface EpureEscalationRecord {
@@ -81,12 +98,23 @@ export function toTerminalState(
   return {
     ...prev,
     ...update,
+    ...(update.status === "cancelled" && prev.status !== "cancelled"
+      ? { cancelled_from: { phase: prev.phase, status: prev.status } }
+      : {}),
     subphase: "idle",
     active_head_sha: undefined,
     active_pr_number: undefined,
     active_task_branch: undefined,
     active_ticket_number: undefined
   };
+}
+
+/** The comment cursor only moves forward: a command older than the cursor never rewinds it. */
+export function advanceCommentCursor(
+  prev: EpureIssueState,
+  commentId: number | undefined
+): number {
+  return Math.max(commentId ?? 0, prev.last_processed_comment_id);
 }
 
 export function isWaitingSubphase(
@@ -99,6 +127,10 @@ export function isAutomaticallyResumable(state: EpureIssueState): boolean {
   return state.status === "active" && isWaitingSubphase(state.subphase);
 }
 
+function isFeatureSubphase(subphase: EpureIssueSubphase | undefined): boolean {
+  return subphase === "waiting_feature_ci" || subphase === "remediating_feature";
+}
+
 // States written before per-ticket budgets kept a single counter for the active element.
 export function readTicketCodeFixAttempts(
   state: EpureIssueState,
@@ -108,7 +140,7 @@ export function readTicketCodeFixAttempts(
     return state.code_fix_attempts_by_ticket[String(ticketNumber)] ?? 0;
   }
   return state.active_ticket_number === ticketNumber &&
-    state.subphase !== "waiting_feature_ci"
+    !isFeatureSubphase(state.subphase)
     ? state.code_fix_attempts_used
     : 0;
 }
@@ -116,14 +148,14 @@ export function readTicketCodeFixAttempts(
 export function readFeatureCodeFixAttempts(state: EpureIssueState): number {
   return (
     state.feature_code_fix_attempts_used ??
-    (state.subphase === "waiting_feature_ci" ? state.code_fix_attempts_used : 0)
+    (isFeatureSubphase(state.subphase) ? state.code_fix_attempts_used : 0)
   );
 }
 
 export function activeBudgetScope(
   state: EpureIssueState
 ): EpureEscalationRecord["budget_scope"] {
-  return state.subphase === "waiting_feature_ci" ? "feature" : "ticket";
+  return isFeatureSubphase(state.subphase) ? "feature" : "ticket";
 }
 
 export function readActiveCodeFixAttempts(state: EpureIssueState): number {
@@ -142,7 +174,7 @@ export function readCodeFixAttemptsByTicket(
     return state.code_fix_attempts_by_ticket;
   }
   return state.active_ticket_number !== undefined &&
-    state.subphase !== "waiting_feature_ci"
+    !isFeatureSubphase(state.subphase)
     ? { [String(state.active_ticket_number)]: state.code_fix_attempts_used }
     : {};
 }
@@ -173,10 +205,14 @@ export function withFeatureCodeFixAttempts(
   };
 }
 
-export function grantHumanBudget(prev: EpureIssueState): EpureIssueState {
+/** Every human resume clears the escalation so a repeated one is reported again; an exhausted budget is refilled once. */
+export function resumeAfterEscalation(
+  prev: EpureIssueState,
+  resumedBy: { readonly actor: string; readonly commentId: number }
+): EpureIssueState {
   const escalation = prev.last_escalation;
   if (!escalation || escalation.reason !== "remediation_exhausted") {
-    return prev;
+    return { ...prev, last_escalation: undefined };
   }
   const granted =
     escalation.budget_scope === "feature"
@@ -185,6 +221,15 @@ export function grantHumanBudget(prev: EpureIssueState): EpureIssueState {
   return {
     ...granted,
     human_budget_grants: (prev.human_budget_grants ?? 0) + 1,
+    human_budget_grant_log: [
+      ...(prev.human_budget_grant_log ?? []),
+      {
+        actor: resumedBy.actor,
+        comment_id: resumedBy.commentId,
+        scope: escalation.budget_scope,
+        ticket: escalation.ticket_number
+      }
+    ],
     last_escalation: undefined
   };
 }
@@ -345,6 +390,71 @@ export async function updateIssueStateWithCas(
   throw new Error(
     `CAS conflict retry budget exhausted (${maxRetries}) on '${refName}'.`
   );
+}
+
+/** A concurrent run, command or closure changed the plan: this run stops without writing. */
+export class StateTransitionAbortedError extends Error {
+  override readonly name = "StateTransitionAbortedError";
+
+  constructor(
+    readonly state: EpureIssueState,
+    readonly reason: string
+  ) {
+    super(
+      `Issue #${state.issue_number} state transition aborted (${state.status}/${state.phase}): ${reason}.`
+    );
+  }
+}
+
+const TERMINAL_STATUSES: ReadonlySet<IssueOrchestrationStatus> = new Set([
+  "cancelled",
+  "done"
+]);
+
+/**
+ * Writes over a `cancelled` or `done` state throw StateTransitionAbortedError, except over the
+ * snapshot `allowedTerminalSha` that an explicit human command started from.
+ */
+export function guardTerminalStates(
+  store: GitRefStateStore,
+  allowedTerminalSha: string | null
+): GitRefStateStore {
+  const statesBySha = new Map<string, EpureIssueState>();
+  return {
+    readRef: async (refName) => {
+      const snapshot = await store.readRef(refName);
+      if (snapshot.sha !== null && snapshot.state !== null) {
+        statesBySha.set(snapshot.sha, snapshot.state);
+      }
+      return snapshot;
+    },
+    compareAndSwapRef: async (refName, expectedOldSha, nextState) => {
+      const prev =
+        expectedOldSha === null ? undefined : statesBySha.get(expectedOldSha);
+      if (
+        prev !== undefined &&
+        TERMINAL_STATUSES.has(prev.status) &&
+        expectedOldSha !== allowedTerminalSha
+      ) {
+        throw new StateTransitionAbortedError(
+          prev,
+          `the plan became \`${prev.status}\` while this run was working`
+        );
+      }
+      const result = await store.compareAndSwapRef(
+        refName,
+        expectedOldSha,
+        nextState
+      );
+      if (result.swapped) {
+        statesBySha.set(result.newSha, nextState);
+      }
+      return result;
+    },
+    ...(store.listIssueStates
+      ? { listIssueStates: store.listIssueStates.bind(store) }
+      : {})
+  };
 }
 
 export interface GitApiRefStateStoreOptions {

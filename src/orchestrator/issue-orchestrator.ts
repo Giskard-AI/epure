@@ -27,13 +27,16 @@ import {
   createGitHubApiRefStateStore,
   activeBudgetScope,
   formatIssueStateMirrorMarkdown,
-  grantHumanBudget,
+  guardTerminalStates,
   isAutomaticallyResumable,
   readActiveCodeFixAttempts,
   readCodeFixAttemptsByTicket,
   readFeatureCodeFixAttempts,
+  resumeAfterEscalation,
+  StateTransitionAbortedError,
   toTerminalState,
   updateIssueStateWithCas,
+  type CancelledFrom,
   type EpureIssueState,
   type GitRefStateStore
 } from "../state/git-ref-state.js";
@@ -65,10 +68,7 @@ import {
   slugifyTitle,
   verifyPublisherMergeBoundary
 } from "./github/rest-client.js";
-import {
-  handleEpicClosedByHuman,
-  PLANNING_PHASES
-} from "./phases/epic-closure.js";
+import { handleEpicClosedByHuman } from "./phases/epic-closure.js";
 import {
   runEpicConvergenceAudit,
   spawnPhase2ConvergenceTickets
@@ -101,6 +101,7 @@ import {
   type GeneratedTicketImplementation,
   type GeneratedTicketPatchEdit,
   type GeneratedTicketSpec,
+  type GitHubRestHelper,
   type GrillRoundEvaluation,
   type IssueCommentRecord,
   type IssueCommentSummary,
@@ -213,13 +214,72 @@ export class EscalationNotRecordedError extends Error {
   constructor(
     readonly issueNumber: number,
     readonly reason: string,
-    readonly escalationMarkdown: string
+    readonly escalationMarkdown: string,
+    readonly resumeCommand: string
   ) {
     super(
-      `GitHub API still rate limited: the \`${reason}\` escalation could not be posted on #${issueNumber}. Post \`/epure continue\` on #${issueNumber} once the limit resets.`
+      `GitHub API still rate limited: the \`${reason}\` escalation could not be posted on #${issueNumber}. Post \`${resumeCommand}\` on #${issueNumber} once the limit resets.`
     );
   }
 }
+
+/** The `issues: closed` event failed before the cancellation was recorded: the plan is left untouched. */
+export class ClosureNotProcessedError extends Error {
+  override readonly name = "ClosureNotProcessedError";
+
+  constructor(
+    readonly issueNumber: number,
+    cause: unknown
+  ) {
+    super(
+      `The closure of #${issueNumber} was not processed (${cause instanceof Error ? cause.message : String(cause)}); the plan state is unchanged. Re-run this job or post \`/epure cancel\` on #${issueNumber}.`,
+      { cause }
+    );
+  }
+}
+
+/** Command that re-runs the phase a plan was suspended in. */
+export function resumeCommandForPhase(phase: EpureIssueState["phase"]): string {
+  switch (phase) {
+    case "idle":
+    case "grilling":
+      return "/epure plan";
+    case "spec":
+      return "/epure to-spec";
+    case "tickets":
+      return "/epure to-tickets";
+    default:
+      return "/epure continue";
+  }
+}
+
+const IMPLEMENTATION_PHASES: ReadonlySet<EpureIssueState["phase"]> = new Set([
+  "implementation",
+  "review",
+  "completed"
+]);
+
+/** `/epure continue` re-enters the implementation run (an awaiting or done plan only waits for a human). */
+function resumesImplementationRun(
+  state: Pick<EpureIssueState, "phase" | "status">
+): boolean {
+  return (
+    IMPLEMENTATION_PHASES.has(state.phase) &&
+    (state.status === "active" || state.status === "suspended")
+  );
+}
+
+// Ticket and branch default to the plan's active element when the caller does not know it (catch-all).
+type EscalationRecordInput = Omit<
+  EscalateToNeedsHumanParams,
+  "ticketNumber" | "branch"
+> & {
+  readonly ticketNumber?: number | undefined;
+  readonly branch?: string | undefined;
+  readonly graceWindowSeconds?: number | undefined;
+  readonly createdTicketNumbers?: readonly number[] | undefined;
+  readonly missingModelKeys?: readonly string[] | undefined;
+};
 
 export async function orchestrateIssueCommand(
   input: OrchestrateIssueInput
@@ -266,7 +326,7 @@ export async function orchestrateIssueCommand(
       fetchImpl: githubFetch
     });
 
-    const store =
+    const rawStore =
       input.stateStore ??
       createGitHubApiRefStateStore({
         repository: input.repository,
@@ -277,23 +337,17 @@ export async function orchestrateIssueCommand(
     const isAutomaticEntry =
       input.command === "continue" && (input.commentId ?? 0) <= 0;
     const triggerHeadSha = input.triggerHeadSha?.trim() || undefined;
-    const triggerBranch = input.triggerBranch?.trim() || undefined;
 
     let resolvedIssueNumber = input.issueNumber;
     if (resolvedIssueNumber <= 0 && input.command === "continue") {
-      const allStates = store.listIssueStates
-        ? await store.listIssueStates()
-        : [];
-      const waitingCandidates = allStates.filter(isAutomaticallyResumable);
-      const matched = triggerHeadSha
-        ? waitingCandidates.find((s) => s.active_head_sha === triggerHeadSha)
-        : triggerBranch
-          ? waitingCandidates.find(
-              (s) =>
-                s.active_task_branch === triggerBranch ||
-                s.active_branch === triggerBranch
-            )
-          : waitingCandidates[0];
+      const allStates =
+        triggerHeadSha && rawStore.listIssueStates
+          ? await rawStore.listIssueStates()
+          : [];
+      const matched = allStates.find(
+        (s) =>
+          isAutomaticallyResumable(s) && s.active_head_sha === triggerHeadSha
+      );
       if (!matched) {
         return {
           executed: false,
@@ -322,10 +376,174 @@ export async function orchestrateIssueCommand(
     let initialTransientRetriesUsed = 0;
     const cumulativeTransientRetriesUsed = (): number =>
       initialTransientRetriesUsed + totalTransientRetriesUsed;
+    // Only an explicit human command may move a plan out of the `cancelled`/`done` state it read at start.
+    let allowedTerminalSha: string | null = null;
+    let store: GitRefStateStore = guardTerminalStates(rawStore, null);
+
+    const commandPhase: EpureIssueState["phase"] =
+      effectiveInput.command === "to-tickets"
+        ? "tickets"
+        : effectiveInput.command === "to-spec"
+          ? "spec"
+          : effectiveInput.command === "plan" ||
+              effectiveInput.command === "reply"
+            ? "grilling"
+            : "implementation";
+    const formatEscalation = (
+      params: EscalationRecordInput,
+      context: {
+        readonly phase: EpureIssueState["phase"];
+        readonly branch: string;
+        readonly ticketNumber: number;
+        readonly codeFixAttemptsUsed?: number | undefined;
+        readonly humanBudgetGrants?: number | undefined;
+      }
+    ): string =>
+      formatNeedsHumanEscalationComment({
+        reason: params.reason,
+        issueNumber: effectiveInput.issueNumber,
+        ticketIssueNumber: context.ticketNumber,
+        prNumber: params.prNumber,
+        prUrl: params.prUrl,
+        branch: context.branch,
+        codeFixAttemptsUsed: context.codeFixAttemptsUsed,
+        maxCodeFixAttempts,
+        humanBudgetGrants: context.humanBudgetGrants,
+        graceWindowSeconds: params.graceWindowSeconds,
+        failedChecks: params.failedChecks,
+        mustFixFindings: params.mustFixFindings,
+        sensitivePaths: params.sensitivePaths,
+        traversalPaths: params.traversalPaths,
+        diagnosticExcerpt: params.diagnosticExcerpt,
+        epicConvergenceDetails: params.epicConvergenceDetails,
+        missingModelKeys: params.missingModelKeys,
+        resumeCommand: IMPLEMENTATION_PHASES.has(context.phase)
+          ? undefined
+          : resumeCommandForPhase(context.phase)
+      });
+    // Single escalation recorder; the catch-all passes its own gh/store when the run's rate-limit budget is spent.
+    const recordEscalation = async (
+      params: EscalationRecordInput,
+      via: {
+        readonly gh: GitHubRestHelper;
+        readonly store: GitRefStateStore;
+      }
+    ): Promise<OrchestrateIssueResult> => {
+      let duplicateOfLastEscalation = false;
+      let ticketNumber: number = effectiveInput.issueNumber;
+      const updatedSuspended = await updateIssueStateWithCas({
+        issueNumber: effectiveInput.issueNumber,
+        store: via.store,
+        mutator: (prev) => {
+          const phase =
+            params.phase ?? (prev.phase !== "idle" ? prev.phase : commandPhase);
+          ticketNumber =
+            params.ticketNumber ??
+            prev.active_ticket_number ??
+            effectiveInput.issueNumber;
+          const escalation = {
+            reason: params.reason,
+            head_sha: prev.active_head_sha ?? "",
+            ticket_number: ticketNumber,
+            budget_scope: params.budgetScope ?? activeBudgetScope(prev)
+          } as const;
+          duplicateOfLastEscalation =
+            isAutomaticEntry &&
+            prev.last_escalation?.reason === escalation.reason &&
+            prev.last_escalation?.head_sha === escalation.head_sha;
+          return toTerminalState(prev, {
+            phase,
+            status: "suspended",
+            active_branch:
+              params.branch ??
+              (prev.active_branch ||
+                (IMPLEMENTATION_PHASES.has(phase) ? featureBranch : planBranch)),
+            code_fix_attempts_used:
+              params.codeFixAttemptsUsed ?? prev.code_fix_attempts_used,
+            transient_retries_used: cumulativeTransientRetriesUsed(),
+            last_escalation: escalation,
+            last_processed_comment_id: Math.max(
+              effectiveInput.commentId ?? 0,
+              prev.last_processed_comment_id
+            )
+          });
+        }
+      });
+      const suspendedState = updatedSuspended.state;
+
+      const escalationMarkdown = appendEpureCommandsSpoiler(
+        [
+          updatedSuspended.issue_mirror_markdown,
+          "",
+          formatEscalation(params, {
+            phase: suspendedState.phase,
+            branch: suspendedState.active_branch,
+            ticketNumber,
+            codeFixAttemptsUsed: suspendedState.code_fix_attempts_used,
+            humanBudgetGrants: IMPLEMENTATION_PHASES.has(suspendedState.phase)
+              ? (suspendedState.human_budget_grants ?? 0)
+              : undefined
+          })
+        ].join("\n"),
+        {
+          phase: "suspended",
+          status: "suspended",
+          issueNumber: effectiveInput.issueNumber
+        }
+      );
+
+      if (!duplicateOfLastEscalation) {
+        await via.gh.ensureLabel(
+          "needs-human",
+          "D93F0B",
+          "Requires human maintainer intervention"
+        );
+        await via.gh.addIssueLabels(effectiveInput.issueNumber, ["needs-human"]);
+        if (
+          params.ticketNumber !== undefined &&
+          params.ticketNumber !== effectiveInput.issueNumber
+        ) {
+          await via.gh.addIssueLabels(params.ticketNumber, ["needs-human"]);
+        }
+        await via.gh.postIssueComment(
+          effectiveInput.issueNumber,
+          escalationMarkdown
+        );
+      }
+
+      return {
+        executed: true,
+        phase: suspendedState.phase,
+        status: suspendedState.status,
+        active_branch: suspendedState.active_branch,
+        summary_markdown: escalationMarkdown,
+        created_ticket_numbers: params.createdTicketNumbers ?? [],
+        feature_pr_url: params.featurePrUrl ?? params.prUrl ?? ""
+      };
+    };
+    const escalateSuspension = (
+      params: EscalationRecordInput
+    ): Promise<OrchestrateIssueResult> =>
+      recordEscalation(params, { gh, store });
+    const abortedResult = (
+      err: StateTransitionAbortedError
+    ): OrchestrateIssueResult => ({
+      executed: false,
+      phase: err.state.phase,
+      status: err.state.status,
+      active_branch: err.state.active_branch,
+      summary_markdown: `Run stopped without writing: ${err.message}`,
+      created_ticket_numbers: [],
+      feature_pr_url: ""
+    });
 
     try {
-      const currentSnapshot = await store.readRef(refName);
+      const currentSnapshot = await rawStore.readRef(refName);
       let currentState = currentSnapshot.state;
+      if (!isAutomaticEntry) {
+        allowedTerminalSha = currentSnapshot.sha;
+        store = guardTerminalStates(rawStore, allowedTerminalSha);
+      }
       initialTransientRetriesUsed = currentState?.transient_retries_used ?? 0;
 
       if (isAutomaticEntry) {
@@ -416,54 +634,6 @@ export async function orchestrateIssueCommand(
         };
       }
 
-      if (
-        effectiveInput.command === "continue" &&
-        (effectiveInput.commentId ?? 0) > 0 &&
-        currentState?.status === "cancelled" &&
-        PLANNING_PHASES.has(currentState.phase)
-      ) {
-        const updated = await updateIssueStateWithCas({
-          issueNumber: effectiveInput.issueNumber,
-          store,
-          mutator: (prev) => ({
-            ...prev,
-            status: prev.phase === "tickets" ? "awaiting_human_approval" : "active",
-            last_processed_comment_id: Math.max(
-              effectiveInput.commentId ?? 0,
-              prev.last_processed_comment_id
-            )
-          })
-        });
-        const nextStep =
-          updated.state.phase === "grilling"
-            ? "Répondez en commentaire pour poursuivre l'entretien, ou postez `/epure to-spec`."
-            : updated.state.phase === "spec"
-              ? "Répondez en commentaire pour réviser la spécification, ou postez `/epure to-tickets`."
-              : "Postez `/epure approve` pour lancer l'implémentation.";
-        const body = appendEpureCommandsSpoiler(
-          [
-            updated.issue_mirror_markdown,
-            "",
-            `▶️ Plan #${effectiveInput.issueNumber} repris par \`@${effectiveInput.actor}\` en phase \`${updated.state.phase}\`. ${nextStep}`
-          ].join("\n"),
-          {
-            phase: updated.state.phase,
-            status: updated.state.status,
-            issueNumber: effectiveInput.issueNumber
-          }
-        );
-        await gh.postIssueComment(effectiveInput.issueNumber, body);
-        return {
-          executed: true,
-          phase: updated.state.phase,
-          status: updated.state.status,
-          active_branch: updated.state.active_branch,
-          summary_markdown: body,
-          created_ticket_numbers: [],
-          feature_pr_url: ""
-        };
-      }
-
       if (effectiveInput.command === "closed") {
         return await handleEpicClosedByHuman({
           issueNumber: effectiveInput.issueNumber,
@@ -477,11 +647,114 @@ export async function orchestrateIssueCommand(
       const issue = await gh.getIssue(effectiveInput.issueNumber);
       const allComments = await gh.listIssueComments(effectiveInput.issueNumber);
       const planSlug = slugifyTitle(issue.title);
-      planBranch = `plan/${effectiveInput.issueNumber}-${planSlug}`;
-      // The slug follows the current title; a renamed epic keeps the feature branch it already uses.
-      featureBranch = currentState?.active_branch.startsWith(`${featureBranch}-`)
-        ? currentState.active_branch
-        : `feature/${effectiveInput.issueNumber}-${planSlug}`;
+      // The slug follows the current title; a renamed epic keeps the branches it already uses
+      // (states written before `plan_branch`/`feature_branch` fall back to `active_branch`).
+      planBranch =
+        currentState?.plan_branch ??
+        (currentState?.active_branch.startsWith(`${planBranch}-`)
+          ? currentState.active_branch
+          : `plan/${effectiveInput.issueNumber}-${planSlug}`);
+      featureBranch =
+        currentState?.feature_branch ??
+        (currentState?.active_branch.startsWith(`${featureBranch}-`)
+          ? currentState.active_branch
+          : `feature/${effectiveInput.issueNumber}-${planSlug}`);
+
+      // `/epure continue` on a cancelled plan restores the phase and status it was cancelled from.
+      if (
+        effectiveInput.command === "continue" &&
+        (effectiveInput.commentId ?? 0) > 0 &&
+        currentState?.status === "cancelled"
+      ) {
+        if (issue.state === "closed") {
+          const reopenFirst = `⏸️ Le plan #${effectiveInput.issueNumber} est annulé et son issue est fermée : rouvrez l'issue #${effectiveInput.issueNumber}, puis postez \`/epure continue\`.`;
+          await gh.postIssueComment(effectiveInput.issueNumber, reopenFirst);
+          return {
+            executed: false,
+            phase: currentState.phase,
+            status: currentState.status,
+            active_branch: currentState.active_branch,
+            summary_markdown: reopenFirst,
+            created_ticket_numbers: [],
+            feature_pr_url: ""
+          };
+        }
+        const restored = await updateIssueStateWithCas({
+          issueNumber: effectiveInput.issueNumber,
+          store,
+          mutator: (prev) => {
+            const from: CancelledFrom = prev.cancelled_from ?? {
+              phase: prev.phase,
+              status: "active"
+            };
+            // A generated spec or ticket graph waits for human review again.
+            const status =
+              from.status === "active" &&
+              (from.phase === "spec" || from.phase === "tickets")
+                ? "awaiting_human_approval"
+                : from.status;
+            const restoredState = {
+              ...prev,
+              phase: from.phase,
+              status,
+              cancelled_from: undefined
+            };
+            // The implementation run below advances the cursor once it has read the resume context.
+            return resumesImplementationRun(restoredState)
+              ? restoredState
+              : {
+                  ...restoredState,
+                  last_processed_comment_id: Math.max(
+                    effectiveInput.commentId ?? 0,
+                    prev.last_processed_comment_id
+                  )
+                };
+          }
+        });
+        currentState = restored.state;
+        if (!resumesImplementationRun(currentState)) {
+          const suspended = currentState.status === "suspended";
+          if (suspended) {
+            await gh.ensureLabel(
+              "needs-human",
+              "D93F0B",
+              "Requires human maintainer intervention"
+            );
+            await gh.addIssueLabels(effectiveInput.issueNumber, ["needs-human"]);
+          }
+          const nextStep = suspended
+            ? `Le plan reste \`suspended\` : postez \`${resumeCommandForPhase(currentState.phase)}\` pour relancer la phase.`
+            : currentState.phase === "grilling"
+              ? "Répondez en commentaire pour poursuivre l'entretien, ou postez `/epure to-spec`."
+              : currentState.phase === "spec"
+                ? "Répondez en commentaire pour réviser la spécification, ou postez `/epure to-tickets`."
+                : currentState.phase === "tickets"
+                  ? "Postez `/epure approve` pour lancer l'implémentation."
+                  : "La Pull Request de fonctionnalité attend la revue humaine et le squash-merge vers `dev`.";
+          const body = appendEpureCommandsSpoiler(
+            [
+              restored.issue_mirror_markdown,
+              "",
+              `▶️ Plan #${effectiveInput.issueNumber} repris par \`@${effectiveInput.actor}\` en phase \`${currentState.phase}\`. ${nextStep}`
+            ].join("\n"),
+            {
+              phase: currentState.phase,
+              status: currentState.status,
+              issueNumber: effectiveInput.issueNumber
+            }
+          );
+          await gh.postIssueComment(effectiveInput.issueNumber, body);
+          return {
+            executed: true,
+            phase: currentState.phase,
+            status: currentState.status,
+            active_branch: currentState.active_branch,
+            summary_markdown: body,
+            created_ticket_numbers: [],
+            feature_pr_url: ""
+          };
+        }
+      }
       let agentsConfigError: unknown;
       let parsedDevAgentsConfig: ParsedAgentsConfig | null = null;
       try {
@@ -542,73 +815,22 @@ export async function orchestrateIssueCommand(
         });
       } catch (err) {
         if (err instanceof LLMError) {
-          await gh.ensureLabel(
-            "needs-human",
-            "D93F0B",
-            "Requires human maintainer intervention"
-          );
-          await gh.addIssueLabels(effectiveInput.issueNumber, ["needs-human"]);
-
-          const suspendedPhase: EpureIssueState["phase"] =
-            effectiveInput.command === "to-tickets"
-              ? "tickets"
-              : effectiveInput.command === "to-spec" || currentState?.phase === "spec"
-                ? "spec"
-                : "grilling";
-
-          const updatedSuspended = await updateIssueStateWithCas({
-            issueNumber: effectiveInput.issueNumber,
-            store,
-            mutator: (prev) =>
-              toTerminalState(prev, {
-                phase: suspendedPhase,
-                status: "suspended",
-                active_branch: planBranch,
-                transient_retries_used: cumulativeTransientRetriesUsed(),
-                last_processed_comment_id:
-                  Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
-              })
+          return await escalateSuspension({
+            reason: resolveLlmEscalationReason(err),
+            ticketNumber: effectiveInput.issueNumber,
+            branch: planBranch,
+            phase:
+              effectiveInput.command === "to-tickets"
+                ? "tickets"
+                : effectiveInput.command === "to-spec" ||
+                    currentState?.phase === "spec"
+                  ? "spec"
+                  : "grilling",
+            diagnosticExcerpt: redactSecrets(err.message, [
+              activeToken,
+              effectiveInput.llmApiKey
+            ])
           });
-
-          const escalationMarkdown = appendEpureCommandsSpoiler(
-            [
-              updatedSuspended.issue_mirror_markdown,
-              "",
-              formatNeedsHumanEscalationComment({
-                reason: resolveLlmEscalationReason(err),
-                issueNumber: effectiveInput.issueNumber,
-                ticketIssueNumber: effectiveInput.issueNumber,
-                branch: planBranch,
-                maxCodeFixAttempts,
-                resumeCommand:
-                  suspendedPhase === "tickets"
-                    ? "/epure to-tickets"
-                    : suspendedPhase === "spec"
-                      ? "/epure to-spec"
-                      : "/epure plan",
-                diagnosticExcerpt: redactSecrets(err.message, [
-                  activeToken,
-                  effectiveInput.llmApiKey
-                ])
-              })
-            ].join("\n"),
-            {
-              phase: "suspended",
-              status: "suspended",
-              issueNumber: effectiveInput.issueNumber
-            }
-          );
-
-          await gh.postIssueComment(effectiveInput.issueNumber, escalationMarkdown);
-          return {
-            executed: true,
-            phase: updatedSuspended.state.phase,
-            status: updatedSuspended.state.status,
-            active_branch: planBranch,
-            summary_markdown: escalationMarkdown,
-            created_ticket_numbers: [],
-            feature_pr_url: ""
-          };
         }
         throw err;
       }
@@ -620,11 +842,7 @@ export async function orchestrateIssueCommand(
         effectiveInput.command === "rebase"
       ) {
         const phaseModels = requirePhaseModels();
-        const targetBranch =
-          currentState?.active_branch &&
-          !currentState.active_branch.startsWith("plan/")
-            ? currentState.active_branch
-            : featureBranch;
+        const targetBranch = featureBranch;
 
         await gh.ensureBranch("dev", "main");
         await gh.ensureBranch(targetBranch, "dev");
@@ -663,53 +881,12 @@ export async function orchestrateIssueCommand(
         });
 
         if (syncRes.status === "escalated") {
-          await gh.ensureLabel(
-            "needs-human",
-            "D93F0B",
-            "Requires human maintainer intervention"
-          );
-          await gh.addIssueLabels(effectiveInput.issueNumber, ["needs-human"]);
-          const updatedSuspended = await updateIssueStateWithCas({
-            issueNumber: effectiveInput.issueNumber,
-            store,
-            mutator: (prev) =>
-              toTerminalState(prev, {
-                status: "suspended",
-                active_branch: targetBranch,
-                last_processed_comment_id:
-                  Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
-              })
+          return await escalateSuspension({
+            reason: syncRes.escalationReason ?? "merge_conflict_unresolved",
+            ticketNumber: effectiveInput.issueNumber,
+            branch: targetBranch,
+            diagnosticExcerpt: syncRes.diagnosticExcerpt
           });
-          const escalationMd = appendEpureCommandsSpoiler(
-            [
-              updatedSuspended.issue_mirror_markdown,
-              "",
-              formatNeedsHumanEscalationComment({
-                reason:
-                  syncRes.escalationReason ?? "merge_conflict_unresolved",
-                issueNumber: effectiveInput.issueNumber,
-                ticketIssueNumber: effectiveInput.issueNumber,
-                branch: targetBranch,
-                maxCodeFixAttempts,
-                diagnosticExcerpt: syncRes.diagnosticExcerpt
-              })
-            ].join("\n"),
-            {
-              phase: "suspended",
-              status: "suspended",
-              issueNumber: effectiveInput.issueNumber
-            }
-          );
-          await gh.postIssueComment(effectiveInput.issueNumber, escalationMd);
-          return {
-            executed: true,
-            phase: updatedSuspended.state.phase,
-            status: updatedSuspended.state.status,
-            active_branch: targetBranch,
-            summary_markdown: escalationMd,
-            created_ticket_numbers: [],
-            feature_pr_url: ""
-          };
         }
 
         if (currentState?.active_task_branch) {
@@ -731,60 +908,14 @@ export async function orchestrateIssueCommand(
             reviewersDir
           });
           if (taskSyncRes.status === "escalated") {
-            await gh.ensureLabel(
-              "needs-human",
-              "D93F0B",
-              "Requires human maintainer intervention"
-            );
-            await gh.addIssueLabels(effectiveInput.issueNumber, [
-              "needs-human"
-            ]);
-            const updatedTaskSuspended = await updateIssueStateWithCas({
-              issueNumber: effectiveInput.issueNumber,
-              store,
-              mutator: (prev) =>
-                toTerminalState(prev, {
-                  status: "suspended",
-                  active_branch: targetBranch,
-                  last_processed_comment_id:
-                    Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
-                })
+            return await escalateSuspension({
+              reason:
+                taskSyncRes.escalationReason ?? "merge_conflict_unresolved",
+              ticketNumber:
+                currentState.active_ticket_number ?? effectiveInput.issueNumber,
+              branch: currentState.active_task_branch,
+              diagnosticExcerpt: taskSyncRes.diagnosticExcerpt
             });
-            const taskEscalationMd = appendEpureCommandsSpoiler(
-              [
-                updatedTaskSuspended.issue_mirror_markdown,
-                "",
-                formatNeedsHumanEscalationComment({
-                  reason:
-                    taskSyncRes.escalationReason ?? "merge_conflict_unresolved",
-                  issueNumber: effectiveInput.issueNumber,
-                  ticketIssueNumber:
-                    currentState.active_ticket_number ??
-                    effectiveInput.issueNumber,
-                  branch: currentState.active_task_branch,
-                  maxCodeFixAttempts,
-                  diagnosticExcerpt: taskSyncRes.diagnosticExcerpt
-                })
-              ].join("\n"),
-              {
-                phase: "suspended",
-                status: "suspended",
-                issueNumber: effectiveInput.issueNumber
-              }
-            );
-            await gh.postIssueComment(
-              effectiveInput.issueNumber,
-              taskEscalationMd
-            );
-            return {
-              executed: true,
-              phase: updatedTaskSuspended.state.phase,
-              status: updatedTaskSuspended.state.status,
-              active_branch: targetBranch,
-              summary_markdown: taskEscalationMd,
-              created_ticket_numbers: [],
-              feature_pr_url: ""
-            };
           }
         }
 
@@ -794,6 +925,7 @@ export async function orchestrateIssueCommand(
           mutator: (prev) => ({
             ...prev,
             active_branch: targetBranch,
+            feature_branch: prev.feature_branch ?? targetBranch,
             last_processed_comment_id:
               Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
           })
@@ -830,101 +962,6 @@ export async function orchestrateIssueCommand(
         };
       }
 
-      const escalateSuspension = async (
-        params: EscalateToNeedsHumanParams & {
-          readonly graceWindowSeconds?: number | undefined;
-          readonly createdTicketNumbers?: readonly number[] | undefined;
-        }
-      ): Promise<OrchestrateIssueResult> => {
-        let duplicateOfLastEscalation = false;
-        const updatedSuspended = await updateIssueStateWithCas({
-          issueNumber: effectiveInput.issueNumber,
-          store,
-          mutator: (prev) => {
-            const escalation = {
-              reason: params.reason,
-              head_sha: prev.active_head_sha ?? "",
-              ticket_number: params.ticketNumber,
-              budget_scope: params.budgetScope ?? "ticket"
-            } as const;
-            duplicateOfLastEscalation =
-              isAutomaticEntry &&
-              prev.last_escalation?.reason === escalation.reason &&
-              prev.last_escalation?.head_sha === escalation.head_sha;
-            return toTerminalState(prev, {
-              phase: params.phase ?? "implementation",
-              status: "suspended",
-              active_branch: params.branch,
-              code_fix_attempts_used:
-                params.codeFixAttemptsUsed ?? prev.code_fix_attempts_used,
-              transient_retries_used: cumulativeTransientRetriesUsed(),
-              last_escalation: escalation,
-              last_processed_comment_id:
-                Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
-            });
-          }
-        });
-
-        if (!duplicateOfLastEscalation) {
-          await gh.ensureLabel(
-            "needs-human",
-            "D93F0B",
-            "Requires human maintainer intervention"
-          );
-          await gh.addIssueLabels(effectiveInput.issueNumber, ["needs-human"]);
-          if (params.ticketNumber !== effectiveInput.issueNumber) {
-            await gh.addIssueLabels(params.ticketNumber, ["needs-human"]);
-          }
-        }
-
-        const escalationMarkdown = appendEpureCommandsSpoiler(
-          [
-            updatedSuspended.issue_mirror_markdown,
-            "",
-            formatNeedsHumanEscalationComment({
-              reason: params.reason,
-              issueNumber: effectiveInput.issueNumber,
-              ticketIssueNumber: params.ticketNumber,
-              prNumber: params.prNumber,
-              prUrl: params.prUrl,
-              branch: params.branch,
-              codeFixAttemptsUsed: updatedSuspended.state.code_fix_attempts_used,
-              maxCodeFixAttempts,
-              humanBudgetGrants: updatedSuspended.state.human_budget_grants ?? 0,
-              graceWindowSeconds: params.graceWindowSeconds,
-              failedChecks: params.failedChecks,
-              mustFixFindings: params.mustFixFindings,
-              sensitivePaths: params.sensitivePaths,
-              traversalPaths: params.traversalPaths,
-              diagnosticExcerpt: params.diagnosticExcerpt,
-              epicConvergenceDetails: params.epicConvergenceDetails
-            })
-          ].join("\n"),
-          {
-            phase: "suspended",
-            status: "suspended",
-            issueNumber: effectiveInput.issueNumber
-          }
-        );
-
-        if (!duplicateOfLastEscalation) {
-          await gh.postIssueComment(
-            effectiveInput.issueNumber,
-            escalationMarkdown
-          );
-        }
-
-        return {
-          executed: true,
-          phase: updatedSuspended.state.phase,
-          status: updatedSuspended.state.status,
-          active_branch: params.branch,
-          summary_markdown: escalationMarkdown,
-          created_ticket_numbers: params.createdTicketNumbers ?? [],
-          feature_pr_url: params.featurePrUrl ?? params.prUrl ?? ""
-        };
-      };
-
       let forceOneRemediationRoundOnOpenPr = false;
 
       // 4c. Handle event-driven CI continuation (workflow_run / /epure continue)
@@ -934,7 +971,8 @@ export async function orchestrateIssueCommand(
         const isManualContinueInImplementation =
           !isWaitingExternalCi &&
           (effectiveInput.commentId ?? 0) > 0 &&
-          currentState?.phase === "implementation";
+          currentState !== null &&
+          resumesImplementationRun(currentState);
 
         if (!isWaitingExternalCi && !isManualContinueInImplementation) {
           return {
@@ -959,7 +997,7 @@ export async function orchestrateIssueCommand(
             targetBranch:
               currentState.subphase === "waiting_feature_ci"
                 ? "dev"
-                : currentState.active_branch || featureBranch
+                : featureBranch
           });
 
           const snapshot = await evaluateSingleExternalCiSnapshot({
@@ -984,11 +1022,37 @@ export async function orchestrateIssueCommand(
             };
           }
 
+          // Claims the wait: a concurrent continuation, cancel or closure makes this run stop here.
+          const waitingState = currentState;
+          await updateIssueStateWithCas({
+            issueNumber: effectiveInput.issueNumber,
+            store,
+            mutator: (prev) => {
+              if (
+                prev.status !== "active" ||
+                prev.subphase !== waitingState.subphase ||
+                prev.active_head_sha !== waitingState.active_head_sha
+              ) {
+                throw new StateTransitionAbortedError(
+                  prev,
+                  "this CI wait was already claimed or ended by another run"
+                );
+              }
+              return {
+                ...prev,
+                subphase:
+                  prev.subphase === "waiting_feature_ci"
+                    ? "remediating_feature"
+                    : "implementing_ticket"
+              };
+            }
+          });
+
           if (snapshot.passed && snapshot.aiReviewPassed) {
             if (currentState.subphase === "waiting_feature_ci") {
               const featurePrNumber = currentState.active_pr_number ?? 0;
               const openFeaturePr = await gh.findOpenPullRequestByHead(
-                currentState.active_branch || featureBranch,
+                featureBranch,
                 "dev"
               );
               const featurePrUrl = openFeaturePr?.html_url ?? "";
@@ -1046,8 +1110,7 @@ export async function orchestrateIssueCommand(
             const taskBranchToMerge =
               currentState.active_task_branch ?? `task/${ticketNum}`;
             const prNumberToMerge = currentState.active_pr_number ?? 0;
-            const targetFeatureBranch =
-              currentState.active_branch || featureBranch;
+            const targetFeatureBranch = featureBranch;
 
             const openTaskPr =
               prNumberToMerge > 0
@@ -1242,11 +1305,7 @@ export async function orchestrateIssueCommand(
                 ticketNumber:
                   currentState.active_ticket_number ??
                   effectiveInput.issueNumber,
-                branch:
-                  currentState.active_task_branch ||
-                  currentState.active_branch ||
-                  featureBranch,
-                budgetScope: activeBudgetScope(currentState),
+                branch: currentState.active_task_branch || featureBranch,
                 prNumber: currentState.active_pr_number,
                 codeFixAttemptsUsed: attemptsUsed,
                 failedChecks: snapshot.failedChecks,
@@ -1475,16 +1534,33 @@ export async function orchestrateIssueCommand(
         issueNumber: effectiveInput.issueNumber,
         store,
         mutator: (prev) => ({
-          ...(prev.status === "suspended" ? grantHumanBudget(prev) : prev),
+          ...(isAutomaticEntry
+            ? prev
+            : resumeAfterEscalation(prev, {
+                actor: effectiveInput.actor,
+                commentId: effectiveInput.commentId ?? 0
+              })),
           phase: "implementation",
           status: "active",
           active_branch: featureBranch,
+          feature_branch: prev.feature_branch ?? featureBranch,
           epic_phase: prev.epic_phase ?? 1,
           ...(integratePlan ? { integrated_plan_sha: planHeadSha ?? undefined } : {}),
           last_processed_comment_id:
             Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
         })
       });
+      const grant = updatedStart.state.human_budget_grant_log?.at(-1);
+      if (
+        grant &&
+        (updatedStart.state.human_budget_grants ?? 0) >
+          (currentState?.human_budget_grants ?? 0)
+      ) {
+        await gh.postIssueComment(
+          effectiveInput.issueNumber,
+          `▶️ Reprise par \`@${grant.actor}\` : budget de remédiation remis à zéro pour ${grant.scope === "feature" ? "la Pull Request de fonctionnalité" : `le ticket #${grant.ticket}`} (\`human_budget_grants\` : ${updatedStart.state.human_budget_grants ?? 0}).`
+        );
+      }
       const baseSyncGuard = createBaseSyncGuard({
         gh,
         store,
@@ -1870,45 +1946,31 @@ export async function orchestrateIssueCommand(
         feature_pr_url: ""
       };
     } catch (err) {
+      if (err instanceof StateTransitionAbortedError) {
+        return abortedResult(err);
+      }
+      if (effectiveInput.command === "closed") {
+        throw new ClosureNotProcessedError(effectiveInput.issueNumber, err);
+      }
       const rawErrMessage = err instanceof Error ? err.message : String(err);
-      const escalationReason =
-        err instanceof LLMError
-          ? resolveLlmEscalationReason(err)
-          : err instanceof GitHubRateLimitError
-            ? "github_rate_limited"
-            : err instanceof BranchUpdateConflictError
-              ? "branch_update_conflict"
-              : err instanceof MissingModelConfigError
-                ? "model_config_missing"
-                : "internal_error";
-
-      const commandPhase: EpureIssueState["phase"] =
-        effectiveInput.command === "approve" ||
-        effectiveInput.command === "continue"
-          ? "implementation"
-          : effectiveInput.command === "to-tickets"
-            ? "tickets"
-            : effectiveInput.command === "to-spec"
-              ? "spec"
-              : "grilling";
-      const escalationCommentFor = (
-        branch: string,
-        codeFixAttemptsUsed: number | undefined
-      ): string =>
-        formatNeedsHumanEscalationComment({
-          reason: escalationReason,
-          issueNumber: effectiveInput.issueNumber,
-          ticketIssueNumber: effectiveInput.issueNumber,
-          branch,
-          codeFixAttemptsUsed,
-          maxCodeFixAttempts,
-          missingModelKeys:
-            err instanceof MissingModelConfigError ? err.missingKeys : undefined,
-          diagnosticExcerpt: redactSecrets(rawErrMessage, [
-            activeToken,
-            effectiveInput.llmApiKey
-          ])
-        });
+      const escalation: EscalationRecordInput = {
+        reason:
+          err instanceof LLMError
+            ? resolveLlmEscalationReason(err)
+            : err instanceof GitHubRateLimitError
+              ? "github_rate_limited"
+              : err instanceof BranchUpdateConflictError
+                ? "branch_update_conflict"
+                : err instanceof MissingModelConfigError
+                  ? "model_config_missing"
+                  : "internal_error",
+        missingModelKeys:
+          err instanceof MissingModelConfigError ? err.missingKeys : undefined,
+        diagnosticExcerpt: redactSecrets(rawErrMessage, [
+          activeToken,
+          effectiveInput.llmApiKey
+        ])
+      };
 
       // The run's wait budget is spent once it escalates github_rate_limited: recording gets its own.
       const rateLimited = err instanceof GitHubRateLimitError;
@@ -1927,95 +1989,39 @@ export async function orchestrateIssueCommand(
         : gh;
       const recordStore =
         rateLimited && !input.stateStore
-          ? createGitHubApiRefStateStore({
-              repository: input.repository,
-              githubToken: activeToken,
-              fetchImpl: recordFetch
-            })
+          ? guardTerminalStates(
+              createGitHubApiRefStateStore({
+                repository: input.repository,
+                githubToken: activeToken,
+                fetchImpl: recordFetch
+              }),
+              allowedTerminalSha
+            )
           : store;
 
       try {
-        const latestSnap = await recordStore.readRef(refName);
-        const fallbackPhase: EpureIssueState["phase"] =
-          latestSnap.state?.phase && latestSnap.state.phase !== "idle"
-            ? latestSnap.state.phase
-            : commandPhase;
-        const fallbackBranch =
-          latestSnap.state?.active_branch ||
-          (fallbackPhase === "implementation" ? featureBranch : planBranch);
-
-        let duplicateOfLastEscalation = false;
-        const updatedSuspended = await updateIssueStateWithCas({
-          issueNumber: effectiveInput.issueNumber,
-          store: recordStore,
-          mutator: (prev) => {
-            const escalation = {
-              reason: escalationReason,
-              head_sha: prev.active_head_sha ?? "",
-              ticket_number: prev.active_ticket_number ?? effectiveInput.issueNumber,
-              budget_scope: activeBudgetScope(prev)
-            };
-            duplicateOfLastEscalation =
-              isAutomaticEntry &&
-              prev.last_escalation?.reason === escalation.reason &&
-              prev.last_escalation?.head_sha === escalation.head_sha;
-            return toTerminalState(prev, {
-              phase: prev.phase !== "idle" ? prev.phase : fallbackPhase,
-              status: "suspended",
-              active_branch: prev.active_branch || fallbackBranch,
-              transient_retries_used: cumulativeTransientRetriesUsed(),
-              last_escalation: escalation,
-              last_processed_comment_id:
-                Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
-            });
-          }
+        return await recordEscalation(escalation, {
+          gh: recordGh,
+          store: recordStore
         });
-
-        const escalationMarkdown = appendEpureCommandsSpoiler(
-          [
-            updatedSuspended.issue_mirror_markdown,
-            "",
-            escalationCommentFor(
-              updatedSuspended.state.active_branch || fallbackBranch,
-              updatedSuspended.state.code_fix_attempts_used
-            )
-          ].join("\n"),
-          {
-            phase: "suspended",
-            status: "suspended",
-            issueNumber: effectiveInput.issueNumber
-          }
-        );
-
-        if (!duplicateOfLastEscalation) {
-          await recordGh.ensureLabel(
-            "needs-human",
-            "D93F0B",
-            "Requires human maintainer intervention"
-          );
-          await recordGh.addIssueLabels(effectiveInput.issueNumber, ["needs-human"]);
-          await recordGh.postIssueComment(effectiveInput.issueNumber, escalationMarkdown);
-        }
-        return {
-          executed: true,
-          phase: updatedSuspended.state.phase,
-          status: updatedSuspended.state.status,
-          active_branch: updatedSuspended.state.active_branch,
-          summary_markdown: escalationMarkdown,
-          created_ticket_numbers: [],
-          feature_pr_url: ""
-        };
       } catch (recordErr) {
+        if (recordErr instanceof StateTransitionAbortedError) {
+          return abortedResult(recordErr);
+        }
         if (!(recordErr instanceof GitHubRateLimitError)) {
           throw recordErr;
         }
         throw new EscalationNotRecordedError(
           effectiveInput.issueNumber,
-          escalationReason,
-          escalationCommentFor(
-            commandPhase === "implementation" ? featureBranch : planBranch,
-            undefined
-          )
+          escalation.reason,
+          formatEscalation(escalation, {
+            phase: commandPhase,
+            branch: IMPLEMENTATION_PHASES.has(commandPhase)
+              ? featureBranch
+              : planBranch,
+            ticketNumber: effectiveInput.issueNumber
+          }),
+          resumeCommandForPhase(commandPhase)
         );
       }
     }

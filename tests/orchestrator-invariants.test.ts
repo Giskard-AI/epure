@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { EscalationNotRecordedError, orchestrateIssueCommand } from "../src/orchestrator/issue-orchestrator.js";
+import { ClosureNotProcessedError, EscalationNotRecordedError, orchestrateIssueCommand } from "../src/orchestrator/issue-orchestrator.js";
 import type { OrchestrateIssueInput } from "../src/orchestrator/types.js";
 import {
   createGitHubApiRefStateStore,
   createInMemoryGitRefStateStore,
+  toTerminalState,
   updateIssueStateWithCas,
   type EpureIssueState,
   type GitRefStateStore
@@ -82,6 +83,27 @@ async function readState(store: GitRefStateStore): Promise<EpureIssueState> {
   return (await store.readRef(`refs/epure/state/${ISSUE}`)).state!;
 }
 
+function postedComments(router: GitHubMockRouter): string[] {
+  return router.requests
+    .filter((r) => r.method === "POST" && r.path === `${R}/issues/${ISSUE}/comments`)
+    .map((r) => (r.body as { body: string }).body);
+}
+
+function captureWrites(store: GitRefStateStore): { store: GitRefStateStore; writes: EpureIssueState[] } {
+  const writes: EpureIssueState[] = [];
+  return {
+    writes,
+    store: {
+      readRef: (refName) => store.readRef(refName),
+      compareAndSwapRef: async (refName, expectedOldSha, nextState) => {
+        const result = await store.compareAndSwapRef(refName, expectedOldSha, nextState);
+        if (result.swapped) writes.push(nextState);
+        return result;
+      }
+    }
+  };
+}
+
 function declareIssueReads(router: GitHubMockRouter): GitHubMockRouter {
   return router
     .on("GET", `${R}/issues/${ISSUE}`, json({ number: ISSUE, title: "Async CI Feature", body: "- [ ] Ship it", state: "open" }))
@@ -119,43 +141,6 @@ function ciPollCalls(router: GitHubMockRouter): number {
     router.calls("GET", /\/check-runs\?/)
   );
 }
-
-describe("Invariant 1 — automatic continuation runs only when status is active and subphase is waiting_*", () => {
-  it.each([
-    { id: "suspended-waiting_feature_ci-not-resumed-by-continue-without-comment", status: "suspended", trigger: TRIGGERS.continueWithoutComment },
-    { id: "suspended-waiting_feature_ci-not-resumed-by-workflow_run-head-sha", status: "suspended", trigger: TRIGGERS.workflowRun },
-    { id: "suspended-waiting_feature_ci-not-resumed-by-branch-only-trigger", status: "suspended", trigger: TRIGGERS.branchOnly },
-    { id: "awaiting_human_approval-waiting_feature_ci-not-resumed-by-workflow_run", status: "awaiting_human_approval", trigger: TRIGGERS.workflowRun }
-  ] as const)("$id", async ({ status, trigger }) => {
-    const store = await seedState({ status, subphase: "waiting_feature_ci" });
-    const before = await readState(store);
-    const router = declareIssueWrites(declareCiSnapshot(declareIssueReads(createGitHubMockRouter()), "success"))
-      .on("GET", /\/pulls\?state=open&head=/, json([{ number: 105, html_url: "pr", head: { sha: HEAD_SHA } }]));
-
-    const res = await run(router, store, { command: "continue", actor: "github-actions[bot]", ...trigger });
-
-    expect(router.unmatched).toEqual([]);
-    expect(res.executed).toBe(false);
-    expect(ciPollCalls(router)).toBe(0);
-    expect(await readState(store)).toEqual(before);
-  });
-
-  it.each([
-    { id: "active-idle-not-resumed-by-continue-without-comment", trigger: TRIGGERS.continueWithoutComment },
-    { id: "active-idle-not-resumed-by-workflow_run", trigger: TRIGGERS.workflowRun }
-  ] as const)("$id", async ({ trigger }) => {
-    const store = await seedState({ status: "active", subphase: "idle" });
-    const before = await readState(store);
-    const router = declareIssueReads(createGitHubMockRouter());
-
-    const res = await run(router, store, { command: "continue", actor: "github-actions[bot]", ...trigger });
-
-    expect(router.unmatched).toEqual([]);
-    expect(res.executed).toBe(false);
-    expect(ciPollCalls(router)).toBe(0);
-    expect(await readState(store)).toEqual(before);
-  });
-});
 
 function terminalResidue(state: EpureIssueState) {
   return {
@@ -293,22 +278,6 @@ describe("Invariant 2 — suspended, done and cancelled imply subphase idle and 
 
 describe("Invariant 3 — only an explicit human command gets an issue out of cancelled or done", () => {
   it.each([
-    { id: "cancelled-with-stale-waiting_feature_ci-not-reactivated-by-workflow_run", status: "cancelled", phase: "implementation", trigger: TRIGGERS.workflowRun },
-    { id: "cancelled-with-stale-waiting_feature_ci-not-reactivated-by-continue-without-comment", status: "cancelled", phase: "implementation", trigger: TRIGGERS.continueWithoutComment },
-    { id: "done-with-stale-waiting_feature_ci-not-reactivated-by-branch-only-trigger", status: "done", phase: "completed", trigger: TRIGGERS.branchOnly }
-  ] as const)("$id", async ({ status, phase, trigger }) => {
-    const store = await seedState({ status, phase, subphase: "waiting_feature_ci" });
-    const router = declareIssueWrites(declareCiSnapshot(declareIssueReads(createGitHubMockRouter()), "success"))
-      .on("GET", /\/pulls\?state=open&head=/, json([{ number: 105, html_url: "pr", head: { sha: HEAD_SHA } }]));
-
-    const res = await run(router, store, { command: "continue", actor: "github-actions[bot]", ...trigger });
-
-    expect(router.unmatched).toEqual([]);
-    expect(res.executed).toBe(false);
-    expect((await readState(store)).status).toBe(status);
-  });
-
-  it.each([
     { id: "cancelled-in-spec-phase-not-reopened-by-plain-human-reply", status: "cancelled", phase: "spec" },
     { id: "cancelled-in-implementation-phase-not-reopened-by-plain-human-reply", status: "cancelled", phase: "implementation" },
     { id: "done-in-completed-phase-not-reopened-by-plain-human-reply", status: "done", phase: "completed" }
@@ -350,7 +319,8 @@ const SOURCES = {
   "workflow_run": TRIGGERS.workflowRun,
   "workflow_run-stale-sha": { ...TRIGGERS.workflowRun, triggerHeadSha: STALE_SHA },
   "workflow_run-stale-sha-with-issue-number": { ...TRIGGERS.workflowRun, issueNumber: ISSUE, triggerHeadSha: STALE_SHA },
-  "continue-without-comment": TRIGGERS.continueWithoutComment
+  "continue-without-comment": TRIGGERS.continueWithoutComment,
+  "branch-only": TRIGGERS.branchOnly
 } satisfies Record<string, Trigger>;
 
 type Expected = "none" | "resume" | "fix_round" | "escalation";
@@ -377,14 +347,21 @@ function llmCalls(router: GitHubMockRouter): number {
   return router.requests.filter((r) => r.host !== "api.github.com").length;
 }
 
-describe("Lot 1 — automatic entry decision table (status x subphase x event source x budget)", () => {
+describe("Automatic entry decision table (status x subphase x event source x budget)", () => {
   it.each([
     { id: "suspended-waiting_ticket_ci-workflow_run-exhausted-budget-does-nothing", status: "suspended", subphase: "waiting_ticket_ci", source: "workflow_run", attempts: 3, ci: "failure", expected: "none" },
     { id: "suspended-idle-continue-without-comment-fresh-budget-does-nothing", status: "suspended", subphase: "idle", source: "continue-without-comment", attempts: 0, ci: "success", expected: "none" },
+    { id: "suspended-waiting_feature_ci-continue-without-comment-does-nothing", status: "suspended", subphase: "waiting_feature_ci", source: "continue-without-comment", attempts: 0, ci: "success", expected: "none" },
+    { id: "suspended-waiting_feature_ci-branch-only-trigger-does-nothing", status: "suspended", subphase: "waiting_feature_ci", source: "branch-only", attempts: 0, ci: "success", expected: "none" },
     { id: "awaiting_human_approval-waiting_feature_ci-workflow_run-does-nothing", status: "awaiting_human_approval", subphase: "waiting_feature_ci", source: "workflow_run", attempts: 0, ci: "success", expected: "none" },
     { id: "cancelled-waiting_ticket_ci-workflow_run-does-nothing", status: "cancelled", subphase: "waiting_ticket_ci", source: "workflow_run", attempts: 3, ci: "failure", expected: "none" },
+    { id: "cancelled-waiting_feature_ci-continue-without-comment-does-nothing", status: "cancelled", subphase: "waiting_feature_ci", source: "continue-without-comment", attempts: 0, ci: "success", expected: "none" },
     { id: "done-idle-continue-without-comment-does-nothing", status: "done", subphase: "idle", source: "continue-without-comment", attempts: 0, ci: "success", expected: "none" },
+    { id: "done-with-leftover-waiting_feature_ci-workflow_run-on-the-old-head-does-nothing", status: "done", subphase: "waiting_feature_ci", source: "workflow_run", attempts: 0, ci: "success", expected: "none" },
+    { id: "done-with-leftover-waiting_feature_ci-branch-only-trigger-does-nothing", status: "done", subphase: "waiting_feature_ci", source: "branch-only", attempts: 0, ci: "success", expected: "none" },
     { id: "active-idle-workflow_run-does-nothing", status: "active", subphase: "idle", source: "workflow_run", attempts: 0, ci: "failure", expected: "none" },
+    { id: "active-idle-continue-without-comment-does-nothing", status: "active", subphase: "idle", source: "continue-without-comment", attempts: 0, ci: "failure", expected: "none" },
+    { id: "active-waiting_ticket_ci-issue-less-trigger-without-head-sha-does-nothing", status: "active", subphase: "waiting_ticket_ci", source: "branch-only", attempts: 0, ci: "success", expected: "none" },
     { id: "active-waiting_ticket_ci-workflow_run-on-stale-sha-does-nothing", status: "active", subphase: "waiting_ticket_ci", source: "workflow_run-stale-sha", attempts: 3, ci: "failure", expected: "none" },
     { id: "active-waiting_feature_ci-workflow_run-on-stale-sha-does-nothing", status: "active", subphase: "waiting_feature_ci", source: "workflow_run-stale-sha", attempts: 0, ci: "success", expected: "none" },
     { id: "active-waiting_ticket_ci-workflow_run-on-stale-sha-for-known-issue-does-nothing", status: "active", subphase: "waiting_ticket_ci", source: "workflow_run-stale-sha-with-issue-number", attempts: 3, ci: "failure", expected: "none" },
@@ -446,7 +423,7 @@ describe("Lot 1 — automatic entry decision table (status x subphase x event so
   });
 });
 
-describe("Lot 1 — event sequences that used to loop", () => {
+describe("Event sequences never loop, run twice or overwrite a cancellation", () => {
   it("cancel-then-workflow_run-on-the-same-head-sha-leaves-the-issue-cancelled", async () => {
     const store = await seedState(seedFor({ status: "active", subphase: "waiting_ticket_ci", attempts: 1 }));
     const router = declareFullFlow("failure");
@@ -463,19 +440,44 @@ describe("Lot 1 — event sequences that used to loop", () => {
   });
 
   it.each([
-    { id: "done-with-leftover-waiting_feature_ci-ignores-workflow_run-on-old-head-sha", trigger: TRIGGERS.workflowRun },
-    { id: "done-with-leftover-waiting_feature_ci-ignores-continue-without-comment", trigger: TRIGGERS.continueWithoutComment }
-  ] as const)("$id", async ({ trigger }) => {
-    const store = await seedState({ status: "done", phase: "completed", subphase: "waiting_feature_ci" });
-    const before = await readState(store);
-    const router = declareFullFlow("success");
+    {
+      id: "cancel-landing-while-the-continuation-reads-ci-stops-it-before-it-claims-the-wait",
+      cancelDuring: /\/actions\/runs\?head_sha=/,
+      reply: json({ workflow_runs: [{ id: 501, name: "CI", path: ".github/workflows/ci.yml", status: "completed", conclusion: "success" }] })
+    },
+    {
+      id: "cancel-landing-after-the-claim-stops-the-continuation-before-it-writes-review",
+      cancelDuring: /\/pulls\?state=open&head=/,
+      reply: json([{ number: 105, html_url: "pr105", head: { sha: HEAD_SHA } }])
+    }
+  ])("$id", async ({ cancelDuring, reply }) => {
+    const store = await seedState(seedFor({ status: "active", subphase: "waiting_feature_ci", attempts: 0 }));
+    const router = declareFullFlow("success").on("GET", cancelDuring, async () => {
+      await updateIssueStateWithCas({ issueNumber: ISSUE, store, mutator: (prev) => toTerminalState(prev, { status: "cancelled" }) });
+      return reply;
+    });
 
-    const res = await run(router, store, { command: "continue", actor: "github-actions[bot]", ...trigger });
+    const res = await run(router, store, { command: "continue", actor: "github-actions[bot]", ...TRIGGERS.workflowRun });
 
     expect(router.unmatched).toEqual([]);
     expect(res.executed).toBe(false);
-    expect(ciPollCalls(router)).toBe(0);
-    expect(await readState(store)).toEqual(before);
+    expect(await readState(store)).toMatchObject({ status: "cancelled", cancelled_from: { phase: "implementation", status: "active" } });
+    expect(router.calls("POST", `${R}/issues/${ISSUE}/comments`) + router.calls("POST", `${R}/issues/${ISSUE}/labels`)).toBe(0);
+  });
+
+  it("two-concurrent-workflow_run-continuations-on-the-same-head-move-to-review-once", async () => {
+    const store = await seedState(seedFor({ status: "active", subphase: "waiting_feature_ci", attempts: 0 }));
+    const router = declareFullFlow("success");
+
+    const results = await Promise.all([
+      run(router, store, { command: "continue", actor: "github-actions[bot]", ...TRIGGERS.workflowRun }),
+      run(router, store, { command: "continue", actor: "github-actions[bot]", ...TRIGGERS.workflowRun })
+    ]);
+
+    expect(router.unmatched).toEqual([]);
+    expect(results.filter((r) => r.executed)).toHaveLength(1);
+    expect(router.calls("POST", `${R}/issues/${ISSUE}/comments`)).toBe(1);
+    expect(await readState(store)).toMatchObject({ phase: "review", status: "awaiting_human_approval", subphase: "idle" });
   });
 
   it("two-successive-automatic-resumes-escalate-once-then-ignore-the-suspended-state", async () => {
@@ -521,7 +523,7 @@ describe("Lot 1 — event sequences that used to loop", () => {
   });
 });
 
-describe("Lot 1 — automatic resume skips dev -> feature -> task sync unless dev moved", () => {
+describe("Automatic resume skips dev -> feature -> task sync unless dev moved", () => {
   it.each([
     { id: "dev-unchanged-since-last-sync-skips-both-merges", lastSyncedBaseSha: "branch-sha", expectedMerges: 0 },
     { id: "dev-advanced-since-last-sync-merges-and-records-new-base-sha", lastSyncedBaseSha: "older-dev-sha", expectedMerges: 2 },
@@ -573,7 +575,7 @@ function implementationPrompt(router: GitHubMockRouter): string {
 const ESCALATED_AT_CURSOR = 500;
 const RESUME_COMMENT = 600;
 
-describe("Lot 1 — resume context: comments since the escalation reach the resumed implementation session", () => {
+describe("Resume context: comments since the escalation reach the resumed implementation session", () => {
   it.each([
     {
       id: "write-and-admin-free-text-since-escalation-injected-bots-readers-commands-and-out-of-window-excluded",
@@ -682,19 +684,22 @@ function implementationCalls(router: GitHubMockRouter): number {
   return router.requests.filter((r) => r.host === "api.openai.com" && schemaName(r.body) === "generated_ticket_implementation").length;
 }
 
-describe("Lot 1 — one remediation budget per ticket shared by fix rounds and Stage 1 retries", () => {
+describe("One remediation budget per ticket shared by fix rounds and Stage 1 retries", () => {
   it.each([
     { id: "fresh-ticket-budget-spends-3-attempts-across-fix-round-and-stage1-retries-then-escalates-once", attempts: 0, expectedImplementationCalls: 3 },
     { id: "ticket-at-1-of-3-spends-its-last-2-attempts-across-fix-round-and-stage1-retry-then-escalates-once", attempts: 1, expectedImplementationCalls: 2 },
-    { id: "ticket-at-2-of-3-spends-its-last-attempt-on-the-fix-round-then-escalates-once", attempts: 2, expectedImplementationCalls: 1 }
-  ] as const)("$id", async ({ attempts, expectedImplementationCalls }) => {
+    { id: "ticket-at-2-of-3-spends-its-last-attempt-on-the-fix-round-then-escalates-once", attempts: 2, expectedImplementationCalls: 1 },
+    { id: "legacy-state-with-a-single-counter-at-2-of-3-spends-its-last-attempt-then-escalates-once", attempts: 2, legacyCounter: true, expectedImplementationCalls: 1 }
+  ] as ReadonlyArray<{ id: string; attempts: number; legacyCounter?: boolean; expectedImplementationCalls: number }>)("$id", async ({ attempts, legacyCounter, expectedImplementationCalls }) => {
     const store = await seedState({
       status: "active",
       subphase: "waiting_ticket_ci",
       active_ticket_number: ISSUE,
       active_task_branch: TASK_BRANCH,
       active_pr_number: 106,
-      code_fix_attempts_by_ticket: { [String(ISSUE)]: attempts }
+      ...(legacyCounter
+        ? { code_fix_attempts_used: attempts }
+        : { code_fix_attempts_by_ticket: { [String(ISSUE)]: attempts } })
     });
     const router = declareFailingFixFlow();
 
@@ -724,7 +729,7 @@ describe("Lot 1 — one remediation budget per ticket shared by fix rounds and S
   });
 });
 
-describe("Lot 1 — one remediation budget per feature PR shared by fix rounds and Stage 1 retries", () => {
+describe("One remediation budget per feature PR shared by fix rounds and Stage 1 retries", () => {
   it.each([
     { id: "fresh-feature-budget-spends-3-attempts-across-fix-round-and-stage1-retries-then-escalates-once", attempts: 0, expectedImplementationCalls: 3 },
     { id: "feature-at-2-of-3-spends-its-last-attempt-on-the-fix-round-then-escalates-once", attempts: 2, expectedImplementationCalls: 1 }
@@ -758,13 +763,13 @@ describe("Lot 1 — one remediation budget per feature PR shared by fix rounds a
   });
 });
 
-describe("Lot 1 — a resume command after budget exhaustion grants one fresh budget and records it", () => {
+describe("A resume command after budget exhaustion grants one fresh budget and records it", () => {
   it.each([
-    { id: "continue-after-remediation_exhausted-resets-the-ticket-budget-and-counts-the-grant", command: "continue", reason: "remediation_exhausted", expectedImplementationCalls: 3, expectedGrants: 1 },
-    { id: "approve-after-remediation_exhausted-resets-the-ticket-budget-and-counts-the-grant", command: "approve", reason: "remediation_exhausted", expectedImplementationCalls: 3, expectedGrants: 1 },
-    { id: "continue-after-another-escalation-reason-keeps-the-exhausted-budget", command: "continue", reason: "llm_request_invalid", expectedImplementationCalls: 0, expectedGrants: 0 },
-    { id: "continue-after-github_rate_limited-resumes-the-ticket-without-a-budget-grant", command: "continue", reason: "github_rate_limited", expectedImplementationCalls: 0, expectedGrants: 0 }
-  ] as const)("$id", async ({ command, reason, expectedImplementationCalls, expectedGrants }) => {
+    { id: "continue-after-remediation_exhausted-resets-the-ticket-budget-and-records-who-granted-it", command: "continue", reason: "remediation_exhausted", expectedImplementationCalls: 3, expectedGrantLog: [{ actor: "maintainer", comment_id: 900, scope: "ticket", ticket: ISSUE }] },
+    { id: "approve-after-remediation_exhausted-resets-the-ticket-budget-and-records-who-granted-it", command: "approve", reason: "remediation_exhausted", expectedImplementationCalls: 3, expectedGrantLog: [{ actor: "maintainer", comment_id: 900, scope: "ticket", ticket: ISSUE }] },
+    { id: "continue-after-another-escalation-reason-keeps-the-exhausted-budget", command: "continue", reason: "llm_request_invalid", expectedImplementationCalls: 0, expectedGrantLog: undefined },
+    { id: "continue-after-github_rate_limited-resumes-the-ticket-without-a-budget-grant", command: "continue", reason: "github_rate_limited", expectedImplementationCalls: 0, expectedGrantLog: undefined }
+  ] as const)("$id", async ({ command, reason, expectedImplementationCalls, expectedGrantLog }) => {
     const store = await seedState({
       status: "suspended",
       subphase: "idle",
@@ -788,19 +793,40 @@ describe("Lot 1 — a resume command after budget exhaustion grants one fresh bu
       commentId: 900
     });
     const after = await readState(store);
+    const resumeNotes = postedComments(router).filter((body) => body.includes("budget de remédiation remis à zéro pour le ticket #77"));
 
     expect(router.unmatched).toEqual([]);
     expect(implementationCalls(router)).toBe(expectedImplementationCalls);
-    expect(after.human_budget_grants ?? 0).toBe(expectedGrants);
+    expect(after.human_budget_grants ?? 0).toBe(expectedGrantLog?.length ?? 0);
+    expect(after.human_budget_grant_log).toEqual(expectedGrantLog);
+    expect(resumeNotes).toHaveLength(expectedGrantLog?.length ?? 0);
     expect(after).toMatchObject({
       status: "suspended",
       code_fix_attempts_by_ticket: { [String(ISSUE)]: 3 },
       last_escalation: { reason: "remediation_exhausted" }
     });
   });
+
+  it.each([
+    { id: "resume-after-pr_not_mergeable-forgets-it-so-the-same-refusal-on-the-same-sha-is-reported-again", reason: "pr_not_mergeable" },
+    { id: "resume-after-github_rate_limited-forgets-it-so-the-same-escalation-on-the-same-sha-is-reported-again", reason: "github_rate_limited" }
+  ] as const)("$id", async ({ reason }) => {
+    const seeded = await seedState({
+      status: "suspended",
+      subphase: "idle",
+      last_escalation: { reason, head_sha: HEAD_SHA, ticket_number: ISSUE, budget_scope: "ticket" }
+    });
+    const { store, writes } = captureWrites(seeded);
+    const router = declareFailingFixFlow();
+
+    await run(router, store, { command: "continue", actor: "maintainer", issueNumber: ISSUE, commentId: 900 });
+
+    expect(router.unmatched).toEqual([]);
+    expect(writes[0]).toMatchObject({ status: "active", last_escalation: undefined });
+  });
 });
 
-describe("Lot 1 — escalation comments remind the exact resume command", () => {
+describe("Escalation comments remind the exact resume command", () => {
   it.each([
     { id: "remediation_exhausted-reminds-continue-and-the-budget-reset", attempts: 3, expectedReason: "remediation_exhausted", mentionsBudgetReset: true },
     { id: "llm_request_invalid-during-a-fix-round-reminds-continue-without-budget-reset", attempts: 2, expectedReason: "llm_request_invalid", mentionsBudgetReset: false }
@@ -822,7 +848,7 @@ describe("Lot 1 — escalation comments remind the exact resume command", () => 
   });
 });
 
-describe("Lot 1 — a feature PR is never opened twice for the same epic", () => {
+describe("A feature PR is never opened twice for the same epic", () => {
   it.each([
     {
       id: "merged-feature-pr-for-the-epic-marks-the-plan-done-without-rerunning-tickets-or-opening-another",
@@ -833,6 +859,14 @@ describe("Lot 1 — a feature PR is never opened twice for the same epic", () =>
     {
       id: "merged-feature-pr-is-found-on-the-stored-branch-after-the-epic-title-was-renamed",
       issueTitle: "Event-driven CI continuation",
+      closedPrs: [{ number: 105, html_url: "pr105", merged_at: "2026-11-01T00:00:00Z" }],
+      expectsShortCircuit: true
+    },
+    {
+      id: "ticket-escalation-then-epic-rename-then-continue-resolves-the-stored-feature-branch-not-the-task-branch",
+      issueTitle: "Event-driven CI continuation",
+      seed: { ...FEATURE_INTEGRATION_PENDING_STATE, status: "suspended", subphase: "idle", active_branch: TASK_BRANCH, feature_branch: FEATURE_BRANCH },
+      command: "continue",
       closedPrs: [{ number: 105, html_url: "pr105", merged_at: "2026-11-01T00:00:00Z" }],
       expectsShortCircuit: true
     },
@@ -848,27 +882,34 @@ describe("Lot 1 — a feature PR is never opened twice for the same epic", () =>
       closedPrs: [],
       expectsShortCircuit: false
     }
-  ])("$id", async ({ issueTitle, closedPrs, expectsShortCircuit }) => {
-    const store = await seedState(FEATURE_INTEGRATION_PENDING_STATE);
+  ] as ReadonlyArray<{
+    readonly id: string;
+    readonly issueTitle: string;
+    readonly seed?: Partial<EpureIssueState>;
+    readonly command?: "approve" | "continue";
+    readonly closedPrs: readonly { number: number; html_url: string; merged_at: string | null }[];
+    readonly expectsShortCircuit: boolean;
+  }>)("$id", async ({ issueTitle, seed, command, closedPrs, expectsShortCircuit }) => {
+    const store = await seedState(seed ?? FEATURE_INTEGRATION_PENDING_STATE);
     const router = declareImplementationFlow(createGitHubMockRouter(), "success", { taskPr: false, featurePr: false })
       .on("GET", `${R}/issues/${ISSUE}`, json({ number: ISSUE, title: issueTitle, body: "- [ ] Ship it", state: "open" }))
       .on("GET", /\/pulls\?state=closed&head=/, (req) =>
         json(req.path.includes(encodeURIComponent(`${OWNER}:${FEATURE_BRANCH}`)) ? closedPrs : [])
       );
 
-    await run(router, store, { command: "approve", actor: "maintainer", issueNumber: ISSUE, commentId: 900 });
-    const posted = router.requests.filter((r) => r.method === "POST" && r.path === `${R}/issues/${ISSUE}/comments`);
+    await run(router, store, { command: command ?? "approve", actor: "maintainer", issueNumber: ISSUE, commentId: 900 });
     const after = await readState(store);
 
     expect(router.unmatched).toEqual([]);
     expect(router.calls("POST", `${R}/pulls`)).toBe(0);
+    expect(router.requests.filter((r) => r.path.includes("event-driven-ci-continuation"))).toEqual([]);
     expect(router.calls("POST", "/v1/chat/completions", "api.openai.com") > 0).toBe(!expectsShortCircuit);
     expect(after.status === "done").toBe(expectsShortCircuit);
-    expect(JSON.stringify(posted.at(-1)?.body).includes("[#105](pr105) de `feature/77-async-ci-feature` est déjà fusionnée dans `dev`")).toBe(expectsShortCircuit);
+    expect(postedComments(router).some((body) => body.includes("[#105](pr105) de `feature/77-async-ci-feature` est déjà fusionnée dans `dev`"))).toBe(expectsShortCircuit);
   });
 });
 
-describe("Lot 1 — a human closing the epic before its feature branch reaches dev cancels the plan with an alert", () => {
+describe("A human closing the epic before its feature branch reaches dev cancels the plan with an alert", () => {
   function declareClosureReads(
     router: GitHubMockRouter,
     params: {
@@ -876,15 +917,21 @@ describe("Lot 1 — a human closing the epic before its feature branch reaches d
       readonly aheadBy: number;
       readonly featurePr: boolean;
       readonly taskPrs: readonly number[];
-      readonly closerPermission?: string;
+      readonly closer?: { readonly permission: string; readonly role_name: string };
+      readonly issueState?: "open" | "closed";
     }
   ): GitHubMockRouter {
     return declareIssueWrites(router)
-      .on("GET", /\/collaborators\/[^/]+\/permission$/, json({ permission: params.closerPermission ?? "write" }))
+      .on("GET", `${R}/issues/${ISSUE}`, json({ number: ISSUE, title: "Async CI Feature", body: "- [ ] Ship it", state: params.issueState ?? "closed" }))
+      .on("GET", /\/collaborators\/[^/]+\/permission$/, json(params.closer ?? { permission: "write", role_name: "write" }))
       .on("GET", /\/pulls\?state=closed&head=/, json(params.mergedFeaturePr ? [{ number: 105, html_url: "pr105", merged_at: "2026-11-01T00:00:00Z" }] : []))
       .on("GET", new RegExp(`/compare/dev\\.\\.\\.${encodeURIComponent(FEATURE_BRANCH)}$`), json({ ahead_by: params.aheadBy, merge_base_commit: { sha: "dev-sha" }, files: [] }))
       .on("GET", /\/pulls\?state=open&head=/, json(params.featurePr ? [{ number: 105, html_url: "pr105", head: { sha: HEAD_SHA } }] : []))
       .on("GET", /\/pulls\?state=open&base=/, json(params.taskPrs.map((n) => ({ number: n, html_url: `pr${n}` }))));
+  }
+
+  function reopenIssue(router: GitHubMockRouter): GitHubMockRouter {
+    return declareIssueReads(router);
   }
 
   it.each([
@@ -901,6 +948,24 @@ describe("Lot 1 — a human closing the epic before its feature branch reaches d
       expectedLines: ["2 commit(s) non intégré(s)", "**Pull Requests ouvertes** : aucune"]
     },
     {
+      id: "ticket-escalation-left-a-task-branch-active-and-the-alert-still-names-the-stored-feature-branch",
+      seed: { status: "suspended", subphase: "idle", active_branch: TASK_BRANCH, feature_branch: FEATURE_BRANCH },
+      reads: { mergedFeaturePr: false, aheadBy: 3, featurePr: true, taskPrs: [106] },
+      expectedLines: ["3 commit(s) non intégré(s)", "[#105](pr105), [#106](pr106)"]
+    },
+    {
+      id: "review-phase-waiting-on-feature-ci-cancels-and-lists-the-feature-pr",
+      seed: { status: "active", phase: "review", subphase: "waiting_feature_ci", active_pr_number: 105 },
+      reads: { mergedFeaturePr: false, aheadBy: 5, featurePr: true, taskPrs: [] },
+      expectedLines: ["5 commit(s) non intégré(s)", "[#105](pr105)"]
+    },
+    {
+      id: "completed-plan-awaiting-the-human-merge-cancels-and-keeps-the-feature-pr-open",
+      seed: { status: "awaiting_human_approval", phase: "completed", subphase: "idle" },
+      reads: { mergedFeaturePr: false, aheadBy: 6, featurePr: true, taskPrs: [] },
+      expectedLines: ["6 commit(s) non intégré(s)", "[#105](pr105)"]
+    },
+    {
       id: "done-with-unmerged-feature-pr-keeps-it-open",
       seed: { status: "done", phase: "completed", subphase: "idle" },
       reads: { mergedFeaturePr: false, aheadBy: 7, featurePr: true, taskPrs: [] },
@@ -911,8 +976,7 @@ describe("Lot 1 — a human closing the epic before its feature branch reaches d
     const router = declareClosureReads(createGitHubMockRouter(), reads);
 
     const res = await run(router, store, { command: "closed", actor: "maintainer", issueNumber: ISSUE, commentId: 0 });
-    const posted = router.requests.filter((r) => r.method === "POST" && r.path === `${R}/issues/${ISSUE}/comments`);
-    const body = (posted.at(-1)?.body as { body: string }).body;
+    const posted = postedComments(router);
     const after = await readState(store);
 
     expect(router.unmatched).toEqual([]);
@@ -920,21 +984,22 @@ describe("Lot 1 — a human closing the epic before its feature branch reaches d
     expect(after.status).toBe("cancelled");
     expect(terminalResidue(after)).toEqual(CLEAN_TERMINAL);
     expect(posted).toHaveLength(1);
-    expect(body).toContain(`\`${FEATURE_BRANCH}\``);
-    expect(body).toContain("rouvrez l'issue #77, puis postez `/epure continue`");
+    expect(posted[0]).toContain(`- **Branche de fonctionnalité** : \`${FEATURE_BRANCH}\``);
+    expect(posted[0]).toContain("rouvrez l'issue #77, puis postez `/epure continue`");
     for (const line of expectedLines) {
-      expect(body).toContain(line);
+      expect(posted[0]).toContain(line);
     }
     expect(router.requests.filter((r) => r.method === "DELETE" || r.method === "PATCH")).toEqual([]);
   });
 
   it.each([
-    { id: "feature-pr-already-merged-into-dev-is-ignored", seed: { status: "done", phase: "completed", subphase: "idle" }, mergedFeaturePr: true },
-    { id: "already-cancelled-plan-is-ignored", seed: { status: "cancelled", subphase: "idle" }, mergedFeaturePr: false }
-  ] as const)("$id", async ({ seed, mergedFeaturePr }) => {
+    { id: "feature-pr-already-merged-into-dev-is-ignored", seed: { status: "done", phase: "completed", subphase: "idle" }, mergedFeaturePr: true, issueState: "closed" },
+    { id: "already-cancelled-plan-is-ignored", seed: { status: "cancelled", subphase: "idle" }, mergedFeaturePr: false, issueState: "closed" },
+    { id: "closure-event-delivered-after-the-issue-was-reopened-is-ignored", seed: { status: "active", subphase: "waiting_ticket_ci" }, mergedFeaturePr: false, issueState: "open" }
+  ] as const)("$id", async ({ seed, mergedFeaturePr, issueState }) => {
     const store = await seedState(seed);
     const before = await readState(store);
-    const router = declareClosureReads(createGitHubMockRouter(), { mergedFeaturePr, aheadBy: 0, featurePr: false, taskPrs: [] });
+    const router = declareClosureReads(createGitHubMockRouter(), { mergedFeaturePr, aheadBy: 0, featurePr: false, taskPrs: [], issueState });
 
     const res = await run(router, store, { command: "closed", actor: "maintainer", issueNumber: ISSUE, commentId: 0 });
 
@@ -945,62 +1010,120 @@ describe("Lot 1 — a human closing the epic before its feature branch reaches d
   });
 
   it.each([
-    { id: "read-closer-of-an-implementation-epic-leaves-the-plan-active", seed: { status: "active", subphase: "waiting_ticket_ci" }, closerPermission: "read", expectsCancel: false },
-    { id: "triage-closer-of-a-grilling-epic-leaves-the-plan-active", seed: { status: "active", phase: "grilling", subphase: "idle" }, closerPermission: "triage", expectsCancel: false },
-    { id: "issue-author-without-repo-access-leaves-the-plan-suspended", seed: { status: "suspended", subphase: "idle" }, closerPermission: "none", expectsCancel: false },
-    { id: "maintain-closer-cancels-the-plan", seed: { status: "active", subphase: "waiting_ticket_ci" }, closerPermission: "maintain", expectsCancel: true },
-    { id: "admin-closer-cancels-the-plan", seed: { status: "active", phase: "grilling", subphase: "idle" }, closerPermission: "admin", expectsCancel: true }
-  ] as const)("$id", async ({ seed, closerPermission, expectsCancel }) => {
+    { id: "maintain-closer-cancels-the-plan", seed: { status: "active", subphase: "waiting_ticket_ci" }, closer: { permission: "write", role_name: "maintain" } },
+    { id: "admin-closer-cancels-a-grilling-plan", seed: { status: "active", phase: "grilling", subphase: "idle" }, closer: { permission: "admin", role_name: "admin" } },
+    { id: "custom-role-based-on-write-cancels-the-plan", seed: { status: "suspended", subphase: "idle" }, closer: { permission: "write", role_name: "release-manager" } }
+  ] as const)("$id", async ({ seed, closer }) => {
     const store = await seedState(seed);
-    const before = await readState(store);
-    const router = declareClosureReads(createGitHubMockRouter(), { mergedFeaturePr: false, aheadBy: 1, featurePr: false, taskPrs: [], closerPermission });
+    const router = declareClosureReads(createGitHubMockRouter(), { mergedFeaturePr: false, aheadBy: 1, featurePr: false, taskPrs: [], closer });
 
     const res = await run(router, store, { command: "closed", actor: "author", issueNumber: ISSUE, commentId: 0 });
-    const posted = router.requests.filter((r) => r.method === "POST" && r.path === `${R}/issues/${ISSUE}/comments`);
-    const body = (posted.at(-1)?.body as { body: string }).body;
 
     expect(router.unmatched).toEqual([]);
-    expect(posted).toHaveLength(1);
-    expect(res.executed).toBe(expectsCancel);
-    if (expectsCancel) {
-      expect((await readState(store)).status).toBe("cancelled");
-    } else {
-      expect(await readState(store)).toEqual(before);
-      expect(body).toContain(`fermée par \`@author\` (permission \`${closerPermission}\`)`);
-      expect(body).toContain("seul un collaborateur `write` ou supérieur");
-    }
+    expect(res.executed).toBe(true);
+    expect(postedComments(router)).toHaveLength(1);
+    expect((await readState(store)).status).toBe("cancelled");
   });
 
   it.each([
-    { id: "grilling-close-cancels-then-continue-reopens-the-interview", phase: "grilling", status: "active", expectedNextStep: "poursuivre l'entretien" },
-    { id: "spec-close-cancels-then-continue-reopens-the-spec-review", phase: "spec", status: "active", expectedNextStep: "réviser la spécification" },
-    { id: "tickets-awaiting-approval-close-cancels-then-continue-awaits-approval-again", phase: "tickets", status: "awaiting_human_approval", expectedNextStep: "Postez `/epure approve`" },
-    { id: "suspended-grilling-close-cancels-then-continue-reopens-the-interview", phase: "grilling", status: "suspended", expectedNextStep: "poursuivre l'entretien" }
-  ] as const)("$id", async ({ phase, status, expectedNextStep }) => {
-    const store = await seedState({ phase, status, subphase: "idle", active_branch: "plan/77-async-ci-feature" });
+    { id: "read-closer-of-an-implementation-epic-leaves-the-plan-active-without-commenting", seed: { status: "active", subphase: "waiting_ticket_ci" }, closer: { permission: "read", role_name: "read" }, expectedPermission: "read" },
+    { id: "triage-closer-of-a-grilling-epic-leaves-the-plan-active-without-commenting", seed: { status: "active", phase: "grilling", subphase: "idle" }, closer: { permission: "read", role_name: "triage" }, expectedPermission: "triage" },
+    { id: "issue-author-without-repo-access-leaves-the-plan-suspended-without-commenting", seed: { status: "suspended", subphase: "idle" }, closer: { permission: "none", role_name: "none" }, expectedPermission: "none" },
+    { id: "custom-role-based-on-read-leaves-the-plan-active-without-commenting", seed: { status: "active", subphase: "waiting_ticket_ci" }, closer: { permission: "read", role_name: "security-auditor" }, expectedPermission: "read" }
+  ] as const)("$id", async ({ seed, closer, expectedPermission }) => {
+    const store = await seedState(seed);
+    const before = await readState(store);
+    const router = declareClosureReads(createGitHubMockRouter(), { mergedFeaturePr: false, aheadBy: 1, featurePr: false, taskPrs: [], closer });
+
+    const res = await run(router, store, { command: "closed", actor: "author", issueNumber: ISSUE, commentId: 0 });
+
+    expect(router.unmatched).toEqual([]);
+    expect(res.executed).toBe(false);
+    expect(res.summary_markdown).toContain(`closer @author has permission ${expectedPermission}`);
+    expect(postedComments(router)).toEqual([]);
+    expect(await readState(store)).toEqual(before);
+  });
+
+  it.each([
+    { id: "grilling-close-cancels-then-continue-reopens-the-interview", phase: "grilling", status: "active", expectedStatus: "active", expectedNextStep: "poursuivre l'entretien", expectsNeedsHuman: false },
+    { id: "spec-close-cancels-then-continue-waits-for-the-spec-review-again", phase: "spec", status: "active", expectedStatus: "awaiting_human_approval", expectedNextStep: "réviser la spécification", expectsNeedsHuman: false },
+    { id: "tickets-awaiting-approval-close-cancels-then-continue-awaits-approval-again", phase: "tickets", status: "awaiting_human_approval", expectedStatus: "awaiting_human_approval", expectedNextStep: "Postez `/epure approve`", expectsNeedsHuman: false },
+    { id: "suspended-grilling-close-cancels-then-continue-stays-suspended-and-names-plan", phase: "grilling", status: "suspended", expectedStatus: "suspended", expectedNextStep: "postez `/epure plan` pour relancer la phase", expectsNeedsHuman: true },
+    { id: "suspended-tickets-close-cancels-then-continue-stays-suspended-and-names-to-tickets", phase: "tickets", status: "suspended", expectedStatus: "suspended", expectedNextStep: "postez `/epure to-tickets` pour relancer la phase", expectsNeedsHuman: true }
+  ] as const)("$id", async ({ phase, status, expectedStatus, expectedNextStep, expectsNeedsHuman }) => {
+    const store = await seedState({ phase, status, subphase: "idle", active_branch: "plan/77-async-ci-feature", plan_branch: "plan/77-async-ci-feature" });
     const router = declareClosureReads(createGitHubMockRouter(), { mergedFeaturePr: false, aheadBy: 0, featurePr: false, taskPrs: [] });
 
     const closed = await run(router, store, { command: "closed", actor: "maintainer", issueNumber: ISSUE, commentId: 0 });
     const afterClose = await readState(store);
-    const closeBody = (router.requests.at(-1)?.body as { body: string }).body;
+    const [closeBody] = postedComments(router);
+    reopenIssue(router);
+    const labelsBeforeResume = router.calls("POST", `${R}/issues/${ISSUE}/labels`);
     const resumed = await run(router, store, { command: "continue", actor: "maintainer", issueNumber: ISSUE, commentId: 900 });
-    const resumeBody = (router.requests.at(-1)?.body as { body: string }).body;
+    const resumeBody = postedComments(router).at(1);
 
     expect(router.unmatched).toEqual([]);
     expect(closed.executed).toBe(true);
-    expect(afterClose).toMatchObject({ status: "cancelled", phase });
+    expect(afterClose).toMatchObject({ status: "cancelled", phase, cancelled_from: { phase, status } });
     expect(terminalResidue(afterClose)).toEqual(CLEAN_TERMINAL);
     expect(closeBody).toContain(`pendant la phase \`${phase}\``);
     expect(closeBody).toContain("rouvrez l'issue #77, puis postez `/epure continue`");
     expect(router.calls("GET", /\/compare\//) + router.calls("GET", /\/pulls\?/)).toBe(0);
     expect(router.requests.filter((r) => r.method === "DELETE" || r.method === "PATCH")).toEqual([]);
     expect(resumed.executed).toBe(true);
-    expect(await readState(store)).toMatchObject({ phase, status: status === "suspended" ? "active" : status, last_processed_comment_id: 900 });
+    expect(await readState(store)).toMatchObject({ phase, status: expectedStatus, cancelled_from: undefined, last_processed_comment_id: 900 });
     expect(resumeBody).toContain(expectedNextStep);
+    expect(router.calls("POST", `${R}/issues/${ISSUE}/labels`) - labelsBeforeResume).toBe(expectsNeedsHuman ? 1 : 0);
+  });
+
+  it("continue-on-a-plan-cancelled-by-closure-while-the-issue-is-still-closed-asks-to-reopen-and-keeps-it-cancelled", async () => {
+    const store = await seedState({ phase: "tickets", status: "awaiting_human_approval", subphase: "idle" });
+    const router = declareClosureReads(createGitHubMockRouter(), { mergedFeaturePr: false, aheadBy: 0, featurePr: false, taskPrs: [] })
+      .on("GET", `${R}/issues/${ISSUE}/comments?per_page=100`, json([]));
+
+    await run(router, store, { command: "closed", actor: "maintainer", issueNumber: ISSUE, commentId: 0 });
+    const resumed = await run(router, store, { command: "continue", actor: "maintainer", issueNumber: ISSUE, commentId: 900 });
+
+    expect(router.unmatched).toEqual([]);
+    expect(resumed.executed).toBe(false);
+    expect(postedComments(router).at(-1)).toContain("rouvrez l'issue #77, puis postez `/epure continue`");
+    expect(await readState(store)).toMatchObject({ status: "cancelled", cancelled_from: { phase: "tickets", status: "awaiting_human_approval" } });
+  });
+
+  it("review-close-cancels-then-reopen-and-continue-resumes-the-feature-integration-run", async () => {
+    const store = await seedState({ phase: "review", status: "active", subphase: "waiting_feature_ci", active_pr_number: 105, feature_branch: FEATURE_BRANCH });
+    const router = declareClosureReads(createGitHubMockRouter(), { mergedFeaturePr: false, aheadBy: 2, featurePr: true, taskPrs: [] });
+
+    const closed = await run(router, store, { command: "closed", actor: "maintainer", issueNumber: ISSUE, commentId: 0 });
+    const afterClose = await readState(store);
+    declareImplementationFlow(router, "success", { taskPr: false, featurePr: true });
+    const resumed = await run(router, store, { command: "continue", actor: "maintainer", issueNumber: ISSUE, commentId: 900 });
+
+    expect(router.unmatched).toEqual([]);
+    expect(closed.executed).toBe(true);
+    expect(afterClose).toMatchObject({ status: "cancelled", cancelled_from: { phase: "review", status: "active" } });
+    expect(resumed.executed).toBe(true);
+    expect((await readState(store)).status).not.toBe("cancelled");
+  });
+
+  it("rate-limit-past-the-budget-during-a-closure-rejects-with-closure-not-processed-and-leaves-the-plan-untouched", async () => {
+    const store = await seedState({ status: "active", subphase: "waiting_ticket_ci" });
+    const before = await readState(store);
+    const router = declareClosureReads(createGitHubMockRouter(), { mergedFeaturePr: false, aheadBy: 1, featurePr: false, taskPrs: [] })
+      .on("GET", `${R}/issues/${ISSUE}`, primaryRateLimit(Math.floor(Date.now() / 1000) + 3600));
+
+    await expect(
+      run(router, store, { command: "closed", actor: "maintainer", issueNumber: ISSUE, commentId: 0 })
+    ).rejects.toBeInstanceOf(ClosureNotProcessedError);
+
+    expect(router.unmatched).toEqual([]);
+    expect(postedComments(router)).toEqual([]);
+    expect(router.calls("POST", `${R}/issues/${ISSUE}/labels`)).toBe(0);
+    expect(await readState(store)).toEqual(before);
   });
 });
 
-describe("Lot 1 — GitHub API rate limits are waited out within 5 minutes, then escalate github_rate_limited", () => {
+describe("GitHub API rate limits are waited out within 5 minutes, then escalate github_rate_limited", () => {
   const nowSeconds = () => Math.floor(Date.now() / 1000);
   const seedWaitingTicket = () =>
     seedState({ status: "active", subphase: "waiting_ticket_ci", active_ticket_number: 78, active_task_branch: TASK_BRANCH });
@@ -1242,7 +1365,7 @@ describe("State ref read and write failures never act on an empty or stale state
   });
 });
 
-describe("Lot 3 — every run logs how many GitHub API requests it sent (#110)", () => {
+describe("Every run logs how many GitHub API requests it sent (#110)", () => {
   it.each([
     { id: "cancel-logs-its-request-count", command: "cancel", commentId: 501 },
     { id: "status-logs-its-request-count", command: "status", commentId: 502 }
