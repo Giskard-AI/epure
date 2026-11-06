@@ -14,9 +14,29 @@ export function parseJobTimeoutMinutes(
 ): number | undefined {
   const lines = workflowYaml.split(/\r?\n/);
   const escapedJobId = jobId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const header = lines.findIndex((line) =>
-    new RegExp(`^\\s+${escapedJobId}:\\s*(#.*)?$`).test(line)
-  );
+  const headerPattern = new RegExp(`^\\s+${escapedJobId}:\\s*(#.*)?$`);
+  const jobsLine = lines.findIndex((line) => /^jobs:\s*(#.*)?$/.test(line));
+  if (jobsLine < 0) {
+    return undefined;
+  }
+  // Only a direct child of the top-level `jobs:` is a job header.
+  let header = -1;
+  let jobIndent: number | undefined;
+  for (let i = jobsLine + 1; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (/^\s*(#.*)?$/.test(line)) {
+      continue;
+    }
+    const indent = indentOf(line);
+    if (indent === 0) {
+      break;
+    }
+    jobIndent ??= indent;
+    if (indent === jobIndent && headerPattern.test(line)) {
+      header = i;
+      break;
+    }
+  }
   if (header < 0) {
     return undefined;
   }

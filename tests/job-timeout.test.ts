@@ -30,7 +30,10 @@ describe("The lease length is the timeout-minutes GitHub enforces on the orchest
     { id: "an-expression-is-unresolvable", yaml: GENERATED.replace(ORCHESTRATE_TIMEOUT_LINE, "    timeout-minutes: ${{ fromJSON(vars.EPURE_TIMEOUT) }}\n    environment:"), expected: undefined },
     { id: "a-job-without-timeout-minutes-has-none", yaml: GENERATED.replace(ORCHESTRATE_TIMEOUT_LINE, "    environment:"), expected: undefined },
     { id: "a-step-level-timeout-minutes-is-not-the-job-timeout", yaml: "jobs:\n  orchestrate-command:\n    runs-on: x\n    steps:\n      - run: echo\n        timeout-minutes: 5\n", expected: undefined },
-    { id: "a-missing-job-has-none", yaml: "jobs:\n  other:\n    timeout-minutes: 5\n", expected: undefined }
+    { id: "a-missing-job-has-none", yaml: "jobs:\n  other:\n    timeout-minutes: 5\n", expected: undefined },
+    { id: "a-same-named-key-nested-in-another-job-is-not-the-job-header", yaml: "jobs:\n  other:\n    outputs:\n      orchestrate-command:\n        timeout-minutes: 5\n  orchestrate-command:\n    timeout-minutes: 45\n", expected: 45 },
+    { id: "a-same-named-key-outside-jobs-is-not-the-job-header", yaml: "env:\n  orchestrate-command:\n    timeout-minutes: 5\njobs:\n  orchestrate-command:\n    runs-on: x\n", expected: undefined },
+    { id: "a-same-named-key-nested-in-another-job-without-the-job-has-none", yaml: "jobs:\n  other:\n    with:\n      orchestrate-command:\n        timeout-minutes: 5\n", expected: undefined }
   ])("$id", ({ yaml, expected }) => {
     expect(parseJobTimeoutMinutes(yaml, "orchestrate-command")).toBe(expected);
   });
