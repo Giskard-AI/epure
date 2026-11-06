@@ -23,6 +23,7 @@ import {
   notFound,
   serverError,
   tooManyRequests,
+  unprocessable,
   type FakeGitDataApi,
   type GitHubMockRouter
 } from "./fixtures/github-mock-router.js";
@@ -505,6 +506,26 @@ describe("commitFilesToBranch — branch writes never force over a concurrent pu
     await expect(commit).rejects.toMatchObject({ branch: FEATURE, attempts: 3 });
     expect(ctx.git.getRef(`refs/heads/${FEATURE}`)).toBe(humanCommits.at(-1));
     expect(ctx.git.readFile(FEATURE, "src/epure.ts")).toBeUndefined();
+  });
+
+  it("ruleset-refusal-on-an-unmoved-branch-fails-once-with-the-ruleset-cause-(#108)", async () => {
+    const ctx = setupRepo();
+    const headBefore = ctx.git.getRef(`refs/heads/${FEATURE}`);
+    ctx.router.on(
+      "PATCH",
+      `${R}/git/refs/heads/${encodeURIComponent(FEATURE)}`,
+      unprocessable("Repository rule violations found\n\nChanges must be made through a pull request.")
+    );
+
+    const commit = ctx.gh.commitFilesToBranch({
+      branch: FEATURE,
+      commitMessage: "docs(plan): integrate",
+      files: [{ path: "src/epure.ts", content: "export const e = 1;\n" }]
+    });
+
+    await expect(commit).rejects.toThrow(/HTTP 422.*did not move.*ruleset/);
+    expect(ctx.router.calls("PATCH", `${R}/git/refs/heads/${encodeURIComponent(FEATURE)}`)).toBe(1);
+    expect(ctx.git.getRef(`refs/heads/${FEATURE}`)).toBe(headBefore);
   });
 });
 

@@ -26,7 +26,7 @@ When modifying `src/llm/**` or `src/orchestrator/**`, mocked unit tests (`npm te
 When modifying `src/orchestrator/github/**`, `src/state/**` or `src/auth/**`, mocked unit tests (`npm test`) are necessary but not sufficient. Validate against a real sandbox repository (name must contain `sandbox`; the App installation must reach only that repo):
 
 1. Run `scripts/wizards/setup-live-github-sandbox-wizard.sh` once, or copy `epure.live-github.example.json` to `epure.live-github.json` (git-ignored), or point `EPURE_LIVE_GITHUB_CONFIG` at a config file, or set `EPURE_LIVE_GITHUB_REPOSITORY`, `EPURE_LIVE_GITHUB_APP_ID`, `EPURE_LIVE_GITHUB_APP_PRIVATE_KEY_PATH` (or `EPURE_LIVE_GITHUB_APP_PRIVATE_KEY`) and optionally `EPURE_LIVE_GITHUB_INSTALLATION_ID`.
-2. Run `npm run test:live:github` (it sets the required opt-in flag `EPURE_LIVE_GITHUB=1`; without it the suite skips). It namespaces everything under `live/<run-id>/`, then deletes refs/branches and closes PRs (best effort, plus namespaces older than 24 h). Never log or print App private keys or tokens.
+2. Run `npm run test:live:github` (it sets the required opt-in flag `EPURE_LIVE_GITHUB=1`; without it the suite skips). The `setup-repo` ruleset case also needs `EPURE_LIVE_GITHUB_ADMIN_TOKEN` (a token with admin on the sandbox, e.g. `$(gh auth token)`); it only creates and deletes a ruleset scoped to the run namespace, and skips without it. It namespaces everything under `live/<run-id>/`, then deletes refs/branches and closes PRs (best effort, plus namespaces older than 24 h). Never log or print App private keys or tokens.
 
 ### Semantic Versioning (`vMAJOR.MINOR.PATCH`)
 

@@ -2,11 +2,15 @@ import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   mintRepositoryInstallationToken,
   revokeGitHubInstallationToken
 } from "../../src/auth/github-app-jwt.js";
+import {
+  buildGitHubRulesetApiPayload,
+  buildGovernanceRulesets
+} from "../../src/bootstrap/setup-repo.js";
 import { syncBranchWithBase } from "../../src/orchestrator/github/branch-sync.js";
 import { createGitHubRateLimitedFetch } from "../../src/orchestrator/github/rate-limit.js";
 import {
@@ -634,6 +638,78 @@ describeLive(
         expect(commit.data.parents.map((p) => p.sha)).toEqual([targetHead, baseHead]);
         expect(await settledMergeable(true)).toMatchObject({ mergeable: true });
         expect((await gh.mergeBranches?.({ base: target, head: base }))?.status).toBe("up_to_date");
+      });
+    });
+
+    // The sandbox App has no `administration` permission: an admin token only creates and deletes a ruleset scoped to this run.
+    const ADMIN_TOKEN = process.env.EPURE_LIVE_GITHUB_ADMIN_TOKEN?.trim() ?? "";
+    (ADMIN_TOKEN ? describe : describe.skip)("setup-repo feature/* ruleset vs EPURE direct writes (#108)", () => {
+      let rulesetId = 0;
+
+      async function adminApi<T>(method: string, path: string, body?: unknown): Promise<ApiResult<T>> {
+        const resp = await fetch(`https://api.github.com${path}`, {
+          method,
+          headers: { Authorization: `Bearer ${ADMIN_TOKEN}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" },
+          ...(body !== undefined ? { body: JSON.stringify(body) } : {})
+        });
+        const text = await resp.text();
+        return { status: resp.status, headers: resp.headers, data: (text ? JSON.parse(text) : null) as T };
+      }
+
+      afterEach(async () => {
+        if (rulesetId) {
+          await adminApi("DELETE", `${R}/rulesets/${rulesetId}`);
+          rulesetId = 0;
+        }
+      });
+
+      it.each([
+        { id: "generated-ruleset-lets-plan-integration-and-a-dev-merge-sync-through", legacy: false },
+        { id: "previous-pull-request-bypass-ruleset-rejects-the-plan-integration-with-422", legacy: true }
+      ])("$id", async ({ legacy }) => {
+        const slug = legacy ? "legacy" : "generated";
+        const feature = await createBranch(`feature/${slug}`, baseSha);
+        const dev = await createBranch(`dev-${slug}`, await commitOnTop([baseSha], `${NS}/${slug}-dev.txt`, "dev moved\n"));
+        const generated = buildGovernanceRulesets({ agentAppName: "agent", releaseAppName: "release" }).featureGovernance;
+        const spec = {
+          ...generated,
+          name: `epure-feature-governance-${RUN_ID}-${slug}`,
+          targetRefs: [`refs/heads/${NS}/feature/*`],
+          ...(legacy
+            ? { requiredLinearHistory: true, bypassActors: generated.bypassActors.map((a) => ({ ...a, mode: "pull_request" as const })) }
+            : {})
+        };
+        const created = await adminApi<{ id: number }>(
+          "POST",
+          `${R}/rulesets`,
+          buildGitHubRulesetApiPayload(spec, { agentAppIntegrationId: Number(cfg.appId) })
+        );
+        expect(created.status).toBe(201);
+        rulesetId = created.data.id;
+
+        const gh = createGitHubRestHelper({ repository: cfg.repository, token });
+        const planIntegration = gh.commitFilesToBranch({
+          branch: feature,
+          commitMessage: "docs(plan): integrate approved plan artifacts",
+          files: [{ path: `${NS}/${slug}-spec.md`, content: "# Spec\n" }]
+        });
+        if (legacy) {
+          await expect(planIntegration).rejects.toThrow(/422/);
+          return;
+        }
+        await planIntegration;
+        const sync = await syncBranchWithBase({
+          gh,
+          targetBranch: feature,
+          baseBranch: dev,
+          issueNumber: 1,
+          llmApiKey: "unused",
+          model: "openai/gpt-test"
+        });
+        const merge = await api<{ parents: unknown[] }>("GET", `${R}/git/commits/${sync.headSha}`);
+
+        expect(sync.status).toBe("merged");
+        expect(merge.data.parents).toHaveLength(2);
       });
     });
 

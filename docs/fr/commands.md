@@ -102,7 +102,7 @@ node dist/cli/setup-repo.mjs \
 | `--repo <owner/name>` | *(Obligatoire)* | Identifiant du dépôt GitHub cible (ex. `my-org/craft-calculator`). |
 | `--target-dir <chemin>` (alias `--dir`, `--repo-root`) | Répertoire courant | Chemin local où sont écrits `.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`, les workflows et les prompts des reviewers (`<reviewers_dir>/*.md`). |
 | `--pinned-sha <sha>` | Dernier SHA EPURE | SHA Git immuable de 40 caractères de `Giskard-AI/epure` utilisé pour épingler les workflows appelants générés. |
-| `--dry-run` | `true` (si `--apply` omis) | Affiche le plan complet de bootstrap sans modifier aucun fichier ni appeler d'API d'écriture. |
+| `--dry-run` | `true` (si `--apply` omis) | Affiche le plan complet de bootstrap sans modifier aucun fichier ni appeler d'API d'écriture. Avec `--apply-github-settings`, lit les Rulesets existants et indique pour chacun `create`, `update` ou `noop`. |
 | `--apply` | `false` | Écrit les fichiers de configuration (`.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`), les workflows appelants et le socle des prompts de reviewers (`<reviewers_dir>/*.md`, par défaut `.agents/reviewers/*.md`). |
 | `--apply-github-settings` | `false` | Applique le mode squash-only et les 3 Repository Rulesets via l'API REST GitHub. |
 | `--no-frontend-reviewers` | `false` | Omet `frontend-reviewer`, `accessibility-reviewer` et `design-reviewer` pour les dépôts sans UI. |
@@ -113,7 +113,7 @@ node dist/cli/setup-repo.mjs \
 | `--planning-model <fournisseur/modèle>` | `anthropic/claude-sonnet-4-20250514` | Définit `models.planning`. |
 | `--implementation-model <fournisseur/modèle>` | `anthropic/claude-sonnet-4-20250514` | Définit `models.implementation`. |
 | `--review-model <fournisseur/modèle>` | `openai/gpt-4.1` | Définit `models.review`. |
-| `--agent-app-id <id>` | Optionnel | ID numérique de `<owner>-epure-agent` ajouté en Bypass Actor PR sur `epure-feature-governance` (`feature/*`). |
+| `--agent-app-id <id>` | Optionnel | ID numérique de `<owner>-epure-agent` ajouté en Bypass Actor (`always`) sur `epure-feature-governance` (`feature/*`), pour qu'EPURE pousse directement les intégrations de plan, synchronisations depuis `dev` et résolutions de conflits. |
 | `--release-app-id <id>` | Optionnel | ID numérique de `<owner>-epure-release` ajouté comme unique Bypass Actor sur `epure-release-immutability` (`main` et `v*`). |
 | `--require-pr-approvals <N>` | `0` | Nombre d'approbations humaines requises sur `dev` (`0` pour compatibilité mainteneur solo ; `>=1` en équipe). |
 | `--json` | `false` | Affiche le résultat structuré complet `SetupRepoResult` au format JSON sur la sortie standard au lieu du résumé Markdown. |

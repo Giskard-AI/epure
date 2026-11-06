@@ -1773,6 +1773,8 @@ export function buildGovernanceRulesets(params: {
     "Zizmor"
   ] as const;
 
+  // EPURE writes feature/* directly (plan integration, dev syncs as merge commits, conflict
+  // resolutions), so the agent App bypasses every rule there and linear history stays off.
   const featureGovernance: RepositoryRulesetSpec = {
     name: "epure-feature-governance",
     enforcement: "active",
@@ -1780,7 +1782,6 @@ export function buildGovernanceRulesets(params: {
     blockDirectPushes: true,
     blockForcePushes: true,
     blockDeletions: true,
-    requiredLinearHistory: true,
     allowedMergeMethods: ["squash"],
     requiredApprovingReviewCount: 0,
     requiredStatusChecks: requiredChecks,
@@ -1789,7 +1790,7 @@ export function buildGovernanceRulesets(params: {
       {
         appRole: "agent",
         appName: params.agentAppName,
-        mode: "pull_request"
+        mode: "always"
       }
     ]
   };
@@ -2311,7 +2312,7 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
   };
 }
 
-function buildGitHubRulesetApiPayload(
+export function buildGitHubRulesetApiPayload(
   spec: RepositoryRulesetSpec,
   appIntegrationIds: {
     readonly agentAppIntegrationId?: number | undefined;
@@ -2381,6 +2382,67 @@ function buildGitHubRulesetApiPayload(
     },
     rules
   };
+}
+
+interface GitHubRulesetShape {
+  readonly conditions?: { readonly ref_name?: { readonly include?: readonly string[] } };
+  readonly rules?: ReadonlyArray<{ readonly type: string }>;
+  readonly bypass_actors?: ReadonlyArray<{
+    readonly actor_id: number | null;
+    readonly actor_type: string;
+    readonly bypass_mode: string;
+  }>;
+}
+
+// Rule parameters are not compared: GitHub fills in defaults the payload never sends.
+function rulesetFingerprint(ruleset: GitHubRulesetShape): string {
+  return JSON.stringify({
+    include: [...(ruleset.conditions?.ref_name?.include ?? [])].sort(),
+    rules: (ruleset.rules ?? []).map((r) => r.type).sort(),
+    bypass: (ruleset.bypass_actors ?? [])
+      .map((a) => `${a.actor_type}:${a.actor_id}:${a.bypass_mode}`)
+      .sort()
+  });
+}
+
+/** Read-only counterpart of `applyGitHubRepositoryGovernance` for `--dry-run`. */
+export async function planGitHubRulesetChanges(
+  input: ApplyGitHubRepositoryGovernanceInput
+): Promise<ReadonlyArray<{ readonly name: string; readonly action: ResourcePlanAction }>> {
+  const fetchFn = input.fetchImpl ?? fetch;
+  const baseUrl = `https://api.github.com/repos/${input.repository.trim()}`;
+  const headers = {
+    Authorization: `Bearer ${input.githubToken.trim()}`,
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28"
+  };
+  const get = async <T>(path: string): Promise<T> => {
+    const resp = await fetchFn(`${baseUrl}${path}`, { method: "GET", headers });
+    if (!resp.ok) {
+      throw new Error(
+        `Failed to read ${path} on ${input.repository} (HTTP ${resp.status}): ${await resp.text()}`
+      );
+    }
+    return (await resp.json()) as T;
+  };
+
+  const existing = await get<Array<{ id: number; name: string }>>("/rulesets");
+  const plan: Array<{ name: string; action: ResourcePlanAction }> = [];
+  for (const spec of input.governanceRulesets) {
+    const match = existing.find((r) => r.name === spec.name);
+    if (!match) {
+      plan.push({ name: spec.name, action: "create" });
+      continue;
+    }
+    const desired = buildGitHubRulesetApiPayload(spec, input) as GitHubRulesetShape;
+    const current = await get<GitHubRulesetShape>(`/rulesets/${match.id}`);
+    plan.push({
+      name: spec.name,
+      action:
+        rulesetFingerprint(current) === rulesetFingerprint(desired) ? "noop" : "update"
+    });
+  }
+  return plan;
 }
 
 export async function applyGitHubRepositoryGovernance(

@@ -123,6 +123,6 @@ git push origin dev
 5. **Politique Squash-Only & 3 Repository Rulesets** :
    - Configure le dépôt en **Squash merge exclusif** (`allow_squash_merge: true`, `allow_merge_commit: false`, `allow_rebase_merge: false`, `delete_branch_on_merge: true`).
    - Installe les 3 Rulesets GitHub :
-     - `epure-feature-governance` (`refs/heads/feature/*`) : `Agent App` en bypass PR pour le squash-merge autonome des PRs `task/* -> feature/*`.
+     - `epure-feature-governance` (`refs/heads/feature/*`) : `Agent App` en bypass `always` pour le squash-merge autonome des PRs `task/* -> feature/*` et les écritures directes d'EPURE (intégration du plan, synchronisations depuis `dev` en commits de merge, résolutions de conflits) ; les humains passent toujours par une PR.
      - `epure-dev-governance` (`refs/heads/dev`) : aucun bypass pour l'`Agent App` (`required_approving_review_count: 0` par défaut pour permettre à un mainteneur solo de merger ses PRs ; configurable via `--require-pr-approvals <N>`).
      - `epure-release-immutability` (`refs/heads/main`, `refs/tags/v*`) : `Release App` comme unique Bypass Actor.

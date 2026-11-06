@@ -923,6 +923,11 @@ export function createGitHubRestHelper(params: {
           return newCommit.data!.sha;
         }
         const movedHead = await this.getDefaultBranchSha(input.branch);
+        if (movedHead === parentCommitSha) {
+          throw new Error(
+            `GitHub refused to update branch '${input.branch}' (HTTP 422) although it did not move: a repository ruleset or branch protection blocks direct pushes by the EPURE App (for feature/*, re-run setup-repo --apply --apply-github-settings).`
+          );
+        }
         if (!movedHead || attempt >= BRANCH_COMMIT_MAX_ATTEMPTS) {
           throw new BranchUpdateConflictError(input.branch, attempt);
         }

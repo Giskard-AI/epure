@@ -43,3 +43,7 @@ Le test pilote de bout en bout d'`EPURE v1.1.0` sur un dépôt consommateur rée
 - Immunité de la chaîne de review face aux modifications du répertoire du roster (`reviewers_dir`) sur une branche de tâche.
 - Roster indépendant de tout IDE par défaut, tout en restant chargeable par un IDE particulier via `--reviewers-dir`.
 - Historique Git linéaire sur `feature/*` et `dev` composé uniquement de commits sémantiques résumant le diff réel.
+
+## Amendement (v3.0.0, #108)
+
+EPURE écrit directement sur `feature/*` (intégration du plan, synchronisation depuis `dev` par commit de merge, résolution de conflits à deux parents). Le bypass `pull_request` de la décision 1.1 rejetait ces écritures (`422 Changes must be made through a pull request`) et `required_linear_history` interdisait les commits de merge. `epure-feature-governance` donne donc à l'`Agent App` un bypass `always` et ne pose plus `required_linear_history` ; les humains restent soumis aux PRs. `dev` garde un historique linéaire.
