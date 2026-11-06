@@ -529,7 +529,7 @@ export function createGitHubRestHelper(params: {
     },
 
     async listBranchPaths(branch: string): Promise<string[]> {
-      return (await readBranchTree(branch)).entries.flatMap((e) =>
+      return (await readCompleteTree(branch)).flatMap((e) =>
         e.type === "blob" && typeof e.path === "string" ? [e.path] : []
       );
     },
@@ -577,176 +577,174 @@ export function createGitHubRestHelper(params: {
       reviewersDir: string = DEFAULT_REVIEWERS_DIR
     ): Promise<Map<string, string>> {
       const filesMap = new Map<string, string>();
-      {
-        const { entries } = await readBranchTree(branch);
-        const candidates = entries.filter((entry) => {
-          if (entry.type !== "blob" || !entry.path || !entry.sha) {
-            return false;
-          }
-          const p = entry.path;
-          if (
-            p.startsWith(".github/") ||
-            p.startsWith(`${reviewersDir}/`) ||
-            p.startsWith(".agents/") ||
-            p.startsWith("docs/") ||
-            p === ".gitignore" ||
-            p === "renovate.json" ||
-            p === "GLOSSARY.md" ||
-            /(?:^|\/)(?:package-lock\.json|pnpm-lock\.yaml|yarn\.lock|Cargo\.lock)$/i.test(
-              p
-            ) ||
-            /\.(?:png|jpe?g|gif|webp|svg|ico|woff2?|ttf|eot|mp3|ogg|wav|mp4|webm|pdf|zip|tar|gz)$/i.test(
-              p
-            )
-          ) {
-            return false;
-          }
-          if (typeof entry.size === "number" && entry.size > 260_000) {
-            return false;
-          }
-          return true;
-        });
-
-        let selectedEntries = candidates;
-        if (candidates.length > 40) {
-          const stopWords = new Set([
-            "read","write","test","tests","spec","from","with","when","that","this","into","only","once","does",
-            "after","before","still","never","drop","wait","waits","full","user","users","data","file","files",
-            "route","routes","check","pass","fail","true","false","null","type","name","code","list","item",
-            "page","view","open","close","keep","make","call","send","load","save","state","store","table",
-            "live","token","tokens","what","build","acceptance","criteria","part","issue",
-            "client","server","socket","request","response","error","errors","value","values","update","updates",
-            "create","delete","remove","existing","current","second","first","other","same","each","more","less"
-          ]);
-          const lowerHint = hintText.toLowerCase();
-          const backtickedTokens = Array.from(
-            hintText.matchAll(/`([A-Za-z0-9_./-]+)`/g)
+      const { entries } = await readBranchTree(branch);
+      const candidates = entries.filter((entry) => {
+        if (entry.type !== "blob" || !entry.path || !entry.sha) {
+          return false;
+        }
+        const p = entry.path;
+        if (
+          p.startsWith(".github/") ||
+          p.startsWith(`${reviewersDir}/`) ||
+          p.startsWith(".agents/") ||
+          p.startsWith("docs/") ||
+          p === ".gitignore" ||
+          p === "renovate.json" ||
+          p === "GLOSSARY.md" ||
+          /(?:^|\/)(?:package-lock\.json|pnpm-lock\.yaml|yarn\.lock|Cargo\.lock)$/i.test(
+            p
+          ) ||
+          /\.(?:png|jpe?g|gif|webp|svg|ico|woff2?|ttf|eot|mp3|ogg|wav|mp4|webm|pdf|zip|tar|gz)$/i.test(
+            p
           )
-            .map((m) => m[1]!.trim().toLowerCase())
-            .filter((t) => t.length >= 3 && !stopWords.has(t));
-          const wordTokens = Array.from(
-            new Set(
-              lowerHint
-                .split(/[^a-z0-9_]+/)
-                .filter((w) => w.length >= 5 && !stopWords.has(w))
-            )
-          );
+        ) {
+          return false;
+        }
+        if (typeof entry.size === "number" && entry.size > 260_000) {
+          return false;
+        }
+        return true;
+      });
 
-          const maxTotalBytes = 380_000;
-          const maxPinnedBytes = Math.floor(maxTotalBytes * 0.35);
-          const normalizedPinnedSet = new Set(
-            pinnedPaths
-              .map((p) => p.trim().replace(/^\/+/, "").toLowerCase())
-              .filter((p) => p.length > 0)
-          );
-          for (const bt of backtickedTokens) {
-            if (bt.includes("/") || /\.[a-z0-9]{1,6}$/i.test(bt)) {
-              normalizedPinnedSet.add(bt.replace(/^\/+/, ""));
-            }
+      let selectedEntries = candidates;
+      if (candidates.length > 40) {
+        const stopWords = new Set([
+          "read","write","test","tests","spec","from","with","when","that","this","into","only","once","does",
+          "after","before","still","never","drop","wait","waits","full","user","users","data","file","files",
+          "route","routes","check","pass","fail","true","false","null","type","name","code","list","item",
+          "page","view","open","close","keep","make","call","send","load","save","state","store","table",
+          "live","token","tokens","what","build","acceptance","criteria","part","issue",
+          "client","server","socket","request","response","error","errors","value","values","update","updates",
+          "create","delete","remove","existing","current","second","first","other","same","each","more","less"
+        ]);
+        const lowerHint = hintText.toLowerCase();
+        const backtickedTokens = Array.from(
+          hintText.matchAll(/`([A-Za-z0-9_./-]+)`/g)
+        )
+          .map((m) => m[1]!.trim().toLowerCase())
+          .filter((t) => t.length >= 3 && !stopWords.has(t));
+        const wordTokens = Array.from(
+          new Set(
+            lowerHint
+              .split(/[^a-z0-9_]+/)
+              .filter((w) => w.length >= 5 && !stopWords.has(w))
+          )
+        );
+
+        const maxTotalBytes = 380_000;
+        const maxPinnedBytes = Math.floor(maxTotalBytes * 0.35);
+        const normalizedPinnedSet = new Set(
+          pinnedPaths
+            .map((p) => p.trim().replace(/^\/+/, "").toLowerCase())
+            .filter((p) => p.length > 0)
+        );
+        for (const bt of backtickedTokens) {
+          if (bt.includes("/") || /\.[a-z0-9]{1,6}$/i.test(bt)) {
+            normalizedPinnedSet.add(bt.replace(/^\/+/, ""));
           }
-
-          const picked: typeof candidates = [];
-          const pickedPathsSet = new Set<string>();
-          let totalBytes = 0;
-          let pinnedBytes = 0;
-
-          // 1. Dynamically pin explicit pinnedPaths, exact backticked paths, and polyglot build manifests (up to 35% byte budget)
-          const isBuildOrEntrypointManifest = (lowerPath: string): boolean =>
-            /(?:^|\/)(?:package\.json|cargo\.toml|pyproject\.toml|go\.mod|makefile|justfile|taskfile\.ya?ml|turbo\.json)$/i.test(
-              lowerPath
-            );
-
-          for (const entry of candidates) {
-            const p = entry.path!;
-            const lowerPath = p.toLowerCase();
-            const isExplicitlyPinned =
-              normalizedPinnedSet.has(lowerPath) ||
-              Array.from(normalizedPinnedSet).some(
-                (pin) => pin.length >= 4 && lowerPath.endsWith(`/${pin}`)
-              );
-            if (!isExplicitlyPinned && !isBuildOrEntrypointManifest(lowerPath)) {
-              continue;
-            }
-            const entrySize = entry.size ?? 4000;
-            if (pinnedBytes + entrySize > maxPinnedBytes) {
-              continue;
-            }
-            picked.push(entry);
-            pickedPathsSet.add(p);
-            pinnedBytes += entrySize;
-            totalBytes += entrySize;
-          }
-
-          const scored = candidates
-            .filter((entry) => !pickedPathsSet.has(entry.path!))
-            .map((entry) => {
-              const p = entry.path!;
-              const lowerPath = p.toLowerCase();
-              const baseName = lowerPath.split("/").pop() ?? lowerPath;
-              const stem = baseName
-                .replace(
-                  /\.(?:e2e\.test|integration\.test|test|spec)\.[a-z0-9]+$/i,
-                  ""
-                )
-                .replace(/\.[a-z0-9]+$/i, "");
-              let score = 0;
-
-              for (const bt of backtickedTokens) {
-                if (
-                  lowerPath === bt ||
-                  lowerPath.endsWith(`/${bt}`) ||
-                  baseName === bt
-                ) {
-                  score += 150;
-                } else if (bt.length >= 4 && stem === bt) {
-                  score += 100;
-                } else if (
-                  bt.length >= 6 &&
-                  (stem.includes(bt) || bt.includes(stem)) &&
-                  stem.length >= 5
-                ) {
-                  score += 70;
-                }
-              }
-              if (
-                stem.length >= 5 &&
-                !stopWords.has(stem) &&
-                lowerHint.includes(stem)
-              ) {
-                score += 60;
-              }
-              for (const w of wordTokens) {
-                if (stem === w) {
-                  score += 45;
-                } else if (w.length >= 6 && stem.includes(w)) {
-                  score += 25;
-                }
-              }
-              if (score > 0 && /(?:\.test\.|__tests__)/.test(lowerPath)) {
-                score += 10;
-              }
-              return { entry, score, size: entry.size ?? 4000 };
-            });
-
-          scored.sort((a, b) => b.score - a.score);
-          for (const s of scored) {
-            if (s.score < 25 || picked.length >= 28) {
-              break;
-            }
-            if (totalBytes + s.size > maxTotalBytes) {
-              continue;
-            }
-            picked.push(s.entry);
-            totalBytes += s.size;
-          }
-          selectedEntries = picked;
         }
 
-        for (const entry of selectedEntries) {
-          const content = entry.sha ? await readBlob(entry.sha) : null;
-          if (entry.path && content !== null) {
-            filesMap.set(entry.path, content);
+        const picked: typeof candidates = [];
+        const pickedPathsSet = new Set<string>();
+        let totalBytes = 0;
+        let pinnedBytes = 0;
+
+        // 1. Dynamically pin explicit pinnedPaths, exact backticked paths, and polyglot build manifests (up to 35% byte budget)
+        const isBuildOrEntrypointManifest = (lowerPath: string): boolean =>
+          /(?:^|\/)(?:package\.json|cargo\.toml|pyproject\.toml|go\.mod|makefile|justfile|taskfile\.ya?ml|turbo\.json)$/i.test(
+            lowerPath
+          );
+
+        for (const entry of candidates) {
+          const p = entry.path!;
+          const lowerPath = p.toLowerCase();
+          const isExplicitlyPinned =
+            normalizedPinnedSet.has(lowerPath) ||
+            Array.from(normalizedPinnedSet).some(
+              (pin) => pin.length >= 4 && lowerPath.endsWith(`/${pin}`)
+            );
+          if (!isExplicitlyPinned && !isBuildOrEntrypointManifest(lowerPath)) {
+            continue;
           }
+          const entrySize = entry.size ?? 4000;
+          if (pinnedBytes + entrySize > maxPinnedBytes) {
+            continue;
+          }
+          picked.push(entry);
+          pickedPathsSet.add(p);
+          pinnedBytes += entrySize;
+          totalBytes += entrySize;
+        }
+
+        const scored = candidates
+          .filter((entry) => !pickedPathsSet.has(entry.path!))
+          .map((entry) => {
+            const p = entry.path!;
+            const lowerPath = p.toLowerCase();
+            const baseName = lowerPath.split("/").pop() ?? lowerPath;
+            const stem = baseName
+              .replace(
+                /\.(?:e2e\.test|integration\.test|test|spec)\.[a-z0-9]+$/i,
+                ""
+              )
+              .replace(/\.[a-z0-9]+$/i, "");
+            let score = 0;
+
+            for (const bt of backtickedTokens) {
+              if (
+                lowerPath === bt ||
+                lowerPath.endsWith(`/${bt}`) ||
+                baseName === bt
+              ) {
+                score += 150;
+              } else if (bt.length >= 4 && stem === bt) {
+                score += 100;
+              } else if (
+                bt.length >= 6 &&
+                (stem.includes(bt) || bt.includes(stem)) &&
+                stem.length >= 5
+              ) {
+                score += 70;
+              }
+            }
+            if (
+              stem.length >= 5 &&
+              !stopWords.has(stem) &&
+              lowerHint.includes(stem)
+            ) {
+              score += 60;
+            }
+            for (const w of wordTokens) {
+              if (stem === w) {
+                score += 45;
+              } else if (w.length >= 6 && stem.includes(w)) {
+                score += 25;
+              }
+            }
+            if (score > 0 && /(?:\.test\.|__tests__)/.test(lowerPath)) {
+              score += 10;
+            }
+            return { entry, score, size: entry.size ?? 4000 };
+          });
+
+        scored.sort((a, b) => b.score - a.score);
+        for (const s of scored) {
+          if (s.score < 25 || picked.length >= 28) {
+            break;
+          }
+          if (totalBytes + s.size > maxTotalBytes) {
+            continue;
+          }
+          picked.push(s.entry);
+          totalBytes += s.size;
+        }
+        selectedEntries = picked;
+      }
+
+      for (const entry of selectedEntries) {
+        const content = entry.sha ? await readBlob(entry.sha) : null;
+        if (entry.path && content !== null) {
+          filesMap.set(entry.path, content);
         }
       }
       return filesMap;
@@ -758,7 +756,7 @@ export function createGitHubRestHelper(params: {
     ): Promise<Map<string, string>> {
       const filesMap = new Map<string, string>();
       const dirPrefix = `${reviewersDir.toLowerCase()}/`;
-      for (const entry of (await readBranchTree(branch)).entries) {
+      for (const entry of await readCompleteTree(branch)) {
         if (entry.type !== "blob" || !entry.path || !entry.sha) {
           continue;
         }
@@ -779,7 +777,7 @@ export function createGitHubRestHelper(params: {
 
     async readDevWorkflowsMap(branch: string): Promise<Map<string, string>> {
       const workflowsMap = new Map<string, string>();
-      for (const entry of (await readBranchTree(branch)).entries) {
+      for (const entry of await readCompleteTree(branch)) {
         if (
           entry.type !== "blob" ||
           !entry.path ||

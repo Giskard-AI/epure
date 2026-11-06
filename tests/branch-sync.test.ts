@@ -5,7 +5,8 @@ import {
 } from "../src/orchestrator/github/branch-sync.js";
 import {
   BranchUpdateConflictError,
-  createGitHubRestHelper
+  createGitHubRestHelper,
+  TruncatedGitTreeError
 } from "../src/orchestrator/github/rest-client.js";
 import { orchestrateIssueCommand } from "../src/orchestrator/issue-orchestrator.js";
 import type {
@@ -32,6 +33,7 @@ const REPO = "acme/demo";
 const FEATURE = "feature/42-sync";
 
 type Escalation = Parameters<EscalateToNeedsHumanFn>[0];
+type RestHelper = ReturnType<typeof createGitHubRestHelper>;
 
 const SUSPENDED: OrchestrateIssueResult = {
   executed: true,
@@ -422,6 +424,21 @@ describe("syncBranchWithBase — conflict reads stay bounded and incomplete data
     expect(escalations[0]?.diagnosticExcerpt).toContain("truncated");
     expect(featureHead(ctx.git)).toBe(headBefore);
     expect(ctx.router.calls("POST", "/v1/chat/completions", "api.openai.com")).toBe(0);
+  });
+
+  it.each<{ id: string; read: (gh: RestHelper) => Promise<unknown> }>([
+    { id: "branch-path-listing", read: (gh) => gh.listBranchPaths("dev") },
+    { id: "dev-workflows-map", read: (gh) => gh.readDevWorkflowsMap("dev") },
+    { id: "trusted-reviewer-roster-and-design", read: (gh) => gh.readTrustedBaseRosterFiles("dev") }
+  ])("$id fails closed on a truncated tree listing", async ({ read }) => {
+    const ctx = setup({
+      shared: { ".github/workflows/ci.yml": "on: push\n", ".agents/reviewers/security.md": "# Security\n", "DESIGN.md": "# Design\n" },
+      ours: {},
+      theirs: {}
+    });
+    ctx.git.truncateTreeListings();
+
+    await expect(read(ctx.gh)).rejects.toBeInstanceOf(TruncatedGitTreeError);
   });
 
   it("a-representative-conflict-fetches-each-tree-once-and-reads-only-the-files-it-needs", async () => {
