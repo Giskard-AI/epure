@@ -1292,7 +1292,8 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
               {
                 id: 499,
                 body: `<!-- epure-plan-manifest:${JSON.stringify(manifestPayload)} -->`,
-                user: { login: "epure-agent[bot]", type: "Bot" },
+                user: { login: "github-actions[bot]", type: "Bot" },
+                performed_via_github_app: { id: 15368 },
                 created_at: "2026-10-26T10:00:00Z"
               },
               ...(mode === "mid_run_cancel"
@@ -3681,7 +3682,8 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
                 {
                   id: 701,
                   body: `<!-- epure-plan-manifest:${JSON.stringify(manifestPayload)} -->`,
-                  user: { login: "epure-agent[bot]", type: "Bot" },
+                  user: { login: "github-actions[bot]", type: "Bot" },
+                  performed_via_github_app: { id: 15368 },
                   created_at: "2026-10-31T10:00:00Z"
                 }
               ]),

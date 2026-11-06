@@ -2,8 +2,10 @@ import {
   PROMPT_INJECTION_IMMUNITY_CLAUSE,
   wrapUntrustedContent
 } from "../../security/prompt-injection-guard.js";
+import type { PlanManifestRecord } from "../../state/git-ref-state.js";
 import { appendEpureCommandsSpoiler } from "../formatting/comments.js";
 import { callLlmJson } from "../llm-helper.js";
+import { embedManifestJson } from "../plan-manifest.js";
 import { EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT } from "../prompts/code-discipline.js";
 import {
   EPIC_CONVERGENCE_AUDIT_SCHEMA,
@@ -180,8 +182,8 @@ export interface SpawnPhase2ConvergenceTicketsParams {
   readonly nextEpicPhase: number;
   readonly existingTickets: readonly TrackedTicketCommentMetadata[];
   readonly auditResult: EpicConvergenceAuditPayload;
-  // Records the manifest digest in the state ref and returns the state mirror markdown.
-  readonly recordPlanManifest: (manifestJson: string) => Promise<string>;
+  // Records the manifest in the state ref and returns the state mirror markdown.
+  readonly recordPlanManifest: (manifest: PlanManifestRecord) => Promise<string>;
 }
 
 export async function spawnPhase2ConvergenceTickets(
@@ -265,13 +267,13 @@ export async function spawnPhase2ConvergenceTickets(
     tickets: combinedTickets
   });
 
-  const planManifestJson = JSON.stringify({
+  const planManifest: PlanManifestRecord = {
     planBranch: params.planBranch,
     specPath: params.specPath,
     epicGoalContract: params.epicGoalContract,
     tickets: combinedTickets
-  });
-  const stateMirrorMarkdown = await params.recordPlanManifest(planManifestJson);
+  };
+  const stateMirrorMarkdown = await params.recordPlanManifest(planManifest);
 
   const phaseComment = appendEpureCommandsSpoiler(
     [
@@ -301,7 +303,7 @@ export async function spawnPhase2ConvergenceTickets(
         (t) => `- **#${t.ticketIssueNumber}** — ${t.title}`
       ),
       "",
-      `<!-- epure-plan-manifest:${planManifestJson} -->`
+      `<!-- epure-plan-manifest:${embedManifestJson(planManifest)} -->`
     ].join("\n"),
     {
       phase: "implementation",

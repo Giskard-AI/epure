@@ -77,7 +77,12 @@ export interface IssueCommentRecord {
   };
   readonly created_at: string;
   readonly author_association?: string | undefined;
-  readonly performed_via_github_app?: { readonly slug?: string } | null | undefined;
+  readonly performed_via_github_app?: GitHubAppRef | null | undefined;
+}
+
+export interface GitHubAppRef {
+  readonly id?: number | undefined;
+  readonly slug?: string | undefined;
 }
 
 export type IssueCommentSummary = IssueCommentRecord;
@@ -102,6 +107,9 @@ export interface IssueMetadata {
     | "reopened"
     | null
     | undefined;
+  readonly user?: { readonly login: string } | undefined;
+  readonly performed_via_github_app?: GitHubAppRef | null | undefined;
+  readonly is_pull_request?: boolean | undefined;
 }
 
 export interface TrackedTicketCommentMetadata {
@@ -205,6 +213,7 @@ export interface GitHubRestHelper {
     parentIssueNumber: number,
     subIssueDatabaseId: number
   ): Promise<void>;
+  listSubIssueNumbers?(parentIssueNumber: number): Promise<number[]>;
   addIssueBlockedByDependency?(
     issueNumber: number,
     blockerDatabaseId: number

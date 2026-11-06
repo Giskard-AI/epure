@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import {
   discoverVerificationProfile,
   type VerificationProfile
@@ -18,11 +17,8 @@ import type {
   LlmToolHandler
 } from "../llm-helper.js";
 import type {
-  EpicGoalContract,
   GeneratedTicketImplementation,
-  GitHubRestHelper,
-  IssueCommentRecord,
-  TrackedTicketCommentMetadata
+  GitHubRestHelper
 } from "../types.js";
 import {
   buildWebExplorationToolsAndHandlers,
@@ -519,77 +515,6 @@ export async function applyTicketImplementationPayload(params: {
   return Array.from(params.ticketChangedFilesMap.entries()).map(
     ([path, content]) => ({ path, content })
   );
-}
-
-export interface ParsedPlanManifestFromComments {
-  readonly planBranch?: string | undefined;
-  readonly specPath?: string | undefined;
-  readonly epicGoalContract?: EpicGoalContract | undefined;
-  readonly tickets: TrackedTicketCommentMetadata[];
-}
-
-export function manifestSha256(manifestJson: string): string {
-  return createHash("sha256").update(manifestJson).digest("hex");
-}
-
-/**
- * A manifest is trusted only when its JSON hashes to the digest EPURE recorded in the state
- * ref when it posted it. States written before the digest existed fall back to Bot authors:
- * neither a visitor nor a write user can comment as a Bot.
- */
-export function isTrustedManifest(
-  comment: IssueCommentRecord,
-  manifestJson: string,
-  trustedSha256: string | undefined
-): boolean {
-  return trustedSha256 !== undefined
-    ? manifestSha256(manifestJson) === trustedSha256
-    : comment.user.type === "Bot";
-}
-
-export function parsePlanManifestFromComments(
-  comments: readonly IssueCommentRecord[],
-  trustedSha256: string | undefined
-): ParsedPlanManifestFromComments | null {
-  for (let i = comments.length - 1; i >= 0; i -= 1) {
-    const comment = comments[i];
-    const match = /<!-- epure-plan-manifest:([\s\S]*?)-->/.exec(comment?.body ?? "");
-    const manifestJson = match?.[1]?.trim();
-    if (comment && manifestJson && isTrustedManifest(comment, manifestJson, trustedSha256)) {
-      try {
-        const parsed = JSON.parse(manifestJson) as {
-          planBranch?: string;
-          specPath?: string;
-          epicGoalContract?: EpicGoalContract;
-          tickets?: TrackedTicketCommentMetadata[];
-        };
-        if (Array.isArray(parsed.tickets) && parsed.tickets.length > 0) {
-          return {
-            ...(typeof parsed.planBranch === "string"
-              ? { planBranch: parsed.planBranch }
-              : {}),
-            ...(typeof parsed.specPath === "string"
-              ? { specPath: parsed.specPath }
-              : {}),
-            ...(parsed.epicGoalContract
-              ? { epicGoalContract: parsed.epicGoalContract }
-              : {}),
-            tickets: parsed.tickets
-          };
-        }
-      } catch {
-        // continue
-      }
-    }
-  }
-  return null;
-}
-
-export function parseTrackedTicketsFromComments(
-  comments: readonly IssueCommentRecord[],
-  trustedSha256: string | undefined
-): TrackedTicketCommentMetadata[] {
-  return parsePlanManifestFromComments(comments, trustedSha256)?.tickets ?? [];
 }
 
 export async function runTestsInIsolatedWorkspace(params: {

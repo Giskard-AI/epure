@@ -105,7 +105,8 @@ async function runTicket(scenario: Scenario) {
         {
           id: 701,
           body: `<!-- epure-plan-manifest:${JSON.stringify(MANIFEST)} -->`,
-          user: { login: "epure-agent[bot]", type: "Bot" },
+          user: { login: "github-actions[bot]", type: "Bot" },
+          performed_via_github_app: { id: 15368 },
           created_at: "2026-10-31T10:00:00Z"
         }
       ]);

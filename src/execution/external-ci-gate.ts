@@ -173,6 +173,7 @@ export type NeedsHumanEscalationReason =
   | "github_rate_limited"
   | "branch_update_conflict"
   | "ambiguous_feature_branch"
+  | "plan_manifest_missing"
   | "internal_error";
 
 /**
@@ -1277,6 +1278,9 @@ export function formatNeedsHumanEscalationComment(
   } else if (input.reason === "ambiguous_feature_branch") {
     reasonHeadline =
       "Several `feature/<N>-*` branches match this plan and no single one has an open or merged PR to `dev` (`ambiguous_feature_branch`) — EPURE does not guess; code-fix budget preserved";
+  } else if (input.reason === "plan_manifest_missing") {
+    reasonHeadline =
+      "The ticket graph EPURE generated for this plan cannot be read (`plan_manifest_missing`) — EPURE does not implement the issue body in its place. Before implementation, `/epure to-tickets` regenerates the graph; once implementation has started, close the plan and open a new one";
   } else if (input.reason === "internal_error") {
     reasonHeadline =
       "Internal orchestrator error — code-fix budget preserved";

@@ -22,10 +22,17 @@ import {
   advanceCommentCursor,
   toTerminalState,
   updateIssueStateWithCas,
-  type GitRefStateStore
+  type GitRefStateStore,
+  type PlanManifestRecord,
+  type SpecManifestRecord
 } from "../../state/git-ref-state.js";
 import { appendEpureCommandsSpoiler } from "../formatting/comments.js";
 import { callLlmJson, callLlmText } from "../llm-helper.js";
+import {
+  embedManifestJson,
+  isSupersedableTicket,
+  type EpureIdentity
+} from "../plan-manifest.js";
 import {
   GENERATED_PLANNING_BUNDLE_SCHEMA,
   GENERATED_SPEC_ARTIFACTS_SCHEMA,
@@ -45,20 +52,7 @@ import {
   type ResolvedPhaseModels,
   type TrackedTicketCommentMetadata
 } from "../types.js";
-import {
-  buildRepoExplorationToolsAndHandlers,
-  isTrustedManifest,
-  manifestSha256,
-  parseTrackedTicketsFromComments
-} from "../workspace/repo-tools.js";
-
-interface StoredSpecManifest {
-  readonly planBranch: string;
-  readonly specPath: string;
-  readonly adrPaths: readonly string[];
-  readonly targetFilesHint: readonly string[];
-  readonly epicGoalContract?: EpicGoalContract | undefined;
-}
+import { buildRepoExplorationToolsAndHandlers } from "../workspace/repo-tools.js";
 
 export function buildParentIssueTicketsTasklistBlock(
   tickets: readonly Pick<
@@ -126,6 +120,7 @@ export async function createLinkedPhaseTicketsOnGitHub(params: {
     readonly acceptanceSectionHeading: string;
     readonly extraHeaderLines?: readonly string[] | undefined;
   }>;
+  readonly onTicketCreated?: ((ticketIssueNumber: number) => void) | undefined;
 }): Promise<TrackedTicketCommentMetadata[]> {
   const indexToIssueNumber = new Map<number, number>();
   const indexToIssueDatabaseId = new Map<number, number>();
@@ -171,6 +166,7 @@ export async function createLinkedPhaseTicketsOnGitHub(params: {
       body: ticketBody,
       labels: ["ready-for-agent"]
     });
+    params.onTicketCreated?.(createdIssue.number);
 
     indexToIssueNumber.set(ticket.index, createdIssue.number);
     if (typeof createdIssue.id === "number") {
@@ -323,53 +319,14 @@ const IMPLEMENTATION_STARTED_PHASES: ReadonlySet<string> = new Set([
   "completed"
 ]);
 
-function parseLatestSpecManifest(
-  comments: readonly IssueCommentRecord[],
-  trustedSha256: string | undefined
-): StoredSpecManifest | null {
-  for (let i = comments.length - 1; i >= 0; i -= 1) {
-    const comment = comments[i];
-    const match = (comment?.body ?? "").match(/<!-- epure-spec-manifest:(\{[\s\S]*?\}) -->/);
-    if (comment && match?.[1] && isTrustedManifest(comment, match[1], trustedSha256)) {
-      try {
-        const parsed = JSON.parse(match[1]) as Partial<StoredSpecManifest>;
-        if (
-          typeof parsed.planBranch === "string" &&
-          typeof parsed.specPath === "string" &&
-          Array.isArray(parsed.adrPaths)
-        ) {
-          return {
-            planBranch: parsed.planBranch,
-            specPath: parsed.specPath,
-            adrPaths: parsed.adrPaths.filter(
-              (p): p is string => typeof p === "string"
-            ),
-            targetFilesHint: Array.isArray(parsed.targetFilesHint)
-              ? parsed.targetFilesHint.filter(
-                  (f): f is string => typeof f === "string"
-                )
-              : [],
-            ...(parsed.epicGoalContract
-              ? { epicGoalContract: parsed.epicGoalContract }
-              : {})
-          };
-        }
-      } catch {
-        // Ignore malformed manifest comments
-      }
-    }
-  }
-  return null;
-}
-
 export async function runGrillAndPlanPhase(params: {
   readonly command: "plan" | "reply" | "to-spec" | "to-tickets";
   readonly currentPhase?: string | undefined;
   readonly currentStatus?: string | undefined;
-  readonly trustedManifestSha256: {
-    readonly plan: string | undefined;
-    readonly spec: string | undefined;
-  };
+  // Read from the state ref (or a legacy comment by EPURE's App), never from other comments.
+  readonly planManifest: PlanManifestRecord | null;
+  readonly specManifest: SpecManifestRecord | null;
+  readonly epureIdentity: EpureIdentity;
   readonly repository: string;
   readonly issueNumber: number;
   readonly commentId: number | undefined;
@@ -389,7 +346,9 @@ export async function runGrillAndPlanPhase(params: {
     command,
     currentPhase,
     currentStatus,
-    trustedManifestSha256,
+    planManifest,
+    specManifest,
+    epureIdentity,
     repository,
     issueNumber,
     commentId,
@@ -408,9 +367,7 @@ export async function runGrillAndPlanPhase(params: {
 
   // Before implementation, `/epure to-tickets` regenerates the graph and closes the tickets it supersedes.
   const supersededTickets =
-    command === "to-tickets"
-      ? parseTrackedTicketsFromComments(allComments, trustedManifestSha256.plan)
-      : [];
+    command === "to-tickets" ? (planManifest?.tickets ?? []) : [];
   const implementationStarted =
     command === "to-tickets" &&
     (IMPLEMENTATION_STARTED_PHASES.has(currentPhase ?? "") ||
@@ -731,9 +688,8 @@ export async function runGrillAndPlanPhase(params: {
   // Phase 2: /epure to-spec (or human revision comment while in phase === "spec")
   if (command === "to-spec" || (command === "reply" && currentPhase === "spec")) {
     const isSpecRevision = command === "reply" && currentPhase === "spec";
-    const existingManifest = parseLatestSpecManifest(allComments, trustedManifestSha256.spec);
     const currentSpecOnBranch = await readRepoFileSafely(
-      existingManifest?.specPath ?? `docs/specs/${planSlug}.md`,
+      specManifest?.specPath ?? `docs/specs/${planSlug}.md`,
       planBranch
     );
 
@@ -1032,7 +988,7 @@ export async function runGrillAndPlanPhase(params: {
       files: planningFiles
     });
 
-    const specManifestPayload: StoredSpecManifest = {
+    const specManifestPayload: SpecManifestRecord = {
       planBranch,
       specPath: specArtifacts.spec_path,
       adrPaths: specArtifacts.adrs.map((a) => a.path),
@@ -1041,7 +997,6 @@ export async function runGrillAndPlanPhase(params: {
         ? { epicGoalContract: specArtifacts.epic_goal_contract }
         : {})
     };
-    const specManifestJson = JSON.stringify(specManifestPayload);
 
     const updatedSpec = await updateIssueStateWithCas({
       issueNumber,
@@ -1052,7 +1007,7 @@ export async function runGrillAndPlanPhase(params: {
         status: "awaiting_human_approval",
         active_branch: planBranch,
         plan_branch: prev.plan_branch ?? planBranch,
-        spec_manifest_sha256: manifestSha256(specManifestJson),
+        spec_manifest: specManifestPayload,
         last_processed_comment_id: advanceCommentCursor(prev, commentId)
       })
     });
@@ -1080,7 +1035,7 @@ export async function runGrillAndPlanPhase(params: {
         "- Pour demander un ajustement ou une correction de la spécification, **répondez directement en commentaire** (sans commande slash).",
         "- Si la spécification est validée, postez **`/epure to-tickets`** pour générer le graphe de tickets TDD (`ready-for-agent`).",
         "",
-        `<!-- epure-spec-manifest:${specManifestJson} -->`
+        `<!-- epure-spec-manifest:${embedManifestJson(specManifestPayload)} -->`
       ].join("\n"),
       {
         phase: "spec",
@@ -1103,9 +1058,7 @@ export async function runGrillAndPlanPhase(params: {
   }
 
   // Phase 3: /epure to-tickets (either from an already-committed spec on planBranch, or shortcut from grilling)
-  const storedSpecManifest = parseLatestSpecManifest(allComments, trustedManifestSha256.spec);
-  const candidateSpecPath =
-    storedSpecManifest?.specPath ?? `docs/specs/${planSlug}.md`;
+  const candidateSpecPath = specManifest?.specPath ?? `docs/specs/${planSlug}.md`;
   const existingSpecOnPlanBranch = await readRepoFileSafely(
     candidateSpecPath,
     planBranch
@@ -1119,7 +1072,7 @@ export async function runGrillAndPlanPhase(params: {
       (await readRepoFileSafely("GLOSSARY.md", "dev")) ??
       "# Glossary\n\n- **Domain Term**: Canonical project definition.\n";
 
-    const adrPathsToRead = storedSpecManifest?.adrPaths ?? [];
+    const adrPathsToRead = specManifest?.adrPaths ?? [];
     const loadedAdrs: Array<{
       path: string;
       content: string;
@@ -1220,8 +1173,8 @@ export async function runGrillAndPlanPhase(params: {
       spec_path: candidateSpecPath,
       spec_markdown: existingSpecOnPlanBranch,
       tickets: ticketDag.tickets,
-      ...(storedSpecManifest?.epicGoalContract
-        ? { epic_goal_contract: storedSpecManifest.epicGoalContract }
+      ...(specManifest?.epicGoalContract
+        ? { epic_goal_contract: specManifest.epicGoalContract }
         : {})
     };
   } else {
@@ -1453,75 +1406,116 @@ export async function runGrillAndPlanPhase(params: {
     "Ticket ready for autonomous EPURE agent execution"
   );
 
+  // The sub-issues also hold the tickets of a regeneration that failed before recording its graph.
+  const supersededCandidates = new Set([
+    ...supersededTickets.map((t) => t.ticketIssueNumber),
+    ...((await gh.listSubIssueNumbers?.(issueNumber)) ?? [])
+  ]);
+  const ticketsToClose: number[] = [];
+  for (const candidate of supersededCandidates) {
+    if (isSupersedableTicket(await gh.getIssue(candidate), issueNumber, epureIdentity)) {
+      ticketsToClose.push(candidate);
+    }
+  }
+  if (planManifest || ticketsToClose.length > 0) {
+    // Approve and continue refuse the old graph from here until the new one is recorded.
+    await updateIssueStateWithCas({
+      issueNumber,
+      store,
+      mutator: (prev) => ({
+        ...prev,
+        plan_manifest: {
+          ...(prev.plan_manifest ?? planManifest ?? { planBranch, tickets: [] }),
+          superseded: true
+        }
+      })
+    });
+  }
   // Closed first: a failure below leaves no second open graph, and the next `/epure to-tickets` retries.
-  for (const old of supersededTickets) {
+  for (const ticketNumber of ticketsToClose) {
     await gh.postIssueComment(
-      old.ticketIssueNumber,
+      ticketNumber,
       `♻️ Ticket remplacé : le graphe de tickets de #${issueNumber} est régénéré par \`/epure to-tickets\` après révision de la spécification. Ce ticket ne sera pas implémenté.`
     );
-    await gh.closeIssue(old.ticketIssueNumber, "not_planned");
+    await gh.closeIssue(ticketNumber, "not_planned");
   }
 
-  const createdTicketsManifest = await createLinkedPhaseTicketsOnGitHub({
-    gh,
-    parentIssueNumber: issueNumber,
-    phase: 1,
-    spoilerContext: {
-      phase: "tickets",
-      status: "awaiting-human"
-    },
-    tickets: bundle.tickets.map((ticket) => {
-      const ticketTouchesUi = ticket.files_to_create_or_update.some((f) =>
-        /\.(?:tsx|jsx|css|scss|html)$/i.test(f)
-      );
-      const enrichedAcceptanceCriteria = [
-        ...ticket.acceptance_criteria,
-        ...(ticketTouchesUi && designGate
-          ? designGate.ux_acceptance_criteria
-          : [])
-      ];
-      return {
-        index: ticket.index,
-        slug: ticket.slug,
-        title: ticket.title,
-        description: ticket.description,
-        acceptanceCriteria: enrichedAcceptanceCriteria,
-        blockedByIndices: ticket.blocked_by_indices,
-        filesToTouch: ticket.files_to_create_or_update,
-        acceptanceSectionHeading: "Acceptance Criteria (TDD & UX)"
-      };
-    })
-  });
+  const createdTicketNumbers: number[] = [];
+  const createAndRecordTicketGraph = async () => {
+    const createdTicketsManifest = await createLinkedPhaseTicketsOnGitHub({
+      gh,
+      parentIssueNumber: issueNumber,
+      phase: 1,
+      onTicketCreated: (ticketNumber) => createdTicketNumbers.push(ticketNumber),
+      spoilerContext: {
+        phase: "tickets",
+        status: "awaiting-human"
+      },
+      tickets: bundle.tickets.map((ticket) => {
+        const ticketTouchesUi = ticket.files_to_create_or_update.some((f) =>
+          /\.(?:tsx|jsx|css|scss|html)$/i.test(f)
+        );
+        const enrichedAcceptanceCriteria = [
+          ...ticket.acceptance_criteria,
+          ...(ticketTouchesUi && designGate
+            ? designGate.ux_acceptance_criteria
+            : [])
+        ];
+        return {
+          index: ticket.index,
+          slug: ticket.slug,
+          title: ticket.title,
+          description: ticket.description,
+          acceptanceCriteria: enrichedAcceptanceCriteria,
+          blockedByIndices: ticket.blocked_by_indices,
+          filesToTouch: ticket.files_to_create_or_update,
+          acceptanceSectionHeading: "Acceptance Criteria (TDD & UX)"
+        };
+      })
+    });
 
-  await upsertParentIssueTicketsTasklist({
-    gh,
-    parentIssueNumber: issueNumber,
-    fallbackBody: issue.body,
-    tickets: createdTicketsManifest
-  });
+    await upsertParentIssueTicketsTasklist({
+      gh,
+      parentIssueNumber: issueNumber,
+      fallbackBody: issue.body,
+      tickets: createdTicketsManifest
+    });
 
-  const planManifestJson = JSON.stringify({
-    planBranch,
-    specPath: bundle.spec_path,
-    ...(bundle.epic_goal_contract
-      ? { epicGoalContract: bundle.epic_goal_contract }
-      : {}),
-    tickets: createdTicketsManifest
-  });
-
-  const updated = await updateIssueStateWithCas({
-    issueNumber,
-    store,
-    mutator: (prev) => ({
-      ...prev,
-      phase: "tickets",
-      status: "awaiting_human_approval",
-      active_branch: planBranch,
-      plan_branch: prev.plan_branch ?? planBranch,
-      plan_manifest_sha256: manifestSha256(planManifestJson),
-      last_processed_comment_id: advanceCommentCursor(prev, commentId)
-    })
-  });
+    const planManifestRecord: PlanManifestRecord = {
+      planBranch,
+      specPath: bundle.spec_path,
+      ...(bundle.epic_goal_contract
+        ? { epicGoalContract: bundle.epic_goal_contract }
+        : {}),
+      tickets: createdTicketsManifest
+    };
+    const updated = await updateIssueStateWithCas({
+      issueNumber,
+      store,
+      mutator: (prev) => ({
+        ...prev,
+        phase: "tickets",
+        status: "awaiting_human_approval",
+        active_branch: planBranch,
+        plan_branch: prev.plan_branch ?? planBranch,
+        plan_manifest: planManifestRecord,
+        last_processed_comment_id: advanceCommentCursor(prev, commentId)
+      })
+    });
+    return { createdTicketsManifest, planManifestRecord, updated };
+  };
+  // A failure or a cancel before the graph is recorded leaves none of the new tickets open.
+  const { createdTicketsManifest, planManifestRecord, updated } =
+    await createAndRecordTicketGraph().catch(async (err: unknown) => {
+      for (const ticketNumber of createdTicketNumbers) {
+        try {
+          await gh.closeIssue(ticketNumber, "not_planned");
+        } catch {
+          // Still a sub-issue of the plan: the next `/epure to-tickets` closes it.
+        }
+      }
+      throw err;
+    });
 
   const ticketLines = createdTicketsManifest.map((t) => {
     const blockedText =
@@ -1552,7 +1546,7 @@ export async function runGrillAndPlanPhase(params: {
       "",
       "👉 **Action requise** : Vérifiez les livrables sur la branche de plan et les tickets ci-dessus, puis postez `/epure approve` sur cette issue pour verrouiller le périmètre et lancer l'implémentation TDD autonome.",
       "",
-      `<!-- epure-plan-manifest:${planManifestJson} -->`
+      `<!-- epure-plan-manifest:${embedManifestJson(planManifestRecord)} -->`
     ].join("\n"),
     {
       phase: "tickets",

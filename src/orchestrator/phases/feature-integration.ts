@@ -33,6 +33,7 @@ import {
 } from "../../security/prompt-injection-guard.js";
 import {
   advanceCommentCursor,
+  formatIssueStateMarker,
   toTerminalState,
   updateIssueStateWithCas,
   withFeatureCodeFixAttempts,
@@ -434,7 +435,7 @@ export async function runFeatureIntegrationPhase(
         })
       });
       const asyncFeatureSummary = [
-        `<!-- epure-state:${JSON.stringify(updatedWaitingFeature.state)} -->`,
+        formatIssueStateMarker(updatedWaitingFeature.state),
         updatedWaitingFeature.issue_mirror_markdown,
         "",
         `### ⏳ Attente événementielle CI externe (\`waiting_feature_ci\`) — Feature PR #${featurePr.number}`,

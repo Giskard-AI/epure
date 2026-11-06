@@ -25,13 +25,15 @@ import type {
   ResolvedPhaseModels,
   TrackedTicketCommentMetadata
 } from "../src/orchestrator/types.js";
+import { validateTicketIntegrityGuard } from "../src/orchestrator/workspace/repo-tools.js";
 import {
-  manifestSha256,
-  parsePlanManifestFromComments,
-  validateTicketIntegrityGuard
-} from "../src/orchestrator/workspace/repo-tools.js";
+  GITHUB_ACTIONS_APP_ID,
+  embedManifestJson,
+  parsePlanManifestFromComments
+} from "../src/orchestrator/plan-manifest.js";
 import {
   buildIssueStateRefName,
+  type PlanManifestRecord,
   createInMemoryGitRefStateStore,
   updateIssueStateWithCas
 } from "../src/state/git-ref-state.js";
@@ -844,14 +846,14 @@ describe("EPURE Graphe GitHub Natif, Garde-fous d'Intégrité Inter-Tickets et C
       const commentRecord: IssueCommentRecord = {
         id: 1,
         body: commentBody,
-        user: { login: "epure-bot" },
-        created_at: "2026-10-31T00:00:00Z"
+        user: { login: "github-actions[bot]" },
+        created_at: "2026-10-31T00:00:00Z",
+        performed_via_github_app: { id: GITHUB_ACTIONS_APP_ID }
       };
 
-      const manifest = parsePlanManifestFromComments(
-        [commentRecord],
-        manifestSha256(manifestJson)
-      );
+      const manifest = parsePlanManifestFromComments([commentRecord], {
+        appId: GITHUB_ACTIONS_APP_ID
+      });
       expect(manifest?.epicGoalContract).toEqual(sampleContract);
       expect(manifest?.tickets).toHaveLength(1);
     });
@@ -971,7 +973,7 @@ describe("EPURE Graphe GitHub Natif, Garde-fous d'Intégrité Inter-Tickets et C
       const subIssues: Array<{ parent: number; childId: number }> = [];
       const blockedByDeps: Array<{ issue: number; blockerId: number }> = [];
       const postedComments: string[] = [];
-      const recordedManifests: string[] = [];
+      const recordedManifests: PlanManifestRecord[] = [];
       let updatedParentIssueBody = "";
 
       let nextIssueNum = 52;
@@ -1055,16 +1057,17 @@ describe("EPURE Graphe GitHub Natif, Garde-fous d'Intégrité Inter-Tickets et C
           remediation_tickets: phase2Tickets
         },
         nextEpicPhase,
-        recordPlanManifest: async (manifestJson) => {
-          recordedManifests.push(manifestJson);
+        recordPlanManifest: async (manifest) => {
+          recordedManifests.push(manifest);
           return "<!-- state -->";
         },
         gh: mockGh
       });
 
       expect(recordedManifests).toHaveLength(1);
+      expect(recordedManifests[0]?.tickets).toEqual(combined);
       expect(postedComments[0]).toContain(
-        `<!-- epure-plan-manifest:${recordedManifests[0]} -->`
+        `<!-- epure-plan-manifest:${embedManifestJson(recordedManifests[0])} -->`
       );
 
       expect(combined.map((t) => t.ticketIssueNumber)).toEqual(
@@ -1293,7 +1296,8 @@ describe("EPURE Graphe GitHub Natif, Garde-fous d'Intégrité Inter-Tickets et C
               {
                 id: 1,
                 body: manifestComment,
-                user: { login: "epure-agent[bot]", type: "Bot" },
+                user: { login: "github-actions[bot]", type: "Bot" },
+                performed_via_github_app: { id: GITHUB_ACTIONS_APP_ID },
                 created_at: "2026-10-31T00:00:00Z"
               }
             ]),

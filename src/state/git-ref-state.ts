@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import type { EpicGoalContract } from "../orchestrator/prompts/schemas.js";
+import type { TrackedTicketCommentMetadata } from "../orchestrator/types.js";
 
 export type IssueOrchestrationPhase =
   | "idle"
@@ -57,9 +59,26 @@ export interface EpureIssueState {
   // Lease of the run working on an active plan outside a CI wait; a killed run's lease expires at the job timeout.
   readonly claimed_by_run_id?: string | undefined;
   readonly claim_expires_at?: string | undefined;
-  // SHA-256 of the manifest JSON EPURE last posted: any comment can carry a manifest marker, only this one is trusted.
-  readonly plan_manifest_sha256?: string | undefined;
-  readonly spec_manifest_sha256?: string | undefined;
+  // Source of truth for approve, continue and to-tickets: the manifest comments only display it.
+  readonly plan_manifest?: PlanManifestRecord | undefined;
+  readonly spec_manifest?: SpecManifestRecord | undefined;
+}
+
+export interface PlanManifestRecord {
+  readonly planBranch: string;
+  readonly specPath?: string | undefined;
+  readonly epicGoalContract?: EpicGoalContract | undefined;
+  readonly tickets: readonly TrackedTicketCommentMetadata[];
+  // Set before `/epure to-tickets` closes these tickets, cleared when it records the new graph.
+  readonly superseded?: true | undefined;
+}
+
+export interface SpecManifestRecord {
+  readonly planBranch: string;
+  readonly specPath: string;
+  readonly adrPaths: readonly string[];
+  readonly targetFilesHint: readonly string[];
+  readonly epicGoalContract?: EpicGoalContract | undefined;
 }
 
 export interface RunLease {
@@ -356,6 +375,12 @@ export function formatIssueStateMirrorMarkdown(state: EpureIssueState): string {
     `- **Cursor**: \`last_processed_comment_id: ${state.last_processed_comment_id}\``,
     `- **Retries**: \`code_fix_attempts_used: ${state.code_fix_attempts_used}\`, \`transient_retries_used: ${state.transient_retries_used}\``
   ].join("\n");
+}
+
+/** The manifests stay out: they can exceed the comment size limit or contain `-->`. */
+export function formatIssueStateMarker(state: EpureIssueState): string {
+  const { plan_manifest: _plan, spec_manifest: _spec, ...summary } = state;
+  return `<!-- epure-state:${JSON.stringify(summary)} -->`;
 }
 
 function computeDeterministicSha(state: EpureIssueState): string {

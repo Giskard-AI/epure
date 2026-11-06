@@ -15,6 +15,7 @@ import {
 import type {
   CollaboratorPermission,
   GitBlobRef,
+  GitHubAppRef,
   GitHubRestHelper,
   IssueCommentRecord,
   IssueMetadata
@@ -345,6 +346,9 @@ export function createGitHubRestHelper(params: {
         body?: string | null;
         state?: string | null;
         state_reason?: "completed" | "not_planned" | "reopened" | null;
+        user?: { login?: string } | null;
+        performed_via_github_app?: GitHubAppRef | null;
+        pull_request?: unknown;
       }>("GET", `/repos/${owner}/${repo}/issues/${issueNumber}`);
       return {
         ...(typeof data?.id === "number" ? { id: data.id } : {}),
@@ -352,8 +356,29 @@ export function createGitHubRestHelper(params: {
         title: data?.title ?? `Issue #${issueNumber}`,
         body: data?.body ?? "",
         state: data?.state ?? "open",
-        state_reason: data?.state_reason ?? null
+        state_reason: data?.state_reason ?? null,
+        ...(typeof data?.user?.login === "string"
+          ? { user: { login: data.user.login } }
+          : {}),
+        performed_via_github_app: data?.performed_via_github_app ?? null,
+        is_pull_request: data?.pull_request !== undefined && data.pull_request !== null
       };
+    },
+
+    // Only the first page: a plan has far fewer than 100 tickets.
+    async listSubIssueNumbers(parentIssueNumber: number): Promise<number[]> {
+      const { status, data } = await apiRequest<Array<{ number?: number }>>(
+        "GET",
+        `/repos/${owner}/${repo}/issues/${parentIssueNumber}/sub_issues?per_page=100`,
+        undefined,
+        true
+      );
+      if (status === 404 || !Array.isArray(data)) {
+        return [];
+      }
+      return data
+        .map((s) => s.number)
+        .filter((n): n is number => typeof n === "number");
     },
 
     // Oldest first, up to 30 pages (3,000 comments).

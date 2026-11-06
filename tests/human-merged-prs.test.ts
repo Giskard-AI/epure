@@ -54,7 +54,7 @@ function arrange(params: { readonly taskPrMerged: boolean; readonly featurePrMer
     .on("GET", `${R}/issues/${ISSUE}`, json({ number: ISSUE, title: "Human merges", body: "- [ ] Store", state: "open" }))
     .on("GET", `${R}/issues/${TICKET}`, json({ number: TICKET, title: "[Ticket 1] Store", body: "", state: "open" }))
     .on("PATCH", `${R}/issues/${TICKET}`, json({ number: TICKET, state: "closed" }))
-    .on("GET", `${R}/issues/${ISSUE}/comments?per_page=100`, json([{ id: 10, body: `<!-- epure-plan-manifest:${JSON.stringify(MANIFEST)} -->`, user: { login: "epure[bot]", type: "Bot" } }]))
+    .on("GET", `${R}/issues/${ISSUE}/comments?per_page=100`, json([{ id: 10, body: `<!-- epure-plan-manifest:${JSON.stringify(MANIFEST)} -->`, user: { login: "github-actions[bot]", type: "Bot" }, performed_via_github_app: { id: 15368 } }]))
     .on("GET", /\/pulls\?state=open&head=/, json([]))
     .on("GET", /\/pulls\?state=closed&head=/, (req) => {
       if (isHead(req, TASK)) {

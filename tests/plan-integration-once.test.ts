@@ -53,7 +53,7 @@ function arrange() {
   router
     .on("GET", `${R}/issues/${ISSUE}`, json({ number: ISSUE, title: "Plan once", body: "- [ ] Store", state: "open" }))
     .on("GET", `${R}/issues/${TICKET}`, json({ number: TICKET, title: "[Ticket 1] Store", body: "", state: "open" }))
-    .on("GET", `${R}/issues/${ISSUE}/comments?per_page=100`, json([{ id: 10, body: `<!-- epure-plan-manifest:${JSON.stringify(MANIFEST)} -->`, user: { login: "epure[bot]", type: "Bot" } }]))
+    .on("GET", `${R}/issues/${ISSUE}/comments?per_page=100`, json([{ id: 10, body: `<!-- epure-plan-manifest:${JSON.stringify(MANIFEST)} -->`, user: { login: "github-actions[bot]", type: "Bot" }, performed_via_github_app: { id: 15368 } }]))
     .on("GET", /\/pulls\?state=(open|closed)&head=/, json([]))
     .on("GET", /\/labels\/[^/]+$/, json({}))
     .on("POST", /\/issues\/\d+\/labels$/, json([]))

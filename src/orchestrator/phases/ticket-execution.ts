@@ -39,6 +39,7 @@ import {
 import { processPendingIssueCommentsBatch } from "../../state/comment-batch-cursor.js";
 import {
   advanceCommentCursor,
+  formatIssueStateMarker,
   toTerminalState,
   updateIssueStateWithCas,
   withTicketCodeFixAttempts,
@@ -148,7 +149,7 @@ async function checkMidLoopCancellation(params: {
   if (snapshot.state?.status === "cancelled") {
     const cancelMarkdown = appendEpureCommandsSpoiler(
       [
-        `<!-- epure-state:${JSON.stringify(snapshot.state)} -->`,
+        formatIssueStateMarker(snapshot.state),
         "",
         `🛑 Plan #${params.issueNumber} execution halted because status is **cancelled**.`
       ].join("\n"),
@@ -200,7 +201,7 @@ async function checkMidLoopCancellation(params: {
   if (batchResult.cancelled) {
     const cancelMarkdown = appendEpureCommandsSpoiler(
       [
-        `<!-- epure-state:${JSON.stringify(batchResult.state)} -->`,
+        formatIssueStateMarker(batchResult.state),
         "",
         `🛑 Plan #${params.issueNumber} has been **cancelled** mid-run via \`/epure cancel\`. Halting remaining ticket executions.`
       ].join("\n"),
@@ -1472,7 +1473,7 @@ export async function runTicketExecutionLoop(
             })
           });
           const asyncSummary = [
-            `<!-- epure-state:${JSON.stringify(updatedWaiting.state)} -->`,
+            formatIssueStateMarker(updatedWaiting.state),
             updatedWaiting.issue_mirror_markdown,
             "",
             `### ⏳ Attente événementielle CI externe (\`waiting_ticket_ci\`) — Ticket #${ticket.ticketIssueNumber} (PR #${openTaskPr.number})`,

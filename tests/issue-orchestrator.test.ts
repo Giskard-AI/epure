@@ -529,6 +529,18 @@ describe("EPURE v1.1.0 — Real Orchestration Wiring (Q84–Q90, ADR-0026)", () 
             { status: 200 }
           );
         }
+        if (urlStr.endsWith("/issues/17") && method === "GET") {
+          return new Response(
+            JSON.stringify({
+              number: 17,
+              title: "[Ticket 1] Implement core forge engine",
+              body: "Parent Plan: #16\nblocked_by: none",
+              state: "open",
+              performed_via_github_app: { id: 15368 }
+            }),
+            { status: 200 }
+          );
+        }
         if (urlStr.includes("/issues/16/comments") && method === "GET") {
           return new Response(
             JSON.stringify(
@@ -828,7 +840,7 @@ describe("EPURE v1.1.0 — Real Orchestration Wiring (Q84–Q90, ADR-0026)", () 
           store,
           mutator: (prev) => ({
             ...prev,
-            phase: "tickets",
+            phase: "spec",
             status: "awaiting_human_approval",
             active_branch: "plan/16-enclume-astrale"
           })

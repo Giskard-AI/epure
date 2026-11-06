@@ -32,6 +32,7 @@ import {
   activeBudgetScope,
   advanceCommentCursor,
   claimForRun,
+  formatIssueStateMarker,
   formatIssueStateMirrorMarkdown,
   guardTerminalStates,
   isAbandonedCiClaim,
@@ -130,16 +131,20 @@ import {
 } from "./types.js";
 import { resolveJobTimeoutMinutes } from "./job-timeout.js";
 import {
+  GITHUB_ACTIONS_APP_ID,
+  parsePlanManifestFromComments,
+  resolvePlanManifest,
+  resolveSpecManifest,
+  type EpureIdentity
+} from "./plan-manifest.js";
+import {
   applyTicketImplementationPayload,
   buildCompactWorkspaceFilesContext,
   buildRepoExplorationToolsAndHandlers,
   checkIsBrownfieldSubpackageRepo,
   checkIsExistingRepoWorkspace,
   createStagedTicketImplementationBuffer,
-  manifestSha256,
   mergeStagedBufferIntoImplementationPayload,
-  parsePlanManifestFromComments,
-  parseTrackedTicketsFromComments,
   runTestsInIsolatedWorkspace,
   validateTicketIntegrityGuard,
   type BuildCompactWorkspaceFilesContextInput,
@@ -171,7 +176,6 @@ export {
   mergeGlossaryMarkdownAdditively,
   mergeStagedBufferIntoImplementationPayload,
   parsePlanManifestFromComments,
-  parseTrackedTicketsFromComments,
   reconcileAdrsWithLlm,
   redactSecrets,
   renumberCollidingAdrs,
@@ -332,6 +336,9 @@ export async function orchestrateIssueCommand(
         "Missing GitHub authentication: configure EPURE_AGENT_APP_ID + EPURE_AGENT_APP_PRIVATE_KEY (or fallback GITHUB_TOKEN)."
       );
     }
+    const epureIdentity: EpureIdentity = {
+      appId: mintedAppToken ? Number(input.agentAppId) : GITHUB_ACTIONS_APP_ID
+    };
 
     const baseFetch = input.fetchImpl ?? fetch;
     const countedFetch: typeof fetch = (url, init) => {
@@ -895,10 +902,11 @@ export async function orchestrateIssueCommand(
           command: effectiveInput.command,
           currentPhase: currentState?.phase,
           currentStatus: currentState?.status,
-          trustedManifestSha256: {
-            plan: currentState?.plan_manifest_sha256,
-            spec: currentState?.spec_manifest_sha256
-          },
+          planManifest:
+            currentState?.plan_manifest ??
+            parsePlanManifestFromComments(allComments, epureIdentity),
+          specManifest: resolveSpecManifest(currentState, allComments, epureIdentity),
+          epureIdentity,
           repository: effectiveInput.repository,
           issueNumber: effectiveInput.issueNumber,
           commentId: effectiveInput.commentId,
@@ -1235,7 +1243,7 @@ export async function orchestrateIssueCommand(
               });
               const readyMd = appendEpureCommandsSpoiler(
                 [
-                  `<!-- epure-state:${JSON.stringify(updatedReviewReady.state)} -->`,
+                  formatIssueStateMarker(updatedReviewReady.state),
                   updatedReviewReady.issue_mirror_markdown,
                   "",
                   `### ✅ Feature Pull Request prête pour validation humaine — PR #${featurePrNumber}`,
@@ -1496,13 +1504,29 @@ export async function orchestrateIssueCommand(
       effectiveInput.command === "continue"
     ) {
       const phaseModels = requirePhaseModels();
+      const planManifestResolution = resolvePlanManifest({
+        state: currentState,
+        comments: allComments,
+        identity: epureIdentity,
+        epicBody: issue.body
+      });
+      if (planManifestResolution.kind === "missing") {
+        return await escalateSuspension({
+          reason: "plan_manifest_missing",
+          phase:
+            currentState && IMPLEMENTATION_PHASES.has(currentState.phase)
+              ? currentState.phase
+              : "tickets",
+          diagnosticExcerpt: planManifestResolution.reason
+        });
+      }
       if (currentState?.status === "suspended") {
         await gh.removeIssueLabel?.(effectiveInput.issueNumber, "needs-human");
       }
-      const parsedPlanManifest = parsePlanManifestFromComments(
-        allComments,
-        currentState?.plan_manifest_sha256
-      );
+      const parsedPlanManifest =
+        planManifestResolution.kind === "recorded"
+          ? planManifestResolution.manifest
+          : null;
       let ticketsManifest = parsedPlanManifest?.tickets
         ? [...parsedPlanManifest.tickets]
         : [];
@@ -1555,7 +1579,7 @@ export async function orchestrateIssueCommand(
         }
       }
 
-      const planBranchToIntegrate = parsedPlanManifest?.planBranch ?? planBranch;
+      const planBranchToIntegrate = parsedPlanManifest?.planBranch || planBranch;
       const planHeadSha =
         hasExplicitPlanManifest && !existingFeaturePrCheck
           ? await gh.getDefaultBranchSha(planBranchToIntegrate)
@@ -1661,6 +1685,11 @@ export async function orchestrateIssueCommand(
           : "";
 
       const runLeaseMs = await resolveRunLeaseMs();
+      const migratedPlanManifest =
+        planManifestResolution.kind === "recorded" &&
+        planManifestResolution.fromLegacyComment
+          ? planManifestResolution.manifest
+          : undefined;
       const updatedStart = await updateIssueStateWithCas({
         issueNumber: effectiveInput.issueNumber,
         store,
@@ -1700,6 +1729,7 @@ export async function orchestrateIssueCommand(
             feature_branch: prev.feature_branch ?? featureBranch,
             epic_phase: prev.epic_phase ?? 1,
             ...(integratePlan ? { integrated_plan_sha: planHeadSha ?? undefined } : {}),
+            plan_manifest: prev.plan_manifest ?? migratedPlanManifest,
             last_processed_comment_id:
               advanceCommentCursor(prev, effectiveInput.commentId)
           };
@@ -1967,21 +1997,18 @@ export async function orchestrateIssueCommand(
             gh,
             issueNumber: effectiveInput.issueNumber,
             issue,
-            planBranch: parsedPlanManifest?.planBranch ?? planBranch,
+            planBranch: parsedPlanManifest?.planBranch || planBranch,
             specPath: effectiveSpecPath,
             epicGoalContract,
             nextEpicPhase,
             existingTickets: ticketsManifest,
             auditResult: convergenceAudit,
-            recordPlanManifest: async (manifestJson) =>
+            recordPlanManifest: async (manifest) =>
               (
                 await updateIssueStateWithCas({
                   issueNumber: effectiveInput.issueNumber,
                   store,
-                  mutator: (prev) => ({
-                    ...prev,
-                    plan_manifest_sha256: manifestSha256(manifestJson)
-                  })
+                  mutator: (prev) => ({ ...prev, plan_manifest: manifest })
                 })
               ).issue_mirror_markdown
           });
