@@ -63,7 +63,6 @@ async function run(): Promise<void> {
   ).trim();
   const model = (process.env.INPUT_MODEL ?? "").trim();
   const triggerHeadSha = (process.env.INPUT_TRIGGER_HEAD_SHA ?? "").trim();
-  const triggerBranch = (process.env.INPUT_TRIGGER_BRANCH ?? "").trim();
   const asyncCiContinuation =
     (process.env.INPUT_ASYNC_CI_CONTINUATION ?? "").trim().toLowerCase() ===
     "true";
@@ -90,7 +89,6 @@ async function run(): Promise<void> {
       llmApiKey,
       model: model || undefined,
       ...(triggerHeadSha ? { triggerHeadSha } : {}),
-      ...(triggerBranch ? { triggerBranch } : {}),
       ...(asyncCiContinuation ? { asyncCiContinuation } : {}),
       runId
     });

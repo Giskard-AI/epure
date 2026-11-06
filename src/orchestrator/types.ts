@@ -147,7 +147,6 @@ export interface OrchestrateIssueInput {
     | undefined;
   readonly asyncCiContinuation?: boolean | undefined;
   readonly triggerHeadSha?: string | undefined;
-  readonly triggerBranch?: string | undefined;
   // Identifies this run in the plan's lease (`claimed_by_run_id`); a random id when absent.
   readonly runId?: string | undefined;
 }

@@ -211,6 +211,7 @@ describe("1. Dry-run simulation & guided application (planAndApplyRepoSetup)", (
     { id: "listens-to-issues-closed-events", expected: "  issues:\n    types: [closed]\n" },
     { id: "checks-the-closer-permission-in-a-job-without-secrets", expected: "  authorize-closure:\n    name: \"Authorize Issue Closure\"\n    if: ${{ github.event_name == 'issues' && github.event.sender.type == 'User' }}\n" },
     { id: "only-a-write-or-admin-closer-is-authorized", expected: "            admin|write) echo \"authorized=true\" >> \"$GITHUB_OUTPUT\" ;;\n" },
+    { id: "a-closer-github-cannot-resolve-is-unauthorized-without-failing-the-job", expected: "--jq .permission || echo none)\"\n" },
     { id: "runs-the-orchestrator-only-for-an-authorized-closer", expected: "needs.authorize-closure.outputs.authorized == 'true'" },
     { id: "runs-workflow_run-continuations-only-for-same-repository-heads", expected: "github.event.workflow_run.head_repository.full_name == github.repository" },
     { id: "closure-runs-in-their-own-concurrency-group", expected: "group: epure-issue-${{ github.event_name == 'issues' && 'closed-' || '' }}${{ github.event.issue.number ||" },
@@ -227,6 +228,24 @@ describe("1. Dry-run simulation & guided application (planAndApplyRepoSetup)", (
         (w) => w.path === ".github/workflows/epure-issue-command.yml"
       );
       expect(issueWorkflow?.content).toContain(expected);
+    } finally {
+      rmSync(tempRepoDir, { recursive: true, force: true });
+    }
+  });
+
+  it("caller issue workflow no longer passes the removed trigger_branch input", () => {
+    const tempRepoDir = mkdtempSync(join(tmpdir(), "epure-setup-closed-"));
+    try {
+      const result = planAndApplyRepoSetup({
+        repository: "acme-org/payments",
+        repoRootDir: tempRepoDir,
+        dryRun: true
+      });
+      const issueWorkflow = result.planned_workflows.find(
+        (w) => w.path === ".github/workflows/epure-issue-command.yml"
+      );
+      expect(issueWorkflow?.content).toContain("trigger_head_sha:");
+      expect(issueWorkflow?.content).not.toContain("trigger_branch");
     } finally {
       rmSync(tempRepoDir, { recursive: true, force: true });
     }

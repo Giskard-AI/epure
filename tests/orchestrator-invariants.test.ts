@@ -34,14 +34,14 @@ const OWNER = REPO.split("/")[0]!;
 
 type Trigger = Pick<
   OrchestrateIssueInput,
-  "issueNumber" | "commentId" | "triggerHeadSha" | "triggerBranch"
+  "issueNumber" | "commentId" | "triggerHeadSha"
 >;
 
 const TRIGGERS = {
   continueWithoutComment: { issueNumber: ISSUE, commentId: 0 },
-  workflowRun: { issueNumber: 0, commentId: 0, triggerHeadSha: HEAD_SHA, triggerBranch: FEATURE_BRANCH },
+  workflowRun: { issueNumber: 0, commentId: 0, triggerHeadSha: HEAD_SHA },
   workflowRunForIssue: { issueNumber: ISSUE, commentId: 0, triggerHeadSha: HEAD_SHA },
-  branchOnly: { issueNumber: 0, commentId: 0, triggerBranch: FEATURE_BRANCH }
+  workflowRunWithoutHeadSha: { issueNumber: 0, commentId: 0 }
 } satisfies Record<string, Trigger>;
 
 async function seedState(
@@ -342,7 +342,7 @@ const SOURCES = {
   "workflow_run-stale-sha-with-issue-number": { ...TRIGGERS.workflowRun, issueNumber: ISSUE, triggerHeadSha: STALE_SHA },
   "workflow_run-with-issue-number": TRIGGERS.workflowRunForIssue,
   "continue-without-comment": TRIGGERS.continueWithoutComment,
-  "branch-only": TRIGGERS.branchOnly
+  "workflow_run-without-head-sha": TRIGGERS.workflowRunWithoutHeadSha
 } satisfies Record<string, Trigger>;
 
 type Expected = "none" | "resume" | "fix_round" | "escalation";
@@ -374,16 +374,16 @@ describe("Automatic entry decision table (status x subphase x event source x bud
     { id: "suspended-waiting_ticket_ci-workflow_run-exhausted-budget-does-nothing", status: "suspended", subphase: "waiting_ticket_ci", source: "workflow_run", attempts: 3, ci: "failure", expected: "none" },
     { id: "suspended-idle-continue-without-comment-fresh-budget-does-nothing", status: "suspended", subphase: "idle", source: "continue-without-comment", attempts: 0, ci: "success", expected: "none" },
     { id: "suspended-waiting_feature_ci-continue-without-comment-does-nothing", status: "suspended", subphase: "waiting_feature_ci", source: "continue-without-comment", attempts: 0, ci: "success", expected: "none" },
-    { id: "suspended-waiting_feature_ci-branch-only-trigger-does-nothing", status: "suspended", subphase: "waiting_feature_ci", source: "branch-only", attempts: 0, ci: "success", expected: "none" },
+    { id: "suspended-waiting_feature_ci-workflow_run-without-head-sha-does-nothing", status: "suspended", subphase: "waiting_feature_ci", source: "workflow_run-without-head-sha", attempts: 0, ci: "success", expected: "none" },
     { id: "awaiting_human_approval-waiting_feature_ci-workflow_run-does-nothing", status: "awaiting_human_approval", subphase: "waiting_feature_ci", source: "workflow_run", attempts: 0, ci: "success", expected: "none" },
     { id: "cancelled-waiting_ticket_ci-workflow_run-does-nothing", status: "cancelled", subphase: "waiting_ticket_ci", source: "workflow_run", attempts: 3, ci: "failure", expected: "none" },
     { id: "cancelled-waiting_feature_ci-continue-without-comment-does-nothing", status: "cancelled", subphase: "waiting_feature_ci", source: "continue-without-comment", attempts: 0, ci: "success", expected: "none" },
     { id: "done-idle-continue-without-comment-does-nothing", status: "done", subphase: "idle", source: "continue-without-comment", attempts: 0, ci: "success", expected: "none" },
     { id: "done-with-leftover-waiting_feature_ci-workflow_run-on-the-old-head-does-nothing", status: "done", subphase: "waiting_feature_ci", source: "workflow_run", attempts: 0, ci: "success", expected: "none" },
-    { id: "done-with-leftover-waiting_feature_ci-branch-only-trigger-does-nothing", status: "done", subphase: "waiting_feature_ci", source: "branch-only", attempts: 0, ci: "success", expected: "none" },
+    { id: "done-with-leftover-waiting_feature_ci-workflow_run-without-head-sha-does-nothing", status: "done", subphase: "waiting_feature_ci", source: "workflow_run-without-head-sha", attempts: 0, ci: "success", expected: "none" },
     { id: "active-idle-workflow_run-does-nothing", status: "active", subphase: "idle", source: "workflow_run", attempts: 0, ci: "failure", expected: "none" },
     { id: "active-idle-continue-without-comment-does-nothing", status: "active", subphase: "idle", source: "continue-without-comment", attempts: 0, ci: "failure", expected: "none" },
-    { id: "active-waiting_ticket_ci-issue-less-trigger-without-head-sha-does-nothing", status: "active", subphase: "waiting_ticket_ci", source: "branch-only", attempts: 0, ci: "success", expected: "none" },
+    { id: "active-waiting_ticket_ci-issue-less-trigger-without-head-sha-does-nothing", status: "active", subphase: "waiting_ticket_ci", source: "workflow_run-without-head-sha", attempts: 0, ci: "success", expected: "none" },
     { id: "active-waiting_ticket_ci-workflow_run-on-stale-sha-does-nothing", status: "active", subphase: "waiting_ticket_ci", source: "workflow_run-stale-sha", attempts: 3, ci: "failure", expected: "none" },
     { id: "active-waiting_feature_ci-workflow_run-on-stale-sha-does-nothing", status: "active", subphase: "waiting_feature_ci", source: "workflow_run-stale-sha", attempts: 0, ci: "success", expected: "none" },
     { id: "active-waiting_ticket_ci-workflow_run-on-stale-sha-for-known-issue-does-nothing", status: "active", subphase: "waiting_ticket_ci", source: "workflow_run-stale-sha-with-issue-number", attempts: 3, ci: "failure", expected: "none" },

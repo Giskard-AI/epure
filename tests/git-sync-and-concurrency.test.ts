@@ -479,16 +479,14 @@ describe("EPURE v1.2 Chantier 1 & 2 — Git Sync, Concurrency & Event-Driven CI 
       {
         id: "ticket-ci-failure-at-exhausted-budget-resolved-from-workflow_run-issueNumber-0-escalates-once-without-sync-or-llm",
         triggerHeadSha: "head-sha-task-203",
-        triggerBranch: "task/203-door-auth",
         expected: { executed: true, status: "suspended", comments: 1, ciPolls: 2 }
       },
       {
         id: "workflow_run-on-dev-with-issueNumber-0-leaves-unrelated-waiting-state-untouched",
         triggerHeadSha: "dev-sha-unrelated",
-        triggerBranch: "dev",
         expected: { executed: false, status: "active", comments: 0, ciPolls: 0 }
       }
-    ])("$id", async ({ triggerHeadSha, triggerBranch, expected }) => {
+    ])("$id", async ({ triggerHeadSha, expected }) => {
       const store = createInMemoryGitRefStateStore();
       await updateIssueStateWithCas({
         issueNumber: 156,
@@ -533,7 +531,6 @@ describe("EPURE v1.2 Chantier 1 & 2 — Git Sync, Concurrency & Event-Driven CI 
         fallbackGithubToken: "ghs_test",
         llmApiKey: "key_test",
         triggerHeadSha,
-        triggerBranch,
         asyncCiContinuation: true,
         stateStore: store,
         fetchImpl: router.fetch
