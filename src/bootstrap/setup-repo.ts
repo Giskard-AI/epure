@@ -1474,6 +1474,16 @@ export function parseAgentsYaml(yamlContent: string): ParsedAgentsConfig {
     hasTargetsKey ||
     parsedTargets.length > 0;
 
+  // A traversal segment must stop the run, not fall back to the default config.
+  if (
+    reviewers_dir !== undefined &&
+    reviewers_dir.split(/[\\/]/).some((s) => s === "." || s === "..")
+  ) {
+    throw new Error(
+      `reviewers_dir '${reviewers_dir}' must not contain '.' or '..' path segments.`
+    );
+  }
+
   const overrides: AgentsConfigOverrides = {
     ...(harness ? { harness } : {}),
     ...(Object.keys(models).length > 0 ? { models } : {}),
