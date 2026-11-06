@@ -67,6 +67,10 @@ async function run(): Promise<void> {
   const asyncCiContinuation =
     (process.env.INPUT_ASYNC_CI_CONTINUATION ?? "").trim().toLowerCase() ===
     "true";
+  // A re-run keeps GITHUB_RUN_ID, so the attempt makes each lease holder distinct.
+  const runId = process.env.GITHUB_RUN_ID
+    ? `${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT ?? "1"}`
+    : undefined;
 
   const secrets = [agentAppPrivateKey, fallbackGithubToken, llmApiKey].filter(
     (s) => s.length >= 4
@@ -87,7 +91,8 @@ async function run(): Promise<void> {
       model: model || undefined,
       ...(triggerHeadSha ? { triggerHeadSha } : {}),
       ...(triggerBranch ? { triggerBranch } : {}),
-      ...(asyncCiContinuation ? { asyncCiContinuation } : {})
+      ...(asyncCiContinuation ? { asyncCiContinuation } : {}),
+      runId
     });
 
     writeGitHubOutputs(

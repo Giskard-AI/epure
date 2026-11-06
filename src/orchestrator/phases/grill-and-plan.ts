@@ -45,7 +45,10 @@ import {
   type ResolvedPhaseModels,
   type TrackedTicketCommentMetadata
 } from "../types.js";
-import { buildRepoExplorationToolsAndHandlers } from "../workspace/repo-tools.js";
+import {
+  buildRepoExplorationToolsAndHandlers,
+  parseTrackedTicketsFromComments
+} from "../workspace/repo-tools.js";
 
 interface StoredSpecManifest {
   readonly planBranch: string;
@@ -388,6 +391,30 @@ export async function runGrillAndPlanPhase(params: {
     onTransientRetriesUsed,
     fetchImpl
   } = params;
+
+  const existingTickets =
+    command === "to-tickets" ? parseTrackedTicketsFromComments(allComments) : [];
+  if (existingTickets.length > 0) {
+    const kept = await updateIssueStateWithCas({
+      issueNumber,
+      store,
+      mutator: (prev) => ({
+        ...prev,
+        last_processed_comment_id: advanceCommentCursor(prev, commentId)
+      })
+    });
+    const body = `⏸️ Le graphe de tickets de #${issueNumber} existe déjà (${existingTickets.map((t) => `#${t.ticketIssueNumber}`).join(", ")}) : \`/epure to-tickets\` n'en crée pas un second. Postez \`/epure approve\` pour lancer ou reprendre l'implémentation.`;
+    await gh.postIssueComment(issueNumber, body);
+    return {
+      executed: false,
+      phase: kept.state.phase,
+      status: kept.state.status,
+      active_branch: kept.state.active_branch,
+      summary_markdown: body,
+      created_ticket_numbers: [],
+      feature_pr_url: ""
+    };
+  }
 
   if (currentStatus === "suspended") {
     await gh.removeIssueLabel?.(issueNumber, "needs-human");

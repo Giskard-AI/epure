@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   mintRepositoryInstallationToken,
   revokeGitHubInstallationToken
@@ -7,7 +8,10 @@ import {
   discoverVerificationProfile,
   type VerificationProfile
 } from "../bootstrap/ci-and-renovate.js";
-import type { ParsedAgentsConfig } from "../bootstrap/setup-repo.js";
+import {
+  DEFAULT_AGENTS_CONFIG,
+  type ParsedAgentsConfig
+} from "../bootstrap/setup-repo.js";
 import {
   discoverExpectedExternalWorkflows,
   evaluateSingleExternalCiSnapshot,
@@ -27,12 +31,16 @@ import {
   createGitHubApiRefStateStore,
   activeBudgetScope,
   advanceCommentCursor,
+  claimForRun,
   formatIssueStateMirrorMarkdown,
   guardTerminalStates,
+  isAbandonedCiClaim,
   isAutomaticallyResumable,
   readActiveCodeFixAttempts,
   readCodeFixAttemptsByTicket,
   readFeatureCodeFixAttempts,
+  readHumanBudgetGrants,
+  readRunLease,
   resumeAfterEscalation,
   StateTransitionAbortedError,
   toTerminalState,
@@ -69,7 +77,10 @@ import {
   slugifyTitle,
   verifyPublisherMergeBoundary
 } from "./github/rest-client.js";
-import { handleEpicClosedByHuman } from "./phases/epic-closure.js";
+import {
+  findExistingFeatureBranch,
+  handleEpicClosedByHuman
+} from "./phases/epic-closure.js";
 import {
   runEpicConvergenceAudit,
   spawnPhase2ConvergenceTickets
@@ -249,7 +260,9 @@ export function resumeCommandForPhase(phase: EpureIssueState["phase"]): string {
       return "/epure to-spec";
     case "tickets":
       return "/epure to-tickets";
-    default:
+    case "implementation":
+    case "review":
+    case "completed":
       return "/epure continue";
   }
 }
@@ -338,6 +351,9 @@ export async function orchestrateIssueCommand(
     const isAutomaticEntry =
       input.command === "continue" && (input.commentId ?? 0) <= 0;
     const triggerHeadSha = input.triggerHeadSha?.trim() || undefined;
+    const runId = input.runId?.trim() || randomUUID();
+    const resumableByCiEvent = (state: EpureIssueState): boolean =>
+      isAutomaticallyResumable(state) || isAbandonedCiClaim(state);
 
     let resolvedIssueNumber = input.issueNumber;
     if (resolvedIssueNumber <= 0 && input.command === "continue") {
@@ -346,8 +362,7 @@ export async function orchestrateIssueCommand(
           ? await rawStore.listIssueStates()
           : [];
       const matched = allStates.find(
-        (s) =>
-          isAutomaticallyResumable(s) && s.active_head_sha === triggerHeadSha
+        (s) => resumableByCiEvent(s) && s.active_head_sha === triggerHeadSha
       );
       if (!matched) {
         return {
@@ -398,6 +413,7 @@ export async function orchestrateIssueCommand(
         readonly ticketNumber: number;
         readonly codeFixAttemptsUsed?: number | undefined;
         readonly humanBudgetGrants?: number | undefined;
+        readonly resumeCommand?: string | undefined;
       }
     ): string =>
       formatNeedsHumanEscalationComment({
@@ -418,9 +434,11 @@ export async function orchestrateIssueCommand(
         diagnosticExcerpt: params.diagnosticExcerpt,
         epicConvergenceDetails: params.epicConvergenceDetails,
         missingModelKeys: params.missingModelKeys,
-        resumeCommand: IMPLEMENTATION_PHASES.has(context.phase)
-          ? undefined
-          : resumeCommandForPhase(context.phase)
+        resumeCommand:
+          context.resumeCommand ??
+          (IMPLEMENTATION_PHASES.has(context.phase)
+            ? undefined
+            : resumeCommandForPhase(context.phase))
       });
     // Single escalation recorder; the catch-all passes its own gh/store when the run's rate-limit budget is spent.
     const recordEscalation = async (
@@ -436,8 +454,14 @@ export async function orchestrateIssueCommand(
         issueNumber: effectiveInput.issueNumber,
         store: via.store,
         mutator: (prev) => {
+          // An approval that fails before its run starts stays approved: `/epure continue` or `/epure approve` re-enters it.
           const phase =
-            params.phase ?? (prev.phase !== "idle" ? prev.phase : commandPhase);
+            params.phase ??
+            (effectiveInput.command === "approve"
+              ? "implementation"
+              : prev.phase !== "idle"
+                ? prev.phase
+                : commandPhase);
           ticketNumber =
             params.ticketNumber ??
             prev.active_ticket_number ??
@@ -482,7 +506,7 @@ export async function orchestrateIssueCommand(
             ticketNumber,
             codeFixAttemptsUsed: suspendedState.code_fix_attempts_used,
             humanBudgetGrants: IMPLEMENTATION_PHASES.has(suspendedState.phase)
-              ? (suspendedState.human_budget_grants ?? 0)
+              ? readHumanBudgetGrants(suspendedState)
               : undefined
           })
         ].join("\n"),
@@ -552,7 +576,7 @@ export async function orchestrateIssueCommand(
           ? "no trigger head SHA"
           : !currentState
             ? "no orchestration state"
-            : !isAutomaticallyResumable(currentState)
+            : !resumableByCiEvent(currentState)
               ? `status \`${currentState.status}\` / subphase \`${currentState.subphase ?? "idle"}\` is not an active wait`
               : triggerHeadSha !== currentState.active_head_sha
                 ? `trigger SHA \`${triggerHeadSha}\` is not the active head SHA`
@@ -570,6 +594,28 @@ export async function orchestrateIssueCommand(
         }
       }
 
+      const heldLease = currentState ? readRunLease(currentState) : null;
+      if (
+        !isAutomaticEntry &&
+        (effectiveInput.command === "continue" ||
+          effectiveInput.command === "approve") &&
+        heldLease &&
+        !heldLease.stale &&
+        heldLease.runId !== runId
+      ) {
+        const body = `⏳ L'exécution EPURE \`${heldLease.runId}\` travaille encore sur le plan #${effectiveInput.issueNumber} (verrou valable jusqu'au ${heldLease.expiresAt}) : \`/epure ${effectiveInput.command}\` est ignoré pour ne pas lancer une seconde exécution en parallèle. Republiez-le une fois cette exécution terminée, ou après l'expiration du verrou si elle a été interrompue.`;
+        await gh.postIssueComment(effectiveInput.issueNumber, body);
+        return {
+          executed: false,
+          phase: currentState?.phase ?? "idle",
+          status: currentState?.status ?? "active",
+          active_branch: currentState?.active_branch ?? "",
+          summary_markdown: body,
+          created_ticket_numbers: [],
+          feature_pr_url: ""
+        };
+      }
+
       // 1. Handle /epure status
       if (effectiveInput.command === "status") {
         const updated = await updateIssueStateWithCas({
@@ -581,8 +627,20 @@ export async function orchestrateIssueCommand(
               advanceCommentCursor(prev, effectiveInput.commentId)
           })
         });
+        const lease = readRunLease(updated.state);
         const statusBody = appendEpureCommandsSpoiler(
-          updated.issue_mirror_markdown,
+          [
+            updated.issue_mirror_markdown,
+            ...(lease === null
+              ? []
+              : lease.stale
+                ? [
+                    `- **Run Lease**: ⚠️ stale — run \`${lease.runId}\` expired at ${lease.expiresAt} without finishing; \`/epure continue\` takes the plan over.`
+                  ]
+                : [
+                    `- **Run Lease**: run \`${lease.runId}\` in progress until ${lease.expiresAt}`
+                  ])
+          ].join("\n"),
           {
             phase: updated.state.phase,
             status: updated.state.status,
@@ -602,6 +660,19 @@ export async function orchestrateIssueCommand(
       }
 
       // 2. Handle /epure cancel
+      if (effectiveInput.command === "cancel" && currentState?.status === "done") {
+        const body = `ℹ️ Le plan #${effectiveInput.issueNumber} est déjà terminé (\`done\`) : \`/epure cancel\` ne le modifie pas.`;
+        await gh.postIssueComment(effectiveInput.issueNumber, body);
+        return {
+          executed: false,
+          phase: currentState.phase,
+          status: currentState.status,
+          active_branch: currentState.active_branch,
+          summary_markdown: body,
+          created_ticket_numbers: [],
+          feature_pr_url: ""
+        };
+      }
       if (effectiveInput.command === "cancel") {
         const updated = await updateIssueStateWithCas({
           issueNumber: effectiveInput.issueNumber,
@@ -658,10 +729,11 @@ export async function orchestrateIssueCommand(
           ? currentState.active_branch
           : `plan/${effectiveInput.issueNumber}-${planSlug}`);
       featureBranch =
-        currentState?.feature_branch ??
-        (currentState?.active_branch.startsWith(`${featureBranch}-`)
-          ? currentState.active_branch
-          : `feature/${effectiveInput.issueNumber}-${planSlug}`);
+        (currentState &&
+        (currentState.feature_branch ||
+          IMPLEMENTATION_PHASES.has(currentState.phase))
+          ? await findExistingFeatureBranch(gh, currentState)
+          : undefined) ?? `feature/${effectiveInput.issueNumber}-${planSlug}`;
 
       // `/epure continue` on a cancelled plan restores the phase and status it was cancelled from.
       if (
@@ -686,9 +758,10 @@ export async function orchestrateIssueCommand(
           issueNumber: effectiveInput.issueNumber,
           store,
           mutator: (prev) => {
+            // A cancellation recorded before `cancelled_from` cannot tell whether the phase had finished: suspended asks for its command again.
             const from: CancelledFrom = prev.cancelled_from ?? {
               phase: prev.phase,
-              status: "active"
+              status: "suspended"
             };
             // A generated spec or ticket graph waits for human review again.
             const status =
@@ -780,6 +853,10 @@ export async function orchestrateIssueCommand(
         return resolvedPhaseModels;
       };
       maxCodeFixAttempts = parsedDevAgentsConfig?.max_code_fix_attempts ?? 3;
+      // The job cannot outlive its timeout, so a lease older than it belongs to a killed run.
+      const runLeaseMs =
+        (parsedDevAgentsConfig?.job_timeout_minutes ??
+          DEFAULT_AGENTS_CONFIG.job_timeout_minutes) * 60_000;
       const reviewersDir =
         parsedDevAgentsConfig?.reviewers_dir ?? DEFAULT_REVIEWERS_DIR;
 
@@ -839,11 +916,64 @@ export async function orchestrateIssueCommand(
       }
     }
 
+      const completeEpicMergedByHuman = async (mergedFeaturePr: {
+        number: number;
+        html_url: string;
+      }): Promise<OrchestrateIssueResult> => {
+        const updatedDone = await updateIssueStateWithCas({
+          issueNumber: effectiveInput.issueNumber,
+          store,
+          mutator: (prev) =>
+            toTerminalState(prev, {
+              phase: "completed",
+              status: "done",
+              active_branch: featureBranch,
+              last_processed_comment_id:
+                advanceCommentCursor(prev, effectiveInput.commentId)
+            })
+        });
+        const mergedComment = appendEpureCommandsSpoiler(
+          [
+            updatedDone.issue_mirror_markdown,
+            "",
+            `La Pull Request de fonctionnalité [#${mergedFeaturePr.number}](${mergedFeaturePr.html_url}) de \`${featureBranch}\` est déjà fusionnée dans \`dev\` : aucune nouvelle Pull Request n'est ouverte.`
+          ].join("\n"),
+          {
+            phase: "completed",
+            status: "completed",
+            issueNumber: effectiveInput.issueNumber
+          }
+        );
+        await gh.postIssueComment(effectiveInput.issueNumber, mergedComment);
+        return {
+          executed: true,
+          phase: updatedDone.state.phase,
+          status: updatedDone.state.status,
+          active_branch: featureBranch,
+          summary_markdown: mergedComment,
+          created_ticket_numbers: [],
+          feature_pr_url: mergedFeaturePr.html_url
+        };
+      };
+      // A human may merge the feature PR while this run is still working: checked before every branch write or PR.
+      const stopIfFeaturePrMerged =
+        async (): Promise<OrchestrateIssueResult | null> => {
+          const merged = await gh.findMergedPullRequestByHead(
+            featureBranch,
+            "dev"
+          );
+          return merged ? await completeEpicMergedByHuman(merged) : null;
+        };
+
       // 4b. Handle /epure sync or /epure rebase (explicit branch synchronization from dev)
       if (
         effectiveInput.command === "sync" ||
         effectiveInput.command === "rebase"
       ) {
+        const mergedBeforeSync = await stopIfFeaturePrMerged();
+        if (mergedBeforeSync) {
+          return mergedBeforeSync;
+        }
         const phaseModels = requirePhaseModels();
         const targetBranch = featureBranch;
 
@@ -970,7 +1100,9 @@ export async function orchestrateIssueCommand(
       // 4c. Handle event-driven CI continuation (workflow_run / /epure continue)
       if (effectiveInput.command === "continue") {
         const isWaitingExternalCi =
-          currentState !== null && isAutomaticallyResumable(currentState);
+          currentState !== null &&
+          (isAutomaticallyResumable(currentState) ||
+            (isAutomaticEntry && isAbandonedCiClaim(currentState)));
         const isManualContinueInImplementation =
           !isWaitingExternalCi &&
           (effectiveInput.commentId ?? 0) > 0 &&
@@ -993,14 +1125,15 @@ export async function orchestrateIssueCommand(
         if (isWaitingExternalCi && currentState) {
           const activeHeadSha =
             currentState.active_head_sha ?? effectiveInput.triggerHeadSha ?? "";
+          // An abandoned claim is still in the subphase its dead run moved the wait to.
+          const waitsOnFeatureCi =
+            currentState.subphase === "waiting_feature_ci" ||
+            currentState.subphase === "remediating_feature";
           const devWorkflowsMapForContinue = await gh.readDevWorkflowsMap("dev");
           const expectedContinueWorkflows = discoverExpectedExternalWorkflows({
             workflowFilesMap: devWorkflowsMapForContinue,
             changedPaths: ["src/index.ts"],
-            targetBranch:
-              currentState.subphase === "waiting_feature_ci"
-                ? "dev"
-                : featureBranch
+            targetBranch: waitsOnFeatureCi ? "dev" : featureBranch
           });
 
           const snapshot = await evaluateSingleExternalCiSnapshot({
@@ -1034,25 +1167,29 @@ export async function orchestrateIssueCommand(
               if (
                 prev.status !== "active" ||
                 prev.subphase !== waitingState.subphase ||
-                prev.active_head_sha !== waitingState.active_head_sha
+                prev.active_head_sha !== waitingState.active_head_sha ||
+                prev.claimed_by_run_id !== waitingState.claimed_by_run_id
               ) {
                 throw new StateTransitionAbortedError(
                   prev,
                   "this CI wait was already claimed or ended by another run"
                 );
               }
-              return {
-                ...prev,
-                subphase:
-                  prev.subphase === "waiting_feature_ci"
+              return claimForRun(
+                {
+                  ...prev,
+                  subphase: waitsOnFeatureCi
                     ? "remediating_feature"
                     : "implementing_ticket"
-              };
+                },
+                runId,
+                runLeaseMs
+              );
             }
           });
 
           if (snapshot.passed && snapshot.aiReviewPassed) {
-            if (currentState.subphase === "waiting_feature_ci") {
+            if (waitsOnFeatureCi) {
               const featurePrNumber = currentState.active_pr_number ?? 0;
               const openFeaturePr = await gh.findOpenPullRequestByHead(
                 featureBranch,
@@ -1383,54 +1520,6 @@ export async function orchestrateIssueCommand(
         featureBranch,
         "dev"
       );
-      const completeEpicMergedByHuman = async (mergedFeaturePr: {
-        number: number;
-        html_url: string;
-      }): Promise<OrchestrateIssueResult> => {
-        const updatedDone = await updateIssueStateWithCas({
-          issueNumber: effectiveInput.issueNumber,
-          store,
-          mutator: (prev) =>
-            toTerminalState(prev, {
-              phase: "completed",
-              status: "done",
-              active_branch: featureBranch,
-              last_processed_comment_id:
-                advanceCommentCursor(prev, effectiveInput.commentId)
-            })
-        });
-        const mergedComment = appendEpureCommandsSpoiler(
-          [
-            updatedDone.issue_mirror_markdown,
-            "",
-            `La Pull Request de fonctionnalité [#${mergedFeaturePr.number}](${mergedFeaturePr.html_url}) de \`${featureBranch}\` est déjà fusionnée dans \`dev\` : aucune nouvelle Pull Request n'est ouverte.`
-          ].join("\n"),
-          {
-            phase: "completed",
-            status: "completed",
-            issueNumber: effectiveInput.issueNumber
-          }
-        );
-        await gh.postIssueComment(effectiveInput.issueNumber, mergedComment);
-        return {
-          executed: true,
-          phase: updatedDone.state.phase,
-          status: updatedDone.state.status,
-          active_branch: featureBranch,
-          summary_markdown: mergedComment,
-          created_ticket_numbers: [],
-          feature_pr_url: mergedFeaturePr.html_url
-        };
-      };
-      // A human may merge the feature PR while this run is still working: checked before every branch write or PR.
-      const stopIfFeaturePrMerged =
-        async (): Promise<OrchestrateIssueResult | null> => {
-          const merged = await gh.findMergedPullRequestByHead(
-            featureBranch,
-            "dev"
-          );
-          return merged ? await completeEpicMergedByHuman(merged) : null;
-        };
       if (!existingFeaturePrCheck) {
         const mergedAtStart = await stopIfFeaturePrMerged();
         if (mergedAtStart) {
@@ -1546,12 +1635,16 @@ export async function orchestrateIssueCommand(
         issueNumber: effectiveInput.issueNumber,
         store,
         mutator: (prev) => ({
-          ...(isAutomaticEntry
-            ? prev
-            : resumeAfterEscalation(prev, {
-                actor: effectiveInput.actor,
-                commentId: effectiveInput.commentId ?? 0
-              })),
+          ...claimForRun(
+            isAutomaticEntry
+              ? prev
+              : resumeAfterEscalation(prev, {
+                  actor: effectiveInput.actor,
+                  commentId: effectiveInput.commentId ?? 0
+                }),
+            runId,
+            runLeaseMs
+          ),
           phase: "implementation",
           status: "active",
           active_branch: featureBranch,
@@ -1563,14 +1656,15 @@ export async function orchestrateIssueCommand(
         })
       });
       const grant = updatedStart.state.human_budget_grant_log?.at(-1);
+      const grantsAfterStart = readHumanBudgetGrants(updatedStart.state);
       if (
         grant &&
-        (updatedStart.state.human_budget_grants ?? 0) >
-          (currentState?.human_budget_grants ?? 0)
+        grantsAfterStart >
+          (currentState ? readHumanBudgetGrants(currentState) : 0)
       ) {
         await gh.postIssueComment(
           effectiveInput.issueNumber,
-          `▶️ Reprise par \`@${grant.actor}\` : budget de remédiation remis à zéro pour ${grant.scope === "feature" ? "la Pull Request de fonctionnalité" : `le ticket #${grant.ticket}`} (\`human_budget_grants\` : ${updatedStart.state.human_budget_grants ?? 0}).`
+          `▶️ Reprise par \`@${grant.actor}\` : budget de remédiation remis à zéro pour ${grant.scope === "feature" ? "la Pull Request de fonctionnalité" : `le ticket #${grant.ticket}`} (\`human_budget_grants\` : ${grantsAfterStart}).`
         );
       }
       const baseSyncGuard = createBaseSyncGuard({
@@ -2023,6 +2117,8 @@ export async function orchestrateIssueCommand(
         if (!(recordErr instanceof GitHubRateLimitError)) {
           throw recordErr;
         }
+        const approveAgain =
+          effectiveInput.command === "approve" ? "/epure approve" : undefined;
         throw new EscalationNotRecordedError(
           effectiveInput.issueNumber,
           escalation.reason,
@@ -2031,9 +2127,10 @@ export async function orchestrateIssueCommand(
             branch: IMPLEMENTATION_PHASES.has(commandPhase)
               ? featureBranch
               : planBranch,
-            ticketNumber: effectiveInput.issueNumber
+            ticketNumber: effectiveInput.issueNumber,
+            resumeCommand: approveAgain
           }),
-          resumeCommandForPhase(commandPhase)
+          approveAgain ?? resumeCommandForPhase(commandPhase)
         );
       }
     }

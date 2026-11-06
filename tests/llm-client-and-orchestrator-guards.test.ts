@@ -2662,6 +2662,9 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
           addedLabels.push(parsed.labels ?? []);
           return new Response(JSON.stringify([]), { status: 200 });
         }
+        if (url.includes("/git/matching-refs/") || url.includes("/pulls?")) {
+          return new Response(JSON.stringify([]), { status: 200 });
+        }
         return new Response(JSON.stringify({}), { status: 200 });
       };
 
@@ -2838,6 +2841,25 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
         );
       }
     );
+
+    it("approve-on-a-ticket-graph-without-an-implementation-model-suspends-in-implementation-and-advertises-approve", async () => {
+      const out = await runModelGatedCommand({
+        command: "approve",
+        commentId: 950,
+        initialState: { phase: "tickets", status: "awaiting_human_approval", active_branch: "plan/123-links" },
+        devAgentsYaml: "models:\n  planning: anthropic/claude-haiku-5-5\n  review: anthropic/claude-haiku-5-5\n"
+      });
+
+      expect(out.stateAfter.state).toMatchObject({
+        phase: "implementation",
+        status: "suspended",
+        last_escalation: { reason: "model_config_missing" }
+      });
+      expect(out.postedComments.at(-1)).toContain("`models.implementation`");
+      expect(out.postedComments.at(-1)).toContain("Postez `/epure continue` (ou `/epure approve`)");
+      expect(out.postedComments.at(-1)).not.toContain("Republiez `/epure to-tickets`");
+      expect(out.llmCalls).toBe(0);
+    });
 
     it.each([
       {

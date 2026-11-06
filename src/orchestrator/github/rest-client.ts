@@ -1114,6 +1114,16 @@ export function createGitHubRestHelper(params: {
       return (open.data ?? []).map((pr) => ({ number: pr.number, html_url: pr.html_url }));
     },
 
+    async listBranchesByPrefix(prefix: string): Promise<string[]> {
+      const { data } = await apiRequest<Array<{ ref: string }>>(
+        "GET",
+        `/repos/${owner}/${repo}/git/matching-refs/heads/${encodeGitHubContentsPath(prefix)}`,
+        undefined,
+        true
+      );
+      return (data ?? []).map((r) => r.ref.replace(/^refs\/heads\//, ""));
+    },
+
     async openPullRequest(input): Promise<{
       number: number;
       html_url: string;

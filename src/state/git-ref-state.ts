@@ -45,7 +45,6 @@ export interface EpureIssueState {
     | Readonly<Record<string, number>>
     | undefined;
   readonly feature_code_fix_attempts_used?: number | undefined;
-  readonly human_budget_grants?: number | undefined;
   readonly last_escalation?: EpureEscalationRecord | undefined;
   readonly last_synced_base_sha?: string | undefined;
   // Head of `plan/*` whose artifacts are already on `feature/*`; integration runs again only when `plan/*` moves.
@@ -55,6 +54,15 @@ export interface EpureIssueState {
   readonly feature_branch?: string | undefined;
   readonly cancelled_from?: CancelledFrom | undefined;
   readonly human_budget_grant_log?: readonly HumanBudgetGrant[] | undefined;
+  // Lease of the run working on an active plan outside a CI wait; a killed run's lease expires at the job timeout.
+  readonly claimed_by_run_id?: string | undefined;
+  readonly claim_expires_at?: string | undefined;
+}
+
+export interface RunLease {
+  readonly runId: string;
+  readonly expiresAt: string;
+  readonly stale: boolean;
 }
 
 export interface CancelledFrom {
@@ -105,8 +113,55 @@ export function toTerminalState(
     active_head_sha: undefined,
     active_pr_number: undefined,
     active_task_branch: undefined,
-    active_ticket_number: undefined
+    active_ticket_number: undefined,
+    claimed_by_run_id: undefined,
+    claim_expires_at: undefined
   };
+}
+
+export function claimForRun(
+  prev: EpureIssueState,
+  runId: string,
+  leaseMs: number
+): EpureIssueState {
+  return {
+    ...prev,
+    claimed_by_run_id: runId,
+    claim_expires_at: new Date(Date.now() + leaseMs).toISOString()
+  };
+}
+
+export function readRunLease(
+  state: EpureIssueState,
+  nowMs: number = Date.now()
+): RunLease | null {
+  if (
+    state.status !== "active" ||
+    isWaitingSubphase(state.subphase) ||
+    !state.claimed_by_run_id ||
+    !state.claim_expires_at
+  ) {
+    return null;
+  }
+  return {
+    runId: state.claimed_by_run_id,
+    expiresAt: state.claim_expires_at,
+    stale: Date.parse(state.claim_expires_at) <= nowMs
+  };
+}
+
+/** A CI wait claimed by a run that died before recording the next step: a CI event on the same head may reclaim it. */
+export function isAbandonedCiClaim(state: EpureIssueState): boolean {
+  return (
+    readRunLease(state)?.stale === true &&
+    state.active_head_sha !== undefined &&
+    (state.subphase === "implementing_ticket" ||
+      state.subphase === "remediating_feature")
+  );
+}
+
+export function readHumanBudgetGrants(state: EpureIssueState): number {
+  return state.human_budget_grant_log?.length ?? 0;
 }
 
 /** The comment cursor only moves forward: a command older than the cursor never rewinds it. */
@@ -220,7 +275,6 @@ export function resumeAfterEscalation(
       : withTicketCodeFixAttempts(prev, escalation.ticket_number, 0);
   return {
     ...granted,
-    human_budget_grants: (prev.human_budget_grants ?? 0) + 1,
     human_budget_grant_log: [
       ...(prev.human_budget_grant_log ?? []),
       {

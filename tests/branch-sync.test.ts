@@ -652,7 +652,7 @@ describe("commitFilesToBranch — branch writes never force over a concurrent pu
 
 const ISSUE = 42;
 
-async function runSyncCommand(ctx: { router: GitHubMockRouter }) {
+async function runSyncCommand(ctx: { router: GitHubMockRouter }, mergedFeaturePrs: readonly object[] = []) {
   const store = createInMemoryGitRefStateStore();
   await updateIssueStateWithCas({
     issueNumber: ISSUE,
@@ -660,6 +660,7 @@ async function runSyncCommand(ctx: { router: GitHubMockRouter }) {
     mutator: (prev) => ({ ...prev, phase: "implementation", status: "active", active_branch: FEATURE })
   });
   ctx.router
+    .on("GET", `${R}/pulls?state=closed&head=${encodeURIComponent(`acme:${FEATURE}`)}&base=dev`, json(mergedFeaturePrs))
     .on("GET", `${R}/issues/${ISSUE}`, json({ number: ISSUE, title: "Sync", body: "", state: "open" }))
     .on("GET", `${R}/issues/${ISSUE}/comments?per_page=100`, json([]))
     .on("GET", /\/labels\/[^/]+$/, json({}))
@@ -708,6 +709,22 @@ describe("/epure sync — a branch that keeps moving escalates branch_update_con
     for (const commit of humanCommits) {
       expect(ctx.git.isAncestor(commit, featureHead(ctx.git))).toBe(true);
     }
+  });
+
+  it("sync-after-the-feature-pr-was-merged-marks-the-plan-done-without-touching-the-feature-branch", async () => {
+    const ctx = setup(CONFLICTING_GLOSSARY);
+    const headBefore = featureHead(ctx.git);
+
+    const { result, state, comments } = await runSyncCommand(ctx, [
+      { number: 90, html_url: "pr90", merged_at: "2026-11-01T00:00:00Z" }
+    ]);
+
+    expect(ctx.router.unmatched).toEqual([]);
+    expect(result.executed).toBe(true);
+    expect(state).toMatchObject({ phase: "completed", status: "done" });
+    expect(featureHead(ctx.git)).toBe(headBefore);
+    expect(ctx.router.calls("POST", `${R}/merges`) + ctx.router.calls("POST", /\/git\/commits$/)).toBe(0);
+    expect(comments).toEqual([expect.stringContaining("est déjà fusionnée dans `dev`")]);
   });
 });
 

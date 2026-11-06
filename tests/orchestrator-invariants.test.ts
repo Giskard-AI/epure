@@ -66,7 +66,7 @@ async function seedState(
 async function run(
   router: GitHubMockRouter,
   store: GitRefStateStore,
-  input: Pick<OrchestrateIssueInput, "command" | "actor"> & Trigger
+  input: Pick<OrchestrateIssueInput, "command" | "actor" | "runId"> & Trigger
 ) {
   return await orchestrateIssueCommand({
     repository: REPO,
@@ -895,7 +895,9 @@ describe("A resume command after budget exhaustion grants one fresh budget and r
 
     expect(router.unmatched).toEqual([]);
     expect(implementationCalls(router)).toBe(expectedImplementationCalls);
-    expect(after.human_budget_grants ?? 0).toBe(expectedGrantLog?.length ?? 0);
+    expect(postedComments(router).at(-1)).toContain(
+      `accordés par un humain** : \`${expectedGrantLog?.length ?? 0}\` (\`human_budget_grants\`)`
+    );
     expect(after.human_budget_grant_log).toEqual(expectedGrantLog);
     expect(resumeNotes).toHaveLength(expectedGrantLog?.length ?? 0);
     expect(after).toMatchObject({
@@ -1477,6 +1479,215 @@ describe("State ref read and write failures never act on an empty or stale state
     expect(router.unmatched).toEqual([]);
     expect(waits.map((ms) => Math.ceil(ms / 1000))).toEqual(expectedWaitsSeconds);
     expect((await store.readRef(STATE_REF)).state).toMatchObject(expected);
+  });
+});
+
+describe("A run lease keeps a second run off a plan until the first one finishes or dies", () => {
+  const FUTURE = "2999-01-01T00:00:00.000Z";
+  const PAST = "2000-01-01T00:00:00.000Z";
+  const claimedBy = (expiresAt: string, subphase: "implementing_ticket" | "remediating_feature") => ({
+    status: "active",
+    subphase,
+    active_ticket_number: ISSUE,
+    active_task_branch: TASK_BRANCH,
+    claimed_by_run_id: "run-a",
+    claim_expires_at: expiresAt
+  }) as const;
+
+  it.each([
+    { id: "manual-continue-while-a-fresh-lease-is-held-is-refused-with-an-explanation", command: "continue" },
+    { id: "manual-approve-while-a-fresh-lease-is-held-is-refused-with-an-explanation", command: "approve" }
+  ] as const)("$id", async ({ command }) => {
+    const store = await seedState(claimedBy(FUTURE, "implementing_ticket"));
+    const before = await readState(store);
+    const router = declareIssueWrites(createGitHubMockRouter());
+
+    const res = await run(router, store, { command, actor: "maintainer", issueNumber: ISSUE, commentId: 900, runId: "run-b" });
+
+    expect(router.unmatched).toEqual([]);
+    expect(res.executed).toBe(false);
+    expect(postedComments(router)).toEqual([
+      expect.stringMatching(new RegExp(`L'exécution EPURE \`run-a\` travaille encore[\\s\\S]*\`/epure ${command}\` est ignoré`))
+    ]);
+    expect(await readState(store)).toEqual(before);
+  });
+
+  it("manual-continue-on-a-stale-lease-takes-the-plan-over", async () => {
+    const store = await seedState({ ...claimedBy(PAST, "implementing_ticket"), active_pr_number: 106 });
+    const router = declareImplementationFlow(createGitHubMockRouter(), "success", { taskPr: false, featurePr: true });
+
+    const res = await run(router, store, { command: "continue", actor: "maintainer", issueNumber: ISSUE, commentId: 900, runId: "run-b" });
+
+    expect(router.unmatched).toEqual([]);
+    expect(res.executed).toBe(true);
+    expect(postedComments(router).filter((body) => body.includes("travaille encore"))).toEqual([]);
+    expect(await readState(store)).toMatchObject({ status: "done", claimed_by_run_id: undefined });
+  });
+
+  it("workflow_run-on-the-head-of-a-stale-claim-reclaims-the-ci-wait", async () => {
+    const store = await seedState(claimedBy(PAST, "remediating_feature"));
+    const router = declareFullFlow("success");
+
+    const res = await run(router, store, { command: "continue", actor: "github-actions[bot]", ...TRIGGERS.workflowRun });
+
+    expect(router.unmatched).toEqual([]);
+    expect(res.executed).toBe(true);
+    expect(llmCalls(router)).toBe(0);
+    expect(await readState(store)).toMatchObject({ phase: "review", status: "awaiting_human_approval", subphase: "idle" });
+  });
+
+  it("workflow_run-on-the-head-of-a-fresh-claim-is-ignored", async () => {
+    const store = await seedState(claimedBy(FUTURE, "remediating_feature"));
+    const before = await readState(store);
+    const router = declareFullFlow("success");
+
+    const res = await run(router, store, { command: "continue", actor: "github-actions[bot]", ...TRIGGERS.workflowRun });
+
+    expect(router.unmatched).toEqual([]);
+    expect(res.executed).toBe(false);
+    expect(ciPollCalls(router)).toBe(0);
+    expect(await readState(store)).toEqual(before);
+  });
+
+  it.each([
+    { id: "status-on-a-stale-claim-reports-the-dead-run-and-the-takeover-command", expiresAt: PAST, expectedLine: `- **Run Lease**: ⚠️ stale — run \`run-a\` expired at ${PAST} without finishing; \`/epure continue\` takes the plan over.` },
+    { id: "status-on-a-fresh-claim-reports-the-running-run", expiresAt: FUTURE, expectedLine: `- **Run Lease**: run \`run-a\` in progress until ${FUTURE}` }
+  ])("$id", async ({ expiresAt, expectedLine }) => {
+    const store = await seedState(claimedBy(expiresAt, "implementing_ticket"));
+    const router = declareIssueWrites(createGitHubMockRouter());
+
+    await run(router, store, { command: "status", actor: "maintainer", issueNumber: ISSUE, commentId: 900 });
+
+    expect(router.unmatched).toEqual([]);
+    expect(postedComments(router)).toEqual([expect.stringContaining(expectedLine)]);
+  });
+});
+
+describe("Commands on finished, legacy or already-planned states never redo or misreport work", () => {
+  const PLAN_BRANCH = "plan/77-async-ci-feature";
+  const MANIFEST_COMMENT = {
+    id: 850,
+    user: { login: "epure-agent[bot]", type: "Bot" },
+    body: `<!-- epure-plan-manifest:${JSON.stringify({
+      planBranch: PLAN_BRANCH,
+      tickets: [{ ticketIssueNumber: 78, slug: "ship", title: "Ship", description: "d", acceptanceCriteria: ["a"], blockedByIssueNumbers: [], filesToTouch: [] }]
+    })} -->`
+  };
+
+  it("cancel-on-a-done-plan-leaves-it-done-and-says-so", async () => {
+    const store = await seedState({ status: "done", phase: "completed", subphase: "idle" });
+    const before = await readState(store);
+    const router = declareIssueWrites(createGitHubMockRouter());
+
+    const res = await run(router, store, { command: "cancel", actor: "maintainer", issueNumber: ISSUE, commentId: 900 });
+
+    expect(router.unmatched).toEqual([]);
+    expect(res.executed).toBe(false);
+    expect(postedComments(router)).toEqual(["ℹ️ Le plan #77 est déjà terminé (`done`) : `/epure cancel` ne le modifie pas."]);
+    expect(await readState(store)).toEqual(before);
+  });
+
+  it("to-tickets-on-a-plan-whose-ticket-graph-exists-creates-no-ticket-and-points-to-approve", async () => {
+    const store = await seedState({ phase: "tickets", status: "awaiting_human_approval", subphase: "idle", active_branch: PLAN_BRANCH, plan_branch: PLAN_BRANCH });
+    const router = declareIssueWrites(declareIssueReads(createGitHubMockRouter()))
+      .on("GET", `${R}/issues/${ISSUE}/comments?per_page=100`, json([MANIFEST_COMMENT]));
+
+    const res = await run(router, store, { command: "to-tickets", actor: "maintainer", issueNumber: ISSUE, commentId: 900 });
+
+    expect(router.unmatched).toEqual([]);
+    expect(res.executed).toBe(false);
+    expect(router.calls("POST", `${R}/issues`)).toBe(0);
+    expect(llmCalls(router)).toBe(0);
+    expect(postedComments(router)).toEqual([expect.stringContaining("existe déjà (#78)")]);
+    expect(postedComments(router)[0]).toContain("Postez `/epure approve`");
+    expect(await readState(store)).toMatchObject({ phase: "tickets", status: "awaiting_human_approval", last_processed_comment_id: 900 });
+  });
+
+  it("approve-whose-escalation-stays-throttled-rejects-with-approve-as-the-resume-command", async () => {
+    const store = await seedState({ phase: "tickets", status: "awaiting_human_approval", subphase: "idle", active_branch: PLAN_BRANCH, active_head_sha: undefined, active_pr_number: undefined });
+    const router = declareIssueWrites(createGitHubMockRouter())
+      .on("GET", `${R}/issues/${ISSUE}`, secondaryRateLimit(120))
+      .on("POST", `${R}/issues/${ISSUE}/comments`, primaryRateLimit(Math.floor(Date.now() / 1000) + 3600));
+
+    const outcome = await orchestrateIssueCommand({
+      repository: REPO,
+      commandArgs: "",
+      fallbackGithubToken: "ghs_test",
+      llmApiKey: "key_test",
+      model: "openai/gpt-test",
+      stateStore: store,
+      fetchImpl: router.fetch,
+      sleepFn: async () => {},
+      command: "approve",
+      actor: "maintainer",
+      issueNumber: ISSUE,
+      commentId: 900
+    }).then(
+      () => null,
+      (err: unknown) => err
+    );
+
+    expect(router.unmatched).toEqual([]);
+    expect(outcome).toBeInstanceOf(EscalationNotRecordedError);
+    expect(outcome).toMatchObject({
+      resumeCommand: "/epure approve",
+      escalationMarkdown: expect.stringContaining("Republiez `/epure approve`")
+    });
+    expect(await readState(store)).toMatchObject({ phase: "implementation", status: "suspended" });
+  });
+
+  it.each([
+    {
+      id: "closure-of-a-legacy-state-parked-on-a-deleted-task-branch-reports-the-feature-branch-found-on-github",
+      remoteFeatureBranches: [FEATURE_BRANCH],
+      expectedLine: `- **Branche de fonctionnalité** : \`${FEATURE_BRANCH}\` — 2 commit(s) non intégré(s) dans \`dev\``
+    },
+    {
+      id: "closure-of-a-legacy-state-without-any-feature-branch-on-github-still-cancels",
+      remoteFeatureBranches: [],
+      expectedLine: "- **Branche de fonctionnalité** : aucune branche `feature/77-*` sur GitHub"
+    }
+  ])("$id", async ({ remoteFeatureBranches, expectedLine }) => {
+    const store = await seedState({ status: "suspended", subphase: "idle", active_branch: TASK_BRANCH, feature_branch: undefined });
+    const router = declareIssueWrites(createGitHubMockRouter())
+      .on("GET", `${R}/issues/${ISSUE}`, json({ number: ISSUE, title: "Async CI Feature", body: "", state: "closed" }))
+      .on("GET", /\/collaborators\/[^/]+\/permission$/, json({ permission: "write", role_name: "write" }))
+      .on("GET", `${R}/git/matching-refs/heads/feature/77-`, json(remoteFeatureBranches.map((b) => ({ ref: `refs/heads/${b}` }))))
+      .on("GET", /\/pulls\?state=closed&head=/, json([]))
+      .on("GET", new RegExp(`/compare/dev\\.\\.\\.${encodeURIComponent(FEATURE_BRANCH)}$`), json({ ahead_by: 2, merge_base_commit: { sha: "dev-sha" }, files: [] }))
+      .on("GET", /\/pulls\?state=open&/, json([]));
+
+    const res = await run(router, store, { command: "closed", actor: "maintainer", issueNumber: ISSUE, commentId: 0 });
+
+    expect(router.unmatched).toEqual([]);
+    expect(res.executed).toBe(true);
+    expect((await readState(store)).status).toBe("cancelled");
+    expect(postedComments(router)).toEqual([expect.stringContaining(expectedLine)]);
+  });
+
+  it("sync-on-a-legacy-state-keeps-the-feature-branch-found-on-github-over-the-title-slug", async () => {
+    const renamed = "feature/77-old-epic-title";
+    const store = await seedState({ status: "suspended", subphase: "idle", active_branch: TASK_BRANCH, feature_branch: undefined });
+    const router = declareIssueWrites(declareIssueReads(createGitHubMockRouter()))
+      .on("GET", `${R}/git/matching-refs/heads/feature/77-`, json([{ ref: `refs/heads/${renamed}` }]))
+      .on("GET", `${R}/pulls?state=closed&head=${encodeURIComponent(`${OWNER}:${renamed}`)}&base=dev`, json([{ number: 105, html_url: "pr105", merged_at: "2026-11-01T00:00:00Z" }]));
+
+    await run(router, store, { command: "sync", actor: "maintainer", issueNumber: ISSUE, commentId: 900 });
+
+    expect(router.unmatched).toEqual([]);
+    expect(await readState(store)).toMatchObject({ status: "done", active_branch: renamed });
+  });
+
+  it("continue-on-a-legacy-cancellation-of-a-ticket-graph-resumes-suspended-and-names-to-tickets", async () => {
+    const store = await seedState({ phase: "tickets", status: "cancelled", subphase: "idle", active_branch: PLAN_BRANCH, cancelled_from: undefined });
+    const router = declareIssueWrites(declareIssueReads(createGitHubMockRouter()));
+
+    const res = await run(router, store, { command: "continue", actor: "maintainer", issueNumber: ISSUE, commentId: 900 });
+
+    expect(router.unmatched).toEqual([]);
+    expect(res.executed).toBe(true);
+    expect(await readState(store)).toMatchObject({ phase: "tickets", status: "suspended", cancelled_from: undefined });
+    expect(postedComments(router)).toEqual([expect.stringContaining("postez `/epure to-tickets` pour relancer la phase")]);
   });
 });
 

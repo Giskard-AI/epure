@@ -148,6 +148,8 @@ export interface OrchestrateIssueInput {
   readonly asyncCiContinuation?: boolean | undefined;
   readonly triggerHeadSha?: string | undefined;
   readonly triggerBranch?: string | undefined;
+  // Identifies this run in the plan's lease (`claimed_by_run_id`); a random id when absent.
+  readonly runId?: string | undefined;
 }
 
 export type IssueOrchestratorInput = OrchestrateIssueInput;
@@ -259,6 +261,7 @@ export interface GitHubRestHelper {
   listOpenPullRequestsByBase(
     baseBranch: string
   ): Promise<ReadonlyArray<{ number: number; html_url: string }>>;
+  listBranchesByPrefix(prefix: string): Promise<string[]>;
   openPullRequest(params: {
     head: string;
     base: string;

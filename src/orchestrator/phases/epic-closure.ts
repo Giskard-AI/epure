@@ -16,7 +16,7 @@ const FEATURE_BRANCH_PHASES: ReadonlySet<EpureIssueState["phase"]> = new Set([
   "review",
   "completed"
 ]);
-export const PLANNING_PHASES: ReadonlySet<EpureIssueState["phase"]> = new Set([
+const PLANNING_PHASES: ReadonlySet<EpureIssueState["phase"]> = new Set([
   "grilling",
   "spec",
   "tickets"
@@ -26,6 +26,21 @@ const CAN_CANCEL: ReadonlySet<CollaboratorPermission> = new Set([
   "maintain",
   "admin"
 ]);
+
+/** States written before `feature_branch` only name it in `active_branch` (a task branch while a ticket runs) or on GitHub. */
+export async function findExistingFeatureBranch(
+  gh: Pick<GitHubRestHelper, "listBranchesByPrefix">,
+  state: EpureIssueState
+): Promise<string | undefined> {
+  if (state.feature_branch) {
+    return state.feature_branch;
+  }
+  const prefix = `feature/${state.issue_number}-`;
+  if (state.active_branch.startsWith(prefix)) {
+    return state.active_branch;
+  }
+  return (await gh.listBranchesByPrefix(prefix))[0];
+}
 
 /**
  * A human closed the plan issue during planning, or before its feature branch reached `dev`:
@@ -40,7 +55,6 @@ export async function handleEpicClosedByHuman(params: {
   readonly store: GitRefStateStore;
 }): Promise<OrchestrateIssueResult> {
   const state = params.currentState;
-  const featureBranch = state?.feature_branch ?? state?.active_branch ?? "";
   const ignore = (reason: string): OrchestrateIssueResult => ({
     executed: false,
     phase: state?.phase ?? "idle",
@@ -63,7 +77,10 @@ export async function handleEpicClosedByHuman(params: {
   if ((await params.gh.getIssue(params.issueNumber)).state === "open") {
     return ignore(`issue #${params.issueNumber} was reopened`);
   }
-  if (!planning) {
+  const featureBranch = planning
+    ? undefined
+    : await findExistingFeatureBranch(params.gh, state);
+  if (featureBranch) {
     const mergedPr = await params.gh.findMergedPullRequestByHead(featureBranch, "dev");
     if (mergedPr) {
       return ignore(`feature PR #${mergedPr.number} is already merged into dev`);
@@ -107,11 +124,13 @@ export async function handleEpicClosedByHuman(params: {
     };
   }
 
-  const [comparison, featurePr, taskPrs] = await Promise.all([
-    params.gh.compareCommits("dev", featureBranch),
-    params.gh.findOpenPullRequestByHead(featureBranch, "dev"),
-    params.gh.listOpenPullRequestsByBase(featureBranch)
-  ]);
+  const [comparison, featurePr, taskPrs] = featureBranch
+    ? await Promise.all([
+        params.gh.compareCommits("dev", featureBranch),
+        params.gh.findOpenPullRequestByHead(featureBranch, "dev"),
+        params.gh.listOpenPullRequestsByBase(featureBranch)
+      ])
+    : [null, null, []];
   const openPrs = [...(featurePr ? [featurePr] : []), ...taskPrs];
 
   const updated = await updateIssueStateWithCas({
@@ -125,7 +144,9 @@ export async function handleEpicClosedByHuman(params: {
       "",
       `### 🛑 Issue de pilotage #${params.issueNumber} fermée par \`@${params.actor}\` avant l'intégration dans \`dev\``,
       "",
-      `- **Branche de fonctionnalité** : \`${featureBranch}\` — ${comparison.aheadBy} commit(s) non intégré(s) dans \`dev\``,
+      featureBranch && comparison
+        ? `- **Branche de fonctionnalité** : \`${featureBranch}\` — ${comparison.aheadBy} commit(s) non intégré(s) dans \`dev\``
+        : `- **Branche de fonctionnalité** : aucune branche \`feature/${params.issueNumber}-*\` sur GitHub`,
       "- **Statut d'orchestration** : `cancelled` (Plan annulé) ; aucune branche n'a été supprimée.",
       openPrs.length > 0
         ? `- **Pull Requests ouvertes, laissées ouvertes** : ${openPrs.map((pr) => `[#${pr.number}](${pr.html_url})`).join(", ")}`
@@ -143,7 +164,7 @@ export async function handleEpicClosedByHuman(params: {
     executed: true,
     phase: updated.state.phase,
     status: updated.state.status,
-    active_branch: featureBranch,
+    active_branch: featureBranch ?? updated.state.active_branch,
     summary_markdown: body,
     created_ticket_numbers: [],
     feature_pr_url: featurePr?.html_url ?? ""
