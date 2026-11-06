@@ -1715,7 +1715,7 @@ export async function orchestrateIssueCommand(
       ) {
         await gh.postIssueComment(
           effectiveInput.issueNumber,
-          `▶️ Reprise par \`@${grant.actor}\` : budget de remédiation remis à zéro pour ${grant.scope === "feature" ? "la Pull Request de fonctionnalité" : `le ticket #${grant.ticket}`} (\`human_budget_grants\` : ${grantsAfterStart}).`
+          `▶️ Reprise par \`@${grant.actor}\` : budget de remédiation remis à zéro pour ${grant.scope === "feature" ? "la Pull Request de fonctionnalité" : `le ticket #${grant.ticket}`} (\`human_budget_grant_log\` : ${grantsAfterStart}).`
         );
       }
       const baseSyncGuard = createBaseSyncGuard({

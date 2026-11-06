@@ -921,7 +921,7 @@ describe("A resume command after budget exhaustion grants one fresh budget and r
     expect(router.unmatched).toEqual([]);
     expect(implementationCalls(router)).toBe(expectedImplementationCalls);
     expect(postedComments(router).at(-1)).toContain(
-      `accordés par un humain** : \`${expectedGrantLog?.length ?? 0}\` (\`human_budget_grants\`)`
+      `accordés par un humain** : \`${expectedGrantLog?.length ?? 0}\` (\`human_budget_grant_log\`)`
     );
     expect(after.human_budget_grant_log).toEqual(expectedGrantLog);
     expect(resumeNotes).toHaveLength(expectedGrantLog?.length ?? 0);

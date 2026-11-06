@@ -1299,7 +1299,7 @@ export function formatNeedsHumanEscalationComment(
 
   if (input.humanBudgetGrants !== undefined) {
     lines.push(
-      `- **Budgets de correction accordés par un humain** : \`${input.humanBudgetGrants}\` (\`human_budget_grants\`)`
+      `- **Budgets de correction accordés par un humain** : \`${input.humanBudgetGrants}\` (\`human_budget_grant_log\`)`
     );
   }
 
@@ -1405,7 +1405,7 @@ export function formatNeedsHumanEscalationComment(
   );
   if (input.reason === "remediation_exhausted" && !input.resumeCommand) {
     lines.push(
-      "4. La reprise remet à zéro le budget de remédiation de l'élément bloqué et l'enregistre dans `human_budget_grants`."
+      "4. La reprise remet à zéro le budget de remédiation de l'élément bloqué et l'enregistre dans `human_budget_grant_log`."
     );
   }
 
