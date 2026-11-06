@@ -11346,12 +11346,18 @@ ${formattedBlocks}`;
 `;
 }
 var ADR_PATH_REGEX = /^docs\/adr\/(\d{4})-(.+)\.md$/;
-async function listPlanArtifactPaths(gh, branch) {
+async function listPlanArtifactPaths(gh, branch, extraPaths = []) {
   const [adrPaths, specPaths] = await Promise.all([
     gh.listDirectoryPaths(branch, "docs/adr"),
     gh.listDirectoryPaths(branch, "docs/specs")
   ]);
-  return ["GLOSSARY.md", ...adrPaths, ...specPaths];
+  return [
+    ...new Set(
+      ["GLOSSARY.md", ...extraPaths, ...adrPaths, ...specPaths].map(
+        (p) => p.trim().replace(/^\/+/, "")
+      )
+    )
+  ];
 }
 function normalizeAdrSlug(rawSlug) {
   return rawSlug.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
@@ -11687,14 +11693,22 @@ async function integratePlanBranchIntoFeature(params) {
       ...closedLegacyPlanPrNumber !== void 0 ? { closedLegacyPlanPrNumber } : {}
     };
   }
-  const [devPaths, planPaths, featurePaths] = await Promise.all([
-    listPlanArtifactPaths(params.gh, baseBranch),
-    listPlanArtifactPaths(params.gh, params.planBranch),
-    listPlanArtifactPaths(params.gh, params.featureBranch)
-  ]);
-  const candidatePlanArtifactPaths = planPaths.map(
-    (p) => p.trim().replace(/^\/+/, "")
+  const manifestSpecPaths = new Set(
+    (params.manifestPaths?.specPaths ?? []).map((p) => p.trim().replace(/^\/+/, ""))
   );
+  const manifestPaths = [
+    ...manifestSpecPaths,
+    ...params.manifestPaths?.adrPaths ?? []
+  ];
+  const manifestNonAdrPaths = manifestPaths.filter(
+    (p) => !ADR_PATH_REGEX.test(p.trim().replace(/^\/+/, ""))
+  );
+  const [devPaths, planPaths, featurePaths] = await Promise.all([
+    listPlanArtifactPaths(params.gh, baseBranch, manifestNonAdrPaths),
+    listPlanArtifactPaths(params.gh, params.planBranch, manifestPaths),
+    listPlanArtifactPaths(params.gh, params.featureBranch, manifestNonAdrPaths)
+  ]);
+  const candidatePlanArtifactPaths = planPaths;
   if (candidatePlanArtifactPaths.length === 0) {
     return {
       featureHeadSha: featureInitialSha,
@@ -11754,7 +11768,7 @@ async function integratePlanBranchIntoFeature(params) {
         keptFeatureAdrPaths.add(renumberedOnFeature);
       }
       planAdrsToProcess.push({ path: artifactPath, content: planContent });
-    } else if (artifactPath.startsWith("docs/specs/")) {
+    } else if (artifactPath.startsWith("docs/specs/") || manifestSpecPaths.has(artifactPath)) {
       specFilesToProcess.push({ path: artifactPath, content: planContent });
     } else {
       filesToCommit.push({ path: artifactPath, content: planContent });
@@ -17659,6 +17673,14 @@ var IMPLEMENTATION_PHASES = /* @__PURE__ */ new Set([
   "review",
   "completed"
 ]);
+function manifestArtifactPaths(state) {
+  return {
+    specPaths: [state?.plan_manifest?.specPath, state?.spec_manifest?.specPath].filter(
+      (p) => Boolean(p)
+    ),
+    adrPaths: [...state?.spec_manifest?.adrPaths ?? []]
+  };
+}
 function resumesImplementationRun(state) {
   return IMPLEMENTATION_PHASES.has(state.phase) && (state.status === "active" || state.status === "suspended");
 }
@@ -17784,6 +17806,13 @@ async function runIssueCommand(input) {
         issueNumber: effectiveInput.issueNumber,
         store: via.store,
         mutator: (prev) => {
+          const lease = readRunLease(prev);
+          if (lease && !lease.stale && lease.runId !== runId) {
+            throw new StateTransitionAbortedError(
+              prev,
+              `run \`${lease.runId}\` holds the plan until ${lease.expiresAt}, so this run does not suspend it`
+            );
+          }
           const phase = params.phase ?? (effectiveInput.command === "approve" ? "implementation" : prev.phase !== "idle" ? prev.phase : commandPhase);
           ticketNumber = params.ticketNumber ?? prev.active_ticket_number ?? effectiveInput.issueNumber;
           const escalation = {
@@ -18193,6 +18222,7 @@ async function runIssueCommand(input) {
             planBranch: currentState.active_branch,
             featureBranch: targetBranch,
             baseBranch: "dev",
+            manifestPaths: manifestArtifactPaths(currentState),
             llmApiKey: effectiveInput.llmApiKey,
             model: phaseModels.planningModel,
             providers: phaseModels.providers,
@@ -18752,7 +18782,7 @@ async function runIssueCommand(input) {
             await gh.postIssueComment(
               effectiveInput.issueNumber,
               `\u23F8\uFE0F \`/epure ${effectiveInput.command}\` n'a pas \xE9t\xE9 appliqu\xE9 : ${err.reason}. V\xE9rifiez l'\xE9tat du plan avec \`/epure status\`, puis republiez la commande si n\xE9cessaire.`
-            );
+            ).catch(() => void 0);
           }
           throw err;
         });
@@ -18764,6 +18794,7 @@ async function runIssueCommand(input) {
             previousPlanSha: currentState?.integrated_plan_sha,
             featureBranch,
             baseBranch: "dev",
+            manifestPaths: manifestArtifactPaths(updatedStart.state),
             llmApiKey: effectiveInput.llmApiKey,
             model: phaseModels.planningModel,
             providers: phaseModels.providers,
