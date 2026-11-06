@@ -74,6 +74,25 @@ function buildAgentsYamlForTarget(target: LiveLLMTargetConfig): string {
   return `${lines.join("\n")}\n`;
 }
 
+// Tool declarations per provider wire format: OpenAI `function.name`, Anthropic `name`, Gemini `functionDeclarations[].name`.
+interface ToolDeclaration {
+  readonly name?: string;
+  readonly function?: { readonly name?: string };
+  readonly functionDeclarations?: ReadonlyArray<{ readonly name?: string }>;
+}
+
+function declaredToolNames(requestBody: string): string[] {
+  if (!requestBody) {
+    return [];
+  }
+  const { tools } = JSON.parse(requestBody) as { tools?: readonly ToolDeclaration[] };
+  return (tools ?? []).flatMap((tool) => [
+    ...(tool.name ? [tool.name] : []),
+    ...(tool.function?.name ? [tool.function.name] : []),
+    ...(tool.functionDeclarations ?? []).flatMap((d) => (d.name ? [d.name] : []))
+  ]);
+}
+
 function createHybridLiveFetch(params: {
   readonly target: LiveLLMTargetConfig;
   readonly issueTitle: string;
@@ -447,7 +466,9 @@ describeLive(
         expect(planRes.phase).toBe("grilling");
         expect(planRes.status).toBe("active");
         expect(planRes.created_ticket_numbers).toEqual([]);
-        expect(ghState.llmRequestBodies.some((body) => body.includes("read_repo_file"))).toBe(true);
+        expect(ghState.llmRequestBodies.flatMap(declaredToolNames)).toEqual(
+          expect.arrayContaining([expect.stringMatching(/^(read_repo_file|list_repo_files)$/)])
+        );
 
         // Stage 2: Human reply answering all questions and confirming everything is decided
         ghState.comments.push({
