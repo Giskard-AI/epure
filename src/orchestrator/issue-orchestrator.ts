@@ -26,6 +26,7 @@ import {
   buildIssueStateRefName,
   createGitHubApiRefStateStore,
   activeBudgetScope,
+  advanceCommentCursor,
   formatIssueStateMirrorMarkdown,
   guardTerminalStates,
   isAutomaticallyResumable,
@@ -462,9 +463,9 @@ export async function orchestrateIssueCommand(
               params.codeFixAttemptsUsed ?? prev.code_fix_attempts_used,
             transient_retries_used: cumulativeTransientRetriesUsed(),
             last_escalation: escalation,
-            last_processed_comment_id: Math.max(
-              effectiveInput.commentId ?? 0,
-              prev.last_processed_comment_id
+            last_processed_comment_id: advanceCommentCursor(
+              prev,
+              effectiveInput.commentId
             )
           });
         }
@@ -575,7 +576,7 @@ export async function orchestrateIssueCommand(
           mutator: (prev) => ({
             ...prev,
             last_processed_comment_id:
-              Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
+              advanceCommentCursor(prev, effectiveInput.commentId)
           })
         });
         const statusBody = appendEpureCommandsSpoiler(
@@ -607,7 +608,7 @@ export async function orchestrateIssueCommand(
             toTerminalState(prev, {
               status: "cancelled",
               last_processed_comment_id:
-                Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
+                advanceCommentCursor(prev, effectiveInput.commentId)
             })
         });
         const body = appendEpureCommandsSpoiler(
@@ -704,9 +705,9 @@ export async function orchestrateIssueCommand(
               ? restoredState
               : {
                   ...restoredState,
-                  last_processed_comment_id: Math.max(
-                    effectiveInput.commentId ?? 0,
-                    prev.last_processed_comment_id
+                  last_processed_comment_id: advanceCommentCursor(
+                    prev,
+                    effectiveInput.commentId
                   )
                 };
           }
@@ -927,7 +928,7 @@ export async function orchestrateIssueCommand(
             active_branch: targetBranch,
             feature_branch: prev.feature_branch ?? targetBranch,
             last_processed_comment_id:
-              Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
+              advanceCommentCursor(prev, effectiveInput.commentId)
           })
         });
 
@@ -1393,7 +1394,7 @@ export async function orchestrateIssueCommand(
               status: "done",
               active_branch: featureBranch,
               last_processed_comment_id:
-                Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
+                advanceCommentCursor(prev, effectiveInput.commentId)
             })
         });
         const mergedComment = appendEpureCommandsSpoiler(
@@ -1556,7 +1557,7 @@ export async function orchestrateIssueCommand(
           epic_phase: prev.epic_phase ?? 1,
           ...(integratePlan ? { integrated_plan_sha: planHeadSha ?? undefined } : {}),
           last_processed_comment_id:
-            Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
+            advanceCommentCursor(prev, effectiveInput.commentId)
         })
       });
       const grant = updatedStart.state.human_budget_grant_log?.at(-1);

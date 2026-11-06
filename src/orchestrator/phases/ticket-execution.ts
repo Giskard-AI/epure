@@ -38,6 +38,7 @@ import {
 } from "../../security/prompt-injection-guard.js";
 import { processPendingIssueCommentsBatch } from "../../state/comment-batch-cursor.js";
 import {
+  advanceCommentCursor,
   toTerminalState,
   updateIssueStateWithCas,
   withTicketCodeFixAttempts,
@@ -571,7 +572,7 @@ export async function runTicketExecutionLoop(
               status: "suspended",
               active_branch: params.featureBranch,
               last_processed_comment_id:
-                Math.max(params.commentId ?? 0, prev.last_processed_comment_id)
+                advanceCommentCursor(prev, params.commentId)
             })
         });
 

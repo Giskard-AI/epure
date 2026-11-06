@@ -32,6 +32,7 @@ import {
   wrapUntrustedContent
 } from "../../security/prompt-injection-guard.js";
 import {
+  advanceCommentCursor,
   toTerminalState,
   updateIssueStateWithCas,
   withFeatureCodeFixAttempts,
@@ -1034,7 +1035,7 @@ export async function runFeatureIntegrationPhase(
         status: "done",
         active_branch: params.featureBranch,
         last_processed_comment_id:
-          Math.max(params.commentId ?? 0, prev.last_processed_comment_id)
+          advanceCommentCursor(prev, params.commentId)
       })
   });
 
