@@ -212,7 +212,23 @@ function createHybridLiveFetch(params: {
       );
     }
 
-    // 4. Git trees & blobs for readSingleBranchFile / readBranchWorkspaceFiles / commitFilesToBranch
+    // 4. Contents API for readSingleBranchFile; git trees & blobs for readBranchWorkspaceFiles / commitFilesToBranch
+    if (pathname.includes("/contents/") && method === "GET") {
+      const filePath = decodeURIComponent(pathname.split("/contents/")[1] ?? "");
+      const content = getBranchMap(parsedUrl.searchParams.get("ref") ?? "dev").get(filePath);
+      return content === undefined
+        ? new Response(JSON.stringify({ message: "Not Found" }), { status: 404 })
+        : new Response(
+            JSON.stringify({
+              type: "file",
+              sha: `blob_${blobSeq++}`,
+              encoding: "base64",
+              content: Buffer.from(content, "utf8").toString("base64")
+            }),
+            { status: 200 }
+          );
+    }
+
     if (pathname.includes("/git/trees/") && method === "GET") {
       const encodedBranch = pathname.split("/git/trees/")[1] ?? "dev";
       const branch = decodeURIComponent(encodedBranch);
