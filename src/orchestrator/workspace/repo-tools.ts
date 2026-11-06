@@ -862,7 +862,7 @@ export function buildRepoExplorationToolsAndHandlers(params: {
   readonly devBranchPaths: readonly string[];
   readonly gh: Pick<
     GitHubRestHelper,
-    "readSingleBranchFile" | "listBranchPaths"
+    "readSingleBranchFile" | "listBranchPathHints"
   >;
   readonly phase?: WebToolsPhase | undefined;
   readonly webToolsConfig?: WebToolsConfig | undefined;
@@ -1295,9 +1295,9 @@ export function buildRepoExplorationToolsAndHandlers(params: {
             ? ""
             : rawQuery;
         const queryTokens = q.split("*").filter(Boolean);
-        let allPaths = await params.gh.listBranchPaths(params.branch);
+        let allPaths = await params.gh.listBranchPathHints(params.branch);
         if (allPaths.length === 0 && params.branch !== params.featureBranch) {
-          allPaths = await params.gh.listBranchPaths(params.featureBranch);
+          allPaths = await params.gh.listBranchPathHints(params.featureBranch);
         }
         const pathSet = new Set<string>(
           allPaths.map((p) => p.trim().replace(/^\/+/, "")).filter(Boolean)

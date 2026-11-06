@@ -1680,6 +1680,28 @@ describe("A run lease keeps a second run off a plan until the first one finishes
   });
 });
 
+describe("A repository too large for a full tree listing still runs its implementation", () => {
+  it.each([
+    { id: "continue-completes-when-github-truncates-the-dev-tree-and-warns-about-the-partial-listing" }
+  ])("$id", async () => {
+    const store = await seedState({ status: "active", subphase: "implementing_ticket", active_ticket_number: ISSUE, active_task_branch: TASK_BRANCH, active_pr_number: 106 });
+    const router = declareImplementationFlow(createGitHubMockRouter(), "success", { taskPr: false, featurePr: true })
+      .on("GET", new RegExp(`^${R_RX}/git/trees/[^?]+\\?recursive=1$`), json({ truncated: true, tree: [] }));
+    const stdout = vi.spyOn(process.stdout, "write");
+
+    try {
+      const res = await run(router, store, { command: "continue", actor: "maintainer", issueNumber: ISSUE, commentId: 900 });
+
+      expect(router.unmatched).toEqual([]);
+      expect(res.executed).toBe(true);
+      expect(await readState(store)).toMatchObject({ status: "done" });
+      expect(stdout).toHaveBeenCalledWith(expect.stringContaining("::warning title=EPURE partial file listing::"));
+    } finally {
+      stdout.mockRestore();
+    }
+  });
+});
+
 describe("Only a plan manifest EPURE posted is trusted", () => {
   const ticket = (n: number) => ({ ticketIssueNumber: n, slug: `t${n}`, title: `T${n}`, description: "d", acceptanceCriteria: ["a"], blockedByIssueNumbers: [], filesToTouch: [] });
   const manifestJson = (planBranch: string, n: number) => JSON.stringify({ planBranch, tickets: [ticket(n)] });

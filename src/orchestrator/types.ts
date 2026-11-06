@@ -215,6 +215,8 @@ export interface GitHubRestHelper {
   ): Promise<void>;
   getDefaultBranchSha(branch: string): Promise<string | null>;
   listBranchPaths(branch: string): Promise<string[]>;
+  // Partial (with a warning) when GitHub truncates the tree: hints and prompt context only, never absence checks.
+  listBranchPathHints(branch: string): Promise<string[]>;
   // Path -> blob of every file at a branch or commit SHA (empty when the ref does not exist).
   listBranchBlobs(
     branchOrSha: string

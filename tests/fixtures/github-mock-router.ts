@@ -567,11 +567,21 @@ export function installFakeGitDataApi(
     })
     .on("GET", new RegExp(`^${repoPath}/contents/([^?]+)\\?ref=(.+)$`), (_req, m) => {
       const path = m![1]!.split("/").map(decodeURIComponent).join("/");
-      const blobSha = treeEntries(resolveCommit(decodeURIComponent(m![2]!))).get(path);
+      const entries = treeEntries(resolveCommit(decodeURIComponent(m![2]!)));
+      const blobSha = entries.get(path);
       const content = blobSha === undefined ? undefined : api.readBlob(blobSha);
-      return content === undefined
-        ? notFound()
-        : json({ type: "file", path, sha: blobSha, encoding: "base64", content: Buffer.from(content, "utf8").toString("base64") });
+      if (content !== undefined) {
+        return json({ type: "file", path, sha: blobSha, encoding: "base64", content: Buffer.from(content, "utf8").toString("base64") });
+      }
+      // A directory answers its direct children, files and subdirectories.
+      const children = new Map<string, { type: string; path: string; sha?: string }>();
+      for (const [entryPath, sha] of entries) {
+        if (!entryPath.startsWith(`${path}/`)) continue;
+        const [name, ...rest] = entryPath.slice(path.length + 1).split("/");
+        const childPath = `${path}/${name}`;
+        children.set(childPath, rest.length === 0 ? { type: "file", path: childPath, sha } : { type: "dir", path: childPath });
+      }
+      return children.size > 0 ? json([...children.values()]) : notFound();
     })
     .on("GET", new RegExp(`^${prefix}/trees/([^?]+)(?:\\?recursive=1)?$`), (_req, m) => {
       const treeSha = resolveTreeish(decodeURIComponent(m![1]!));

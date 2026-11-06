@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   syncBranchWithBase,
   type SyncBranchWithBaseInput
@@ -321,13 +321,14 @@ describe("GitHub REST helper — branch reads return null or empty only on 404 (
   });
 
   it.each([
-    { id: "missing-branch-lists-no-path", ref: notFound(), tree: notFound(), expected: "empty" },
-    { id: "403-on-the-tree-throws", ref: json({ object: { sha: "c".repeat(40) } }), tree: json({ message: "Forbidden" }, 403), expected: "throws" },
-    { id: "403-on-the-ref-throws", ref: json({ message: "Forbidden" }, 403), tree: notFound(), expected: "throws" }
-  ])("listBranchPaths and readDevWorkflowsMap $id", async ({ ref, tree, expected }) => {
+    { id: "missing-branch-lists-no-path", ref: notFound(), tree: notFound(), dir: notFound(), expected: "empty" },
+    { id: "403-on-the-tree-throws", ref: json({ object: { sha: "c".repeat(40) } }), tree: json({ message: "Forbidden" }, 403), dir: json({ message: "Forbidden" }, 403), expected: "throws" },
+    { id: "403-on-the-ref-throws", ref: json({ message: "Forbidden" }, 403), tree: notFound(), dir: json({ message: "Forbidden" }, 403), expected: "throws" }
+  ])("listBranchPaths and readDevWorkflowsMap $id", async ({ ref, tree, dir, expected }) => {
     const router = createGitHubMockRouter()
       .on("GET", `${R}/git/ref/heads/dev`, ref)
-      .on("GET", new RegExp(`/git/trees/c{40}\\?recursive=1$`), tree);
+      .on("GET", new RegExp(`/git/trees/c{40}\\?recursive=1$`), tree)
+      .on("GET", `${R}/contents/.github/workflows?ref=dev`, dir);
     const gh = createGitHubRestHelper({ repository: REPO, token: "ghs_test", fetchImpl: router.fetch });
 
     if (expected === "empty") {
@@ -357,6 +358,7 @@ describe("GitHub REST helper — branch reads return null or empty only on 404 (
           ]
         })
       )
+      .on("GET", `${R}/contents/.agents/reviewers?ref=dev`, json([{ type: "file", path: ".agents/reviewers/standards-reviewer.md", sha: "d".repeat(40) }]))
       .on("GET", /\/git\/blobs\//, json({ message: "Forbidden" }, 403))
       .on("GET", /\/pulls\?state=open/, json({ message: "Forbidden" }, 403));
     const gh = createGitHubRestHelper({ repository: REPO, token: "ghs_test", fetchImpl: router.fetch });
@@ -373,7 +375,7 @@ describe("GitHub REST helper — branch reads return null or empty only on 404 (
 
     await gh.listBranchPaths("dev");
     await gh.readBranchWorkspaceFiles("dev", "src/a.ts");
-    await gh.readTrustedBaseRosterFiles("dev");
+    await gh.listBranchPathHints("dev");
 
     expect(router.calls("GET", /\/git\/trees\//)).toBe(1);
   });
@@ -426,19 +428,56 @@ describe("syncBranchWithBase — conflict reads stay bounded and incomplete data
     expect(ctx.router.calls("POST", "/v1/chat/completions", "api.openai.com")).toBe(0);
   });
 
-  it.each<{ id: string; read: (gh: RestHelper) => Promise<unknown> }>([
-    { id: "branch-path-listing", read: (gh) => gh.listBranchPaths("dev") },
-    { id: "dev-workflows-map", read: (gh) => gh.readDevWorkflowsMap("dev") },
-    { id: "trusted-reviewer-roster-and-design", read: (gh) => gh.readTrustedBaseRosterFiles("dev") }
-  ])("$id fails closed on a truncated tree listing", async ({ read }) => {
-    const ctx = setup({
-      shared: { ".github/workflows/ci.yml": "on: push\n", ".agents/reviewers/security.md": "# Security\n", "DESIGN.md": "# Design\n" },
-      ours: {},
-      theirs: {}
-    });
+  const SCOPED_FILES = {
+    ".github/workflows/ci.yml": "on: push\n",
+    ".github/workflows/nested/skip.yml": "on: push\n",
+    ".agents/reviewers/security.md": "# Security\n",
+    "DESIGN.md": "# Design\n",
+    "src/a.ts": "export const a = 1;\n"
+  };
+
+  it("branch-path-listing fails closed on a truncated tree listing", async () => {
+    const ctx = setup({ shared: SCOPED_FILES, ours: {}, theirs: {} });
     ctx.git.truncateTreeListings();
 
-    await expect(read(ctx.gh)).rejects.toBeInstanceOf(TruncatedGitTreeError);
+    await expect(ctx.gh.listBranchPaths("dev")).rejects.toBeInstanceOf(TruncatedGitTreeError);
+  });
+
+  it.each<{ id: string; read: (gh: RestHelper) => Promise<ReadonlyMap<string, string>>; expected: Record<string, string> }>([
+    { id: "dev-workflows-map", read: (gh) => gh.readDevWorkflowsMap("dev"), expected: { ".github/workflows/ci.yml": "on: push\n" } },
+    { id: "trusted-reviewer-roster-and-design", read: (gh) => gh.readTrustedBaseRosterFiles("dev"), expected: { ".agents/reviewers/security.md": "# Security\n", "DESIGN.md": "# Design\n" } }
+  ])("$id reads only its own directory, so a truncated repository-wide listing does not affect it", async ({ read, expected }) => {
+    const ctx = setup({ shared: SCOPED_FILES, ours: {}, theirs: {} });
+    ctx.git.truncateTreeListings();
+
+    expect(Object.fromEntries(await read(ctx.gh))).toEqual(expected);
+    expect(ctx.router.calls("GET", /\/git\/trees\//)).toBe(0);
+  });
+
+  it.each<{ id: string; dir: string; read: (gh: RestHelper) => Promise<unknown> }>([
+    { id: "dev-workflows-map", dir: ".github/workflows", read: (gh) => gh.readDevWorkflowsMap("dev") },
+    { id: "trusted-reviewer-roster", dir: ".agents/reviewers", read: (gh) => gh.readTrustedBaseRosterFiles("dev") }
+  ])("$id fails closed when its directory listing reaches the 1,000-entry cap", async ({ dir, read }) => {
+    const router = createGitHubMockRouter().on(
+      "GET",
+      `${R}/contents/${dir}?ref=dev`,
+      json(Array.from({ length: 1000 }, (_, i) => ({ type: "file", path: `${dir}/f${i}.yml`, sha: "b".repeat(40) })))
+    );
+    const gh = createGitHubRestHelper({ repository: REPO, token: "ghs_test", fetchImpl: router.fetch });
+
+    await expect(read(gh)).rejects.toBeInstanceOf(TruncatedGitTreeError);
+  });
+
+  it("path hints on a truncated listing return the partial listing with a warning", async () => {
+    const ctx = setup({ shared: SCOPED_FILES, ours: {}, theirs: {} });
+    ctx.git.truncateTreeListings();
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    try {
+      expect(await ctx.gh.listBranchPathHints("dev")).toEqual(expect.arrayContaining(["src/a.ts", "DESIGN.md"]));
+      expect(stdout).toHaveBeenCalledWith(expect.stringContaining("::warning title=EPURE partial file listing::GitHub truncated the file listing of dev"));
+    } finally {
+      stdout.mockRestore();
+    }
   });
 
   it("a-representative-conflict-fetches-each-tree-once-and-reads-only-the-files-it-needs", async () => {

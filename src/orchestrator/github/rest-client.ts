@@ -307,6 +307,33 @@ export function createGitHubRestHelper(params: {
     return tree.entries;
   }
 
+  // One directory only, so a repository too large for a recursive listing still reads it in full.
+  async function listDirectoryFiles(
+    branch: string,
+    dirPath: string
+  ): Promise<readonly GitTreeEntry[]> {
+    const { data } = await apiRequest<
+      Array<{ type?: string; path?: string; sha?: string }> | object
+    >(
+      "GET",
+      `/repos/${owner}/${repo}/contents/${encodeGitHubContentsPath(dirPath)}?ref=${encodeURIComponent(branch)}`,
+      undefined,
+      true
+    );
+    if (!Array.isArray(data)) {
+      return [];
+    }
+    // The contents API lists at most 1,000 entries of a directory.
+    if (data.length >= 1000) {
+      throw new TruncatedGitTreeError(`${branch}:${dirPath}`);
+    }
+    return data.flatMap((e) =>
+      e.type === "file" && e.path && e.sha
+        ? [{ type: "blob", path: e.path, sha: e.sha }]
+        : []
+    );
+  }
+
   return {
     token: params.token,
 
@@ -534,6 +561,19 @@ export function createGitHubRestHelper(params: {
       );
     },
 
+    async listBranchPathHints(branch: string): Promise<string[]> {
+      const tree = await readBranchTree(branch);
+      const paths = tree.entries.flatMap((e) =>
+        e.type === "blob" && typeof e.path === "string" ? [e.path] : []
+      );
+      if (tree.truncated) {
+        process.stdout.write(
+          `::warning title=EPURE partial file listing::GitHub truncated the file listing of ${branch}: workspace hints and prompt context use the first ${paths.length} paths only.\n`
+        );
+      }
+      return paths;
+    },
+
     async listBranchBlobs(
       branchOrSha: string
     ): Promise<ReadonlyMap<string, GitBlobRef>> {
@@ -755,35 +795,31 @@ export function createGitHubRestHelper(params: {
       reviewersDir: string = DEFAULT_REVIEWERS_DIR
     ): Promise<Map<string, string>> {
       const filesMap = new Map<string, string>();
-      const dirPrefix = `${reviewersDir.toLowerCase()}/`;
-      for (const entry of await readCompleteTree(branch)) {
-        if (entry.type !== "blob" || !entry.path || !entry.sha) {
-          continue;
-        }
-        const p = entry.path;
-        const isRosterFile =
-          p.toLowerCase().startsWith(dirPrefix) &&
-          /^[a-z0-9-]+\.md$/i.test(p.slice(dirPrefix.length));
-        if (!isRosterFile && p !== "DESIGN.md") {
+      const dirPath = reviewersDir.replace(/\/+$/, "");
+      for (const entry of await listDirectoryFiles(branch, dirPath)) {
+        if (
+          !entry.path ||
+          !entry.sha ||
+          !/^[a-z0-9-]+\.md$/i.test(entry.path.slice(dirPath.length + 1))
+        ) {
           continue;
         }
         const content = await readBlob(entry.sha);
         if (content !== null) {
-          filesMap.set(p, content);
+          filesMap.set(entry.path, content);
         }
+      }
+      const designMarkdown = await this.readSingleBranchFile(branch, "DESIGN.md");
+      if (designMarkdown !== null) {
+        filesMap.set("DESIGN.md", designMarkdown);
       }
       return filesMap;
     },
 
     async readDevWorkflowsMap(branch: string): Promise<Map<string, string>> {
       const workflowsMap = new Map<string, string>();
-      for (const entry of await readCompleteTree(branch)) {
-        if (
-          entry.type !== "blob" ||
-          !entry.path ||
-          !entry.sha ||
-          !/^\.github\/workflows\/[^/]+\.ya?ml$/i.test(entry.path)
-        ) {
+      for (const entry of await listDirectoryFiles(branch, ".github/workflows")) {
+        if (!entry.path || !entry.sha || !/\.ya?ml$/i.test(entry.path)) {
           continue;
         }
         const content = await readBlob(entry.sha);

@@ -1577,7 +1577,7 @@ export async function orchestrateIssueCommand(
       }
 
       const devWorkflowsMap = await gh.readDevWorkflowsMap("dev");
-      const devBranchPaths = await gh.listBranchPaths("dev");
+      const devBranchPaths = await gh.listBranchPathHints("dev");
 
       const discoveredDevProfile = discoverVerificationProfile({
         targetFilesHint: [

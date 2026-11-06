@@ -3132,7 +3132,7 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
           devBranchPaths: Array.from(initialAccumulated.keys()),
           gh: {
             readSingleBranchFile: async () => null,
-            listBranchPaths: async () => Array.from(initialAccumulated.keys())
+            listBranchPathHints: async () => Array.from(initialAccumulated.keys())
           }
         });
 

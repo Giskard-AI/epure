@@ -920,7 +920,7 @@ describe("EPURE Graphe GitHub Natif, Garde-fous d'Intégrité Inter-Tickets et C
           (_, idx) => `export const line_${idx + 1} = "${"x".repeat(40)}";`
         ).join("\n");
         const mockGh = {
-          listBranchPaths: async () => ["src/cli.ts", "src/large.ts"],
+          listBranchPathHints: async () => ["src/cli.ts", "src/large.ts"],
           readSingleBranchFile: async (_branch: string, path: string) =>
             path === "src/large.ts"
               ? longLineFile

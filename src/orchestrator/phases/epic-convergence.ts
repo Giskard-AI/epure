@@ -34,7 +34,7 @@ export interface RunEpicConvergenceAuditParams {
   readonly stage1Summary?: string | undefined;
   readonly gh: Pick<
     GitHubRestHelper,
-    "readSingleBranchFile" | "listBranchPaths"
+    "readSingleBranchFile" | "listBranchPathHints"
   >;
   readonly llmApiKey: string;
   readonly phaseModels: ResolvedPhaseModels;
