@@ -219,6 +219,45 @@ describe("Ticket 09 (#10) — Atomic Git ref state (refs/epure/state/*) & concur
     expect(router.calls(failing.method, failing.path) - callsBefore).toBe(1);
   });
 
+  it.each([
+    { id: "graphql-update-that-landed-but-answered-502-is-not-retried", seeded: true, method: "POST", path: "/graphql" },
+    { id: "ref-creation-that-landed-but-answered-502-is-not-retried", seeded: false, method: "POST", path: "/repos/acme/demo/git/refs" }
+  ] as const)("createGitHubApiRefStateStore write [$id]", async ({ seeded, method, path }) => {
+    const ref = "refs/epure/state/10";
+    const router = createGitHubMockRouter();
+    installFakeGitDataApi(router, "acme/demo");
+    let armed = true;
+    const store = createGitHubApiRefStateStore({
+      repository: "acme/demo",
+      githubToken: "ghs_test",
+      fetchImpl: async (input, init) => {
+        const resp = await router.fetch(input, init);
+        if (armed && init?.method === method && new URL(String(input)).pathname === path) {
+          armed = false;
+          return new Response("Bad Gateway", { status: 502 });
+        }
+        return resp;
+      }
+    });
+    if (seeded) {
+      await updateIssueStateWithCas({ issueNumber: 10, store, mutator: (prev) => ({ ...prev, phase: "spec" }) });
+      armed = true;
+    }
+    const versionBefore = (await store.readRef(ref)).state?.version ?? 0;
+    const writesBefore = router.calls(method, path);
+
+    const result = await updateIssueStateWithCas({
+      issueNumber: 10,
+      store,
+      mutator: (prev) => ({ ...prev, code_fix_attempts_used: prev.code_fix_attempts_used + 1 })
+    });
+
+    expect(router.unmatched).toEqual([]);
+    expect(result.cas_conflicts_recovered).toBe(0);
+    expect(router.calls(method, path) - writesBefore).toBe(1);
+    expect((await store.readRef(ref)).state).toMatchObject({ version: versionBefore + 1, code_fix_attempts_used: 1 });
+  });
+
   it("formatIssueStateMirrorMarkdown renders deterministic human-readable state summary", () => {
     const state: EpureIssueState = {
       issue_number: 10,

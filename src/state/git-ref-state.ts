@@ -557,15 +557,20 @@ export function createGitHubApiRefStateStore(
     return JSON.parse(rawJson) as EpureIssueState;
   };
 
-  // A rejected write is a CAS conflict only when the ref really moved; anything else is an error.
-  const refMovedFrom = async (
+  // A rejected write landed when the ref is now at `newSha`, is a CAS conflict when the ref moved
+  // elsewhere, and an error otherwise.
+  const rejectedWriteLanded = async (
     refName: string,
     current: GitRefObject | null,
+    newSha: string,
     resp: Response
   ): Promise<boolean> => {
     const now = await getRefObject(refName);
-    if ((now?.sha ?? null) !== (current?.sha ?? null)) {
+    if (now?.sha === newSha) {
       return true;
+    }
+    if ((now?.sha ?? null) !== (current?.sha ?? null)) {
+      return false;
     }
     throw new Error(
       `Failed to update Git ref '${refName}' (HTTP ${resp.status}): ${(await resp.text()).slice(0, 300)}`
@@ -586,7 +591,7 @@ export function createGitHubApiRefStateStore(
       });
       return (
         createRefResp.ok ||
-        !(await refMovedFrom(refName, current, createRefResp))
+        (await rejectedWriteLanded(refName, current, newSha, createRefResp))
       );
     }
     if (current.type !== "commit") {
@@ -596,7 +601,8 @@ export function createGitHubApiRefStateStore(
         body: JSON.stringify({ sha: newSha })
       });
       return (
-        migrateResp.ok || !(await refMovedFrom(refName, current, migrateResp))
+        migrateResp.ok ||
+        (await rejectedWriteLanded(refName, current, newSha, migrateResp))
       );
     }
     repositoryNodeId ??= await fetchRepositoryNodeId();
@@ -622,7 +628,7 @@ export function createGitHubApiRefStateStore(
         return true;
       }
     }
-    return !(await refMovedFrom(refName, current, updateRefsResp));
+    return await rejectedWriteLanded(refName, current, newSha, updateRefsResp);
   };
 
   return {
