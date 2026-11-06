@@ -120,9 +120,10 @@ git push origin dev
      - **Socle transverse permanent** : `architecture-reviewer`, `security-reviewer`, `spec-parity-reviewer`, `standards-reviewer` (adapté au langage détecté : TypeScript, Python, Rust ou Go) et `user-advocate`.
      - **Spécialistes conçus sur mesure selon les éléments du projet** : `domain-backend-reviewer`, `infra-reviewer`, tout reviewer métier créé par l'agent pour vos sous-systèmes (ex. `realtime-reviewer.md`, `combat-engine-reviewer.md`, `sql-migration-reviewer.md` avec routage par `paths:` dans le frontmatter YAML), et — uniquement si le projet comporte une UI — les reviewers frontend/Impeccable (`frontend-reviewer`, `accessibility-reviewer`, `design-reviewer`).
      - *Exemple illustratif sur `craft-calculator` (application web TypeScript + React)* : l'agent assemble un roster de 10 reviewers combinant le socle transverse, `domain-backend-reviewer`, `infra-reviewer` et les 3 reviewers UI/Impeccable.
-5. **Politique Squash-Only & 3 Repository Rulesets** :
+5. **Politique Squash-Only & 4 Repository Rulesets** :
    - Configure le dépôt en **Squash merge exclusif** (`allow_squash_merge: true`, `allow_merge_commit: false`, `allow_rebase_merge: false`, `delete_branch_on_merge: true`).
-   - Installe les 3 Rulesets GitHub :
+   - Installe les 4 Rulesets GitHub :
+     - `epure-feature-integrity` (`refs/heads/feature/*`) : interdit suppression et force-push sans aucun Bypass Actor, si bien que même l'`Agent App` ne peut ni réécrire ni supprimer une branche de fonctionnalité.
      - `epure-feature-governance` (`refs/heads/feature/*`) : `Agent App` en bypass `always` pour le squash-merge autonome des PRs `task/* -> feature/*` et les écritures directes d'EPURE (intégration du plan, synchronisations depuis `dev` en commits de merge, résolutions de conflits) ; les humains passent toujours par une PR.
      - `epure-dev-governance` (`refs/heads/dev`) : aucun bypass pour l'`Agent App` (`required_approving_review_count: 0` par défaut pour permettre à un mainteneur solo de merger ses PRs ; configurable via `--require-pr-approvals <N>`).
      - `epure-release-immutability` (`refs/heads/main`, `refs/tags/v*`) : `Release App` comme unique Bypass Actor.
