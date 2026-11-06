@@ -366,6 +366,40 @@ describe("syncBranchWithBase — conflict reads stay bounded and a failed read n
   });
 });
 
+describe("syncBranchWithBase — a resolved conflict is committed as a two-parent merge, so the merge base moves (#105)", () => {
+  it.each([
+    { id: "unchanged-base-next-sync-is-up-to-date", nextDevChange: {}, expectedNextStatus: "up_to_date" },
+    { id: "unrelated-base-change-next-sync-merges-without-a-new-conflict", nextDevChange: { "src/other.ts": "export const o = 1;\n" }, expectedNextStatus: "merged" },
+    { id: "base-edits-the-resolved-line-again-only-that-file-conflicts", nextDevChange: { "src/service.ts": "export const v = 'dev-again';\n" }, expectedNextStatus: "resolved" }
+  ])("$id", async ({ nextDevChange, expectedNextStatus }) => {
+    const ctx = setup({
+      shared: { ...CONFLICTING_SERVICE.shared, "src/util.ts": "export const u = 1;\n" },
+      ours: { ...CONFLICTING_SERVICE.ours, "src/util.ts": "export const u = 'ours';\n" },
+      theirs: CONFLICTING_SERVICE.theirs
+    });
+    const targetBefore = featureHead(ctx.git);
+    const baseHead = ctx.git.getRef("refs/heads/dev")!;
+    answerConflictResolution(ctx.router, [{ path: "src/service.ts", content: RESOLVED_SERVICE }]);
+
+    const first = await sync(ctx);
+
+    expect(first.result.status).toBe("resolved");
+    expect(ctx.git.getCommit(featureHead(ctx.git))!.parents).toEqual([targetBefore, baseHead]);
+    expect(ctx.git.readFile(FEATURE, "src/util.ts")).toBe("export const u = 'ours';\n");
+
+    if (Object.keys(nextDevChange).length > 0) {
+      ctx.git.commitFiles("dev", nextDevChange, "dev moves again");
+    }
+    const next = await sync(ctx);
+
+    expect(ctx.router.unmatched).toEqual([]);
+    expect(next.escalations).toEqual([]);
+    expect(next.result.status).toBe(expectedNextStatus);
+    expect(next.result.conflictsResolved).toEqual(expectedNextStatus === "resolved" ? ["src/service.ts"] : []);
+    expect(ctx.git.isAncestor(ctx.git.getRef("refs/heads/dev")!, featureHead(ctx.git))).toBe(true);
+  });
+});
+
 // Each time EPURE is about to move `branch`, a human pushes a commit first (up to `times` pushes).
 function pushBeforeEachRefWrite(git: FakeGitDataApi, branch: string, times: number): string[] {
   const humanCommits: string[] = [];
@@ -514,5 +548,125 @@ describe("/epure sync — a branch that keeps moving escalates branch_update_con
     for (const commit of humanCommits) {
       expect(ctx.git.isAncestor(commit, featureHead(ctx.git))).toBe(true);
     }
+  });
+});
+
+describe("continue on green ticket CI — a task PR merge refused with 405 re-syncs once, then escalates typed (#105)", () => {
+  const TASK = "task/42-sync";
+
+  async function runGreenTicketContinue(arrange: { taskChange: string; featureChange?: string; resolution: string }) {
+    const router = createGitHubMockRouter();
+    const git = installFakeGitDataApi(router, REPO);
+    const base = git.commitFiles("dev", CONFLICTING_SERVICE.shared, "shared history");
+    git.setRef(`refs/heads/${FEATURE}`, base);
+    git.setRef(`refs/heads/${TASK}`, base);
+    git.commitFiles(TASK, { "src/service.ts": arrange.taskChange }, "ticket work");
+    if (arrange.featureChange) {
+      git.commitFiles(FEATURE, { "src/service.ts": arrange.featureChange }, "other ticket merged");
+    }
+    const taskHead = git.getRef(`refs/heads/${TASK}`)!;
+    const store = createInMemoryGitRefStateStore();
+    await updateIssueStateWithCas({
+      issueNumber: ISSUE,
+      store,
+      mutator: (prev) => ({
+        ...prev,
+        phase: "implementation",
+        status: "active",
+        subphase: "waiting_ticket_ci",
+        active_branch: FEATURE,
+        active_ticket_number: ISSUE,
+        active_task_branch: TASK,
+        active_pr_number: 106,
+        active_head_sha: taskHead
+      })
+    });
+    router
+      .on("GET", `${R}/issues/${ISSUE}`, json({ number: ISSUE, title: "Sync", body: "", state: "open" }))
+      .on("GET", `${R}/issues/${ISSUE}/comments?per_page=100`, json([]))
+      .on("GET", /\/labels\/[^/]+$/, json({}))
+      .on("POST", `${R}/issues/${ISSUE}/labels`, json([]))
+      .on("POST", `${R}/issues/${ISSUE}/comments`, json({ html_url: "c" }, 201))
+      .on("GET", /\/actions\/runs\?head_sha=/, json({ workflow_runs: [{ id: 1, name: "CI", path: ".github/workflows/ci.yml", status: "completed", conclusion: "success" }] }))
+      .on("GET", /\/commits\/[^/]+\/check-runs\?/, json({ check_runs: [{ id: 1, name: "CI", status: "completed", conclusion: "success" }, { id: 2, name: "ai-review", status: "completed", conclusion: "success" }] }))
+      .on("GET", /\/pulls\?state=open&head=/, json([{ number: 106, html_url: "pr106", title: "feat: x", head: { sha: taskHead } }]))
+      .on("GET", `${R}/pulls/106/files`, json([{ filename: "src/service.ts", status: "modified", patch: "@@ -1 +1 @@" }]))
+      .on("PATCH", `${R}/pulls/106`, json({ head: { sha: taskHead } }))
+      .on("POST", `${R}/check-runs`, json({}, 201))
+      .on("PUT", `${R}/pulls/106/merge`, json({ message: "Pull Request is not mergeable" }, 405))
+      .onHost("api.openai.com", "POST", "/v1/chat/completions", (req) => {
+        const schema = (req.body as { response_format?: { json_schema?: { name?: string } } }).response_format?.json_schema?.name;
+        const payload =
+          schema === "squash_commit_payload"
+            ? { title: "feat: x", body: "", pr_title: "feat: x", commit_title: "feat: x", commit_body: "", bullets: ["- x", "- y"] }
+            : { summary: "merged", resolved_files: [{ path: "src/service.ts", content: arrange.resolution }] };
+        return json({ choices: [{ message: { content: JSON.stringify(payload) } }] });
+      });
+
+    const result = await orchestrateIssueCommand({
+      repository: REPO,
+      issueNumber: ISSUE,
+      command: "continue",
+      commandArgs: "",
+      actor: "github-actions[bot]",
+      commentId: 0,
+      fallbackGithubToken: "ghs_test",
+      llmApiKey: "key_test",
+      model: "openai/gpt-test",
+      asyncCiContinuation: true,
+      stateStore: store,
+      fetchImpl: router.fetch
+    });
+    const checkRuns = router.requests
+      .filter((r) => r.method === "POST" && r.path === `${R}/check-runs`)
+      .map((r) => r.body as { name: string; head_sha: string });
+    return {
+      router,
+      git,
+      taskHead,
+      result,
+      checkRuns,
+      state: (await store.readRef(`refs/epure/state/${ISSUE}`)).state!
+    };
+  }
+
+  it("conflicting-task-branch-is-re-synced-as-a-merge-commit-and-ci-is-awaited-on-it", async () => {
+    const run = await runGreenTicketContinue({
+      taskChange: CONFLICTING_SERVICE.ours["src/service.ts"]!,
+      featureChange: CONFLICTING_SERVICE.theirs["src/service.ts"]!,
+      resolution: RESOLVED_SERVICE
+    });
+    const newHead = run.git.getRef(`refs/heads/${TASK}`)!;
+
+    expect(run.router.unmatched).toEqual([]);
+    expect(run.git.getCommit(newHead)!.parents).toEqual([run.taskHead, run.git.getRef(`refs/heads/${FEATURE}`)]);
+    expect(run.git.readFile(newHead, "src/service.ts")).toBe(RESOLVED_SERVICE);
+    expect(run.state).toMatchObject({ status: "active", subphase: "waiting_ticket_ci", active_head_sha: newHead });
+    expect(run.state.last_escalation).toBeUndefined();
+    expect(run.checkRuns.filter((c) => c.name === "ai-review").map((c) => c.head_sha)).toEqual([newHead]);
+    expect(run.router.calls("PUT", `${R}/pulls/106/merge`)).toBe(1);
+  });
+
+  it.each([
+    {
+      id: "unresolvable-conflict-escalates-merge_conflict_unresolved",
+      arrange: {
+        taskChange: CONFLICTING_SERVICE.ours["src/service.ts"]!,
+        featureChange: CONFLICTING_SERVICE.theirs["src/service.ts"]!,
+        resolution: "<<<<<<< ours\na\n=======\nb\n>>>>>>> theirs\n"
+      }
+    },
+    {
+      id: "task-branch-already-up-to-date-escalates-merge_conflict_unresolved",
+      arrange: { taskChange: CONFLICTING_SERVICE.ours["src/service.ts"]!, resolution: RESOLVED_SERVICE }
+    }
+  ])("$id", async ({ arrange }) => {
+    const run = await runGreenTicketContinue(arrange);
+
+    expect(run.router.unmatched).toEqual([]);
+    expect(run.state).toMatchObject({ status: "suspended", last_escalation: { reason: "merge_conflict_unresolved" } });
+    expect(run.git.getRef(`refs/heads/${TASK}`)).toBe(run.taskHead);
+    expect(run.result.summary_markdown).toContain("`MERGE_CONFLICT_UNRESOLVED`");
+    expect(run.result.summary_markdown).not.toContain("Internal orchestrator error");
   });
 });

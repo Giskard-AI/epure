@@ -79,6 +79,14 @@ export class BranchUpdateConflictError extends Error {
   }
 }
 
+export class PullRequestNotMergeableError extends Error {
+  override readonly name = "PullRequestNotMergeableError";
+
+  constructor(readonly prNumber: number) {
+    super(`GitHub refused to merge PR #${prNumber} (HTTP 405: not mergeable).`);
+  }
+}
+
 interface GitTreeEntry {
   readonly path?: string;
   readonly type?: string;
@@ -871,26 +879,33 @@ export function createGitHubRestHelper(params: {
           }
         }
 
-        if (attemptEntries.length === 0) {
+        if (attemptEntries.length === 0 && !input.mergeParentSha) {
           return parentCommitSha;
         }
 
-        const newTree = await apiRequest<{ sha: string }>(
-          "POST",
-          `/repos/${owner}/${repo}/git/trees`,
-          {
-            base_tree: baseTreeSha,
-            tree: attemptEntries
-          }
-        );
+        const treeSha =
+          attemptEntries.length === 0
+            ? baseTreeSha
+            : (
+                await apiRequest<{ sha: string }>(
+                  "POST",
+                  `/repos/${owner}/${repo}/git/trees`,
+                  {
+                    base_tree: baseTreeSha,
+                    tree: attemptEntries
+                  }
+                )
+              ).data!.sha;
 
         const newCommit = await apiRequest<{ sha: string }>(
           "POST",
           `/repos/${owner}/${repo}/git/commits`,
           {
             message: input.commitMessage,
-            tree: newTree.data!.sha,
-            parents: [parentCommitSha]
+            tree: treeSha,
+            parents: input.mergeParentSha
+              ? [parentCommitSha, input.mergeParentSha]
+              : [parentCommitSha]
           }
         );
 
@@ -1199,6 +1214,14 @@ export function createGitHubRestHelper(params: {
       }
     },
 
+    async getPullRequestMergeableState(prNumber: number): Promise<string> {
+      const { data } = await apiRequest<{ mergeable_state?: string }>(
+        "GET",
+        `/repos/${owner}/${repo}/pulls/${prNumber}`
+      );
+      return data?.mergeable_state ?? "unknown";
+    },
+
     async mergePullRequest(
       prNumber: number,
       input: {
@@ -1213,15 +1236,20 @@ export function createGitHubRestHelper(params: {
         baseBranch: input.baseBranch
       });
 
-      await apiRequest(
+      const merged = await apiRequest(
         "PUT",
         `/repos/${owner}/${repo}/pulls/${prNumber}/merge`,
         {
           commit_title: input.commitTitle,
           commit_message: input.commitMessage ?? "",
           merge_method: "squash"
-        }
+        },
+        false,
+        [405]
       );
+      if (merged.status === 405) {
+        throw new PullRequestNotMergeableError(prNumber);
+      }
 
       const cleanHead = input.headBranch.trim().replace(/^refs\/heads\//, "");
       if (cleanHead.startsWith("task/") || cleanHead.startsWith("plan/")) {

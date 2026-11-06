@@ -57,6 +57,7 @@ import {
   BranchUpdateConflictError,
   createGitHubRestHelper,
   loadRepoAgentsConfig,
+  PullRequestNotMergeableError,
   slugifyTitle,
   verifyPublisherMergeBoundary
 } from "./github/rest-client.js";
@@ -1025,12 +1026,69 @@ export async function orchestrateIssueCommand(
                 conclusion: "success",
                 summary: `Conventional Commit title verified: '${squashCommit.pr_title}'`
               });
-              await gh.mergePullRequest(prNumberToMerge, {
-                headBranch: taskBranchToMerge,
-                baseBranch: targetFeatureBranch,
-                commitTitle: squashCommit.commit_title,
-                commitMessage: squashCommit.commit_message
-              });
+              try {
+                await gh.mergePullRequest(prNumberToMerge, {
+                  headBranch: taskBranchToMerge,
+                  baseBranch: targetFeatureBranch,
+                  commitTitle: squashCommit.commit_title,
+                  commitMessage: squashCommit.commit_message
+                });
+              } catch (err) {
+                if (!(err instanceof PullRequestNotMergeableError)) {
+                  throw err;
+                }
+                // A refused merge gets one re-sync; external CI then re-verifies the new head before the next merge.
+                const resync = await syncBranchWithBase({
+                  gh,
+                  targetBranch: taskBranchToMerge,
+                  baseBranch: targetFeatureBranch,
+                  issueNumber: ticketNum,
+                  llmApiKey: effectiveInput.llmApiKey,
+                  fetchImpl: effectiveInput.fetchImpl,
+                  model: phaseModels.implementationModel,
+                  providers: phaseModels.providers,
+                  maxTransientRetries: phaseModels.maxTransientRetries,
+                  transientRetryBackoffSeconds:
+                    phaseModels.transientRetryBackoffSeconds,
+                  requestTimeoutMs: phaseModels.requestTimeoutMs,
+                  sandboxRunner: effectiveInput.sandboxRunner,
+                  reviewersDir
+                });
+                if (resync.status !== "merged" && resync.status !== "resolved") {
+                  return await escalateSuspension({
+                    reason: resync.escalationReason ?? "merge_conflict_unresolved",
+                    ticketNumber: ticketNum,
+                    branch: taskBranchToMerge,
+                    prNumber: prNumberToMerge,
+                    prUrl: openTaskPr?.html_url,
+                    diagnosticExcerpt: resync.diagnosticExcerpt ?? err.message
+                  });
+                }
+                await gh.publishCheckRun({
+                  name: "ai-review",
+                  headSha: resync.headSha,
+                  conclusion: "success",
+                  summary: `Review of \`${activeHeadSha}\` carried over: \`${resync.headSha}\` only merges \`${targetFeatureBranch}\` into \`${taskBranchToMerge}\`.`
+                });
+                const updatedResynced = await updateIssueStateWithCas({
+                  issueNumber: effectiveInput.issueNumber,
+                  store,
+                  mutator: (prev) => ({
+                    ...prev,
+                    subphase: "waiting_ticket_ci",
+                    active_head_sha: resync.headSha
+                  })
+                });
+                return {
+                  executed: true,
+                  phase: updatedResynced.state.phase,
+                  status: updatedResynced.state.status,
+                  active_branch: updatedResynced.state.active_branch,
+                  summary_markdown: `PR #${prNumberToMerge} was not mergeable; \`${taskBranchToMerge}\` re-synced with \`${targetFeatureBranch}\` at \`${resync.headSha}\`. Waiting for external CI on the new head.`,
+                  created_ticket_numbers: [],
+                  feature_pr_url: ""
+                };
+              }
             }
 
             if (ticketNum !== effectiveInput.issueNumber) {

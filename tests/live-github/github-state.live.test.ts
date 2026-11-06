@@ -7,8 +7,12 @@ import {
   mintRepositoryInstallationToken,
   revokeGitHubInstallationToken
 } from "../../src/auth/github-app-jwt.js";
+import { syncBranchWithBase } from "../../src/orchestrator/github/branch-sync.js";
 import { createGitHubRateLimitedFetch } from "../../src/orchestrator/github/rate-limit.js";
-import { createGitHubRestHelper } from "../../src/orchestrator/github/rest-client.js";
+import {
+  createGitHubRestHelper,
+  PullRequestNotMergeableError
+} from "../../src/orchestrator/github/rest-client.js";
 import {
   createGitHubApiRefStateStore,
   updateIssueStateWithCas,
@@ -562,6 +566,74 @@ describeLive(
         expect(merge.status).toBe(201);
         expect(merge.data.parents).toHaveLength(2);
         expect(update.status).toBe(200);
+      });
+    });
+
+    describe("3-way conflict resolution makes a conflicting PR mergeable (#105)", () => {
+      const FILE = `${NS}/conflict.txt`;
+      let base = "";
+      let target = "";
+      let targetHead = "";
+      let baseHead = "";
+      let prNumber = 0;
+
+      // GitHub recomputes mergeability asynchronously and keeps serving the previous value meanwhile.
+      async function settledMergeable(expected: boolean): Promise<{ mergeable: boolean | null; mergeable_state: string }> {
+        for (let attempt = 0; ; attempt += 1) {
+          const pr = await api<{ mergeable: boolean | null; mergeable_state: string }>("GET", `${R}/pulls/${prNumber}`);
+          if (pr.data.mergeable === expected || attempt >= 20) {
+            return pr.data;
+          }
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+      }
+
+      beforeAll(async () => {
+        const shared = await commitOnTop([baseSha], FILE, "shared\n");
+        baseHead = await commitOnTop([shared], FILE, "base side\n");
+        targetHead = await commitOnTop([shared], FILE, "target side\n");
+        base = await createBranch("conflict-base", baseHead);
+        target = await createBranch("conflict-target", targetHead);
+        const pr = await api<{ number: number }>("POST", `${R}/pulls`, { title: `test(${NS}): conflict`, head: target, base });
+        prNumber = pr.data.number;
+      }, HOOK_TIMEOUT_MS);
+
+      it("a conflicting PR is dirty and its merge is refused with PullRequestNotMergeableError", async () => {
+        const gh = createGitHubRestHelper({ repository: cfg.repository, token });
+        expect(await settledMergeable(false)).toMatchObject({ mergeable: false, mergeable_state: "dirty" });
+        expect(await gh.getPullRequestMergeableState?.(prNumber)).toBe("dirty");
+        await expect(
+          gh.mergePullRequest(prNumber, { headBranch: target, baseBranch: base, commitTitle: "refused" })
+        ).rejects.toBeInstanceOf(PullRequestNotMergeableError);
+      });
+
+      it("the resolution is a two-parent merge commit and the PR becomes mergeable", async () => {
+        const gh = createGitHubRestHelper({ repository: cfg.repository, token });
+        const llmFetch: typeof fetch = async (input, init) =>
+          new URL(String(input)).hostname === "api.openai.com"
+            ? new Response(
+                JSON.stringify({
+                  choices: [{ message: { content: JSON.stringify({ summary: "both", resolved_files: [{ path: FILE, content: "both sides\n" }] }) } }]
+                }),
+                { status: 200 }
+              )
+            : await fetch(input, init);
+
+        const result = await syncBranchWithBase({
+          gh,
+          targetBranch: target,
+          baseBranch: base,
+          issueNumber: 1,
+          llmApiKey: "unused",
+          model: "openai/gpt-test",
+          fetchImpl: llmFetch
+        });
+        const commit = await api<{ parents: Array<{ sha: string }> }>("GET", `${R}/git/commits/${result.headSha}`);
+
+        expect(result).toMatchObject({ status: "resolved", conflictsResolved: [FILE] });
+        expect(commit.data.parents.map((p) => p.sha)).toEqual([targetHead, baseHead]);
+        expect(await settledMergeable(true)).toMatchObject({ mergeable: true });
+        expect((await gh.mergeBranches?.({ base: target, head: base }))?.status).toBe("up_to_date");
       });
     });
 

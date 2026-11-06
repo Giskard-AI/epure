@@ -227,6 +227,8 @@ export interface GitHubRestHelper {
     commitMessage: string;
     files: ReadonlyArray<{ path: string; content: string }>;
     readonly deletedFiles?: readonly string[] | undefined;
+    // Second parent: the commit is then a merge commit, so Git records `mergeParentSha` as merged.
+    readonly mergeParentSha?: string | undefined;
   }): Promise<string>;
   listPullRequestFiles(
     prNumber: number
@@ -288,6 +290,9 @@ export interface GitHubRestHelper {
     prNumber: number,
     params: { commitId: string; body: string }
   ): Promise<void>;
+  // GitHub `mergeable_state` (`dirty` = merge conflicts; `unknown` while GitHub computes it).
+  getPullRequestMergeableState?(prNumber: number): Promise<string>;
+  // Throws `PullRequestNotMergeableError` when GitHub refuses the merge (HTTP 405).
   mergePullRequest(
     prNumber: number,
     params: {

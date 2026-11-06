@@ -1428,7 +1428,9 @@ export async function syncBranchWithBase(
     branch: input.targetBranch,
     commitMessage: `chore(sync): resolve merge conflicts from ${input.baseBranch} into ${input.targetBranch}`,
     files: allFilesToCommit,
-    ...(baseDeletedFiles.length > 0 ? { deletedFiles: baseDeletedFiles } : {})
+    ...(baseDeletedFiles.length > 0 ? { deletedFiles: baseDeletedFiles } : {}),
+    // Without the base as second parent the merge base never moves: the PR stays `dirty` and GitHub runs no `pull_request` CI.
+    mergeParentSha: baseHeadSha
   });
 
   return {
