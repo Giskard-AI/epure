@@ -110,11 +110,11 @@ describeLive(
     let baseSha = "";
     const R = `/repos/${cfg.repository}`;
 
-    async function api<T>(method: string, path: string, body?: unknown): Promise<ApiResult<T>> {
+    async function api<T>(method: string, path: string, body?: unknown, auth: string = token): Promise<ApiResult<T>> {
       const resp = await fetch(`https://api.github.com${path}`, {
         method,
         headers: {
-          Authorization: `Bearer ${token}`,
+          Authorization: `Bearer ${auth}`,
           Accept: "application/vnd.github+json",
           "X-GitHub-Api-Version": "2022-11-28"
         },
@@ -128,24 +128,24 @@ describeLive(
       };
     }
 
-    async function commitOnTop(parents: readonly string[], path: string, content: string): Promise<string> {
-      const parent = await api<{ tree: { sha: string } }>("GET", `${R}/git/commits/${parents[0]}`);
-      const blob = await api<{ sha: string }>("POST", `${R}/git/blobs`, { content, encoding: "utf-8" });
+    async function commitOnTop(parents: readonly string[], path: string, content: string, auth: string = token): Promise<string> {
+      const parent = await api<{ tree: { sha: string } }>("GET", `${R}/git/commits/${parents[0]}`, undefined, auth);
+      const blob = await api<{ sha: string }>("POST", `${R}/git/blobs`, { content, encoding: "utf-8" }, auth);
       const tree = await api<{ sha: string }>("POST", `${R}/git/trees`, {
         base_tree: parent.data.tree.sha,
         tree: [{ path, mode: "100644", type: "blob", sha: blob.data.sha }]
-      });
+      }, auth);
       const commit = await api<{ sha: string }>("POST", `${R}/git/commits`, {
         message: `test(${NS}): ${path}`,
         tree: tree.data.sha,
         parents
-      });
+      }, auth);
       return commit.data.sha;
     }
 
-    async function createBranch(name: string, sha: string): Promise<string> {
+    async function createBranch(name: string, sha: string, auth: string = token): Promise<string> {
       const ref = `refs/heads/${NS}/${name}`;
-      const res = await api("POST", `${R}/git/refs`, { ref, sha });
+      const res = await api("POST", `${R}/git/refs`, { ref, sha }, auth);
       expect(res.status).toBe(201);
       return `${NS}/${name}`;
     }
@@ -599,13 +599,10 @@ describeLive(
         };
       }
 
-      it.each([
-        { id: "disjoint-concurrent-push-is-kept-and-the-commit-is-rebuilt-on-it", concurrentPath: "other.txt", overlaps: false },
-        { id: "concurrent-push-on-a-written-path-throws-BranchUpdateConflictError-without-overwriting-it", concurrentPath: "epure.txt", overlaps: true }
-      ])("$id", async ({ id, concurrentPath, overlaps }) => {
-        const branch = await createBranch(`concurrent-${overlaps ? "overlap" : "disjoint"}`, baseSha);
-        const epurePath = `${NS}/${id}/epure.txt`;
-        const humanPath = `${NS}/${id}/${concurrentPath}`;
+      async function writeDuringConcurrentPush(slug: string, concurrentFile: string) {
+        const branch = await createBranch(`concurrent-${slug}`, baseSha);
+        const epurePath = `${NS}/${slug}/epure.txt`;
+        const humanPath = `${NS}/${slug}/${concurrentFile}`;
         let humanSha = "";
         const gh = createGitHubRestHelper({
           repository: cfg.repository,
@@ -616,24 +613,32 @@ describeLive(
             return humanSha;
           })
         });
-
         const commit = gh.commitFilesToBranch({
           branch,
           commitMessage: `test(${NS}): epure write`,
           files: [{ path: epurePath, content: "epure write\n" }]
         });
+        return { branch, epurePath, humanPath, commit, humanSha: () => humanSha };
+      }
 
-        if (overlaps) {
-          await expect(commit).rejects.toMatchObject({ name: "BranchUpdateConflictError", overlappingPaths: [epurePath] });
-          const head = await api<{ object: { sha: string } }>("GET", `${R}/git/ref/heads/${branch}`);
-          expect(head.data.object.sha).toBe(humanSha);
-          return;
-        }
+      it("disjoint-concurrent-push-is-kept-and-the-commit-is-rebuilt-on-it", async () => {
+        const { epurePath, humanPath, commit, humanSha } = await writeDuringConcurrentPush("disjoint", "other.txt");
+
         const headSha = await commit;
         const head = await api<{ parents: Array<{ sha: string }> }>("GET", `${R}/git/commits/${headSha}`);
         const tree = await api<{ tree: Array<{ path: string }> }>("GET", `${R}/git/trees/${headSha}?recursive=1`);
-        expect(head.data.parents.map((p) => p.sha)).toEqual([humanSha]);
+
+        expect(head.data.parents.map((p) => p.sha)).toEqual([humanSha()]);
         expect(tree.data.tree.map((e) => e.path)).toEqual(expect.arrayContaining([epurePath, humanPath]));
+      });
+
+      it("concurrent-push-on-a-written-path-throws-BranchUpdateConflictError-without-overwriting-it", async () => {
+        const { branch, epurePath, commit, humanSha } = await writeDuringConcurrentPush("overlap", "epure.txt");
+
+        await expect(commit).rejects.toMatchObject({ name: "BranchUpdateConflictError", overlappingPaths: [epurePath] });
+        const head = await api<{ object: { sha: string } }>("GET", `${R}/git/ref/heads/${branch}`);
+
+        expect(head.data.object.sha).toBe(humanSha());
       });
     });
 
@@ -702,6 +707,103 @@ describeLive(
         expect(commit.data.parents.map((p) => p.sha)).toEqual([targetHead, baseHead]);
         expect(await settledMergeable(true)).toMatchObject({ mergeable: true });
         expect((await gh.mergeBranches?.({ base: target, head: base }))?.status).toBe("up_to_date");
+      });
+    });
+
+    // Committing a workflow file needs `workflows: write`, reading runs `actions: read`; the sandbox App may not have them yet.
+    describe("3-way conflict resolution triggers the PR checks on the new head (#105e)", () => {
+      const FILE = `${NS}/conflict-checks.txt`;
+      const WORKFLOW_PATH = `.github/workflows/live-${RUN_ID}.yml`;
+      const RUN_TIMEOUT_MS = 120_000;
+      let checksToken = "";
+      let missingPermission = "";
+
+      beforeAll(async () => {
+        try {
+          checksToken = (
+            await mintRepositoryInstallationToken({
+              appId: cfg.appId,
+              privateKeyPem: cfg.privateKey,
+              repository: cfg.repository,
+              permissions: { contents: "write", pull_requests: "write", workflows: "write", actions: "read" }
+            })
+          ).token;
+        } catch (err: unknown) {
+          if (!(err instanceof Error && /HTTP 422/.test(err.message))) {
+            throw err;
+          }
+          missingPermission = "the sandbox App lacks workflows: write or actions: read; grant them and rerun";
+        }
+      }, HOOK_TIMEOUT_MS);
+
+      afterAll(async () => {
+        if (checksToken) {
+          await revokeGitHubInstallationToken({ token: checksToken });
+        }
+      }, HOOK_TIMEOUT_MS);
+
+      it("a pull_request workflow run registers on the two-parent resolution head", { timeout: RUN_TIMEOUT_MS + 60_000 }, async (ctx) => {
+        if (missingPermission) {
+          ctx.skip(missingPermission);
+        }
+        // `if: false` registers the run without spending runner minutes.
+        const workflow = [
+          `name: live-${RUN_ID}`,
+          "on:",
+          "  pull_request:",
+          `    branches: ["${NS}/**"]`,
+          "jobs:",
+          "  noop:",
+          "    if: false",
+          "    runs-on: ubuntu-latest",
+          "    steps:",
+          "      - run: true",
+          ""
+        ].join("\n");
+        const withWorkflow = await commitOnTop([baseSha], WORKFLOW_PATH, workflow, checksToken);
+        const shared = await commitOnTop([withWorkflow], FILE, "shared\n", checksToken);
+        const baseHead = await commitOnTop([shared], FILE, "base side\n", checksToken);
+        const targetHead = await commitOnTop([shared], FILE, "target side\n", checksToken);
+        const base = await createBranch("checks-base", baseHead, checksToken);
+        const target = await createBranch("checks-target", targetHead, checksToken);
+        const pr = await api<{ number: number }>("POST", `${R}/pulls`, { title: `test(${NS}): checks`, head: target, base }, checksToken);
+        expect(pr.status).toBe(201);
+
+        const gh = createGitHubRestHelper({ repository: cfg.repository, token: checksToken });
+        const llmFetch: typeof fetch = async (input, init) =>
+          new URL(String(input)).hostname === "api.openai.com"
+            ? new Response(
+                JSON.stringify({
+                  choices: [{ message: { content: JSON.stringify({ summary: "both", resolved_files: [{ path: FILE, content: "both sides\n" }] }) } }]
+                }),
+                { status: 200 }
+              )
+            : await fetch(input, init);
+        const result = await syncBranchWithBase({
+          gh,
+          targetBranch: target,
+          baseBranch: base,
+          issueNumber: 1,
+          llmApiKey: "unused",
+          model: "openai/gpt-test",
+          fetchImpl: llmFetch
+        });
+        expect(result).toMatchObject({ status: "resolved", conflictsResolved: [FILE] });
+
+        type Run = { event: string; head_sha: string; path: string };
+        let runs: Run[] = [];
+        for (const deadline = Date.now() + RUN_TIMEOUT_MS; runs.length === 0 && Date.now() < deadline; ) {
+          await new Promise((r) => setTimeout(r, 5000));
+          const listed = await api<{ workflow_runs: Run[] }>(
+            "GET",
+            `${R}/actions/runs?event=pull_request&head_sha=${result.headSha}`,
+            undefined,
+            checksToken
+          );
+          runs = listed.data.workflow_runs.filter((run) => run.path === WORKFLOW_PATH);
+        }
+
+        expect(runs).toContainEqual(expect.objectContaining({ event: "pull_request", head_sha: result.headSha }));
       });
     });
 
