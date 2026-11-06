@@ -553,6 +553,14 @@ export function installFakeGitDataApi(
           })
         : notFound();
     })
+    .on("GET", new RegExp(`^${repoPath}/contents/([^?]+)\\?ref=(.+)$`), (_req, m) => {
+      const path = m![1]!.split("/").map(decodeURIComponent).join("/");
+      const blobSha = treeEntries(resolveCommit(decodeURIComponent(m![2]!))).get(path);
+      const content = blobSha === undefined ? undefined : api.readBlob(blobSha);
+      return content === undefined
+        ? notFound()
+        : json({ type: "file", path, sha: blobSha, encoding: "base64", content: Buffer.from(content, "utf8").toString("base64") });
+    })
     .on("GET", new RegExp(`^${prefix}/trees/([^?]+)(?:\\?recursive=1)?$`), (_req, m) => {
       const treeSha = resolveTreeish(decodeURIComponent(m![1]!));
       if (treeSha === undefined) {

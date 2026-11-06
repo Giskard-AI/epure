@@ -14,6 +14,7 @@ import {
 } from "../../state/git-ref-state.js";
 import type {
   CollaboratorPermission,
+  GitBlobRef,
   GitHubRestHelper,
   IssueCommentRecord,
   IssueMetadata
@@ -61,6 +62,14 @@ export function slugifyTitle(raw: string, fallback = "feature"): string {
     .slice(0, 36)
     .replace(/-+$/g, "");
   return clean || fallback;
+}
+
+interface GitTreeEntry {
+  readonly path?: string;
+  readonly type?: string;
+  readonly sha?: string;
+  readonly mode?: string;
+  readonly size?: number;
 }
 
 function encodeGitHubContentsPath(filePath: string): string {
@@ -135,6 +144,59 @@ export function createGitHubRestHelper(params: {
     }
     const json = (await resp.json()) as T;
     return { status: resp.status, data: json };
+  }
+
+  function decodeBase64(content: string): string {
+    return Buffer.from(content.replace(/\s+/g, ""), "base64").toString("utf8");
+  }
+
+  async function readBlob(sha: string): Promise<string | null> {
+    const { data } = await apiRequest<{ content?: string; encoding?: string }>(
+      "GET",
+      `/repos/${owner}/${repo}/git/blobs/${sha}`,
+      undefined,
+      true
+    );
+    return data?.encoding === "base64" && typeof data.content === "string"
+      ? decodeBase64(data.content)
+      : null;
+  }
+
+  async function resolveCommitSha(branchOrSha: string): Promise<string | null> {
+    if (/^[0-9a-f]{40}$/i.test(branchOrSha)) {
+      return branchOrSha;
+    }
+    const { data } = await apiRequest<{ object?: { sha?: string } }>(
+      "GET",
+      `/repos/${owner}/${repo}/git/ref/heads/${encodeURIComponent(branchOrSha)}`,
+      undefined,
+      true
+    );
+    return data?.object?.sha ?? null;
+  }
+
+  const treesByCommitSha = new Map<string, Promise<readonly GitTreeEntry[]>>();
+
+  // A commit's tree never changes, so the recursive listing is fetched once per commit SHA per run.
+  async function readBranchTree(
+    branchOrSha: string
+  ): Promise<readonly GitTreeEntry[]> {
+    const sha = await resolveCommitSha(branchOrSha);
+    if (!sha) {
+      return [];
+    }
+    let pending = treesByCommitSha.get(sha);
+    if (!pending) {
+      pending = apiRequest<{ tree?: GitTreeEntry[] }>(
+        "GET",
+        `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(sha)}?recursive=1`,
+        undefined,
+        true
+      ).then((res) => res.data?.tree ?? []);
+      treesByCommitSha.set(sha, pending);
+      pending.catch(() => treesByCommitSha.delete(sha));
+    }
+    return await pending;
   }
 
   return {
@@ -350,57 +412,45 @@ export function createGitHubRestHelper(params: {
     },
 
     async listBranchPaths(branch: string): Promise<string[]> {
-      try {
-        const treeRes = await apiRequest<{
-          tree?: Array<{ path?: string; type?: string }>;
-        }>(
-          "GET",
-          `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
-          undefined,
-          true
-        );
-        return (treeRes.data?.tree ?? [])
-          .filter((e) => e.type === "blob" && typeof e.path === "string")
-          .map((e) => e.path!);
-      } catch {
-        return [];
+      return (await readBranchTree(branch))
+        .filter((e) => e.type === "blob" && typeof e.path === "string")
+        .map((e) => e.path!);
+    },
+
+    async listBranchBlobs(
+      branchOrSha: string
+    ): Promise<ReadonlyMap<string, GitBlobRef>> {
+      const blobs = new Map<string, GitBlobRef>();
+      for (const e of await readBranchTree(branchOrSha)) {
+        if (e.type === "blob" && e.path && e.sha) {
+          blobs.set(e.path, { sha: e.sha, mode: e.mode ?? "100644" });
+        }
       }
+      return blobs;
     },
 
     async readSingleBranchFile(
       branch: string,
       filePath: string
     ): Promise<string | null> {
-      try {
-        const cleanPath = filePath.trim().replace(/^\/+/, "");
-        const treeRes = await apiRequest<{
-          tree?: Array<{ path?: string; type?: string; sha?: string }>;
-        }>(
-          "GET",
-          `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
-          undefined,
-          true
-        );
-        const match = (treeRes.data?.tree ?? []).find(
-          (e) => e.type === "blob" && e.path === cleanPath
-        );
-        if (!match?.sha) {
-          return null;
-        }
-        const blobRes = await apiRequest<{
-          content?: string;
-          encoding?: string;
-        }>("GET", `/repos/${owner}/${repo}/git/blobs/${match.sha}`, undefined, true);
-        if (blobRes.data?.content && blobRes.data.encoding === "base64") {
-          return Buffer.from(
-            blobRes.data.content.replace(/\s+/g, ""),
-            "base64"
-          ).toString("utf8");
-        }
-        return null;
-      } catch {
+      const cleanPath = filePath.trim().replace(/^\/+/, "");
+      const { data } = await apiRequest<
+        | { type?: string; sha?: string; content?: string; encoding?: string }
+        | unknown[]
+      >(
+        "GET",
+        `/repos/${owner}/${repo}/contents/${encodeGitHubContentsPath(cleanPath)}?ref=${encodeURIComponent(branch)}`,
+        undefined,
+        true
+      );
+      if (!data || Array.isArray(data) || data.type !== "file") {
         return null;
       }
+      if (data.encoding === "base64" && typeof data.content === "string") {
+        return decodeBase64(data.content);
+      }
+      // Files over 1 MB come back with `encoding: "none"`; their blob still has the content.
+      return data.sha ? await readBlob(data.sha) : null;
     },
 
     async readBranchWorkspaceFiles(
@@ -665,42 +715,19 @@ export function createGitHubRestHelper(params: {
 
     async readDevWorkflowsMap(branch: string): Promise<Map<string, string>> {
       const workflowsMap = new Map<string, string>();
-      try {
-        const treeRes = await apiRequest<{
-          tree?: Array<{ path?: string; type?: string; sha?: string }>;
-        }>(
-          "GET",
-          `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
-          undefined,
-          true
-        );
-        const entries = treeRes.data?.tree ?? [];
-        for (const entry of entries) {
-          if (entry.type !== "blob" || !entry.path || !entry.sha) {
-            continue;
-          }
-          if (!/^\.github\/workflows\/[^/]+\.ya?ml$/i.test(entry.path)) {
-            continue;
-          }
-          const blobRes = await apiRequest<{
-            content?: string;
-            encoding?: string;
-          }>(
-            "GET",
-            `/repos/${owner}/${repo}/git/blobs/${entry.sha}`,
-            undefined,
-            true
-          );
-          if (blobRes.data?.content && blobRes.data.encoding === "base64") {
-            const decoded = Buffer.from(
-              blobRes.data.content.replace(/\s+/g, ""),
-              "base64"
-            ).toString("utf8");
-            workflowsMap.set(entry.path, decoded);
-          }
+      for (const entry of await readBranchTree(branch)) {
+        if (
+          entry.type !== "blob" ||
+          !entry.path ||
+          !entry.sha ||
+          !/^\.github\/workflows\/[^/]+\.ya?ml$/i.test(entry.path)
+        ) {
+          continue;
         }
-      } catch {
-        // Non-fatal if branch tree is unavailable or mocked in tests
+        const content = await readBlob(entry.sha);
+        if (content !== null) {
+          workflowsMap.set(entry.path, content);
+        }
       }
       return workflowsMap;
     },
@@ -1090,27 +1117,23 @@ export function createGitHubRestHelper(params: {
       changedFiles: readonly string[];
       aheadBy: number;
     }> {
-      try {
-        const res = await apiRequest<{
-          merge_base_commit?: { sha?: string };
-          files?: Array<{ filename?: string }>;
-          ahead_by?: number;
-        }>(
-          "GET",
-          `/repos/${owner}/${repo}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`,
-          undefined,
-          true
-        );
-        const mergeBaseSha = res.data?.merge_base_commit?.sha ?? base;
-        const changedFiles = Array.isArray(res.data?.files)
-          ? res.data!.files
-              .map((f) => f.filename?.trim().replace(/^\/+/, "") ?? "")
-              .filter((p) => p.length > 0)
-          : [];
-        return { mergeBaseSha, changedFiles, aheadBy: res.data?.ahead_by ?? 0 };
-      } catch {
-        return { mergeBaseSha: base, changedFiles: [], aheadBy: 0 };
-      }
+      const res = await apiRequest<{
+        merge_base_commit?: { sha?: string };
+        files?: Array<{ filename?: string }>;
+        ahead_by?: number;
+      }>(
+        "GET",
+        `/repos/${owner}/${repo}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`,
+        undefined,
+        true
+      );
+      const mergeBaseSha = res.data?.merge_base_commit?.sha ?? base;
+      const changedFiles = Array.isArray(res.data?.files)
+        ? res.data!.files
+            .map((f) => f.filename?.trim().replace(/^\/+/, "") ?? "")
+            .filter((p) => p.length > 0)
+        : [];
+      return { mergeBaseSha, changedFiles, aheadBy: res.data?.ahead_by ?? 0 };
     },
 
     async postPullRequestReview(

@@ -611,6 +611,7 @@ describe("EPURE Graphe GitHub Natif, Garde-fous d'Intégrité Inter-Tickets et C
           branch === "dev"
             ? ["docs/adr/0031-first.md"]
             : ["docs/adr/0031-first.md", "docs/adr/0032-second.md"],
+        listBranchBlobs: async () => new Map(),
         readSingleBranchFile: async (_branch: string, path: string) =>
           path.includes("0031")
             ? "# ADR-0031 : First\n"

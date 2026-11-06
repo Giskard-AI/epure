@@ -201,6 +201,7 @@ export async function orchestrateIssueCommand(
   input: OrchestrateIssueInput
 ): Promise<OrchestrateIssueResult> {
   let mintedAppToken: string | null = null;
+  let githubRequestCount = 0;
 
   try {
     let activeToken = (input.fallbackGithubToken ?? "").trim();
@@ -226,8 +227,12 @@ export async function orchestrateIssueCommand(
       );
     }
 
+    const baseFetch = input.fetchImpl ?? fetch;
     const githubFetch = createGitHubRateLimitedFetch({
-      fetchImpl: input.fetchImpl ?? fetch,
+      fetchImpl: (url, init) => {
+        githubRequestCount += 1;
+        return baseFetch(url, init);
+      },
       sleepFn: input.sleepFn
     });
     const gh = createGitHubRestHelper({
@@ -1755,6 +1760,9 @@ export async function orchestrateIssueCommand(
       };
     }
   } finally {
+    process.stdout.write(
+      `[EPURE] GitHub API requests this run: ${githubRequestCount}\n`
+    );
     if (mintedAppToken) {
       try {
         await revokeGitHubInstallationToken({

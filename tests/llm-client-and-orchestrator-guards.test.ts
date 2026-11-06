@@ -2598,7 +2598,7 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
 
       const postedComments: string[] = [];
       const addedLabels: string[][] = [];
-      const treeBranchesRead: string[] = [];
+      const configBranchesRead: string[] = [];
       let llmCalls = 0;
 
       const mockFetch: typeof fetch = async (inputUrl, init) => {
@@ -2609,20 +2609,25 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
           llmCalls += 1;
           return new Response(JSON.stringify({}), { status: 500 });
         }
-        const treeMatch = url.match(/\/git\/trees\/([^?]+)\?recursive=1/);
-        if (treeMatch && method === "GET") {
-          const branch = decodeURIComponent(treeMatch[1]!);
-          treeBranchesRead.push(branch);
-          const tree =
-            branch === "dev" && params.devAgentsYaml !== undefined
-              ? [{ path: ".github/agents.yml", type: "blob", sha: "agentsdev" }]
-              : [];
-          return new Response(JSON.stringify({ tree }), { status: 200 });
-        }
-        if (url.endsWith("/git/blobs/agentsdev") && method === "GET") {
+        const configMatch = url.match(
+          /\/contents\/\.github\/(agents\.ya?ml)\?ref=([^&]+)$/
+        );
+        if (configMatch && method === "GET") {
+          const branch = decodeURIComponent(configMatch[2]!);
+          configBranchesRead.push(branch);
+          if (
+            branch !== "dev" ||
+            configMatch[1] !== "agents.yml" ||
+            params.devAgentsYaml === undefined
+          ) {
+            return new Response(JSON.stringify({ message: "Not Found" }), {
+              status: 404
+            });
+          }
           return new Response(
             JSON.stringify({
-              content: Buffer.from(params.devAgentsYaml ?? "", "utf8").toString(
+              type: "file",
+              content: Buffer.from(params.devAgentsYaml, "utf8").toString(
                 "base64"
               ),
               encoding: "base64"
@@ -2681,7 +2686,7 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
         stateAfter,
         postedComments,
         addedLabels,
-        treeBranchesRead,
+        configBranchesRead,
         llmCalls
       };
     }
@@ -2828,7 +2833,7 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
         expect(out.postedComments.at(-1)).toContain(expectedCommentSubstring);
         expect(out.stateAfter.state?.status).toBe("suspended");
         expect(out.llmCalls).toBe(0);
-        expect(out.treeBranchesRead.includes("main")).toBe(
+        expect(out.configBranchesRead.includes("main")).toBe(
           expectMainBranchConfigRead
         );
       }

@@ -577,6 +577,28 @@ describe("EPURE v1.1.0 — Real Orchestration Wiring (Q84–Q90, ADR-0026)", () 
           }
           return new Response(JSON.stringify({ tree: [] }), { status: 200 });
         }
+        const contentsPath = /\/contents\/([^?]+)\?ref=/.exec(urlStr)?.[1];
+        if (contentsPath !== undefined && method === "GET") {
+          const committedFiles: Readonly<Record<string, string>> = committedSpecContent
+            ? {
+                "docs/specs/l-enclume-astrale.md": committedSpecContent,
+                "GLOSSARY.md": "# GLOSSARY\n\n- **Astral Anvil**: Deterministic forge.\n",
+                "docs/adr/0001-astral-anvil.md":
+                  "# ADR 0001\n\n## Context\nForge.\n\n## Decision\nPure TS.\n\n## Consequences\nTestable.\n"
+              }
+            : {};
+          const text = committedFiles[contentsPath.split("/").map(decodeURIComponent).join("/")];
+          return text === undefined
+            ? new Response(JSON.stringify({ message: "Not Found" }), { status: 404 })
+            : new Response(
+                JSON.stringify({
+                  type: "file",
+                  encoding: "base64",
+                  content: Buffer.from(text, "utf8").toString("base64")
+                }),
+                { status: 200 }
+              );
+        }
         if (urlStr.includes("/git/blobs/") && method === "GET") {
           const text = urlStr.endsWith("sha_glossary_1")
             ? "# GLOSSARY\n\n- **Astral Anvil**: Deterministic forge.\n"

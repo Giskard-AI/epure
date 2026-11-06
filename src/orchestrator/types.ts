@@ -163,6 +163,11 @@ export interface OrchestrateIssueResult {
 
 export type IssueOrchestratorResult = OrchestrateIssueResult;
 
+export interface GitBlobRef {
+  readonly sha: string;
+  readonly mode: string;
+}
+
 export interface GitHubRestHelper {
   readonly token: string;
   getIssue(issueNumber: number): Promise<IssueMetadata>;
@@ -196,6 +201,10 @@ export interface GitHubRestHelper {
   closeIssue(issueNumber: number): Promise<void>;
   getDefaultBranchSha(branch: string): Promise<string | null>;
   listBranchPaths(branch: string): Promise<string[]>;
+  // Path -> blob of every file at a branch or commit SHA (empty when the ref does not exist).
+  listBranchBlobs(
+    branchOrSha: string
+  ): Promise<ReadonlyMap<string, GitBlobRef>>;
   readSingleBranchFile(
     branch: string,
     filePath: string

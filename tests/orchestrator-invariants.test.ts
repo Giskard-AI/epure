@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { orchestrateIssueCommand } from "../src/orchestrator/issue-orchestrator.js";
 import type { OrchestrateIssueInput } from "../src/orchestrator/types.js";
 import {
@@ -82,7 +82,8 @@ function declareIssueReads(router: GitHubMockRouter): GitHubMockRouter {
   return router
     .on("GET", `${R}/issues/${ISSUE}`, json({ number: ISSUE, title: "Async CI Feature", body: "- [ ] Ship it", state: "open" }))
     .on("GET", `${R}/issues/${ISSUE}/comments?per_page=100`, json([]))
-    .on("GET", new RegExp(`^${R_RX}/git/trees/[^?]+\\?recursive=1$`), notFound());
+    .on("GET", new RegExp(`^${R_RX}/git/trees/[^?]+\\?recursive=1$`), notFound())
+    .on("GET", new RegExp(`^${R_RX}/contents/`), notFound());
 }
 
 type CiOutcome = "success" | "failure" | "pending";
@@ -994,5 +995,23 @@ describe("Lot 1 — GitHub API rate limits are waited out within 5 minutes, then
     expect(posted).toHaveLength(1);
     expect(body).toContain("`github_rate_limited`");
     expect(body).toContain("Postez `/epure continue` (ou `/epure approve`)");
+  });
+});
+
+describe("Lot 3 — every run logs how many GitHub API requests it sent (#110)", () => {
+  it.each([
+    { id: "cancel-logs-its-request-count", command: "cancel", commentId: 501 },
+    { id: "status-logs-its-request-count", command: "status", commentId: 502 }
+  ] as const)("$id", async ({ command, commentId }) => {
+    const store = await seedState({ status: "active", subphase: "idle" });
+    const router = declareIssueWrites(declareIssueReads(createGitHubMockRouter()));
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+    await run(router, store, { command, actor: "maintainer", issueNumber: ISSUE, commentId });
+    const logged = stdout.mock.calls.map(([chunk]) => String(chunk)).filter((l) => l.includes("GitHub API requests"));
+    stdout.mockRestore();
+
+    expect(router.unmatched).toEqual([]);
+    expect(logged).toEqual([`[EPURE] GitHub API requests this run: ${router.requests.length}\n`]);
   });
 });

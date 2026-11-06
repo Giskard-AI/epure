@@ -19,7 +19,11 @@ import {
   type AdrCoherenceReconciliationPayload,
   type ConflictResolutionPayload
 } from "../prompts/schemas.js";
-import type { EscalateToNeedsHumanFn, GitHubRestHelper } from "../types.js";
+import type {
+  EscalateToNeedsHumanFn,
+  GitBlobRef,
+  GitHubRestHelper
+} from "../types.js";
 import { runTestsInIsolatedWorkspace } from "../workspace/repo-tools.js";
 
 interface ParsedGlossaryTerm {
@@ -875,6 +879,7 @@ export interface SyncBranchWithBaseInput extends LlmRequestTuning {
     | "mergeBranches"
     | "getDefaultBranchSha"
     | "listBranchPaths"
+    | "listBranchBlobs"
     | "readSingleBranchFile"
     | "commitFilesToBranch"
     | "compareCommits"
@@ -1092,53 +1097,61 @@ export async function syncBranchWithBase(
     };
   }
 
-  // 409 Conflict: identify conflicting files between baseBranch (theirs) and targetBranch (ours)
+  // 409 Conflict: classify every path by comparing blob SHAs at the merge base, the base head and the target head.
   const maxConflicts = input.maxConflictingFiles ?? 8;
-  let mergeBaseSha = input.baseBranch;
-  let candidateFiles: string[] = [];
-  let baseOnlyChangedFiles: string[] = [];
-
-  if (input.gh.compareCommits) {
-    const [baseToTarget, targetToBase] = await Promise.all([
-      input.gh.compareCommits(input.baseBranch, input.targetBranch),
-      input.gh.compareCommits(input.targetBranch, input.baseBranch)
-    ]);
-    mergeBaseSha = baseToTarget.mergeBaseSha || input.baseBranch;
-    const targetChanged = new Set(baseToTarget.changedFiles);
-    const bothChanged = targetToBase.changedFiles.filter((f) =>
-      targetChanged.has(f)
+  if (!input.gh.compareCommits) {
+    throw new Error("syncBranchWithBase needs compareCommits to resolve a merge conflict.");
+  }
+  const [targetHeadSha, baseHeadSha] = await Promise.all([
+    input.gh.getDefaultBranchSha(input.targetBranch),
+    input.gh.getDefaultBranchSha(input.baseBranch)
+  ]);
+  if (!targetHeadSha || !baseHeadSha) {
+    throw new Error(
+      `Cannot resolve the merge conflict: '${input.targetBranch}' or '${input.baseBranch}' no longer exists.`
     );
-    if (bothChanged.length > 0) {
-      candidateFiles = bothChanged;
-      baseOnlyChangedFiles = targetToBase.changedFiles.filter(
-        (f) => !targetChanged.has(f)
-      );
+  }
+  const { mergeBaseSha } = await input.gh.compareCommits(
+    targetHeadSha,
+    baseHeadSha
+  );
+  const [ancestorBlobs, baseBlobs, targetBlobs] = await Promise.all([
+    input.gh.listBranchBlobs(mergeBaseSha),
+    input.gh.listBranchBlobs(baseHeadSha),
+    input.gh.listBranchBlobs(targetHeadSha)
+  ]);
+  const candidateFiles: string[] = [];
+  const baseOnlyChangedFiles: string[] = [];
+  for (const path of new Set([
+    ...ancestorBlobs.keys(),
+    ...baseBlobs.keys(),
+    ...targetBlobs.keys()
+  ])) {
+    const ancestor = ancestorBlobs.get(path)?.sha;
+    const theirs = baseBlobs.get(path)?.sha;
+    const ours = targetBlobs.get(path)?.sha;
+    if (theirs === ours || ancestor === theirs) {
+      continue;
+    }
+    if (ancestor === ours) {
+      baseOnlyChangedFiles.push(path);
     } else {
-      candidateFiles = [
-        ...new Set([
-          ...baseToTarget.changedFiles,
-          ...targetToBase.changedFiles
-        ])
-      ];
+      candidateFiles.push(path);
     }
   }
 
-  if (candidateFiles.length === 0) {
-    const [basePaths, targetPaths] = await Promise.all([
-      input.gh.listBranchPaths(input.baseBranch),
-      input.gh.listBranchPaths(input.targetBranch)
-    ]);
-    const commonPaths = targetPaths.filter((p) => basePaths.includes(p));
-    for (const p of commonPaths) {
-      const [oursContent, theirsContent] = await Promise.all([
-        input.gh.readSingleBranchFile(input.targetBranch, p),
-        input.gh.readSingleBranchFile(input.baseBranch, p)
-      ]);
-      if (oursContent !== theirsContent) {
-        candidateFiles.push(p);
-      }
+  const readPinnedFile = async (sha: string, path: string): Promise<string> => {
+    const content = await input.gh.readSingleBranchFile(sha, path);
+    if (content === null) {
+      throw new Error(`'${path}' exists at ${sha} but could not be read.`);
     }
-  }
+    return content;
+  };
+  const readVersion = async (
+    blobs: ReadonlyMap<string, GitBlobRef>,
+    sha: string,
+    path: string
+  ): Promise<string> => (blobs.has(path) ? await readPinnedFile(sha, path) : "");
 
   // Base-only changes are taken from the base as-is (a human committed them there); only files EPURE resolves are guarded.
   const pathGuard = validateWorkspaceFileOperations({
@@ -1201,12 +1214,11 @@ export async function syncBranchWithBase(
   const baseDeletedFiles: string[] = [];
 
   for (const basePath of baseOnlyChangedFiles) {
-    const baseFileContent = await input.gh.readSingleBranchFile(
-      input.baseBranch,
-      basePath
-    );
-    if (baseFileContent !== null) {
-      baseNonConflictingFiles.push({ path: basePath, content: baseFileContent });
+    if (baseBlobs.has(basePath)) {
+      baseNonConflictingFiles.push({
+        path: basePath,
+        content: await readPinnedFile(baseHeadSha, basePath)
+      });
     } else {
       baseDeletedFiles.push(basePath);
     }
@@ -1214,15 +1226,12 @@ export async function syncBranchWithBase(
 
   if (candidateFiles.includes("GLOSSARY.md")) {
     const [theirsGlossary, oursGlossary] = await Promise.all([
-      input.gh.readSingleBranchFile(input.baseBranch, "GLOSSARY.md"),
-      input.gh.readSingleBranchFile(input.targetBranch, "GLOSSARY.md")
+      readVersion(baseBlobs, baseHeadSha, "GLOSSARY.md"),
+      readVersion(targetBlobs, targetHeadSha, "GLOSSARY.md")
     ]);
     resolvedFiles.push({
       path: "GLOSSARY.md",
-      content: mergeGlossaryMarkdownAdditively(
-        theirsGlossary ?? "",
-        oursGlossary ?? ""
-      )
+      content: mergeGlossaryMarkdownAdditively(theirsGlossary, oursGlossary)
     });
   }
 
@@ -1230,28 +1239,19 @@ export async function syncBranchWithBase(
     const fileTriplets: string[] = [];
     for (const filePath of codeConflictPaths) {
       const [baseContent, oursContent, theirsContent] = await Promise.all([
-        input.gh.readSingleBranchFile(mergeBaseSha, filePath),
-        input.gh.readSingleBranchFile(input.targetBranch, filePath),
-        input.gh.readSingleBranchFile(input.baseBranch, filePath)
+        readVersion(ancestorBlobs, mergeBaseSha, filePath),
+        readVersion(targetBlobs, targetHeadSha, filePath),
+        readVersion(baseBlobs, baseHeadSha, filePath)
       ]);
       fileTriplets.push(
         [
           `### File: \`${filePath}\` (untruncated 3-way versions)`,
           "#### `<base_version>` (common ancestor):",
-          wrapUntrustedContent(
-            "untrusted_workspace_files",
-            baseContent ?? ""
-          ),
+          wrapUntrustedContent("untrusted_workspace_files", baseContent),
           `#### \`<ours_target_branch>\` (\`${input.targetBranch}\`):`,
-          wrapUntrustedContent(
-            "untrusted_workspace_files",
-            oursContent ?? ""
-          ),
+          wrapUntrustedContent("untrusted_workspace_files", oursContent),
           `#### \`<theirs_base_branch>\` (\`${input.baseBranch}\`):`,
-          wrapUntrustedContent(
-            "untrusted_workspace_files",
-            theirsContent ?? ""
-          )
+          wrapUntrustedContent("untrusted_workspace_files", theirsContent)
         ].join("\n")
       );
     }
