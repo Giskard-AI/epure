@@ -220,7 +220,8 @@ export function tooManyRequests(retryAfterSeconds: number): MockReply {
 
 type GitObject =
   | { readonly type: "blob"; readonly content: string }
-  | { readonly type: "tree" }
+  // Flat recursive listing: file path -> blob sha.
+  | { readonly type: "tree"; readonly entries: ReadonlyMap<string, string> }
   | {
       readonly type: "commit";
       readonly tree: string;
@@ -228,15 +229,29 @@ type GitObject =
       readonly message: string;
     };
 
+export interface FakeCommit {
+  readonly tree: string;
+  readonly parents: readonly string[];
+  readonly message: string;
+}
+
 export interface FakeGitDataApi {
   putBlob(content: string): string;
   putCommit(input: {
     readonly parents: readonly string[];
     readonly message?: string | undefined;
   }): string;
+  // Commits `files` (null deletes) on top of `refs/heads/<branch>` and moves the branch; creates it if missing.
+  commitFiles(
+    branch: string,
+    files: Readonly<Record<string, string | null>>,
+    message?: string
+  ): string;
   setRef(ref: string, sha: string): void;
   getRef(ref: string): string | undefined;
   readBlob(sha: string): string | undefined;
+  readFile(branchOrSha: string, path: string): string | undefined;
+  getCommit(sha: string): FakeCommit | undefined;
   isAncestor(ancestorSha: string, descendantSha: string): boolean;
   onBeforeNextRefWrite(ref: string, hook: () => void): void;
 }
@@ -251,8 +266,8 @@ function escapeRegExp(raw: string): string {
   return raw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-// Refs, blobs and GraphQL `updateRefs` mirror what src/state/git-ref-state.ts calls; commits (all on the empty tree)
-// exist only to build the graph that fast-forward checks walk.
+// Refs, blobs and GraphQL `updateRefs` mirror what src/state/git-ref-state.ts calls. Trees are flat path -> blob maps,
+// enough for branch file reads, `POST /merges` (file-level 3-way merge) and three-dot compares.
 export function installFakeGitDataApi(
   router: GitHubMockRouter,
   repository: string
@@ -260,26 +275,85 @@ export function installFakeGitDataApi(
   const objects = new Map<string, GitObject>();
   const refs = new Map<string, string>();
   const refWriteHooks = new Map<string, () => void>();
-  const prefix = `/repos/${escapeRegExp(repository)}/git`;
-  const emptyTreeSha = gitSha("tree", "");
-  objects.set(emptyTreeSha, { type: "tree" });
+  const repoPath = `/repos/${escapeRegExp(repository)}`;
+  const prefix = `${repoPath}/git`;
 
-  const isAncestor = (ancestorSha: string, descendantSha: string): boolean => {
-    const pending = [descendantSha];
+  const putTree = (entries: ReadonlyMap<string, string>): string => {
+    const payload = [...entries.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([path, sha]) => `${path}\0${sha}\n`)
+      .join("");
+    const sha = gitSha("tree", payload);
+    objects.set(sha, { type: "tree", entries: new Map(entries) });
+    return sha;
+  };
+  const emptyTreeSha = putTree(new Map());
+
+  const storeCommit = (tree: string, parents: readonly string[], message: string): string => {
+    const payload = [`tree ${tree}`, ...parents.map((p) => `parent ${p}`), "", message].join("\n");
+    const sha = gitSha("commit", payload);
+    objects.set(sha, { type: "commit", tree, parents, message });
+    return sha;
+  };
+
+  const ancestors = (sha: string): Set<string> => {
+    const pending = [sha];
     const seen = new Set<string>();
     while (pending.length > 0) {
-      const sha = pending.pop()!;
-      if (sha === ancestorSha) {
-        return true;
+      const current = pending.pop()!;
+      const obj = objects.get(current);
+      if (seen.has(current) || obj?.type !== "commit") {
+        continue;
+      }
+      seen.add(current);
+      pending.push(...obj.parents);
+    }
+    return seen;
+  };
+
+  const isAncestor = (ancestorSha: string, descendantSha: string): boolean =>
+    ancestors(descendantSha).has(ancestorSha);
+
+  const mergeBase = (a: string, b: string): string | undefined => {
+    const fromA = ancestors(a);
+    const queue = [b];
+    const seen = new Set<string>();
+    while (queue.length > 0) {
+      const sha = queue.shift()!;
+      if (fromA.has(sha)) {
+        return sha;
       }
       const obj = objects.get(sha);
       if (seen.has(sha) || obj?.type !== "commit") {
         continue;
       }
       seen.add(sha);
-      pending.push(...obj.parents);
+      queue.push(...obj.parents);
     }
-    return false;
+    return undefined;
+  };
+
+  const resolveCommit = (branchOrSha: string): string | undefined =>
+    objects.get(branchOrSha)?.type === "commit"
+      ? branchOrSha
+      : refs.get(`refs/heads/${branchOrSha}`);
+
+  const treeEntries = (sha: string | undefined): ReadonlyMap<string, string> => {
+    const obj = sha === undefined ? undefined : objects.get(sha);
+    if (obj?.type === "commit") {
+      return treeEntries(obj.tree);
+    }
+    return obj?.type === "tree" ? obj.entries : new Map();
+  };
+
+  const resolveTreeish = (raw: string): string | undefined => {
+    const obj = objects.get(raw);
+    if (obj?.type === "tree") {
+      return raw;
+    }
+    const commit = resolveCommit(raw);
+    const commitObj = commit === undefined ? undefined : objects.get(commit);
+    return commitObj?.type === "commit" ? commitObj.tree : undefined;
   };
 
   const runRefWriteHook = (ref: string): void => {
@@ -301,15 +375,21 @@ export function installFakeGitDataApi(
       objects.set(sha, { type: "blob", content });
       return sha;
     },
-    putCommit: ({ parents, message = "fake commit" }) => {
-      const payload = [
-        `tree ${emptyTreeSha}`,
-        ...parents.map((p) => `parent ${p}`),
-        "",
-        message
-      ].join("\n");
-      const sha = gitSha("commit", payload);
-      objects.set(sha, { type: "commit", tree: emptyTreeSha, parents, message });
+    putCommit: ({ parents, message = "fake commit" }) =>
+      storeCommit(emptyTreeSha, parents, message),
+    commitFiles: (branch, files, message = "fake commit") => {
+      const ref = `refs/heads/${branch}`;
+      const parent = refs.get(ref);
+      const entries = new Map(treeEntries(parent));
+      for (const [path, content] of Object.entries(files)) {
+        if (content === null) {
+          entries.delete(path);
+        } else {
+          entries.set(path, api.putBlob(content));
+        }
+      }
+      const sha = storeCommit(putTree(entries), parent ? [parent] : [], message);
+      refs.set(ref, sha);
       return sha;
     },
     setRef: (ref, sha) => {
@@ -319,6 +399,14 @@ export function installFakeGitDataApi(
     readBlob: (sha) => {
       const obj = objects.get(sha);
       return obj?.type === "blob" ? obj.content : undefined;
+    },
+    readFile: (branchOrSha, path) => {
+      const blobSha = treeEntries(resolveCommit(branchOrSha)).get(path);
+      return blobSha === undefined ? undefined : api.readBlob(blobSha);
+    },
+    getCommit: (sha) => {
+      const obj = objects.get(sha);
+      return obj?.type === "commit" ? obj : undefined;
     },
     isAncestor,
     onBeforeNextRefWrite: (ref, hook) => {
@@ -443,19 +531,7 @@ export function installFakeGitDataApi(
       ) {
         return unprocessable("Tree SHA or parent SHA does not exist");
       }
-      const payload = [
-        `tree ${tree}`,
-        ...parentShas.map((p) => `parent ${p}`),
-        "",
-        message ?? ""
-      ].join("\n");
-      const sha = gitSha("commit", payload);
-      objects.set(sha, {
-        type: "commit",
-        tree,
-        parents: parentShas,
-        message: message ?? ""
-      });
+      const sha = storeCommit(tree, parentShas, message ?? "");
       return json(
         {
           sha,
@@ -476,6 +552,100 @@ export function installFakeGitDataApi(
             parents: obj.parents.map((p) => ({ sha: p }))
           })
         : notFound();
+    })
+    .on("GET", new RegExp(`^${prefix}/trees/([^?]+)(?:\\?recursive=1)?$`), (_req, m) => {
+      const treeSha = resolveTreeish(decodeURIComponent(m![1]!));
+      if (treeSha === undefined) {
+        return notFound();
+      }
+      return json({
+        sha: treeSha,
+        truncated: false,
+        tree: [...treeEntries(treeSha).entries()].map(([path, sha]) => ({
+          path,
+          mode: "100644",
+          type: "blob",
+          sha,
+          size: Buffer.byteLength(api.readBlob(sha) ?? "", "utf8")
+        }))
+      });
+    })
+    .on("POST", `/repos/${repository}/git/trees`, (req) => {
+      const { base_tree: baseTree, tree } = req.body as {
+        base_tree?: string;
+        tree?: ReadonlyArray<{ path: string; sha?: string | null; content?: string }>;
+      };
+      if (baseTree !== undefined && objects.get(baseTree)?.type !== "tree") {
+        return unprocessable("base_tree is not a valid tree oid");
+      }
+      const entries = new Map(treeEntries(baseTree));
+      for (const entry of tree ?? []) {
+        if (entry.content !== undefined) {
+          entries.set(entry.path, api.putBlob(entry.content));
+        } else if (entry.sha === null || entry.sha === undefined) {
+          entries.delete(entry.path);
+        } else if (objects.get(entry.sha)?.type !== "blob") {
+          return unprocessable("tree.sha is not a valid blob");
+        } else {
+          entries.set(entry.path, entry.sha);
+        }
+      }
+      return json({ sha: putTree(entries) }, 201);
+    })
+    // File-level 3-way merge: a path changed differently on both sides is a conflict (409), like a hunk overlap.
+    .on("POST", `/repos/${repository}/merges`, (req) => {
+      const { base, head, commit_message: message } = req.body as {
+        base: string;
+        head: string;
+        commit_message?: string;
+      };
+      const baseSha = refs.get(`refs/heads/${base}`);
+      const headSha = resolveCommit(head);
+      if (baseSha === undefined || headSha === undefined) {
+        return notFound();
+      }
+      if (isAncestor(headSha, baseSha)) {
+        return noContent();
+      }
+      const ancestorEntries = treeEntries(mergeBase(baseSha, headSha));
+      const ours = treeEntries(baseSha);
+      const theirs = treeEntries(headSha);
+      const merged = new Map<string, string>();
+      for (const path of new Set([...ancestorEntries.keys(), ...ours.keys(), ...theirs.keys()])) {
+        const [a, o, t] = [ancestorEntries.get(path), ours.get(path), theirs.get(path)];
+        const pick = o === t || a === t ? o : a === o ? t : "conflict";
+        if (pick === "conflict") {
+          return json({ message: "Merge conflict" }, 409);
+        }
+        if (pick !== undefined) {
+          merged.set(path, pick);
+        }
+      }
+      const sha = storeCommit(putTree(merged), [baseSha, headSha], message ?? "merge");
+      refs.set(`refs/heads/${base}`, sha);
+      return json({ sha }, 201);
+    })
+    .on("GET", new RegExp(`^${repoPath}/compare/(.+)\\.\\.\\.([^?]+)$`), (_req, m) => {
+      const baseSha = resolveCommit(decodeURIComponent(m![1]!));
+      const headSha = resolveCommit(decodeURIComponent(m![2]!));
+      if (baseSha === undefined || headSha === undefined) {
+        return notFound();
+      }
+      const mergeBaseSha = mergeBase(baseSha, headSha)!;
+      const before = treeEntries(mergeBaseSha);
+      const after = treeEntries(headSha);
+      const files = [...new Set([...before.keys(), ...after.keys()])]
+        .filter((path) => before.get(path) !== after.get(path))
+        .map((filename) => ({
+          filename,
+          status: !before.has(filename) ? "added" : !after.has(filename) ? "removed" : "modified"
+        }));
+      const baseAncestors = ancestors(baseSha);
+      return json({
+        merge_base_commit: { sha: mergeBaseSha },
+        ahead_by: [...ancestors(headSha)].filter((sha) => !baseAncestors.has(sha)).length,
+        files
+      });
     });
 
   return api;

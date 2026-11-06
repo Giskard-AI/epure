@@ -907,6 +907,15 @@ export interface SyncBranchWithBaseResult {
   readonly diagnosticExcerpt?: string | undefined;
 }
 
+// A Git conflict block is a `<<<<<<<` line, then a line that is exactly `=======`, then a `>>>>>>>` line.
+// Comment banners (`// =====`) or setext headings never form that sequence.
+const GIT_CONFLICT_BLOCK_REGEX =
+  /^<{7}(?: .*)?$[\s\S]*?^={7}$[\s\S]*?^>{7}(?: .*)?$/m;
+
+function containsGitConflictMarkers(content: string): boolean {
+  return GIT_CONFLICT_BLOCK_REGEX.test(content.replace(/\r\n/g, "\n"));
+}
+
 export interface BaseSyncGuard {
   needsSync(): Promise<boolean>;
   markSynced(): Promise<void>;
@@ -1342,11 +1351,7 @@ export async function syncBranchWithBase(
     }
 
     for (const rf of resolutionData.resolved_files) {
-      if (
-        rf.content.includes("<<<<<<<") ||
-        rf.content.includes("=======") ||
-        rf.content.includes(">>>>>>>")
-      ) {
+      if (containsGitConflictMarkers(rf.content)) {
         const diag = `LLM conflict resolution for '${rf.path}' still contained Git conflict markers.`;
         if (input.escalateToNeedsHuman) {
           await input.escalateToNeedsHuman({
