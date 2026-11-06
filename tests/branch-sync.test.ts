@@ -473,6 +473,24 @@ describe("commitFilesToBranch — branch writes never force over a concurrent pu
     expect(ctx.router.requests.filter((r) => r.method === "PATCH").map((r) => (r.body as { force?: boolean }).force)).not.toContain(true);
   });
 
+  it.each([
+    { id: "same-content-as-the-head-returns-the-head-without-a-commit-(#106)", content: "readme\n", expectsCommit: false },
+    { id: "changed-content-creates-one-commit", content: "readme v2\n", expectsCommit: true }
+  ])("$id", async ({ content, expectsCommit }) => {
+    const ctx = setupRepo();
+    const headBefore = ctx.git.getRef(`refs/heads/${FEATURE}`)!;
+
+    const sha = await ctx.gh.commitFilesToBranch({
+      branch: FEATURE,
+      commitMessage: "docs(plan): integrate",
+      files: [{ path: "README.md", content }]
+    });
+
+    expect(sha === headBefore).toBe(!expectsCommit);
+    expect(ctx.git.getRef(`refs/heads/${FEATURE}`)).toBe(sha);
+    expect(ctx.router.calls("POST", `${R}/git/commits`)).toBe(expectsCommit ? 1 : 0);
+  });
+
   it("three-concurrent-pushes-raise-branch_update_conflict-and-keep-every-human-commit", async () => {
     const ctx = setupRepo();
     const humanCommits = pushBeforeEachRefWrite(ctx.git, FEATURE, 3);

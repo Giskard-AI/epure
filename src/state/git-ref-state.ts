@@ -48,6 +48,8 @@ export interface EpureIssueState {
   readonly human_budget_grants?: number | undefined;
   readonly last_escalation?: EpureEscalationRecord | undefined;
   readonly last_synced_base_sha?: string | undefined;
+  // Head of `plan/*` whose artifacts are already on `feature/*`; integration runs again only when `plan/*` moves.
+  readonly integrated_plan_sha?: string | undefined;
 }
 
 export interface EpureEscalationRecord {

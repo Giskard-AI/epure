@@ -896,6 +896,9 @@ export function createGitHubRestHelper(params: {
                   }
                 )
               ).data!.sha;
+        if (treeSha === baseTreeSha && !input.mergeParentSha) {
+          return parentCommitSha;
+        }
 
         const newCommit = await apiRequest<{ sha: string }>(
           "POST",

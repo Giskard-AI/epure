@@ -133,6 +133,28 @@ export function parseGlossaryTerms(markdown: string): ParsedGlossaryTerm[] {
  * - Preserves 100% of terms present in `baseGlossary` (`dev`), including terms added concurrently by other issues.
  * - Updates any existing term if `planGlossary` explicitly changed its definition, and appends all new terms/sections from `planGlossary`.
  */
+// Only the plan terms added or reworded since `previousPlanGlossary`, so terms the plan left alone keep their feature/* wording.
+function glossaryTermsChangedSince(
+  planGlossary: string,
+  previousPlanGlossary: string
+): string {
+  const previous = new Map(
+    parseGlossaryTerms(previousPlanGlossary).map((t) => [t.key, t.blockText])
+  );
+  const blocksBySection = new Map<string, string[]>();
+  for (const term of parseGlossaryTerms(planGlossary)) {
+    if (previous.get(term.key) !== term.blockText) {
+      blocksBySection.set(term.sectionHeader, [
+        ...(blocksBySection.get(term.sectionHeader) ?? []),
+        term.blockText
+      ]);
+    }
+  }
+  return [...blocksBySection.entries()]
+    .map(([header, blocks]) => [header, ...blocks].filter(Boolean).join("\n\n"))
+    .join("\n\n");
+}
+
 export function mergeGlossaryMarkdownAdditively(
   baseGlossary: string | null | undefined,
   planGlossary: string | null | undefined
@@ -681,7 +703,7 @@ async function applyAdrLlmReconciliation(params: {
  * Integrates approved `plan/<issue>-<slug>` artifacts directly into `feature/<issue>-<slug>`
  * without opening a blocking `plan/* -> dev` PR:
  * - Closes any legacy open `plan/* -> dev` PR if present.
- * - Additively merges `GLOSSARY.md` against `dev`.
+ * - Additively merges `GLOSSARY.md` into the `feature/*` version; other artifacts already changed on `feature/*` are kept.
  * - Automatically renumbers colliding `docs/adr/NNNN-*.md` files against `dev`.
  */
 export async function integratePlanBranchIntoFeature(params: {
@@ -689,6 +711,8 @@ export async function integratePlanBranchIntoFeature(params: {
   readonly planBranch: string;
   readonly featureBranch: string;
   readonly baseBranch?: string | undefined;
+  // `plan/*` head integrated last time: a feature file still equal to it was not edited by a human.
+  readonly previousPlanSha?: string | undefined;
   readonly llmClient?: LLMClient | undefined;
   readonly llmApiKey?: string | undefined;
   readonly model: string;
@@ -732,9 +756,10 @@ export async function integratePlanBranchIntoFeature(params: {
     };
   }
 
-  const [devPaths, planPaths] = await Promise.all([
+  const [devPaths, planPaths, featurePaths] = await Promise.all([
     params.gh.listBranchPaths(baseBranch),
-    params.gh.listBranchPaths(params.planBranch)
+    params.gh.listBranchPaths(params.planBranch),
+    params.gh.listBranchPaths(params.featureBranch)
   ]);
 
   const candidatePlanArtifactPaths = planPaths
@@ -753,6 +778,9 @@ export async function integratePlanBranchIntoFeature(params: {
   }
 
   const devPathSet = new Set(devPaths.map((p) => p.trim().replace(/^\/+/, "")));
+  const featurePathSet = new Set(
+    featurePaths.map((p) => p.trim().replace(/^\/+/, ""))
+  );
   const filesToCommit: Array<{ path: string; content: string }> = [];
   const planAdrsToProcess: Array<{ path: string; content: string }> = [];
   const specFilesToProcess: Array<{ path: string; content: string }> = [];
@@ -772,13 +800,35 @@ export async function integratePlanBranchIntoFeature(params: {
     if (devContent !== null && devContent === planContent) {
       continue;
     }
+    const featureContent = featurePathSet.has(artifactPath)
+      ? await params.gh.readSingleBranchFile(params.featureBranch, artifactPath)
+      : null;
+    if (featureContent === planContent) {
+      continue;
+    }
+    const previouslyIntegrated = params.previousPlanSha
+      ? await params.gh.readSingleBranchFile(params.previousPlanSha, artifactPath)
+      : null;
 
     if (artifactPath === "GLOSSARY.md") {
+      const planTerms =
+        previouslyIntegrated === null
+          ? planContent
+          : glossaryTermsChangedSince(planContent, previouslyIntegrated);
       const mergedGlossary = mergeGlossaryMarkdownAdditively(
-        devContent ?? "",
-        planContent
+        featureContent ?? devContent ?? "",
+        planTerms
       );
-      filesToCommit.push({ path: "GLOSSARY.md", content: mergedGlossary });
+      if (planTerms.trim() && mergedGlossary !== featureContent) {
+        filesToCommit.push({ path: "GLOSSARY.md", content: mergedGlossary });
+      }
+    } else if (
+      featureContent !== null &&
+      featureContent !== devContent &&
+      featureContent !== previouslyIntegrated
+    ) {
+      // Edited on feature/* since dev and the last integrated plan: the feature-side version wins.
+      continue;
     } else if (ADR_PATH_REGEX.test(artifactPath)) {
       planAdrsToProcess.push({ path: artifactPath, content: planContent });
     } else if (artifactPath.startsWith("docs/specs/")) {

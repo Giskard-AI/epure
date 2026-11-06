@@ -1228,10 +1228,18 @@ export async function orchestrateIssueCommand(
         };
       }
 
-      if (hasExplicitPlanManifest && !existingFeaturePrCheck) {
+      const planBranchToIntegrate = parsedPlanManifest?.planBranch ?? planBranch;
+      const planHeadSha =
+        hasExplicitPlanManifest && !existingFeaturePrCheck
+          ? await gh.getDefaultBranchSha(planBranchToIntegrate)
+          : null;
+      const integratePlan =
+        planHeadSha !== null && planHeadSha !== currentState?.integrated_plan_sha;
+      if (integratePlan) {
         await integratePlanBranchIntoFeature({
           gh,
-          planBranch: parsedPlanManifest?.planBranch ?? planBranch,
+          planBranch: planBranchToIntegrate,
+          previousPlanSha: currentState?.integrated_plan_sha,
           featureBranch,
           baseBranch: "dev",
           llmApiKey: effectiveInput.llmApiKey,
@@ -1332,6 +1340,7 @@ export async function orchestrateIssueCommand(
           status: "active",
           active_branch: featureBranch,
           epic_phase: prev.epic_phase ?? 1,
+          ...(integratePlan ? { integrated_plan_sha: planHeadSha ?? undefined } : {}),
           last_processed_comment_id:
             Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
         })

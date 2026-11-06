@@ -186,6 +186,9 @@ _Éviter_ : qualifier une limitation de débit GitHub d'erreur interne (`interna
 **Branche déplacée pendant l'écriture (`branch_update_conflict`)** : un commit d'EPURE sur `plan/*`, `feature/*` ou `task/*` n'avance la branche qu'en avance rapide (`force: false`). Si quelqu'un pousse entre la lecture de la tête et la mise à jour, EPURE reconstruit les mêmes changements sur la nouvelle tête, au plus 3 tentatives, puis déclenche une **Escalade humaine** typée `branch_update_conflict`, reprise par `/epure continue`, sans consommer le quota de corrections de code. Aucun commit qu'EPURE n'a pas écrit n'est écrasé.
 _Éviter_ : forcer la mise à jour d'une branche de travail ou qualifier une poussée concurrente d'erreur interne (`internal_error`).
 
+**Intégration unique du plan (`integrated_plan_sha`)** : les artefacts de `plan/*` (`GLOSSARY.md`, ADR, spécification) sont copiés sur `feature/*` à l'approbation, et la tête de `plan/*` intégrée est enregistrée dans l'état. Les entrées suivantes (`/epure continue`, continuation de CI) ne réintègrent que si `plan/*` a bougé, et seulement ce qui a changé sur `plan/*` depuis : un fichier ou un terme modifié sur `feature/*` est conservé. Un commit sans changement de contenu n'est jamais créé, et rien n'est écrit sur `feature/*` une fois sa Pull Request fusionnée.
+_Éviter_ : réécrire `feature/*` à chaque exécution ou écraser une traduction ou une correction faite sur `feature/*`.
+
 **Blocage fournisseur LLM** : problème de clé, de crédits ou de quota empêchant la poursuite des tâches dépendantes ; signalement GitHub et suspension sans changement automatique de clé ou de fournisseur.
 _Éviter_ : fallback automatique contournant les plafonds définis par l'utilisateur.
 
