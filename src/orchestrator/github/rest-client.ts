@@ -507,13 +507,13 @@ export function createGitHubRestHelper(params: {
       }
     },
 
-    async closeIssue(issueNumber: number): Promise<void> {
+    async closeIssue(issueNumber, stateReason = "completed"): Promise<void> {
       await apiRequest(
         "PATCH",
         `/repos/${owner}/${repo}/issues/${issueNumber}`,
         {
           state: "closed",
-          state_reason: "completed"
+          state_reason: stateReason
         }
       );
     },

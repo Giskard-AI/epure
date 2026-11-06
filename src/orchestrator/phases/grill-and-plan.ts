@@ -47,6 +47,8 @@ import {
 } from "../types.js";
 import {
   buildRepoExplorationToolsAndHandlers,
+  isTrustedManifest,
+  manifestSha256,
   parseTrackedTicketsFromComments
 } from "../workspace/repo-tools.js";
 
@@ -315,13 +317,20 @@ export async function runGoldfishSpecAudit(
   });
 }
 
+const IMPLEMENTATION_STARTED_PHASES: ReadonlySet<string> = new Set([
+  "implementation",
+  "review",
+  "completed"
+]);
+
 function parseLatestSpecManifest(
-  comments: readonly IssueCommentRecord[]
+  comments: readonly IssueCommentRecord[],
+  trustedSha256: string | undefined
 ): StoredSpecManifest | null {
   for (let i = comments.length - 1; i >= 0; i -= 1) {
-    const body = comments[i]?.body ?? "";
-    const match = body.match(/<!-- epure-spec-manifest:(\{[\s\S]*?\}) -->/);
-    if (match?.[1]) {
+    const comment = comments[i];
+    const match = (comment?.body ?? "").match(/<!-- epure-spec-manifest:(\{[\s\S]*?\}) -->/);
+    if (comment && match?.[1] && isTrustedManifest(comment, match[1], trustedSha256)) {
       try {
         const parsed = JSON.parse(match[1]) as Partial<StoredSpecManifest>;
         if (
@@ -357,6 +366,10 @@ export async function runGrillAndPlanPhase(params: {
   readonly command: "plan" | "reply" | "to-spec" | "to-tickets";
   readonly currentPhase?: string | undefined;
   readonly currentStatus?: string | undefined;
+  readonly trustedManifestSha256: {
+    readonly plan: string | undefined;
+    readonly spec: string | undefined;
+  };
   readonly repository: string;
   readonly issueNumber: number;
   readonly commentId: number | undefined;
@@ -376,6 +389,7 @@ export async function runGrillAndPlanPhase(params: {
     command,
     currentPhase,
     currentStatus,
+    trustedManifestSha256,
     repository,
     issueNumber,
     commentId,
@@ -392,9 +406,17 @@ export async function runGrillAndPlanPhase(params: {
     fetchImpl
   } = params;
 
-  const existingTickets =
-    command === "to-tickets" ? parseTrackedTicketsFromComments(allComments) : [];
-  if (existingTickets.length > 0) {
+  // Before implementation, `/epure to-tickets` regenerates the graph and closes the tickets it supersedes.
+  const supersededTickets =
+    command === "to-tickets"
+      ? parseTrackedTicketsFromComments(allComments, trustedManifestSha256.plan)
+      : [];
+  const implementationStarted =
+    command === "to-tickets" &&
+    (IMPLEMENTATION_STARTED_PHASES.has(currentPhase ?? "") ||
+      (supersededTickets.length > 0 &&
+        (await gh.listBranchesByPrefix(`feature/${issueNumber}-`)).length > 0));
+  if (implementationStarted) {
     const kept = await updateIssueStateWithCas({
       issueNumber,
       store,
@@ -403,7 +425,8 @@ export async function runGrillAndPlanPhase(params: {
         last_processed_comment_id: advanceCommentCursor(prev, commentId)
       })
     });
-    const body = `⏸️ Le graphe de tickets de #${issueNumber} existe déjà (${existingTickets.map((t) => `#${t.ticketIssueNumber}`).join(", ")}) : \`/epure to-tickets\` n'en crée pas un second. Postez \`/epure approve\` pour lancer ou reprendre l'implémentation.`;
+    const ticketList = supersededTickets.map((t) => `#${t.ticketIssueNumber}`).join(", ");
+    const body = `⏸️ L'implémentation de #${issueNumber} a commencé : \`/epure to-tickets\` ne régénère plus son graphe de tickets${ticketList ? ` (${ticketList})` : ""}. Postez \`/epure continue\` pour reprendre l'implémentation.`;
     await gh.postIssueComment(issueNumber, body);
     return {
       executed: false,
@@ -708,7 +731,7 @@ export async function runGrillAndPlanPhase(params: {
   // Phase 2: /epure to-spec (or human revision comment while in phase === "spec")
   if (command === "to-spec" || (command === "reply" && currentPhase === "spec")) {
     const isSpecRevision = command === "reply" && currentPhase === "spec";
-    const existingManifest = parseLatestSpecManifest(allComments);
+    const existingManifest = parseLatestSpecManifest(allComments, trustedManifestSha256.spec);
     const currentSpecOnBranch = await readRepoFileSafely(
       existingManifest?.specPath ?? `docs/specs/${planSlug}.md`,
       planBranch
@@ -1009,19 +1032,6 @@ export async function runGrillAndPlanPhase(params: {
       files: planningFiles
     });
 
-    const updatedSpec = await updateIssueStateWithCas({
-      issueNumber,
-      store,
-      mutator: (prev) => ({
-        ...prev,
-        phase: "spec",
-        status: "awaiting_human_approval",
-        active_branch: planBranch,
-        plan_branch: prev.plan_branch ?? planBranch,
-        last_processed_comment_id: advanceCommentCursor(prev, commentId)
-      })
-    });
-
     const specManifestPayload: StoredSpecManifest = {
       planBranch,
       specPath: specArtifacts.spec_path,
@@ -1031,6 +1041,21 @@ export async function runGrillAndPlanPhase(params: {
         ? { epicGoalContract: specArtifacts.epic_goal_contract }
         : {})
     };
+    const specManifestJson = JSON.stringify(specManifestPayload);
+
+    const updatedSpec = await updateIssueStateWithCas({
+      issueNumber,
+      store,
+      mutator: (prev) => ({
+        ...prev,
+        phase: "spec",
+        status: "awaiting_human_approval",
+        active_branch: planBranch,
+        plan_branch: prev.plan_branch ?? planBranch,
+        spec_manifest_sha256: manifestSha256(specManifestJson),
+        last_processed_comment_id: advanceCommentCursor(prev, commentId)
+      })
+    });
 
     const specReviewComment = appendEpureCommandsSpoiler(
       [
@@ -1055,7 +1080,7 @@ export async function runGrillAndPlanPhase(params: {
         "- Pour demander un ajustement ou une correction de la spécification, **répondez directement en commentaire** (sans commande slash).",
         "- Si la spécification est validée, postez **`/epure to-tickets`** pour générer le graphe de tickets TDD (`ready-for-agent`).",
         "",
-        `<!-- epure-spec-manifest:${JSON.stringify(specManifestPayload)} -->`
+        `<!-- epure-spec-manifest:${specManifestJson} -->`
       ].join("\n"),
       {
         phase: "spec",
@@ -1078,7 +1103,7 @@ export async function runGrillAndPlanPhase(params: {
   }
 
   // Phase 3: /epure to-tickets (either from an already-committed spec on planBranch, or shortcut from grilling)
-  const storedSpecManifest = parseLatestSpecManifest(allComments);
+  const storedSpecManifest = parseLatestSpecManifest(allComments, trustedManifestSha256.spec);
   const candidateSpecPath =
     storedSpecManifest?.specPath ?? `docs/specs/${planSlug}.md`;
   const existingSpecOnPlanBranch = await readRepoFileSafely(
@@ -1428,6 +1453,15 @@ export async function runGrillAndPlanPhase(params: {
     "Ticket ready for autonomous EPURE agent execution"
   );
 
+  // Closed first: a failure below leaves no second open graph, and the next `/epure to-tickets` retries.
+  for (const old of supersededTickets) {
+    await gh.postIssueComment(
+      old.ticketIssueNumber,
+      `♻️ Ticket remplacé : le graphe de tickets de #${issueNumber} est régénéré par \`/epure to-tickets\` après révision de la spécification. Ce ticket ne sera pas implémenté.`
+    );
+    await gh.closeIssue(old.ticketIssueNumber, "not_planned");
+  }
+
   const createdTicketsManifest = await createLinkedPhaseTicketsOnGitHub({
     gh,
     parentIssueNumber: issueNumber,
@@ -1466,6 +1500,15 @@ export async function runGrillAndPlanPhase(params: {
     tickets: createdTicketsManifest
   });
 
+  const planManifestJson = JSON.stringify({
+    planBranch,
+    specPath: bundle.spec_path,
+    ...(bundle.epic_goal_contract
+      ? { epicGoalContract: bundle.epic_goal_contract }
+      : {}),
+    tickets: createdTicketsManifest
+  });
+
   const updated = await updateIssueStateWithCas({
     issueNumber,
     store,
@@ -1475,6 +1518,7 @@ export async function runGrillAndPlanPhase(params: {
       status: "awaiting_human_approval",
       active_branch: planBranch,
       plan_branch: prev.plan_branch ?? planBranch,
+      plan_manifest_sha256: manifestSha256(planManifestJson),
       last_processed_comment_id: advanceCommentCursor(prev, commentId)
     })
   });
@@ -1508,14 +1552,7 @@ export async function runGrillAndPlanPhase(params: {
       "",
       "👉 **Action requise** : Vérifiez les livrables sur la branche de plan et les tickets ci-dessus, puis postez `/epure approve` sur cette issue pour verrouiller le périmètre et lancer l'implémentation TDD autonome.",
       "",
-      `<!-- epure-plan-manifest:${JSON.stringify({
-        planBranch,
-        specPath: bundle.spec_path,
-        ...(bundle.epic_goal_contract
-          ? { epicGoalContract: bundle.epic_goal_contract }
-          : {}),
-        tickets: createdTicketsManifest
-      })} -->`
+      `<!-- epure-plan-manifest:${planManifestJson} -->`
     ].join("\n"),
     {
       phase: "tickets",

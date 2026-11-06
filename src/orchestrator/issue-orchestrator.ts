@@ -134,6 +134,7 @@ import {
   checkIsBrownfieldSubpackageRepo,
   checkIsExistingRepoWorkspace,
   createStagedTicketImplementationBuffer,
+  manifestSha256,
   mergeStagedBufferIntoImplementationPayload,
   parsePlanManifestFromComments,
   parseTrackedTicketsFromComments,
@@ -876,6 +877,10 @@ export async function orchestrateIssueCommand(
           command: effectiveInput.command,
           currentPhase: currentState?.phase,
           currentStatus: currentState?.status,
+          trustedManifestSha256: {
+            plan: currentState?.plan_manifest_sha256,
+            spec: currentState?.spec_manifest_sha256
+          },
           repository: effectiveInput.repository,
           issueNumber: effectiveInput.issueNumber,
           commentId: effectiveInput.commentId,
@@ -1474,10 +1479,13 @@ export async function orchestrateIssueCommand(
       if (currentState?.status === "suspended") {
         await gh.removeIssueLabel?.(effectiveInput.issueNumber, "needs-human");
       }
-      const parsedPlanManifest = parsePlanManifestFromComments(allComments);
+      const parsedPlanManifest = parsePlanManifestFromComments(
+        allComments,
+        currentState?.plan_manifest_sha256
+      );
       let ticketsManifest = parsedPlanManifest?.tickets
         ? [...parsedPlanManifest.tickets]
-        : parseTrackedTicketsFromComments(allComments);
+        : [];
       const hasExplicitPlanManifest = ticketsManifest.length > 0;
       if (!hasExplicitPlanManifest) {
         const parsedCriteria = Array.from(
@@ -1901,7 +1909,7 @@ export async function orchestrateIssueCommand(
           }
 
           const nextEpicPhase = currentEpicPhase + 1;
-          const phase2State = await updateIssueStateWithCas({
+          await updateIssueStateWithCas({
             issueNumber: effectiveInput.issueNumber,
             store,
             mutator: (prev) => ({
@@ -1923,7 +1931,17 @@ export async function orchestrateIssueCommand(
             nextEpicPhase,
             existingTickets: ticketsManifest,
             auditResult: convergenceAudit,
-            stateMirrorMarkdown: phase2State.issue_mirror_markdown
+            recordPlanManifest: async (manifestJson) =>
+              (
+                await updateIssueStateWithCas({
+                  issueNumber: effectiveInput.issueNumber,
+                  store,
+                  mutator: (prev) => ({
+                    ...prev,
+                    plan_manifest_sha256: manifestSha256(manifestJson)
+                  })
+                })
+              ).issue_mirror_markdown
           });
           currentEpicPhase = nextEpicPhase;
 

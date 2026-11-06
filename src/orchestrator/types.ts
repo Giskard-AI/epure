@@ -201,7 +201,10 @@ export interface GitHubRestHelper {
     issueNumber: number,
     blockerDatabaseId: number
   ): Promise<void>;
-  closeIssue(issueNumber: number): Promise<void>;
+  closeIssue(
+    issueNumber: number,
+    stateReason?: "completed" | "not_planned"
+  ): Promise<void>;
   getDefaultBranchSha(branch: string): Promise<string | null>;
   listBranchPaths(branch: string): Promise<string[]>;
   // Path -> blob of every file at a branch or commit SHA (empty when the ref does not exist).

@@ -57,6 +57,9 @@ export interface EpureIssueState {
   // Lease of the run working on an active plan outside a CI wait; a killed run's lease expires at the job timeout.
   readonly claimed_by_run_id?: string | undefined;
   readonly claim_expires_at?: string | undefined;
+  // SHA-256 of the manifest JSON EPURE last posted: any comment can carry a manifest marker, only this one is trusted.
+  readonly plan_manifest_sha256?: string | undefined;
+  readonly spec_manifest_sha256?: string | undefined;
 }
 
 export interface RunLease {

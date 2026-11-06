@@ -180,7 +180,8 @@ export interface SpawnPhase2ConvergenceTicketsParams {
   readonly nextEpicPhase: number;
   readonly existingTickets: readonly TrackedTicketCommentMetadata[];
   readonly auditResult: EpicConvergenceAuditPayload;
-  readonly stateMirrorMarkdown: string;
+  // Records the manifest digest in the state ref and returns the state mirror markdown.
+  readonly recordPlanManifest: (manifestJson: string) => Promise<string>;
 }
 
 export async function spawnPhase2ConvergenceTickets(
@@ -264,9 +265,17 @@ export async function spawnPhase2ConvergenceTickets(
     tickets: combinedTickets
   });
 
+  const planManifestJson = JSON.stringify({
+    planBranch: params.planBranch,
+    specPath: params.specPath,
+    epicGoalContract: params.epicGoalContract,
+    tickets: combinedTickets
+  });
+  const stateMirrorMarkdown = await params.recordPlanManifest(planManifestJson);
+
   const phaseComment = appendEpureCommandsSpoiler(
     [
-      params.stateMirrorMarkdown,
+      stateMirrorMarkdown,
       "",
       `### 🔄 Audit de Convergence Goldfish (\`INCOMPLETE\`) — Lancement automatique de la Phase ${params.nextEpicPhase}`,
       "",
@@ -292,12 +301,7 @@ export async function spawnPhase2ConvergenceTickets(
         (t) => `- **#${t.ticketIssueNumber}** — ${t.title}`
       ),
       "",
-      `<!-- epure-plan-manifest:${JSON.stringify({
-        planBranch: params.planBranch,
-        specPath: params.specPath,
-        epicGoalContract: params.epicGoalContract,
-        tickets: combinedTickets
-      })} -->`
+      `<!-- epure-plan-manifest:${planManifestJson} -->`
     ].join("\n"),
     {
       phase: "implementation",

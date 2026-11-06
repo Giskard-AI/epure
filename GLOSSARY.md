@@ -380,6 +380,12 @@ _Éviter_ : enchaîner automatiquement la fin du grill avec la génération de l
 **Validation humaine de la spécification (Q85)** : séparation explicite entre `/epure to-spec` (qui génère et commite `GLOSSARY.md`, `docs/adr/NNNN-*.md`, `docs/specs/<slug>.md` et `DESIGN.md` sur `plan/<issue>-<slug>`, puis passe l'issue en phase `spec` / `awaiting_human_approval` où tout commentaire libre révise la spécification) et `/epure to-tickets` (qui découpe la spécification validée en un DAG acyclique de tickets GitHub `ready-for-agent` avec `blocked_by` et passe l'issue en phase `tickets` / `awaiting_human_approval` en attente de `/epure approve`).
 _Éviter_ : créer les sous-issues GitHub dès `/epure to-spec` avant que l'humain ait pu relire et valider la spécification sur `plan/<issue>-<slug>`.
 
+**Régénération du graphe de tickets** : `/epure to-tickets` reposté avant le début de l'implémentation (par exemple après une révision de la spécification par `/epure to-spec`) ferme d'abord les tickets du graphe précédent (`not planned`, commentaire « ticket remplacé »), puis crée le nouveau graphe. L'implémentation a commencé dès que la phase est `implementation`, `review` ou `completed`, ou qu'une branche `feature/<issue>-*` existe : `/epure to-tickets` est alors refusé.
+_Éviter_ : laisser deux graphes de tickets ouverts pour la même issue de pilotage, ou régénérer les tickets d'une implémentation déjà commencée.
+
+**Manifeste de confiance** : seul le manifeste (`epure-plan-manifest`, `epure-spec-manifest`) dont le SHA-256 est conservé dans `refs/epure/state/<issue>` (`plan_manifest_sha256`, `spec_manifest_sha256`) fait foi. Un état écrit avant ces champs ne fait confiance qu'aux manifestes publiés par un auteur `Bot`, ce qu'aucun visiteur ni utilisateur `write` ne peut être.
+_Éviter_ : lire un manifeste dans n'importe quel commentaire de l'issue.
+
 **Jeton d'installation GitHub App éphémère (Q87)** : jeton court obtenu en signant un JWT RS256 avec `EPURE_AGENT_APP_ID` et `EPURE_AGENT_APP_PRIVATE_KEY` puis en appelant l'API d'installation GitHub du dépôt cible, utilisé par le publisher isolé pour créer branches, commits, tickets, PRs et checks, puis révoqué immédiatement.
 _Éviter_ : exposer la clé privée PEM au processus agent ou partager un PAT personnel permanent.
 

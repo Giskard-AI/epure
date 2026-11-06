@@ -26,6 +26,7 @@ import type {
   TrackedTicketCommentMetadata
 } from "../src/orchestrator/types.js";
 import {
+  manifestSha256,
   parsePlanManifestFromComments,
   validateTicketIntegrityGuard
 } from "../src/orchestrator/workspace/repo-tools.js";
@@ -832,12 +833,13 @@ describe("EPURE Graphe GitHub Natif, Garde-fous d'Intégrité Inter-Tickets et C
       const parsed = parseOptionalEpicGoalContract(sampleContract);
       expect(parsed).toEqual(sampleContract);
 
-      const commentBody = `### Plan\n<!-- epure-plan-manifest:${JSON.stringify({
+      const manifestJson = JSON.stringify({
         planBranch,
         specPath,
         epicGoalContract: sampleContract,
         tickets: [sampleTicket]
-      })} -->`;
+      });
+      const commentBody = `### Plan\n<!-- epure-plan-manifest:${manifestJson} -->`;
 
       const commentRecord: IssueCommentRecord = {
         id: 1,
@@ -846,7 +848,10 @@ describe("EPURE Graphe GitHub Natif, Garde-fous d'Intégrité Inter-Tickets et C
         created_at: "2026-10-31T00:00:00Z"
       };
 
-      const manifest = parsePlanManifestFromComments([commentRecord]);
+      const manifest = parsePlanManifestFromComments(
+        [commentRecord],
+        manifestSha256(manifestJson)
+      );
       expect(manifest?.epicGoalContract).toEqual(sampleContract);
       expect(manifest?.tickets).toHaveLength(1);
     });
@@ -966,6 +971,7 @@ describe("EPURE Graphe GitHub Natif, Garde-fous d'Intégrité Inter-Tickets et C
       const subIssues: Array<{ parent: number; childId: number }> = [];
       const blockedByDeps: Array<{ issue: number; blockerId: number }> = [];
       const postedComments: string[] = [];
+      const recordedManifests: string[] = [];
       let updatedParentIssueBody = "";
 
       let nextIssueNum = 52;
@@ -1049,9 +1055,17 @@ describe("EPURE Graphe GitHub Natif, Garde-fous d'Intégrité Inter-Tickets et C
           remediation_tickets: phase2Tickets
         },
         nextEpicPhase,
-        stateMirrorMarkdown: "<!-- state -->",
+        recordPlanManifest: async (manifestJson) => {
+          recordedManifests.push(manifestJson);
+          return "<!-- state -->";
+        },
         gh: mockGh
       });
+
+      expect(recordedManifests).toHaveLength(1);
+      expect(postedComments[0]).toContain(
+        `<!-- epure-plan-manifest:${recordedManifests[0]} -->`
+      );
 
       expect(combined.map((t) => t.ticketIssueNumber)).toEqual(
         expectedTicketNumbers
@@ -1279,7 +1293,7 @@ describe("EPURE Graphe GitHub Natif, Garde-fous d'Intégrité Inter-Tickets et C
               {
                 id: 1,
                 body: manifestComment,
-                user: { login: "epure-bot" },
+                user: { login: "epure-agent[bot]", type: "Bot" },
                 created_at: "2026-10-31T00:00:00Z"
               }
             ]),
