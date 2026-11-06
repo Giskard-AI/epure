@@ -1344,25 +1344,12 @@ describe("GitHub API rate limits are waited out within 5 minutes, then escalate 
     expect(body).toContain("Postez `/epure continue` (ou `/epure approve`)");
   });
 
-  it.each([
-    {
-      id: "escalation-comment-throttled-once-after-the-run-budget-is-spent-is-still-posted-within-its-own-budget",
-      commentReplies: (): [RouteStep, ...RouteStep[]] => [secondaryRateLimit(120), json({ html_url: "c" }, 201)],
-      expectedWaitsSeconds: [120, 120, 120],
-      expectsPosted: true
-    },
-    {
-      id: "escalation-comment-still-throttled-past-its-own-budget-rejects-with-the-escalation-for-the-action-summary",
-      commentReplies: (): [RouteStep, ...RouteStep[]] => [primaryRateLimit(nowSeconds() + 3600)],
-      expectedWaitsSeconds: [120, 120],
-      expectsPosted: false
-    }
-  ])("$id", async ({ commentReplies, expectedWaitsSeconds, expectsPosted }) => {
+  async function runEscalationWithThrottledComment(...commentReplies: [RouteStep, ...RouteStep[]]) {
     const store = await seedWaitingTicket();
     const waits: number[] = [];
     const router = declareIssueWrites(createGitHubMockRouter())
       .on("GET", `${R}/issues/${ISSUE}`, secondaryRateLimit(120))
-      .on("POST", `${R}/issues/${ISSUE}/comments`, ...commentReplies());
+      .on("POST", `${R}/issues/${ISSUE}/comments`, ...commentReplies);
 
     const outcome = await orchestrateIssueCommand({
       repository: REPO,
@@ -1382,20 +1369,29 @@ describe("GitHub API rate limits are waited out within 5 minutes, then escalate 
       () => null,
       (err: unknown) => err
     );
-    const posted = router.requests.filter((r) => r.method === "POST" && r.path === `${R}/issues/${ISSUE}/comments`);
-
     expect(router.unmatched).toEqual([]);
-    expect(waits.map((ms) => Math.ceil(ms / 1000))).toEqual(expectedWaitsSeconds);
-    expect(await readState(store)).toMatchObject({ status: "suspended", last_escalation: { reason: "github_rate_limited" } });
-    if (expectsPosted) {
-      expect(outcome).toBeNull();
-      expect((posted.at(-1)?.body as { body: string }).body).toContain("`github_rate_limited`");
-    } else {
-      expect(outcome).toBeInstanceOf(EscalationNotRecordedError);
-      expect((outcome as EscalationNotRecordedError).message).toContain(`/epure continue\` on #${ISSUE}`);
-      expect((outcome as EscalationNotRecordedError).escalationMarkdown).toContain("`github_rate_limited`");
-      expect((outcome as EscalationNotRecordedError).escalationMarkdown).toContain("Postez `/epure continue`");
-    }
+    return { outcome, waitsSeconds: waits.map((ms) => Math.ceil(ms / 1000)), router, state: await readState(store) };
+  }
+
+  it("escalation-comment-throttled-once-after-the-run-budget-is-spent-is-still-posted-within-its-own-budget", async () => {
+    const run = await runEscalationWithThrottledComment(secondaryRateLimit(120), json({ html_url: "c" }, 201));
+
+    expect(run.outcome).toBeNull();
+    expect(run.waitsSeconds).toEqual([120, 120, 120]);
+    expect(run.state).toMatchObject({ status: "suspended", last_escalation: { reason: "github_rate_limited" } });
+    expect(postedComments(run.router).at(-1)).toContain("`github_rate_limited`");
+  });
+
+  it("escalation-comment-still-throttled-past-its-own-budget-leaves-the-plan-suspended-and-rejects-with-the-escalation-for-the-action-summary", async () => {
+    const run = await runEscalationWithThrottledComment(primaryRateLimit(nowSeconds() + 3600));
+
+    expect(run.waitsSeconds).toEqual([120, 120]);
+    expect(run.state).toMatchObject({ status: "suspended", subphase: "idle", last_escalation: { reason: "github_rate_limited" } });
+    expect(run.outcome).toBeInstanceOf(EscalationNotRecordedError);
+    expect(run.outcome).toMatchObject({
+      message: expect.stringContaining(`/epure continue\` on #${ISSUE}`),
+      escalationMarkdown: expect.stringMatching(/`github_rate_limited`[\s\S]*Postez `\/epure continue`/)
+    });
   });
 });
 
