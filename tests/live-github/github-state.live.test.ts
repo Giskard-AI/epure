@@ -568,6 +568,40 @@ describeLive(
       });
     });
 
+    describe("roster and workflow reads list only their own directory (contents API)", () => {
+      const DIR = `${NS}/reviewers`;
+      let branch = "";
+
+      beforeAll(async () => {
+        let head = await commitOnTop([baseSha], `${DIR}/security-reviewer.md`, "# security\n");
+        head = await commitOnTop([head], `${DIR}/notes.txt`, "not a reviewer\n");
+        head = await commitOnTop([head], `${DIR}/nested/deep-reviewer.md`, "# nested\n");
+        branch = await createBranch("scoped-reads", head);
+      }, HOOK_TIMEOUT_MS);
+
+      it.each([
+        { id: "reviewer-directory-yields-only-its-direct-markdown-children", dir: DIR, expected: { [`${DIR}/security-reviewer.md`]: "# security\n" } },
+        { id: "missing-reviewer-directory-yields-no-roster-file", dir: `${NS}/missing`, expected: {} }
+      ])("$id", async ({ dir, expected }) => {
+        const gh = createGitHubRestHelper({ repository: cfg.repository, token });
+
+        const roster = await gh.readTrustedBaseRosterFiles(branch, dir);
+        roster.delete("DESIGN.md");
+
+        expect(Object.fromEntries(roster)).toEqual(expected);
+      });
+
+      it("workflow map holds only top-level workflow files and path hints include the committed files", async () => {
+        const gh = createGitHubRestHelper({ repository: cfg.repository, token });
+
+        const workflows = [...(await gh.readDevWorkflowsMap(branch)).keys()];
+        const hints = await gh.listBranchPathHints(branch);
+
+        expect(workflows.filter((p) => !/^\.github\/workflows\/[^/]+\.ya?ml$/.test(p))).toEqual([]);
+        expect(hints).toEqual(expect.arrayContaining([`${DIR}/security-reviewer.md`, `${DIR}/notes.txt`, `${DIR}/nested/deep-reviewer.md`]));
+      });
+    });
+
     describe("git data API", () => {
       it("a two-parent merge commit fast-forwards the branch without force", async () => {
         const left = await commitOnTop([baseSha], `${NS}/left.txt`, "left");
