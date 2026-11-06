@@ -203,6 +203,7 @@ function declareImplementationFlow(
     .on("PATCH", /\/pulls\/10[56]$/, json({ head: { sha: HEAD_SHA } }))
     .on("GET", /\/pulls\/10[56]$/, json({ mergeable_state: "clean" }))
     .on("POST", `${R}/check-runs`, json({}, 201))
+    .on("GET", /\/pulls\?state=closed&head=/, json([]))
     .on("GET", /\/pulls\?state=open&head=/, (req) => {
       const isTask = req.path.includes(encodeURIComponent(`${OWNER}:${TASK_BRANCH}`));
       return json(

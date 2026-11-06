@@ -975,11 +975,21 @@ export async function orchestrateIssueCommand(
             const targetFeatureBranch =
               currentState.active_branch || featureBranch;
 
-            if (prNumberToMerge > 0) {
-              const openTaskPr = await gh.findOpenPullRequestByHead(
+            const openTaskPr =
+              prNumberToMerge > 0
+                ? await gh.findOpenPullRequestByHead(
+                    taskBranchToMerge,
+                    targetFeatureBranch
+                  )
+                : null;
+            const mergedByHuman =
+              prNumberToMerge > 0 &&
+              !openTaskPr &&
+              (await gh.findMergedPullRequestByHead(
                 taskBranchToMerge,
                 targetFeatureBranch
-              );
+              )) !== null;
+            if (prNumberToMerge > 0 && !mergedByHuman) {
               const prFiles = await gh.listPullRequestFiles(prNumberToMerge);
               const changedFilesForSquash = await Promise.all(
                 prFiles.map(async (f) => ({
@@ -1188,10 +1198,10 @@ export async function orchestrateIssueCommand(
         featureBranch,
         "dev"
       );
-      const mergedFeaturePr = existingFeaturePrCheck
-        ? null
-        : await gh.findMergedPullRequestByHead(featureBranch, "dev");
-      if (mergedFeaturePr) {
+      const completeEpicMergedByHuman = async (mergedFeaturePr: {
+        number: number;
+        html_url: string;
+      }): Promise<OrchestrateIssueResult> => {
         const updatedDone = await updateIssueStateWithCas({
           issueNumber: effectiveInput.issueNumber,
           store,
@@ -1226,6 +1236,21 @@ export async function orchestrateIssueCommand(
           created_ticket_numbers: [],
           feature_pr_url: mergedFeaturePr.html_url
         };
+      };
+      // A human may merge the feature PR while this run is still working: checked before every branch write or PR.
+      const stopIfFeaturePrMerged =
+        async (): Promise<OrchestrateIssueResult | null> => {
+          const merged = await gh.findMergedPullRequestByHead(
+            featureBranch,
+            "dev"
+          );
+          return merged ? await completeEpicMergedByHuman(merged) : null;
+        };
+      if (!existingFeaturePrCheck) {
+        const mergedAtStart = await stopIfFeaturePrMerged();
+        if (mergedAtStart) {
+          return mergedAtStart;
+        }
       }
 
       const planBranchToIntegrate = parsedPlanManifest?.planBranch ?? planBranch;
@@ -1473,7 +1498,8 @@ export async function orchestrateIssueCommand(
         forceOneRemediationRoundOnOpenPr,
         initialCodeFixAttemptsByTicket,
         baseSyncGuard,
-        resumeContextMarkdown
+        resumeContextMarkdown,
+        stopIfFeaturePrMerged
       });
 
       if (loopOutcome.halted && loopOutcome.result) {
@@ -1644,7 +1670,8 @@ export async function orchestrateIssueCommand(
             forceOneRemediationRoundOnOpenPr: false,
             initialCodeFixAttemptsByTicket,
             baseSyncGuard,
-            resumeContextMarkdown
+            resumeContextMarkdown,
+            stopIfFeaturePrMerged
           });
 
           if (loopOutcome.halted && loopOutcome.result) {
@@ -1698,7 +1725,8 @@ export async function orchestrateIssueCommand(
           forceOneRemediationRoundOnOpenPr,
           initialFeatureCodeFixAttemptsUsed,
           baseSyncGuard,
-          resumeContextMarkdown
+          resumeContextMarkdown,
+          stopIfFeaturePrMerged
         });
       } catch (err) {
         if (err instanceof LLMError) {

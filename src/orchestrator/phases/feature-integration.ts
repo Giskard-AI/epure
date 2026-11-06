@@ -110,6 +110,7 @@ export interface RunFeatureIntegrationPhaseParams {
   readonly initialFeatureCodeFixAttemptsUsed: number;
   readonly baseSyncGuard: BaseSyncGuard;
   readonly resumeContextMarkdown?: string | undefined;
+  readonly stopIfFeaturePrMerged: () => Promise<OrchestrateIssueResult | null>;
 }
 
 export async function runFeatureIntegrationPhase(
@@ -151,6 +152,10 @@ export async function runFeatureIntegrationPhase(
   }
 
   if (await params.baseSyncGuard.needsSync()) {
+    const mergedBeforeSync = await params.stopIfFeaturePrMerged();
+    if (mergedBeforeSync) {
+      return mergedBeforeSync;
+    }
     const featureSync = await syncBranchWithBase({
       gh: params.gh,
       targetBranch: params.featureBranch,
@@ -243,6 +248,12 @@ export async function runFeatureIntegrationPhase(
     }
   );
 
+  const mergedBeforeOpening = existingFeaturePr
+    ? null
+    : await params.stopIfFeaturePrMerged();
+  if (mergedBeforeOpening) {
+    return mergedBeforeOpening;
+  }
   const featurePr = existingFeaturePr
     ? existingFeaturePr
     : await params.gh.openPullRequest({

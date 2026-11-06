@@ -117,6 +117,8 @@ export interface RunTicketExecutionLoopParams {
   readonly initialCodeFixAttemptsByTicket: Readonly<Record<string, number>>;
   readonly baseSyncGuard: BaseSyncGuard;
   readonly resumeContextMarkdown?: string | undefined;
+  // Moves the epic to `done` and returns its result when a human merged the feature PR meanwhile.
+  readonly stopIfFeaturePrMerged: () => Promise<OrchestrateIssueResult | null>;
 }
 
 export interface RunTicketExecutionLoopOutcome {
@@ -476,10 +478,12 @@ export async function runTicketExecutionLoop(
       gh: params.gh,
       store: params.store
     });
-    if (cancelledBeforeTicket) {
+    const haltBeforeTicket =
+      cancelledBeforeTicket ?? (await params.stopIfFeaturePrMerged());
+    if (haltBeforeTicket) {
       return {
         halted: true,
-        result: cancelledBeforeTicket,
+        result: haltBeforeTicket,
         verificationProfile,
         verificationGuideMarkdown
       };
@@ -634,6 +638,20 @@ export async function runTicketExecutionLoop(
     }
 
     const taskBranch = `task/${ticket.ticketIssueNumber}-${ticket.slug}`;
+    const mergedTaskPr = await params.gh.findMergedPullRequestByHead(
+      taskBranch,
+      params.featureBranch
+    );
+    if (mergedTaskPr) {
+      if (ticket.ticketIssueNumber !== params.issueNumber) {
+        await params.gh.closeIssue(ticket.ticketIssueNumber);
+      }
+      completedTicketNumbers.add(ticket.ticketIssueNumber);
+      params.completedTicketsSummary.push(
+        `- **#${ticket.ticketIssueNumber}** (${ticket.title}) — PR [#${mergedTaskPr.number}](${mergedTaskPr.html_url}) already merged into \`${params.featureBranch}\``
+      );
+      continue;
+    }
     if (ticket.ticketIssueNumber !== params.issueNumber) {
       await params.gh.removeIssueLabel?.(ticket.ticketIssueNumber, "needs-human");
     }
@@ -1260,6 +1278,15 @@ export async function runTicketExecutionLoop(
           };
         }
 
+        const featureMergedBeforeTaskPr = await params.stopIfFeaturePrMerged();
+        if (featureMergedBeforeTaskPr) {
+          return {
+            halted: true,
+            result: featureMergedBeforeTaskPr,
+            verificationProfile,
+            verificationGuideMarkdown
+          };
+        }
         await params.gh.commitFilesToBranch({
           branch: taskBranch,
           fromBranch: params.featureBranch,
