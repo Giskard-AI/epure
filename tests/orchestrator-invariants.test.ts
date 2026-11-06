@@ -40,6 +40,7 @@ type Trigger = Pick<
 const TRIGGERS = {
   continueWithoutComment: { issueNumber: ISSUE, commentId: 0 },
   workflowRun: { issueNumber: 0, commentId: 0, triggerHeadSha: HEAD_SHA, triggerBranch: FEATURE_BRANCH },
+  workflowRunForIssue: { issueNumber: ISSUE, commentId: 0, triggerHeadSha: HEAD_SHA },
   branchOnly: { issueNumber: 0, commentId: 0, triggerBranch: FEATURE_BRANCH }
 } satisfies Record<string, Trigger>;
 
@@ -256,7 +257,7 @@ describe("Invariant 2 — suspended, done and cancelled imply subphase idle and 
       expectedStatus: "suspended",
       declare: (router: GitHubMockRouter) =>
         declareIssueWrites(router).on("GET", `${R}/issues/${ISSUE}`, primaryRateLimit(1_800_000_000)),
-      input: { command: "continue", actor: "github-actions[bot]", ...TRIGGERS.continueWithoutComment }
+      input: { command: "continue", actor: "github-actions[bot]", ...TRIGGERS.workflowRunForIssue }
     }
   ] as const)("$id", async ({ expectedStatus, declare, input }) => {
     const store = await seedState({
@@ -316,7 +317,7 @@ describe("Invariant 3 — only an explicit human command gets an issue out of ca
 describe("Invariant 4 — exhausted remediation budget escalates exactly once with no sync, review or LLM call", () => {
   it.each([
     { id: "ticket-ci-failure-at-3-of-3-attempts-resumed-by-workflow_run", trigger: TRIGGERS.workflowRun },
-    { id: "ticket-ci-failure-at-3-of-3-attempts-resumed-by-continue-without-comment", trigger: TRIGGERS.continueWithoutComment }
+    { id: "ticket-ci-failure-at-3-of-3-attempts-resumed-by-workflow_run-naming-the-issue", trigger: TRIGGERS.workflowRunForIssue }
   ] as const)("$id", async ({ trigger }) => {
     const store = await seedState(EXHAUSTED_TICKET_STATE);
     const router = declareImplementationFlow(createGitHubMockRouter(), "failure", { taskPr: true, featurePr: false });
@@ -339,6 +340,7 @@ const SOURCES = {
   "workflow_run": TRIGGERS.workflowRun,
   "workflow_run-stale-sha": { ...TRIGGERS.workflowRun, triggerHeadSha: STALE_SHA },
   "workflow_run-stale-sha-with-issue-number": { ...TRIGGERS.workflowRun, issueNumber: ISSUE, triggerHeadSha: STALE_SHA },
+  "workflow_run-with-issue-number": TRIGGERS.workflowRunForIssue,
   "continue-without-comment": TRIGGERS.continueWithoutComment,
   "branch-only": TRIGGERS.branchOnly
 } satisfies Record<string, Trigger>;
@@ -387,10 +389,11 @@ describe("Automatic entry decision table (status x subphase x event source x bud
     { id: "active-waiting_ticket_ci-workflow_run-on-stale-sha-for-known-issue-does-nothing", status: "active", subphase: "waiting_ticket_ci", source: "workflow_run-stale-sha-with-issue-number", attempts: 3, ci: "failure", expected: "none" },
     { id: "active-waiting_ticket_ci-workflow_run-ci-still-running-polls-without-writing", status: "active", subphase: "waiting_ticket_ci", source: "workflow_run", attempts: 1, ci: "pending", expected: "resume" },
     { id: "active-waiting_feature_ci-workflow_run-green-ci-at-exhausted-budget-moves-to-review", status: "active", subphase: "waiting_feature_ci", source: "workflow_run", attempts: 3, ci: "success", expected: "resume" },
-    { id: "active-waiting_feature_ci-continue-without-comment-green-ci-moves-to-review", status: "active", subphase: "waiting_feature_ci", source: "continue-without-comment", attempts: 0, ci: "success", expected: "resume" },
+    { id: "active-waiting_feature_ci-continue-without-comment-or-head-sha-green-ci-does-nothing", status: "active", subphase: "waiting_feature_ci", source: "continue-without-comment", attempts: 0, ci: "success", expected: "none" },
+    { id: "active-waiting_feature_ci-workflow_run-naming-the-issue-green-ci-moves-to-review", status: "active", subphase: "waiting_feature_ci", source: "workflow_run-with-issue-number", attempts: 0, ci: "success", expected: "resume" },
     { id: "active-waiting_ticket_ci-workflow_run-red-ci-with-budget-left-runs-one-fix-round", status: "active", subphase: "waiting_ticket_ci", source: "workflow_run", attempts: 2, ci: "failure", expected: "fix_round" },
     { id: "active-waiting_ticket_ci-workflow_run-red-ci-at-exhausted-budget-escalates-once", status: "active", subphase: "waiting_ticket_ci", source: "workflow_run", attempts: 3, ci: "failure", expected: "escalation" },
-    { id: "active-waiting_ticket_ci-continue-without-comment-red-ci-at-exhausted-budget-escalates-once", status: "active", subphase: "waiting_ticket_ci", source: "continue-without-comment", attempts: 3, ci: "failure", expected: "escalation" },
+    { id: "active-waiting_ticket_ci-continue-without-comment-or-head-sha-red-ci-at-exhausted-budget-does-nothing", status: "active", subphase: "waiting_ticket_ci", source: "continue-without-comment", attempts: 3, ci: "failure", expected: "none" },
     { id: "active-waiting_feature_ci-workflow_run-red-ci-at-exhausted-feature-budget-escalates-once", status: "active", subphase: "waiting_feature_ci", source: "workflow_run", attempts: 3, ci: "failure", expected: "escalation" }
   ] as const satisfies ReadonlyArray<{
     id: string;
@@ -1330,7 +1333,7 @@ describe("GitHub API rate limits are waited out within 5 minutes, then escalate 
       },
       command: "continue",
       actor: "github-actions[bot]",
-      ...TRIGGERS.continueWithoutComment
+      ...TRIGGERS.workflowRunForIssue
     });
     const posted = router.requests.filter((r) => r.method === "POST" && r.path === `${R}/issues/${ISSUE}/comments`);
     const body = (posted.at(-1)?.body as { body: string }).body;
@@ -1364,7 +1367,7 @@ describe("GitHub API rate limits are waited out within 5 minutes, then escalate 
       },
       command: "continue",
       actor: "github-actions[bot]",
-      ...TRIGGERS.continueWithoutComment
+      ...TRIGGERS.workflowRunForIssue
     }).then(
       () => null,
       (err: unknown) => err

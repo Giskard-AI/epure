@@ -801,6 +801,7 @@ describe("continue on green ticket CI — a task PR merge refused with 405 re-sy
       commandArgs: "",
       actor: "github-actions[bot]",
       commentId: 0,
+      triggerHeadSha: taskHead,
       fallbackGithubToken: "ghs_test",
       llmApiKey: "key_test",
       model: "openai/gpt-test",

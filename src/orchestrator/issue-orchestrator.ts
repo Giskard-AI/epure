@@ -548,13 +548,15 @@ export async function orchestrateIssueCommand(
       initialTransientRetriesUsed = currentState?.transient_retries_used ?? 0;
 
       if (isAutomaticEntry) {
-        const ignoredReason = !currentState
-          ? "no orchestration state"
-          : !isAutomaticallyResumable(currentState)
-            ? `status \`${currentState.status}\` / subphase \`${currentState.subphase ?? "idle"}\` is not an active wait`
-            : triggerHeadSha && triggerHeadSha !== currentState.active_head_sha
-              ? `trigger SHA \`${triggerHeadSha}\` is not the active head SHA`
-              : undefined;
+        const ignoredReason = !triggerHeadSha
+          ? "no trigger head SHA"
+          : !currentState
+            ? "no orchestration state"
+            : !isAutomaticallyResumable(currentState)
+              ? `status \`${currentState.status}\` / subphase \`${currentState.subphase ?? "idle"}\` is not an active wait`
+              : triggerHeadSha !== currentState.active_head_sha
+                ? `trigger SHA \`${triggerHeadSha}\` is not the active head SHA`
+                : undefined;
         if (ignoredReason) {
           return {
             executed: false,
