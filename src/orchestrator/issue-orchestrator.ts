@@ -127,6 +127,7 @@ import {
   type ResolvedPhaseModels,
   type TrackedTicketCommentMetadata
 } from "./types.js";
+import { resolveJobTimeoutMinutes } from "./job-timeout.js";
 import {
   applyTicketImplementationPayload,
   buildCompactWorkspaceFilesContext,
@@ -855,9 +856,16 @@ export async function orchestrateIssueCommand(
       };
       maxCodeFixAttempts = parsedDevAgentsConfig?.max_code_fix_attempts ?? 3;
       // The job cannot outlive its timeout, so a lease older than it belongs to a killed run.
-      const runLeaseMs =
-        (parsedDevAgentsConfig?.job_timeout_minutes ??
-          DEFAULT_AGENTS_CONFIG.job_timeout_minutes) * 60_000;
+      let runLeaseMinutes: Promise<number> | undefined;
+      const resolveRunLeaseMs = async (): Promise<number> => {
+        runLeaseMinutes ??= effectiveInput.workflowJob
+          ? resolveJobTimeoutMinutes(gh, effectiveInput.workflowJob)
+          : Promise.resolve(
+              parsedDevAgentsConfig?.job_timeout_minutes ??
+                DEFAULT_AGENTS_CONFIG.job_timeout_minutes
+            );
+        return (await runLeaseMinutes) * 60_000;
+      };
       const reviewersDir =
         parsedDevAgentsConfig?.reviewers_dir ?? DEFAULT_REVIEWERS_DIR;
 
@@ -1165,6 +1173,7 @@ export async function orchestrateIssueCommand(
 
           // Claims the wait: a concurrent continuation, cancel or closure makes this run stop here.
           const waitingState = currentState;
+          const ciClaimLeaseMs = await resolveRunLeaseMs();
           await updateIssueStateWithCas({
             issueNumber: effectiveInput.issueNumber,
             store,
@@ -1188,7 +1197,7 @@ export async function orchestrateIssueCommand(
                     : "implementing_ticket"
                 },
                 runId,
-                runLeaseMs
+                ciClaimLeaseMs
               );
             }
           });
@@ -1640,6 +1649,7 @@ export async function orchestrateIssueCommand(
             )
           : "";
 
+      const runLeaseMs = await resolveRunLeaseMs();
       const updatedStart = await updateIssueStateWithCas({
         issueNumber: effectiveInput.issueNumber,
         store,

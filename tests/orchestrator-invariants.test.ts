@@ -68,7 +68,7 @@ async function seedState(
 async function run(
   router: GitHubMockRouter,
   store: GitRefStateStore,
-  input: Pick<OrchestrateIssueInput, "command" | "actor" | "runId"> & Trigger
+  input: Pick<OrchestrateIssueInput, "command" | "actor" | "runId" | "workflowJob"> & Trigger
 ) {
   return await orchestrateIssueCommand({
     repository: REPO,
@@ -1627,6 +1627,30 @@ describe("A run lease keeps a second run off a plan until the first one finishes
     expect(res.summary_markdown).toContain("run `run-c` claimed the plan after this run checked the lease");
     expect(ciPollCalls(router)).toBe(0);
     expect(await readState(raw)).toMatchObject({ claimed_by_run_id: "run-c", subphase: "implementing_ticket", status: "active" });
+  });
+
+  it.each([
+    { id: "lease-lasts-the-workflow-literal-when-agents-yml-sets-a-shorter-job-timeout", workflowTimeoutLine: "    timeout-minutes: 120\n", expectedMinutes: 120 },
+    { id: "lease-lasts-the-github-maximum-when-the-job-sets-no-timeout-minutes", workflowTimeoutLine: "", expectedMinutes: 360 }
+  ])("$id", async ({ workflowTimeoutLine, expectedMinutes }) => {
+    const base64 = (text: string) => json({ type: "file", encoding: "base64", content: Buffer.from(text, "utf8").toString("base64") });
+    const { store, writes } = captureWrites(await seedState({ ...claimedBy(PAST, "implementing_ticket"), active_pr_number: 106 }));
+    const router = declareImplementationFlow(createGitHubMockRouter(), "success", { taskPr: false, featurePr: true })
+      .on("GET", `${R}/contents/.github/agents.yml?ref=dev`, base64("job_timeout_minutes: 30\n"))
+      .on("GET", `${R}/contents/.github/workflows/epure-issue-command.yml?ref=wf-sha`, base64(`jobs:\n  orchestrate-command:\n    runs-on: ubuntu-26.04\n${workflowTimeoutLine}    steps:\n      - run: echo\n`));
+
+    await run(router, store, {
+      command: "continue",
+      actor: "maintainer",
+      issueNumber: ISSUE,
+      commentId: 900,
+      runId: "run-b",
+      workflowJob: { path: ".github/workflows/epure-issue-command.yml", ref: "wf-sha", jobId: "orchestrate-command" }
+    });
+
+    expect(router.unmatched).toEqual([]);
+    const claim = writes.find((w) => w.claimed_by_run_id === "run-b")!;
+    expect(Math.round((Date.parse(claim.claim_expires_at!) - Date.parse(claim.updated_at)) / 60_000)).toBe(expectedMinutes);
   });
 
   it("workflow_run-on-the-head-of-a-fresh-claim-is-ignored", async () => {

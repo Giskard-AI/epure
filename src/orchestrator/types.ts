@@ -150,6 +150,14 @@ export interface OrchestrateIssueInput {
   readonly triggerHeadSha?: string | undefined;
   // Identifies this run in the plan's lease (`claimed_by_run_id`); a random id when absent.
   readonly runId?: string | undefined;
+  // The Actions job running this command: the lease lasts the `timeout-minutes` GitHub enforces on it.
+  readonly workflowJob?: WorkflowJobRef | undefined;
+}
+
+export interface WorkflowJobRef {
+  readonly path: string;
+  readonly ref: string;
+  readonly jobId: string;
 }
 
 export type IssueOrchestratorInput = OrchestrateIssueInput;

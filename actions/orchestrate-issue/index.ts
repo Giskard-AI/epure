@@ -70,6 +70,18 @@ async function run(): Promise<void> {
   const runId = process.env.GITHUB_RUN_ID
     ? `${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT ?? "1"}`
     : undefined;
+  // GITHUB_WORKFLOW_REF is `<owner>/<repo>/<workflow path>@<ref>`.
+  const workflowPath = /^[^/]+\/[^/]+\/(.+)@/.exec(
+    process.env.GITHUB_WORKFLOW_REF ?? ""
+  )?.[1];
+  const workflowJob =
+    workflowPath && process.env.GITHUB_WORKFLOW_SHA && process.env.GITHUB_JOB
+      ? {
+          path: workflowPath,
+          ref: process.env.GITHUB_WORKFLOW_SHA,
+          jobId: process.env.GITHUB_JOB
+        }
+      : undefined;
 
   const secrets = [agentAppPrivateKey, fallbackGithubToken, llmApiKey].filter(
     (s) => s.length >= 4
@@ -90,7 +102,8 @@ async function run(): Promise<void> {
       model: model || undefined,
       ...(triggerHeadSha ? { triggerHeadSha } : {}),
       ...(asyncCiContinuation ? { asyncCiContinuation } : {}),
-      runId
+      runId,
+      workflowJob
     });
 
     writeGitHubOutputs(
