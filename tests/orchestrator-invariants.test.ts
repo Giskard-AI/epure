@@ -3,6 +3,7 @@ import { ClosureNotProcessedError, EscalationNotRecordedError, orchestrateIssueC
 import type { OrchestrateIssueInput } from "../src/orchestrator/types.js";
 import { manifestSha256, parsePlanManifestFromComments } from "../src/orchestrator/workspace/repo-tools.js";
 import {
+  claimForRun,
   createGitHubApiRefStateStore,
   createInMemoryGitRefStateStore,
   toTerminalState,
@@ -1556,6 +1557,76 @@ describe("A run lease keeps a second run off a plan until the first one finishes
     expect(res.executed).toBe(true);
     expect(llmCalls(router)).toBe(0);
     expect(await readState(store)).toMatchObject({ phase: "review", status: "awaiting_human_approval", subphase: "idle" });
+  });
+
+  // Runs `interloper` on the raw store when run `runId` first writes its claim, before or after that write lands.
+  function interleaveOnClaim(
+    raw: GitRefStateStore,
+    runId: string,
+    when: "before" | "after",
+    interloper: () => Promise<void>
+  ): GitRefStateStore {
+    let fired = false;
+    return {
+      readRef: (refName) => raw.readRef(refName),
+      compareAndSwapRef: async (refName, expectedOldSha, nextState) => {
+        const fire = !fired && nextState.claimed_by_run_id === runId;
+        if (fire) fired = true;
+        if (fire && when === "before") await interloper();
+        const result = await raw.compareAndSwapRef(refName, expectedOldSha, nextState);
+        if (fire && when === "after") await interloper();
+        return result;
+      }
+    };
+  }
+
+  it.each([
+    { id: "approve-during-a-ticket-ci-wait-then-workflow_run-on-that-head-is-ignored", interloper: "workflow_run" },
+    { id: "approve-during-a-ticket-ci-wait-then-manual-continue-is-refused-by-the-fresh-lease", interloper: "continue" }
+  ] as const)("$id", async ({ interloper }) => {
+    const raw = await seedState({ status: "active", subphase: "waiting_ticket_ci", active_ticket_number: ISSUE, active_task_branch: TASK_BRANCH, active_pr_number: 106 });
+    const interloperRouter = interloper === "workflow_run" ? declareFullFlow("success") : declareIssueWrites(createGitHubMockRouter());
+    let interloperResult: Awaited<ReturnType<typeof run>> | undefined;
+    const store = interleaveOnClaim(raw, "run-b", "after", async () => {
+      interloperResult = await run(
+        interloperRouter,
+        raw,
+        interloper === "workflow_run"
+          ? { command: "continue", actor: "github-actions[bot]", runId: "run-c", ...TRIGGERS.workflowRun }
+          : { command: "continue", actor: "maintainer", runId: "run-c", issueNumber: ISSUE, commentId: 901 }
+      );
+    });
+    const router = declareImplementationFlow(createGitHubMockRouter(), "success", { taskPr: false, featurePr: true });
+
+    const res = await run(router, store, { command: "approve", actor: "maintainer", issueNumber: ISSUE, commentId: 900, runId: "run-b" });
+
+    expect(router.unmatched).toEqual([]);
+    expect(interloperRouter.unmatched).toEqual([]);
+    expect(res.executed).toBe(true);
+    expect(interloperResult?.executed).toBe(false);
+    expect(ciPollCalls(interloperRouter)).toBe(0);
+    if (interloper === "continue") {
+      expect(postedComments(interloperRouter)).toEqual([expect.stringContaining("L'exécution EPURE `run-b` travaille encore")]);
+    }
+    expect(await readState(raw)).toMatchObject({ status: "done", claimed_by_run_id: undefined });
+  });
+
+  it.each([
+    { id: "stale-lease-takeover-by-continue-aborts-when-another-run-claimed-first", command: "continue" },
+    { id: "stale-lease-takeover-by-approve-aborts-when-another-run-claimed-first", command: "approve" }
+  ] as const)("$id", async ({ command }) => {
+    const raw = await seedState({ ...claimedBy(PAST, "implementing_ticket"), active_pr_number: 106 });
+    const store = interleaveOnClaim(raw, "run-b", "before", async () => {
+      await updateIssueStateWithCas({ issueNumber: ISSUE, store: raw, mutator: (prev) => claimForRun(prev, "run-c", 3_600_000) });
+    });
+    const router = declareImplementationFlow(createGitHubMockRouter(), "success", { taskPr: false, featurePr: true });
+
+    const res = await run(router, store, { command, actor: "maintainer", issueNumber: ISSUE, commentId: 900, runId: "run-b" });
+
+    expect(res.executed).toBe(false);
+    expect(res.summary_markdown).toContain("run `run-c` claimed the plan after this run checked the lease");
+    expect(ciPollCalls(router)).toBe(0);
+    expect(await readState(raw)).toMatchObject({ claimed_by_run_id: "run-c", subphase: "implementing_ticket", status: "active" });
   });
 
   it("workflow_run-on-the-head-of-a-fresh-claim-is-ignored", async () => {

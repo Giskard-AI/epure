@@ -1643,26 +1643,46 @@ export async function orchestrateIssueCommand(
       const updatedStart = await updateIssueStateWithCas({
         issueNumber: effectiveInput.issueNumber,
         store,
-        mutator: (prev) => ({
-          ...claimForRun(
-            isAutomaticEntry
-              ? prev
-              : resumeAfterEscalation(prev, {
-                  actor: effectiveInput.actor,
-                  commentId: effectiveInput.commentId ?? 0
-                }),
-            runId,
-            runLeaseMs
-          ),
-          phase: "implementation",
-          status: "active",
-          active_branch: featureBranch,
-          feature_branch: prev.feature_branch ?? featureBranch,
-          epic_phase: prev.epic_phase ?? 1,
-          ...(integratePlan ? { integrated_plan_sha: planHeadSha ?? undefined } : {}),
-          last_processed_comment_id:
-            advanceCommentCursor(prev, effectiveInput.commentId)
-        })
+        mutator: (prev) => {
+          if (
+            prev.claimed_by_run_id !== undefined &&
+            prev.claimed_by_run_id !== runId &&
+            (prev.claimed_by_run_id !== currentState?.claimed_by_run_id ||
+              prev.claim_expires_at !== currentState?.claim_expires_at)
+          ) {
+            throw new StateTransitionAbortedError(
+              prev,
+              `run \`${prev.claimed_by_run_id}\` claimed the plan after this run checked the lease`
+            );
+          }
+          return {
+            ...claimForRun(
+              isAutomaticEntry
+                ? prev
+                : resumeAfterEscalation(prev, {
+                    actor: effectiveInput.actor,
+                    commentId: effectiveInput.commentId ?? 0
+                  }),
+              runId,
+              runLeaseMs
+            ),
+            // Leaving the CI wait makes the lease visible, so a workflow_run or continue cannot claim the plan too.
+            subphase:
+              prev.subphase === "waiting_feature_ci"
+                ? "remediating_feature"
+                : prev.subphase === "waiting_ticket_ci"
+                  ? "implementing_ticket"
+                  : prev.subphase,
+            phase: "implementation",
+            status: "active",
+            active_branch: featureBranch,
+            feature_branch: prev.feature_branch ?? featureBranch,
+            epic_phase: prev.epic_phase ?? 1,
+            ...(integratePlan ? { integrated_plan_sha: planHeadSha ?? undefined } : {}),
+            last_processed_comment_id:
+              advanceCommentCursor(prev, effectiveInput.commentId)
+          };
+        }
       });
       const grant = updatedStart.state.human_budget_grant_log?.at(-1);
       const grantsAfterStart = readHumanBudgetGrants(updatedStart.state);
