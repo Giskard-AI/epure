@@ -169,6 +169,7 @@ export type NeedsHumanEscalationReason =
   | "llm_refusal"
   | "model_config_missing"
   | "github_rate_limited"
+  | "branch_update_conflict"
   | "internal_error";
 
 /**
@@ -1261,6 +1262,9 @@ export function formatNeedsHumanEscalationComment(
   } else if (input.reason === "github_rate_limited") {
     reasonHeadline =
       "GitHub API rate limit still exceeded after waiting up to 5 minutes (`github_rate_limited`) — code-fix budget preserved";
+  } else if (input.reason === "branch_update_conflict") {
+    reasonHeadline =
+      "Branch kept moving under EPURE: its commit could not be fast-forwarded after re-basing on the new head (`branch_update_conflict`) — no commit overwritten, code-fix budget preserved";
   } else if (input.reason === "internal_error") {
     reasonHeadline =
       "Internal orchestrator error — code-fix budget preserved";

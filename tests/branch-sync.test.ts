@@ -3,11 +3,19 @@ import {
   syncBranchWithBase,
   type SyncBranchWithBaseInput
 } from "../src/orchestrator/github/branch-sync.js";
-import { createGitHubRestHelper } from "../src/orchestrator/github/rest-client.js";
+import {
+  BranchUpdateConflictError,
+  createGitHubRestHelper
+} from "../src/orchestrator/github/rest-client.js";
+import { orchestrateIssueCommand } from "../src/orchestrator/issue-orchestrator.js";
 import type {
   EscalateToNeedsHumanFn,
   OrchestrateIssueResult
 } from "../src/orchestrator/types.js";
+import {
+  createInMemoryGitRefStateStore,
+  updateIssueStateWithCas
+} from "../src/state/git-ref-state.js";
 import {
   createGitHubMockRouter,
   installFakeGitDataApi,
@@ -355,5 +363,156 @@ describe("syncBranchWithBase — conflict reads stay bounded and a failed read n
     ).toEqual(["src/util.ts", "src/service.ts", "src/service.ts", "src/service.ts"]);
     expect(ctx.git.readFile(FEATURE, "src/util.ts")).toBe("export const u = 2;\n");
     expect(ctx.git.readFile(FEATURE, "src/mod1.ts")).toBe("export const m1 = 'ours';\n");
+  });
+});
+
+// Each time EPURE is about to move `branch`, a human pushes a commit first (up to `times` pushes).
+function pushBeforeEachRefWrite(git: FakeGitDataApi, branch: string, times: number): string[] {
+  const humanCommits: string[] = [];
+  const arm = (): void =>
+    git.onBeforeNextRefWrite(`refs/heads/${branch}`, () => {
+      humanCommits.push(git.commitFiles(branch, { [`human-${humanCommits.length}.md`]: "human\n" }, "human push"));
+      if (humanCommits.length < times) {
+        arm();
+      }
+    });
+  arm();
+  return humanCommits;
+}
+
+describe("commitFilesToBranch — branch writes never force over a concurrent push (#109)", () => {
+  const TASK = "task/42-new";
+
+  function setupRepo() {
+    const router = createGitHubMockRouter();
+    const git = installFakeGitDataApi(router, REPO);
+    git.commitFiles("dev", { "README.md": "readme\n" });
+    git.commitFiles(FEATURE, { "README.md": "readme\n" });
+    const gh = createGitHubRestHelper({ repository: REPO, token: "ghs_test", fetchImpl: router.fetch });
+    return { router, git, gh };
+  }
+
+  it.each([
+    {
+      id: "new-branch-whose-ref-still-404s-after-creation-gets-its-commit",
+      branch: TASK,
+      arrange: (ctx: ReturnType<typeof setupRepo>) => {
+        ctx.router.on("GET", `${R}/git/ref/heads/${encodeURIComponent(TASK)}`, notFound());
+        return [] as string[];
+      }
+    },
+    {
+      id: "branch-created-concurrently-by-another-writer-is-built-upon",
+      branch: TASK,
+      arrange: (ctx: ReturnType<typeof setupRepo>) => {
+        const other = ctx.git.commitFiles("dev", { "other.md": "other\n" }, "other writer");
+        ctx.git.onBeforeNextRefWrite(`refs/heads/${TASK}`, () => ctx.git.setRef(`refs/heads/${TASK}`, other));
+        return [other];
+      }
+    },
+    {
+      id: "one-concurrent-push-is-kept-and-the-commit-is-rebuilt-on-it",
+      branch: FEATURE,
+      arrange: (ctx: ReturnType<typeof setupRepo>) => pushBeforeEachRefWrite(ctx.git, FEATURE, 1)
+    },
+    {
+      id: "two-concurrent-pushes-are-kept-and-the-commit-lands-on-the-third-attempt",
+      branch: FEATURE,
+      arrange: (ctx: ReturnType<typeof setupRepo>) => pushBeforeEachRefWrite(ctx.git, FEATURE, 2)
+    }
+  ])("$id", async ({ branch, arrange }) => {
+    const ctx = setupRepo();
+    const concurrent = arrange(ctx);
+
+    const sha = await ctx.gh.commitFilesToBranch({
+      branch,
+      fromBranch: "dev",
+      commitMessage: "feat: epure change",
+      files: [{ path: "src/epure.ts", content: "export const e = 1;\n" }]
+    });
+
+    expect(ctx.git.getRef(`refs/heads/${branch}`)).toBe(sha);
+    expect(ctx.git.readFile(sha, "src/epure.ts")).toBe("export const e = 1;\n");
+    for (const commit of concurrent) {
+      expect(ctx.git.isAncestor(commit, sha)).toBe(true);
+    }
+    expect(ctx.router.requests.filter((r) => r.method === "PATCH").map((r) => (r.body as { force?: boolean }).force)).not.toContain(true);
+  });
+
+  it("three-concurrent-pushes-raise-branch_update_conflict-and-keep-every-human-commit", async () => {
+    const ctx = setupRepo();
+    const humanCommits = pushBeforeEachRefWrite(ctx.git, FEATURE, 3);
+
+    const commit = ctx.gh.commitFilesToBranch({
+      branch: FEATURE,
+      commitMessage: "feat: epure change",
+      files: [{ path: "src/epure.ts", content: "export const e = 1;\n" }]
+    });
+
+    await expect(commit).rejects.toBeInstanceOf(BranchUpdateConflictError);
+    await expect(commit).rejects.toMatchObject({ branch: FEATURE, attempts: 3 });
+    expect(ctx.git.getRef(`refs/heads/${FEATURE}`)).toBe(humanCommits.at(-1));
+    expect(ctx.git.readFile(FEATURE, "src/epure.ts")).toBeUndefined();
+  });
+});
+
+const ISSUE = 42;
+
+async function runSyncCommand(ctx: { router: GitHubMockRouter }) {
+  const store = createInMemoryGitRefStateStore();
+  await updateIssueStateWithCas({
+    issueNumber: ISSUE,
+    store,
+    mutator: (prev) => ({ ...prev, phase: "implementation", status: "active", active_branch: FEATURE })
+  });
+  ctx.router
+    .on("GET", `${R}/issues/${ISSUE}`, json({ number: ISSUE, title: "Sync", body: "", state: "open" }))
+    .on("GET", `${R}/issues/${ISSUE}/comments?per_page=100`, json([]))
+    .on("GET", /\/labels\/[^/]+$/, json({}))
+    .on("POST", `${R}/issues/${ISSUE}/labels`, json([]))
+    .on("POST", `${R}/issues/${ISSUE}/comments`, json({ html_url: "c" }, 201));
+  const result = await orchestrateIssueCommand({
+    repository: REPO,
+    issueNumber: ISSUE,
+    command: "sync",
+    commandArgs: "",
+    actor: "maintainer",
+    commentId: 700,
+    fallbackGithubToken: "ghs_test",
+    llmApiKey: "key_test",
+    model: "openai/gpt-test",
+    stateStore: store,
+    fetchImpl: ctx.router.fetch
+  });
+  const comments = ctx.router.requests
+    .filter((r) => r.method === "POST" && r.path === `${R}/issues/${ISSUE}/comments`)
+    .map((r) => (r.body as { body: string }).body);
+  return { result, state: (await store.readRef(`refs/epure/state/${ISSUE}`)).state!, comments };
+}
+
+const CONFLICTING_GLOSSARY: Divergence = {
+  shared: { "GLOSSARY.md": "# Glossaire\n\n## Terme A\nA.\n" },
+  ours: { "GLOSSARY.md": "# Glossaire\n\n## Terme A\nA.\n\n## Terme B\nB.\n" },
+  theirs: { "GLOSSARY.md": "# Glossaire\n\n## Terme A\nA.\n\n## Terme C\nC.\n" }
+};
+
+describe("/epure sync — a branch that keeps moving escalates branch_update_conflict instead of an internal error (#109)", () => {
+  it.each([
+    { id: "two-concurrent-pushes-still-sync", pushes: 2, expectedStatus: "active", expectedReason: undefined },
+    { id: "three-concurrent-pushes-suspend-with-branch_update_conflict", pushes: 3, expectedStatus: "suspended", expectedReason: "branch_update_conflict" }
+  ])("$id", async ({ pushes, expectedStatus, expectedReason }) => {
+    const ctx = setup(CONFLICTING_GLOSSARY);
+    const humanCommits = pushBeforeEachRefWrite(ctx.git, FEATURE, pushes);
+
+    const { state, comments } = await runSyncCommand(ctx);
+
+    expect(ctx.router.unmatched).toEqual([]);
+    expect(state.status).toBe(expectedStatus);
+    expect(state.last_escalation?.reason).toBe(expectedReason);
+    expect(comments).toHaveLength(1);
+    expect(comments[0]!.includes("`branch_update_conflict`")).toBe(expectedReason !== undefined);
+    for (const commit of humanCommits) {
+      expect(ctx.git.isAncestor(commit, featureHead(ctx.git))).toBe(true);
+    }
   });
 });

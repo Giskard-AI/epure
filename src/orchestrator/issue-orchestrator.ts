@@ -54,6 +54,7 @@ import {
   GitHubRateLimitError
 } from "./github/rate-limit.js";
 import {
+  BranchUpdateConflictError,
   createGitHubRestHelper,
   loadRepoAgentsConfig,
   slugifyTitle,
@@ -1665,9 +1666,11 @@ export async function orchestrateIssueCommand(
           ? resolveLlmEscalationReason(err)
           : err instanceof GitHubRateLimitError
             ? "github_rate_limited"
-            : err instanceof MissingModelConfigError
-              ? "model_config_missing"
-              : "internal_error";
+            : err instanceof BranchUpdateConflictError
+              ? "branch_update_conflict"
+              : err instanceof MissingModelConfigError
+                ? "model_config_missing"
+                : "internal_error";
 
       const latestSnap = await store.readRef(refName);
       const fallbackPhase: EpureIssueState["phase"] =

@@ -64,6 +64,21 @@ export function slugifyTitle(raw: string, fallback = "feature"): string {
   return clean || fallback;
 }
 
+const BRANCH_COMMIT_MAX_ATTEMPTS = 3;
+
+export class BranchUpdateConflictError extends Error {
+  override readonly name = "BranchUpdateConflictError";
+
+  constructor(
+    readonly branch: string,
+    readonly attempts: number
+  ) {
+    super(
+      `Branch '${branch}' moved during ${attempts} commit attempt(s); its update was not a fast-forward and EPURE did not force it.`
+    );
+  }
+}
+
 interface GitTreeEntry {
   readonly path?: string;
   readonly type?: string;
@@ -100,7 +115,8 @@ export function createGitHubRestHelper(params: {
     method: string,
     path: string,
     body?: unknown,
-    allow404 = false
+    allow404 = false,
+    expectedErrorStatuses: readonly number[] = []
   ): Promise<{ status: number; data: T | null }> {
     let resp: Response | undefined;
     let lastErr: unknown;
@@ -130,8 +146,11 @@ export function createGitHubRestHelper(params: {
     if (!resp) {
       throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
     }
-    if (allow404 && resp.status === 404) {
-      return { status: 404, data: null };
+    if (
+      (allow404 && resp.status === 404) ||
+      expectedErrorStatuses.includes(resp.status)
+    ) {
+      return { status: resp.status, data: null };
     }
     if (!resp.ok) {
       const errText = await resp.text();
@@ -746,28 +765,30 @@ export function createGitHubRestHelper(params: {
           `Cannot create branch '${branch}': neither '${fromBranch}' nor 'main' exists.`
         );
       }
-      await apiRequest("POST", `/repos/${owner}/${repo}/git/refs`, {
-        ref: `refs/heads/${branch}`,
-        sha: baseSha
-      });
+      const created = await apiRequest(
+        "POST",
+        `/repos/${owner}/${repo}/git/refs`,
+        { ref: `refs/heads/${branch}`, sha: baseSha },
+        false,
+        [422]
+      );
+      if (created.status === 422) {
+        // Another writer created the branch first: build on its head.
+        const concurrentSha = await this.getDefaultBranchSha(branch);
+        if (!concurrentSha) {
+          throw new Error(`Cannot create branch '${branch}': GitHub rejected the ref.`);
+        }
+        return concurrentSha;
+      }
       return baseSha;
     },
 
     async commitFilesToBranch(input): Promise<string> {
-      const baseBranch = input.fromBranch ?? "main";
-      await this.ensureBranch(input.branch, baseBranch);
-
-      const branchRef = await apiRequest<{ object: { sha: string } }>(
-        "GET",
-        `/repos/${owner}/${repo}/git/ref/heads/${encodeURIComponent(input.branch)}`
+      // ensureBranch returns the head it read or created, so a just-created ref is never re-read (it can 404 briefly).
+      let parentCommitSha = await this.ensureBranch(
+        input.branch,
+        input.fromBranch ?? "main"
       );
-      const parentCommitSha = branchRef.data!.object.sha;
-
-      const parentCommit = await apiRequest<{ tree: { sha: string } }>(
-        "GET",
-        `/repos/${owner}/${repo}/git/commits/${parentCommitSha}`
-      );
-      const baseTreeSha = parentCommit.data!.tree.sha;
 
       const treeEntries: Array<{
         path: string;
@@ -806,74 +827,89 @@ export function createGitHubRestHelper(params: {
         pendingDeletedPaths.push(cleanPath);
       }
 
-      if (pendingDeletedPaths.length > 0) {
-        let existingTreePaths: Set<string> | null = null;
-        try {
-          const baseTreeListing = await apiRequest<{
-            tree?: Array<{ path?: string; type?: string }>;
-          }>(
-            "GET",
-            `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(baseTreeSha)}?recursive=1`,
-            undefined,
-            true
-          );
-          if (Array.isArray(baseTreeListing.data?.tree)) {
-            existingTreePaths = new Set(
-              baseTreeListing.data.tree
-                .filter((e) => e.type === "blob" && typeof e.path === "string")
-                .map((e) => e.path!.trim().replace(/^\/+/, ""))
+      // A rejected fast-forward means someone pushed meanwhile: rebuild the same changes on the new head, never force.
+      for (let attempt = 1; ; attempt += 1) {
+        const parentCommit = await apiRequest<{ tree: { sha: string } }>(
+          "GET",
+          `/repos/${owner}/${repo}/git/commits/${parentCommitSha}`
+        );
+        const baseTreeSha = parentCommit.data!.tree.sha;
+
+        const attemptEntries = [...treeEntries];
+        if (pendingDeletedPaths.length > 0) {
+          let existingTreePaths: Set<string> | null = null;
+          try {
+            const baseTreeListing = await apiRequest<{
+              tree?: Array<{ path?: string; type?: string }>;
+            }>(
+              "GET",
+              `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(baseTreeSha)}?recursive=1`,
+              undefined,
+              true
             );
+            if (Array.isArray(baseTreeListing.data?.tree)) {
+              existingTreePaths = new Set(
+                baseTreeListing.data.tree
+                  .filter((e) => e.type === "blob" && typeof e.path === "string")
+                  .map((e) => e.path!.trim().replace(/^\/+/, ""))
+              );
+            }
+          } catch {
+            existingTreePaths = null;
           }
-        } catch {
-          existingTreePaths = null;
-        }
 
-        for (const cleanPath of pendingDeletedPaths) {
-          if (existingTreePaths && !existingTreePaths.has(cleanPath)) {
-            continue;
+          for (const cleanPath of pendingDeletedPaths) {
+            if (existingTreePaths && !existingTreePaths.has(cleanPath)) {
+              continue;
+            }
+            attemptEntries.push({
+              path: cleanPath,
+              mode: "100644",
+              type: "blob",
+              sha: null
+            });
           }
-          treeEntries.push({
-            path: cleanPath,
-            mode: "100644",
-            type: "blob",
-            sha: null
-          });
         }
+
+        if (attemptEntries.length === 0) {
+          return parentCommitSha;
+        }
+
+        const newTree = await apiRequest<{ sha: string }>(
+          "POST",
+          `/repos/${owner}/${repo}/git/trees`,
+          {
+            base_tree: baseTreeSha,
+            tree: attemptEntries
+          }
+        );
+
+        const newCommit = await apiRequest<{ sha: string }>(
+          "POST",
+          `/repos/${owner}/${repo}/git/commits`,
+          {
+            message: input.commitMessage,
+            tree: newTree.data!.sha,
+            parents: [parentCommitSha]
+          }
+        );
+
+        const update = await apiRequest(
+          "PATCH",
+          `/repos/${owner}/${repo}/git/refs/heads/${encodeURIComponent(input.branch)}`,
+          { sha: newCommit.data!.sha, force: false },
+          false,
+          [422]
+        );
+        if (update.status !== 422) {
+          return newCommit.data!.sha;
+        }
+        const movedHead = await this.getDefaultBranchSha(input.branch);
+        if (!movedHead || attempt >= BRANCH_COMMIT_MAX_ATTEMPTS) {
+          throw new BranchUpdateConflictError(input.branch, attempt);
+        }
+        parentCommitSha = movedHead;
       }
-
-      if (treeEntries.length === 0) {
-        return parentCommitSha;
-      }
-
-      const newTree = await apiRequest<{ sha: string }>(
-        "POST",
-        `/repos/${owner}/${repo}/git/trees`,
-        {
-          base_tree: baseTreeSha,
-          tree: treeEntries
-        }
-      );
-
-      const newCommit = await apiRequest<{ sha: string }>(
-        "POST",
-        `/repos/${owner}/${repo}/git/commits`,
-        {
-          message: input.commitMessage,
-          tree: newTree.data!.sha,
-          parents: [parentCommitSha]
-        }
-      );
-
-      await apiRequest(
-        "PATCH",
-        `/repos/${owner}/${repo}/git/refs/heads/${encodeURIComponent(input.branch)}`,
-        {
-          sha: newCommit.data!.sha,
-          force: true
-        }
-      );
-
-      return newCommit.data!.sha;
     },
 
     async listPullRequestFiles(

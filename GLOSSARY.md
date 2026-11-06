@@ -183,6 +183,9 @@ _Éviter_ : décompter une pause de rate-limit `429` comme un échec serveur ou 
 **Échec transitoire de l'API GitHub (`github_rate_limited`)** : réponse `403` ou `429` de limitation de débit de l'API GitHub (limite primaire avec `x-ratelimit-remaining: 0` ou limite secondaire), relancée automatiquement après l'attente indiquée par `Retry-After`, à défaut jusqu'à `x-ratelimit-reset`, à défaut après une minute, dans un budget d'attente cumulé de 5 minutes par exécution partagé par le client REST et la **Référence Git d'état d'orchestration**. Au-delà de ce budget, l'orchestrateur déclenche une **Escalade humaine** typée `github_rate_limited`, reprise par `/epure continue`, sans consommer le quota de corrections de code du ticket.
 _Éviter_ : qualifier une limitation de débit GitHub d'erreur interne (`internal_error`), attendre sans plafond ou la confondre avec un **Échec transitoire du fournisseur LLM**.
 
+**Branche déplacée pendant l'écriture (`branch_update_conflict`)** : un commit d'EPURE sur `plan/*`, `feature/*` ou `task/*` n'avance la branche qu'en avance rapide (`force: false`). Si quelqu'un pousse entre la lecture de la tête et la mise à jour, EPURE reconstruit les mêmes changements sur la nouvelle tête, au plus 3 tentatives, puis déclenche une **Escalade humaine** typée `branch_update_conflict`, reprise par `/epure continue`, sans consommer le quota de corrections de code. Aucun commit qu'EPURE n'a pas écrit n'est écrasé.
+_Éviter_ : forcer la mise à jour d'une branche de travail ou qualifier une poussée concurrente d'erreur interne (`internal_error`).
+
 **Blocage fournisseur LLM** : problème de clé, de crédits ou de quota empêchant la poursuite des tâches dépendantes ; signalement GitHub et suspension sans changement automatique de clé ou de fournisseur.
 _Éviter_ : fallback automatique contournant les plafonds définis par l'utilisateur.
 
