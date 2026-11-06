@@ -5,16 +5,26 @@ import {
   type GitRefStateStore
 } from "../../state/git-ref-state.js";
 import { appendEpureCommandsSpoiler } from "../formatting/comments.js";
-import type { GitHubRestHelper, OrchestrateIssueResult } from "../types.js";
+import type {
+  CollaboratorPermission,
+  GitHubRestHelper,
+  OrchestrateIssueResult
+} from "../types.js";
 
 const FEATURE_BRANCH_PHASES: ReadonlySet<EpureIssueState["phase"]> = new Set([
   "implementation",
   "completed"
 ]);
+const CAN_CANCEL: ReadonlySet<CollaboratorPermission> = new Set([
+  "write",
+  "maintain",
+  "admin"
+]);
 
 /**
- * A human closed the plan issue: when its feature branch is not merged into `dev`,
- * cancel the plan, keep every branch and open PR, and tell how to resume.
+ * A human closed the plan issue before its feature branch reached `dev`: a closer with
+ * `write` or higher cancels the plan, keeps every branch and open PR, and gets told how
+ * to resume; anyone else only gets a note.
  */
 export async function handleEpicClosedByHuman(params: {
   readonly issueNumber: number;
@@ -41,6 +51,13 @@ export async function handleEpicClosedByHuman(params: {
   const mergedPr = await params.gh.findMergedPullRequestByHead(featureBranch, "dev");
   if (mergedPr) {
     return ignore(`feature PR #${mergedPr.number} is already merged into dev`);
+  }
+
+  const permission = await params.gh.getCollaboratorPermission(params.actor);
+  if (!CAN_CANCEL.has(permission)) {
+    const note = `ℹ️ L'issue #${params.issueNumber} a été fermée par \`@${params.actor}\` (permission \`${permission}\`) : seul un collaborateur \`write\` ou supérieur annule un plan EPURE en fermant son issue. Le plan reste \`${state.status}\` en phase \`${state.phase}\`.`;
+    await params.gh.postIssueComment(params.issueNumber, note);
+    return { ...ignore(`closer @${params.actor} has permission ${permission}`), summary_markdown: note };
   }
 
   const [comparison, featurePr, taskPrs] = await Promise.all([
