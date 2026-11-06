@@ -2,6 +2,18 @@
 import { appendFileSync } from "node:fs";
 
 // src/auth/issue-command-gate.ts
+var SUPPORTED_COMMANDS = /* @__PURE__ */ new Set([
+  "status",
+  "plan",
+  "to-spec",
+  "to-tickets",
+  "approve",
+  "sync",
+  "rebase",
+  "continue",
+  "cancel",
+  "reply"
+]);
 var DEFAULT_KNOWN_BOT_ACTORS = [
   "github-actions",
   "epure-agent",
@@ -39,6 +51,37 @@ function redactSecrets(text, extraSecrets = []) {
     });
   }
   return result;
+}
+function stripFencedCodeBlocks(body) {
+  return body.replace(/```[\s\S]*?```/g, "");
+}
+function extractRawSlashEpureLine(commentBody) {
+  const cleaned = stripFencedCodeBlocks(commentBody);
+  for (const rawLine of cleaned.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    const match = /^\/epure(?:\s+([A-Za-z0-9_-]+))?(?:\s+(.*))?$/.exec(line);
+    if (match) {
+      return {
+        subcommand: (match[1] ?? "").toLowerCase(),
+        args: (match[2] ?? "").trim()
+      };
+    }
+  }
+  return null;
+}
+function parseEpureCommand(commentBody) {
+  const extracted = extractRawSlashEpureLine(commentBody);
+  if (!extracted) {
+    return null;
+  }
+  if (!SUPPORTED_COMMANDS.has(extracted.subcommand)) {
+    return null;
+  }
+  const normalizedCommand = extracted.subcommand === "rebase" ? "sync" : extracted.subcommand;
+  return {
+    command: normalizedCommand,
+    args: extracted.args
+  };
 }
 function isBotActor(actor, knownBotActors = DEFAULT_KNOWN_BOT_ACTORS) {
   const loginLower = actor.login.trim().toLowerCase();
@@ -3970,6 +4013,7 @@ function toTerminalState(prev, update) {
   return {
     ...prev,
     ...update,
+    ...update.status === "cancelled" && prev.status !== "cancelled" ? { cancelled_from: { phase: prev.phase, status: prev.status } } : {},
     subphase: "idle",
     active_head_sha: void 0,
     active_pr_number: void 0,
@@ -3977,23 +4021,29 @@ function toTerminalState(prev, update) {
     active_ticket_number: void 0
   };
 }
+function advanceCommentCursor(prev, commentId) {
+  return Math.max(commentId ?? 0, prev.last_processed_comment_id);
+}
 function isWaitingSubphase(subphase) {
   return subphase === "waiting_ticket_ci" || subphase === "waiting_feature_ci";
 }
 function isAutomaticallyResumable(state) {
   return state.status === "active" && isWaitingSubphase(state.subphase);
 }
+function isFeatureSubphase(subphase) {
+  return subphase === "waiting_feature_ci" || subphase === "remediating_feature";
+}
 function readTicketCodeFixAttempts(state, ticketNumber) {
   if (state.code_fix_attempts_by_ticket !== void 0) {
     return state.code_fix_attempts_by_ticket[String(ticketNumber)] ?? 0;
   }
-  return state.active_ticket_number === ticketNumber && state.subphase !== "waiting_feature_ci" ? state.code_fix_attempts_used : 0;
+  return state.active_ticket_number === ticketNumber && !isFeatureSubphase(state.subphase) ? state.code_fix_attempts_used : 0;
 }
 function readFeatureCodeFixAttempts(state) {
-  return state.feature_code_fix_attempts_used ?? (state.subphase === "waiting_feature_ci" ? state.code_fix_attempts_used : 0);
+  return state.feature_code_fix_attempts_used ?? (isFeatureSubphase(state.subphase) ? state.code_fix_attempts_used : 0);
 }
 function activeBudgetScope(state) {
-  return state.subphase === "waiting_feature_ci" ? "feature" : "ticket";
+  return isFeatureSubphase(state.subphase) ? "feature" : "ticket";
 }
 function readActiveCodeFixAttempts(state) {
   return activeBudgetScope(state) === "feature" ? readFeatureCodeFixAttempts(state) : readTicketCodeFixAttempts(
@@ -4005,7 +4055,7 @@ function readCodeFixAttemptsByTicket(state) {
   if (state.code_fix_attempts_by_ticket !== void 0) {
     return state.code_fix_attempts_by_ticket;
   }
-  return state.active_ticket_number !== void 0 && state.subphase !== "waiting_feature_ci" ? { [String(state.active_ticket_number)]: state.code_fix_attempts_used } : {};
+  return state.active_ticket_number !== void 0 && !isFeatureSubphase(state.subphase) ? { [String(state.active_ticket_number)]: state.code_fix_attempts_used } : {};
 }
 function withTicketCodeFixAttempts(prev, ticketNumber, attempts) {
   return {
@@ -4024,15 +4074,24 @@ function withFeatureCodeFixAttempts(prev, attempts) {
     feature_code_fix_attempts_used: attempts
   };
 }
-function grantHumanBudget(prev) {
+function resumeAfterEscalation(prev, resumedBy) {
   const escalation = prev.last_escalation;
   if (!escalation || escalation.reason !== "remediation_exhausted") {
-    return prev;
+    return { ...prev, last_escalation: void 0 };
   }
   const granted = escalation.budget_scope === "feature" ? withFeatureCodeFixAttempts(prev, 0) : withTicketCodeFixAttempts(prev, escalation.ticket_number, 0);
   return {
     ...granted,
     human_budget_grants: (prev.human_budget_grants ?? 0) + 1,
+    human_budget_grant_log: [
+      ...prev.human_budget_grant_log ?? [],
+      {
+        actor: resumedBy.actor,
+        comment_id: resumedBy.commentId,
+        scope: escalation.budget_scope,
+        ticket: escalation.ticket_number
+      }
+    ],
     last_escalation: void 0
   };
 }
@@ -4104,6 +4163,53 @@ async function updateIssueStateWithCas(input) {
     `CAS conflict retry budget exhausted (${maxRetries}) on '${refName}'.`
   );
 }
+var StateTransitionAbortedError = class extends Error {
+  constructor(state, reason) {
+    super(
+      `Issue #${state.issue_number} state transition aborted (${state.status}/${state.phase}): ${reason}.`
+    );
+    this.state = state;
+    this.reason = reason;
+  }
+  state;
+  reason;
+  name = "StateTransitionAbortedError";
+};
+var TERMINAL_STATUSES = /* @__PURE__ */ new Set([
+  "cancelled",
+  "done"
+]);
+function guardTerminalStates(store, allowedTerminalSha) {
+  const statesBySha = /* @__PURE__ */ new Map();
+  return {
+    readRef: async (refName) => {
+      const snapshot = await store.readRef(refName);
+      if (snapshot.sha !== null && snapshot.state !== null) {
+        statesBySha.set(snapshot.sha, snapshot.state);
+      }
+      return snapshot;
+    },
+    compareAndSwapRef: async (refName, expectedOldSha, nextState) => {
+      const prev = expectedOldSha === null ? void 0 : statesBySha.get(expectedOldSha);
+      if (prev !== void 0 && TERMINAL_STATUSES.has(prev.status) && expectedOldSha !== allowedTerminalSha) {
+        throw new StateTransitionAbortedError(
+          prev,
+          `the plan became \`${prev.status}\` while this run was working`
+        );
+      }
+      const result = await store.compareAndSwapRef(
+        refName,
+        expectedOldSha,
+        nextState
+      );
+      if (result.swapped) {
+        statesBySha.set(result.newSha, nextState);
+      }
+      return result;
+    },
+    ...store.listIssueStates ? { listIssueStates: store.listIssueStates.bind(store) } : {}
+  };
+}
 var EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 var UPDATE_REFS_MUTATION = "mutation($repositoryId: ID!, $refUpdates: [RefUpdate!]!) { updateRefs(input: {repositoryId: $repositoryId, refUpdates: $refUpdates}) { clientMutationId } }";
 function createGitHubApiRefStateStore(options) {
@@ -4148,30 +4254,38 @@ function createGitHubApiRefStateStore(options) {
     return sha ? { sha, type: refData.object?.type ?? "commit" } : null;
   };
   const readStateObject = async (object) => {
-    if (object.type === "commit") {
-      const commitResp = await fetchFn(`${repoUrl}/git/commits/${object.sha}`, {
-        method: "GET",
-        headers
-      });
-      if (!commitResp.ok) {
-        return null;
-      }
-      const commit = await commitResp.json();
-      return JSON.parse(commit.message ?? "");
-    }
-    const blobResp = await fetchFn(`${repoUrl}/git/blobs/${object.sha}`, {
+    const kind = object.type === "commit" ? "commits" : "blobs";
+    const resp = await fetchFn(`${repoUrl}/git/${kind}/${object.sha}`, {
       method: "GET",
       headers
     });
-    if (!blobResp.ok) {
+    if (resp.status === 404) {
       return null;
     }
-    const blobData = await blobResp.json();
+    if (!resp.ok) {
+      throw new Error(
+        `Failed to read state object '${object.sha}' (HTTP ${resp.status}).`
+      );
+    }
+    if (object.type === "commit") {
+      const commit = await resp.json();
+      return JSON.parse(commit.message ?? "");
+    }
+    const blobData = await resp.json();
     const rawJson = Buffer.from(
       blobData.content ?? "",
       blobData.encoding === "base64" ? "base64" : "utf8"
     ).toString("utf8");
     return JSON.parse(rawJson);
+  };
+  const refMovedFrom = async (refName, current, resp) => {
+    const now = await getRefObject(refName);
+    if ((now?.sha ?? null) !== (current?.sha ?? null)) {
+      return true;
+    }
+    throw new Error(
+      `Failed to update Git ref '${refName}' (HTTP ${resp.status}): ${(await resp.text()).slice(0, 300)}`
+    );
   };
   const writeRef = async (refName, current, newSha) => {
     if (current === null) {
@@ -4180,7 +4294,7 @@ function createGitHubApiRefStateStore(options) {
         headers,
         body: JSON.stringify({ ref: refName, sha: newSha })
       });
-      return createRefResp.ok;
+      return createRefResp.ok || !await refMovedFrom(refName, current, createRefResp);
     }
     if (current.type !== "commit") {
       const migrateResp = await fetchFn(`${repoUrl}/git/${refName}`, {
@@ -4188,7 +4302,7 @@ function createGitHubApiRefStateStore(options) {
         headers,
         body: JSON.stringify({ sha: newSha })
       });
-      return migrateResp.ok;
+      return migrateResp.ok || !await refMovedFrom(refName, current, migrateResp);
     }
     repositoryNodeId ??= await fetchRepositoryNodeId();
     const updateRefsResp = await fetchFn(`${baseUrl}/graphql`, {
@@ -4204,11 +4318,13 @@ function createGitHubApiRefStateStore(options) {
         }
       })
     });
-    if (!updateRefsResp.ok) {
-      return false;
+    if (updateRefsResp.ok) {
+      const payload = await updateRefsResp.clone().json();
+      if (payload.data?.updateRefs) {
+        return true;
+      }
     }
-    const payload = await updateRefsResp.json();
-    return Boolean(payload.data?.updateRefs);
+    return !await refMovedFrom(refName, current, updateRefsResp);
   };
   return {
     readRef: async (refName) => {
@@ -4222,8 +4338,8 @@ function createGitHubApiRefStateStore(options) {
     compareAndSwapRef: async (refName, expectedOldSha, nextState) => {
       const notSwapped = { swapped: false, newSha: "" };
       const fullRefName = refName.startsWith("refs/") ? refName : `refs/${refName}`;
-      const current = await getRefObject(fullRefName).catch(() => void 0);
-      if (current === void 0 || (current?.sha ?? null) !== expectedOldSha) {
+      const current = await getRefObject(fullRefName);
+      if ((current?.sha ?? null) !== expectedOldSha) {
         return notSwapped;
       }
       const createCommitResp = await fetchFn(`${repoUrl}/git/commits`, {
@@ -4235,46 +4351,40 @@ function createGitHubApiRefStateStore(options) {
           parents: current?.type === "commit" ? [current.sha] : []
         })
       });
-      if (!createCommitResp.ok) {
-        return notSwapped;
-      }
-      const newSha = (await createCommitResp.json()).sha ?? "";
+      const newSha = createCommitResp.ok ? (await createCommitResp.json()).sha : void 0;
       if (!newSha) {
-        return notSwapped;
+        throw new Error(
+          `Failed to create the state commit for '${fullRefName}' (HTTP ${createCommitResp.status}).`
+        );
       }
       return await writeRef(fullRefName, current, newSha) ? { swapped: true, newSha } : notSwapped;
     },
     listIssueStates: async () => {
-      try {
-        const listResp = await fetchFn(
-          `${repoUrl}/git/matching-refs/epure/state/`,
-          { method: "GET", headers }
+      const listResp = await fetchFn(
+        `${repoUrl}/git/matching-refs/epure/state/`,
+        { method: "GET", headers }
+      );
+      if (!listResp.ok) {
+        throw new Error(
+          `Failed to list EPURE state refs (HTTP ${listResp.status}).`
         );
-        if (!listResp.ok) {
-          return [];
-        }
-        const entries = await listResp.json();
-        if (!Array.isArray(entries)) {
-          return [];
-        }
-        const states = [];
-        for (const entry of entries) {
-          const sha = entry.object?.sha;
-          if (!sha) {
-            continue;
-          }
-          const state = await readStateObject({
-            sha,
-            type: entry.object?.type ?? "commit"
-          });
-          if (state) {
-            states.push(state);
-          }
-        }
-        return states;
-      } catch {
-        return [];
       }
+      const entries = await listResp.json();
+      const states = [];
+      for (const entry of entries) {
+        const sha = entry.object?.sha;
+        if (!sha) {
+          continue;
+        }
+        const state = await readStateObject({
+          sha,
+          type: entry.object?.type ?? "commit"
+        });
+        if (state) {
+          states.push(state);
+        }
+      }
+      return states;
     }
   };
 }
@@ -4298,6 +4408,12 @@ var GitHubRateLimitError = class extends Error {
   name = "GitHubRateLimitError";
 };
 async function githubRateLimitWaitMs(resp, nowMs) {
+  const resetSeconds = Number(resp.headers.get("x-ratelimit-reset") ?? Number.NaN);
+  const quotaSpent = resp.headers.get("x-ratelimit-remaining") === "0";
+  const untilReset = Math.max(MIN_RATE_LIMIT_WAIT_MS, resetSeconds * 1e3 - nowMs);
+  if (resp.status === 200) {
+    return quotaSpent && Number.isFinite(resetSeconds) && /"type"\s*:\s*"RATE_LIMITED"/.test(await resp.clone().text()) ? untilReset : null;
+  }
   if (resp.status !== 403 && resp.status !== 429) {
     return null;
   }
@@ -4305,9 +4421,8 @@ async function githubRateLimitWaitMs(resp, nowMs) {
   if (Number.isFinite(retryAfterSeconds)) {
     return Math.max(MIN_RATE_LIMIT_WAIT_MS, retryAfterSeconds * 1e3);
   }
-  const resetSeconds = Number(resp.headers.get("x-ratelimit-reset") ?? Number.NaN);
-  if (resp.headers.get("x-ratelimit-remaining") === "0" && Number.isFinite(resetSeconds)) {
-    return Math.max(MIN_RATE_LIMIT_WAIT_MS, resetSeconds * 1e3 - nowMs);
+  if (quotaSpent && Number.isFinite(resetSeconds)) {
+    return untilReset;
   }
   if (resp.status === 429) {
     return SECONDARY_RATE_LIMIT_DEFAULT_WAIT_MS;
@@ -4320,12 +4435,13 @@ function createGitHubRateLimitedFetch(params) {
   const now = params.now ?? Date.now;
   let waitedMs = 0;
   return async (input, init) => {
-    for (; ; ) {
+    for (let retry = 0; ; retry += 1) {
       const resp = await params.fetchImpl(input, init);
-      const waitMs = await githubRateLimitWaitMs(resp, now());
-      if (waitMs === null) {
+      const advisedMs = await githubRateLimitWaitMs(resp, now());
+      if (advisedMs === null) {
         return resp;
       }
+      const waitMs = Math.max(advisedMs, MIN_RATE_LIMIT_WAIT_MS * 2 ** retry);
       if (waitedMs + waitMs > GITHUB_RATE_LIMIT_MAX_WAIT_MS) {
         throw new GitHubRateLimitError(
           (init?.method ?? "GET").toUpperCase(),
@@ -4348,6 +4464,9 @@ var COLLABORATOR_PERMISSIONS = /* @__PURE__ */ new Set([
   "read",
   "none"
 ]);
+function isCollaboratorPermission(value) {
+  return value !== void 0 && COLLABORATOR_PERMISSIONS.has(value);
+}
 function verifyPublisherMergeBoundary(params) {
   const cleanHead = params.headBranch.trim().replace(/^refs\/heads\//, "");
   const cleanBase = params.baseBranch.trim().replace(/^refs\/heads\//, "");
@@ -4368,24 +4487,58 @@ function slugifyTitle(raw, fallback = "feature") {
 }
 var BRANCH_COMMIT_MAX_ATTEMPTS = 3;
 var BranchUpdateConflictError = class extends Error {
-  constructor(branch, attempts) {
+  constructor(branch, attempts, overlappingPaths = []) {
     super(
-      `Branch '${branch}' moved during ${attempts} commit attempt(s); its update was not a fast-forward and EPURE did not force it.`
+      overlappingPaths.length > 0 ? `Branch '${branch}' moved and its new head also changed ${overlappingPaths.map((p) => `'${p}'`).join(", ")}: EPURE did not overlay its stale version of these files.` : `Branch '${branch}' moved during ${attempts} commit attempt(s); its update was not a fast-forward and EPURE did not force it.`
     );
     this.branch = branch;
     this.attempts = attempts;
+    this.overlappingPaths = overlappingPaths;
   }
   branch;
   attempts;
+  overlappingPaths;
   name = "BranchUpdateConflictError";
 };
 var PullRequestNotMergeableError = class extends Error {
-  constructor(prNumber) {
-    super(`GitHub refused to merge PR #${prNumber} (HTTP 405: not mergeable).`);
+  constructor(prNumber, githubMessage = "") {
+    super(
+      `GitHub refused to merge PR #${prNumber} (HTTP 405: not mergeable)${githubMessage ? `: ${githubMessage}` : "."}`
+    );
     this.prNumber = prNumber;
+    this.githubMessage = githubMessage;
   }
   prNumber;
+  githubMessage;
   name = "PullRequestNotMergeableError";
+};
+function isConflictRefusal(refusal, mergeableState) {
+  return mergeableState === "dirty" || mergeableState === "behind" || /not mergeable/i.test(refusal.githubMessage);
+}
+function describeMergeRefusal(refusal, mergeableState) {
+  return `${refusal.message} (mergeable_state: \`${mergeableState}\`)`;
+}
+var PullRequestHeadMovedError = class extends Error {
+  constructor(prNumber, expectedHeadSha) {
+    super(
+      `PR #${prNumber} head moved after \`${expectedHeadSha}\` was reviewed (HTTP 409): not merged.`
+    );
+    this.prNumber = prNumber;
+    this.expectedHeadSha = expectedHeadSha;
+  }
+  prNumber;
+  expectedHeadSha;
+  name = "PullRequestHeadMovedError";
+};
+var TruncatedGitTreeError = class extends Error {
+  constructor(commitSha) {
+    super(
+      `The recursive tree listing of ${commitSha} is truncated by GitHub: EPURE cannot tell which files exist and does not infer deletions from it.`
+    );
+    this.commitSha = commitSha;
+  }
+  commitSha;
+  name = "TruncatedGitTreeError";
 };
 function encodeGitHubContentsPath(filePath) {
   return filePath.split("/").filter((segment) => segment.length > 0).map((segment) => encodeURIComponent(segment)).join("/");
@@ -4429,8 +4582,17 @@ function createGitHubRestHelper(params) {
     if (!resp) {
       throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
     }
-    if (allow404 && resp.status === 404 || expectedErrorStatuses.includes(resp.status)) {
+    if (allow404 && resp.status === 404) {
       return { status: resp.status, data: null };
+    }
+    if (expectedErrorStatuses.includes(resp.status)) {
+      const errText = await resp.text();
+      let errorMessage = errText;
+      try {
+        errorMessage = JSON.parse(errText).message ?? errText;
+      } catch {
+      }
+      return { status: resp.status, data: null, errorMessage };
     }
     if (!resp.ok) {
       const errText = await resp.text();
@@ -4469,11 +4631,7 @@ function createGitHubRestHelper(params) {
     return data?.object?.sha ?? null;
   }
   const treesByCommitSha = /* @__PURE__ */ new Map();
-  async function readBranchTree(branchOrSha) {
-    const sha = await resolveCommitSha(branchOrSha);
-    if (!sha) {
-      return [];
-    }
+  async function readCommitTree(sha) {
     let pending = treesByCommitSha.get(sha);
     if (!pending) {
       pending = apiRequest(
@@ -4481,11 +4639,25 @@ function createGitHubRestHelper(params) {
         `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(sha)}?recursive=1`,
         void 0,
         true
-      ).then((res) => res.data?.tree ?? []);
+      ).then((res) => ({
+        entries: res.data?.tree ?? [],
+        truncated: res.data?.truncated === true
+      }));
       treesByCommitSha.set(sha, pending);
       pending.catch(() => treesByCommitSha.delete(sha));
     }
     return await pending;
+  }
+  async function readBranchTree(branchOrSha) {
+    const sha = await resolveCommitSha(branchOrSha);
+    return sha ? await readCommitTree(sha) : { entries: [], truncated: false };
+  }
+  async function readCompleteTree(branchOrSha) {
+    const tree = await readBranchTree(branchOrSha);
+    if (tree.truncated) {
+      throw new TruncatedGitTreeError(branchOrSha);
+    }
+    return tree.entries;
   }
   return {
     token: params.token,
@@ -4500,12 +4672,20 @@ function createGitHubRestHelper(params) {
         state_reason: data?.state_reason ?? null
       };
     },
+    // Oldest first, up to 30 pages (3,000 comments).
     async listIssueComments(issueNumber) {
-      const { data } = await apiRequest(
-        "GET",
-        `/repos/${owner}/${repo}/issues/${issueNumber}/comments?per_page=100`
-      );
-      return data ?? [];
+      const comments = [];
+      for (let page = 1; page <= 30; page += 1) {
+        const { data } = await apiRequest(
+          "GET",
+          `/repos/${owner}/${repo}/issues/${issueNumber}/comments?per_page=100${page > 1 ? `&page=${page}` : ""}`
+        );
+        comments.push(...data ?? []);
+        if ((data ?? []).length < 100) {
+          break;
+        }
+      }
+      return comments;
     },
     async getCollaboratorPermission(username) {
       const { data } = await apiRequest(
@@ -4514,8 +4694,8 @@ function createGitHubRestHelper(params) {
         void 0,
         true
       );
-      const level = data?.role_name || data?.permission || "none";
-      return COLLABORATOR_PERMISSIONS.has(level) ? level : "none";
+      const level = isCollaboratorPermission(data?.role_name) ? data.role_name : data?.permission;
+      return isCollaboratorPermission(level) ? level : "none";
     },
     async postIssueComment(issueNumber, body) {
       const { data } = await apiRequest(
@@ -4636,11 +4816,13 @@ function createGitHubRestHelper(params) {
       return res.data?.object?.sha ?? null;
     },
     async listBranchPaths(branch) {
-      return (await readBranchTree(branch)).filter((e) => e.type === "blob" && typeof e.path === "string").map((e) => e.path);
+      return (await readBranchTree(branch)).entries.flatMap(
+        (e) => e.type === "blob" && typeof e.path === "string" ? [e.path] : []
+      );
     },
     async listBranchBlobs(branchOrSha) {
       const blobs = /* @__PURE__ */ new Map();
-      for (const e of await readBranchTree(branchOrSha)) {
+      for (const e of await readCompleteTree(branchOrSha)) {
         if (e.type === "blob" && e.path && e.sha) {
           blobs.set(e.path, { sha: e.sha, mode: e.mode ?? "100644" });
         }
@@ -4665,14 +4847,8 @@ function createGitHubRestHelper(params) {
     },
     async readBranchWorkspaceFiles(branch, hintText = "", pinnedPaths = [], reviewersDir = DEFAULT_REVIEWERS_DIR) {
       const filesMap = /* @__PURE__ */ new Map();
-      try {
-        const treeRes = await apiRequest(
-          "GET",
-          `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
-          void 0,
-          true
-        );
-        const entries = treeRes.data?.tree ?? [];
+      {
+        const { entries } = await readBranchTree(branch);
         const candidates = entries.filter((entry) => {
           if (entry.type !== "blob" || !entry.path || !entry.sha) {
             return false;
@@ -4870,66 +5046,36 @@ function createGitHubRestHelper(params) {
           selectedEntries = picked;
         }
         for (const entry of selectedEntries) {
-          const p = entry.path;
-          const blobRes = await apiRequest(
-            "GET",
-            `/repos/${owner}/${repo}/git/blobs/${entry.sha}`,
-            void 0,
-            true
-          );
-          if (blobRes.data?.content && blobRes.data.encoding === "base64") {
-            const decoded = Buffer.from(
-              blobRes.data.content.replace(/\s+/g, ""),
-              "base64"
-            ).toString("utf8");
-            filesMap.set(p, decoded);
+          const content = entry.sha ? await readBlob(entry.sha) : null;
+          if (entry.path && content !== null) {
+            filesMap.set(entry.path, content);
           }
         }
-      } catch {
       }
       return filesMap;
     },
     async readTrustedBaseRosterFiles(branch, reviewersDir = DEFAULT_REVIEWERS_DIR) {
       const filesMap = /* @__PURE__ */ new Map();
       const dirPrefix = `${reviewersDir.toLowerCase()}/`;
-      try {
-        const treeRes = await apiRequest(
-          "GET",
-          `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
-          void 0,
-          true
-        );
-        const entries = treeRes.data?.tree ?? [];
-        for (const entry of entries) {
-          if (entry.type !== "blob" || !entry.path || !entry.sha) {
-            continue;
-          }
-          const p = entry.path;
-          const isRosterFile = p.toLowerCase().startsWith(dirPrefix) && /^[a-z0-9-]+\.md$/i.test(p.slice(dirPrefix.length));
-          if (!isRosterFile && p !== "DESIGN.md") {
-            continue;
-          }
-          const blobRes = await apiRequest(
-            "GET",
-            `/repos/${owner}/${repo}/git/blobs/${entry.sha}`,
-            void 0,
-            true
-          );
-          if (blobRes.data?.content && blobRes.data.encoding === "base64") {
-            const decoded = Buffer.from(
-              blobRes.data.content.replace(/\s+/g, ""),
-              "base64"
-            ).toString("utf8");
-            filesMap.set(p, decoded);
-          }
+      for (const entry of (await readBranchTree(branch)).entries) {
+        if (entry.type !== "blob" || !entry.path || !entry.sha) {
+          continue;
         }
-      } catch {
+        const p = entry.path;
+        const isRosterFile = p.toLowerCase().startsWith(dirPrefix) && /^[a-z0-9-]+\.md$/i.test(p.slice(dirPrefix.length));
+        if (!isRosterFile && p !== "DESIGN.md") {
+          continue;
+        }
+        const content = await readBlob(entry.sha);
+        if (content !== null) {
+          filesMap.set(p, content);
+        }
       }
       return filesMap;
     },
     async readDevWorkflowsMap(branch) {
       const workflowsMap = /* @__PURE__ */ new Map();
-      for (const entry of await readBranchTree(branch)) {
+      for (const entry of (await readBranchTree(branch)).entries) {
         if (entry.type !== "blob" || !entry.path || !entry.sha || !/^\.github\/workflows\/[^/]+\.ya?ml$/i.test(entry.path)) {
           continue;
         }
@@ -4995,6 +5141,19 @@ function createGitHubRestHelper(params) {
           sha: blobRes.data.sha
         });
       }
+      for (const blob of input.blobs ?? []) {
+        const cleanPath = blob.path.trim().replace(/^\/+/, "");
+        if (seenTreePaths.has(cleanPath)) {
+          continue;
+        }
+        seenTreePaths.add(cleanPath);
+        treeEntries.push({
+          path: cleanPath,
+          mode: blob.mode,
+          type: "blob",
+          sha: blob.sha
+        });
+      }
       const pendingDeletedPaths = [];
       for (const delPath of input.deletedFiles ?? []) {
         const cleanPath = delPath.trim().replace(/^\/+/, "");
@@ -5004,6 +5163,21 @@ function createGitHubRestHelper(params) {
         seenTreePaths.add(cleanPath);
         pendingDeletedPaths.push(cleanPath);
       }
+      const touchedPaths = [...seenTreePaths];
+      const touchedPathsChanged = async (fromSha, toSha) => {
+        const [before, after] = await Promise.all([
+          readCommitTree(fromSha),
+          readCommitTree(toSha)
+        ]);
+        if (before.truncated || after.truncated) {
+          return touchedPaths;
+        }
+        const blobAt = (tree) => new Map(tree.entries.map((e) => [e.path, e.sha]));
+        const [beforeBlobs, afterBlobs] = [blobAt(before), blobAt(after)];
+        return touchedPaths.filter(
+          (p) => beforeBlobs.get(p) !== afterBlobs.get(p)
+        );
+      };
       for (let attempt = 1; ; attempt += 1) {
         const parentCommit = await apiRequest(
           "GET",
@@ -5012,22 +5186,12 @@ function createGitHubRestHelper(params) {
         const baseTreeSha = parentCommit.data.tree.sha;
         const attemptEntries = [...treeEntries];
         if (pendingDeletedPaths.length > 0) {
-          let existingTreePaths = null;
-          try {
-            const baseTreeListing = await apiRequest(
-              "GET",
-              `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(baseTreeSha)}?recursive=1`,
-              void 0,
-              true
-            );
-            if (Array.isArray(baseTreeListing.data?.tree)) {
-              existingTreePaths = new Set(
-                baseTreeListing.data.tree.filter((e) => e.type === "blob" && typeof e.path === "string").map((e) => e.path.trim().replace(/^\/+/, ""))
-              );
-            }
-          } catch {
-            existingTreePaths = null;
-          }
+          const parentTree = await readCommitTree(parentCommitSha);
+          const existingTreePaths = parentTree.truncated ? null : new Set(
+            parentTree.entries.flatMap(
+              (e) => e.type === "blob" && e.path ? [e.path] : []
+            )
+          );
           for (const cleanPath of pendingDeletedPaths) {
             if (existingTreePaths && !existingTreePaths.has(cleanPath)) {
               continue;
@@ -5082,6 +5246,10 @@ function createGitHubRestHelper(params) {
         if (!movedHead || attempt >= BRANCH_COMMIT_MAX_ATTEMPTS) {
           throw new BranchUpdateConflictError(input.branch, attempt);
         }
+        const overlapping = await touchedPathsChanged(parentCommitSha, movedHead);
+        if (overlapping.length > 0) {
+          throw new BranchUpdateConflictError(input.branch, attempt, overlapping);
+        }
         parentCommitSha = movedHead;
       }
     },
@@ -5107,28 +5275,23 @@ function createGitHubRestHelper(params) {
       return [];
     },
     async findOpenPullRequestByHead(headBranch, baseBranch) {
-      try {
-        const existing = await apiRequest(
-          "GET",
-          `/repos/${owner}/${repo}/pulls?state=open&head=${encodeURIComponent(
-            `${owner}:${headBranch}`
-          )}&base=${encodeURIComponent(baseBranch)}`,
-          void 0,
-          true
-        );
-        if (Array.isArray(existing.data) && existing.data.length > 0 && existing.data[0]?.head?.sha) {
-          const first = existing.data[0];
-          return {
-            number: first.number,
-            html_url: first.html_url,
-            head_sha: first.head.sha,
-            title: first.title ?? "",
-            body: first.body ?? ""
-          };
-        }
-      } catch {
-      }
-      return null;
+      const existing = await apiRequest(
+        "GET",
+        `/repos/${owner}/${repo}/pulls?state=open&head=${encodeURIComponent(
+          `${owner}:${headBranch}`
+        )}&base=${encodeURIComponent(baseBranch)}`,
+        void 0,
+        true
+      );
+      const first = existing.data?.[0];
+      const headSha = first?.head?.sha;
+      return first && headSha ? {
+        number: first.number,
+        html_url: first.html_url,
+        head_sha: headSha,
+        title: first.title ?? "",
+        body: first.body ?? ""
+      } : null;
     },
     async findMergedPullRequestByHead(headBranch, baseBranch) {
       const closed = await apiRequest(
@@ -5238,8 +5401,13 @@ function createGitHubRestHelper(params) {
         void 0,
         true
       );
-      const mergeBaseSha = res.data?.merge_base_commit?.sha ?? base;
-      const changedFiles = Array.isArray(res.data?.files) ? res.data.files.map((f) => f.filename?.trim().replace(/^\/+/, "") ?? "").filter((p) => p.length > 0) : [];
+      const mergeBaseSha = res.data?.merge_base_commit?.sha;
+      if (!mergeBaseSha) {
+        throw new Error(
+          `GitHub compare ${base}...${head} returned no merge base (HTTP ${res.status}): the branches cannot be compared.`
+        );
+      }
+      const changedFiles = (res.data?.files ?? []).map((f) => f.filename?.trim().replace(/^\/+/, "") ?? "").filter((p) => p.length > 0);
       return { mergeBaseSha, changedFiles, aheadBy: res.data?.ahead_by ?? 0 };
     },
     async postPullRequestReview(prNumber, input) {
@@ -5282,13 +5450,17 @@ function createGitHubRestHelper(params) {
         {
           commit_title: input.commitTitle,
           commit_message: input.commitMessage ?? "",
-          merge_method: "squash"
+          merge_method: "squash",
+          sha: input.expectedHeadSha
         },
         false,
-        [405]
+        [405, 409]
       );
+      if (merged.status === 409) {
+        throw new PullRequestHeadMovedError(prNumber, input.expectedHeadSha);
+      }
       if (merged.status === 405) {
-        throw new PullRequestNotMergeableError(prNumber);
+        throw new PullRequestNotMergeableError(prNumber, merged.errorMessage);
       }
       const cleanHead = input.headBranch.trim().replace(/^refs\/heads\//, "");
       if (cleanHead.startsWith("task/") || cleanHead.startsWith("plan/")) {
@@ -8303,122 +8475,10 @@ ${formattedOutput}`;
   }
 }
 
-// src/state/comment-batch-cursor.ts
-var CANCEL_OR_STOP_PATTERN = /(?:^|\s)\/epure\s+(?:cancel|stop)(?:\s|$)/i;
-function isAuthorizedHumanComment(comment) {
-  if (isBotActor({ login: comment.authorLogin, type: comment.authorType })) {
-    return false;
-  }
-  return comment.effectivePermission === "admin" || comment.effectivePermission === "maintain" || comment.effectivePermission === "write";
-}
+// src/contract/resume-context.ts
 var RESUME_CONTEXT_MAX_COMMENTS = 10;
 var RESUME_CONTEXT_MAX_CHARS = 8e3;
-var EPURE_COMMAND_PATTERN = /^\s*\/epure\b/i;
-async function selectResumeContextComments(input) {
-  const candidates = input.comments.filter(
-    (c) => c.id > input.afterCommentId && c.id < input.resumeCommentId && !EPURE_COMMAND_PATTERN.test(c.body) && !isBotActor({ login: c.authorLogin, type: c.authorType })
-  ).sort((a, b) => b.id - a.id);
-  const permissions = /* @__PURE__ */ new Map();
-  const selected = [];
-  let remainingChars = RESUME_CONTEXT_MAX_CHARS;
-  for (const candidate of candidates) {
-    if (selected.length === RESUME_CONTEXT_MAX_COMMENTS || remainingChars <= 0) {
-      break;
-    }
-    if (!permissions.has(candidate.authorLogin)) {
-      permissions.set(
-        candidate.authorLogin,
-        await input.resolvePermission(candidate.authorLogin)
-      );
-    }
-    const comment = {
-      ...candidate,
-      effectivePermission: permissions.get(candidate.authorLogin),
-      body: candidate.body.trim().slice(0, remainingChars)
-    };
-    if (isAuthorizedHumanComment(comment)) {
-      selected.push(comment);
-      remainingChars -= comment.body.length;
-    }
-  }
-  return selected.reverse();
-}
-function formatResumeContextMarkdown(comments) {
-  return comments.map((c) => `@${c.authorLogin} (commentaire ${c.id}) :
-${c.body}`).join("\n\n");
-}
-async function processPendingIssueCommentsBatch(input) {
-  if (typeof input.initialCursor === "number" && input.initialCursor > 0) {
-    await updateIssueStateWithCas({
-      issueNumber: input.issueNumber,
-      store: input.store,
-      mutator: (prev) => ({
-        ...prev,
-        last_processed_comment_id: Math.max(
-          prev.last_processed_comment_id,
-          input.initialCursor ?? 0
-        )
-      })
-    });
-  }
-  const processedIds = [];
-  const processedBodies = [];
-  let cursor = input.initialCursor ?? 0;
-  let cancelled = false;
-  let latestStateResult = await updateIssueStateWithCas({
-    issueNumber: input.issueNumber,
-    store: input.store,
-    mutator: (prev) => prev
-  });
-  for (let pass = 0; pass < 3; pass += 1) {
-    const rawComments = await input.fetchCommentsSinceCursor(cursor);
-    const unseen = rawComments.filter((c) => c.id > cursor).sort((a, b) => a.id - b.id);
-    if (unseen.length === 0) {
-      break;
-    }
-    const maxSeenId = unseen[unseen.length - 1]?.id ?? cursor;
-    const authorized = unseen.filter(isAuthorizedHumanComment);
-    const cancelComment = authorized.find(
-      (c) => CANCEL_OR_STOP_PATTERN.test(c.body)
-    );
-    if (cancelComment) {
-      processedIds.push(cancelComment.id);
-      processedBodies.push(cancelComment.body);
-      cursor = maxSeenId;
-      cancelled = true;
-      latestStateResult = await updateIssueStateWithCas({
-        issueNumber: input.issueNumber,
-        store: input.store,
-        mutator: (prev) => toTerminalState(prev, {
-          status: "cancelled",
-          last_processed_comment_id: cursor
-        })
-      });
-      break;
-    }
-    for (const comment of authorized) {
-      processedIds.push(comment.id);
-      processedBodies.push(comment.body);
-    }
-    cursor = maxSeenId;
-    latestStateResult = await updateIssueStateWithCas({
-      issueNumber: input.issueNumber,
-      store: input.store,
-      mutator: (prev) => ({
-        ...prev,
-        status: "active",
-        last_processed_comment_id: cursor
-      })
-    });
-  }
-  return {
-    processed_comment_ids: processedIds,
-    processed_bodies: processedBodies,
-    last_processed_comment_id: cursor,
-    cancelled,
-    state: latestStateResult.state
-  };
-}
+var RESUME_CONTEXT_MAX_PERMISSION_LOOKUPS = 10;
 
 // src/execution/external-ci-gate.ts
 function resolveLlmEscalationReason(err) {
@@ -9146,6 +9206,10 @@ function formatNeedsHumanEscalationComment(input) {
     reasonHeadline = "Git 3-way merge conflict touched sensitive paths or exceeded automated resolution threshold (`MERGE_CONFLICT_UNRESOLVED`)";
   } else if (input.reason === "merge_conflict_stage1_failed") {
     reasonHeadline = "Automated 3-way conflict resolution failed Stage 1 Sandbox verification (`MERGE_CONFLICT_STAGE1_FAILED`)";
+  } else if (input.reason === "pr_not_mergeable") {
+    reasonHeadline = "GitHub refused the merge for a reason a re-sync cannot fix (merge method, ruleset or required review/check) (`pr_not_mergeable`) \u2014 code-fix budget preserved";
+  } else if (input.reason === "resync_verification_failed") {
+    reasonHeadline = "Review or CI failed on the re-synced head after GitHub refused the merge (`resync_verification_failed`) \u2014 code-fix budget preserved";
   } else if (input.reason === "transient_llm_api_exhausted") {
     reasonHeadline = "Transient LLM API retries or unitary request timeout exhausted (`max_transient_api_retries`) \u2014 code-fix budget preserved";
   } else if (input.reason === "llm_quota_or_auth_failure") {
@@ -9407,6 +9471,125 @@ ${snippet}`;
       uses_closes_keyword: trailers.usesClosesKeyword
     };
   }
+}
+
+// src/state/comment-batch-cursor.ts
+var CANCEL_OR_STOP_PATTERN = /(?:^|\s)\/epure\s+(?:cancel|stop)(?:\s|$)/i;
+function isAuthorizedHumanComment(comment) {
+  if (isBotActor({ login: comment.authorLogin, type: comment.authorType })) {
+    return false;
+  }
+  return comment.effectivePermission === "admin" || comment.effectivePermission === "maintain" || comment.effectivePermission === "write";
+}
+var EPURE_COMMENT_MARKER = "<!-- epure-";
+async function selectResumeContextComments(input) {
+  const candidates = input.comments.filter(
+    (c) => c.id > input.afterCommentId && c.id < input.resumeCommentId && parseEpureCommand(c.body) === null && !c.viaGitHubApp && !c.body.includes(EPURE_COMMENT_MARKER) && !isBotActor({ login: c.authorLogin, type: c.authorType })
+  ).sort((a, b) => b.id - a.id);
+  const permissions = /* @__PURE__ */ new Map();
+  const selected = [];
+  let remainingChars = RESUME_CONTEXT_MAX_CHARS;
+  for (const candidate of candidates) {
+    if (selected.length === RESUME_CONTEXT_MAX_COMMENTS || remainingChars <= 0) {
+      break;
+    }
+    let permission = permissions.get(candidate.authorLogin);
+    if (permission === void 0) {
+      if (permissions.size === RESUME_CONTEXT_MAX_PERMISSION_LOOKUPS) {
+        continue;
+      }
+      permission = await input.resolvePermission(candidate.authorLogin);
+      permissions.set(candidate.authorLogin, permission);
+    }
+    const comment = {
+      id: candidate.id,
+      authorLogin: candidate.authorLogin,
+      authorType: candidate.authorType,
+      effectivePermission: permission,
+      body: candidate.body.trim().slice(0, remainingChars)
+    };
+    if (isAuthorizedHumanComment(comment)) {
+      selected.push(comment);
+      remainingChars -= comment.body.length;
+    }
+  }
+  return selected.reverse();
+}
+function formatResumeContextMarkdown(comments) {
+  return comments.map((c) => `@${c.authorLogin} (commentaire ${c.id}) :
+${c.body}`).join("\n\n");
+}
+async function processPendingIssueCommentsBatch(input) {
+  if (typeof input.initialCursor === "number" && input.initialCursor > 0) {
+    await updateIssueStateWithCas({
+      issueNumber: input.issueNumber,
+      store: input.store,
+      mutator: (prev) => ({
+        ...prev,
+        last_processed_comment_id: Math.max(
+          prev.last_processed_comment_id,
+          input.initialCursor ?? 0
+        )
+      })
+    });
+  }
+  const processedIds = [];
+  const processedBodies = [];
+  let cursor = input.initialCursor ?? 0;
+  let cancelled = false;
+  let latestStateResult = await updateIssueStateWithCas({
+    issueNumber: input.issueNumber,
+    store: input.store,
+    mutator: (prev) => prev
+  });
+  for (let pass = 0; pass < 3; pass += 1) {
+    const rawComments = await input.fetchCommentsSinceCursor(cursor);
+    const unseen = rawComments.filter((c) => c.id > cursor).sort((a, b) => a.id - b.id);
+    if (unseen.length === 0) {
+      break;
+    }
+    const maxSeenId = unseen[unseen.length - 1]?.id ?? cursor;
+    const authorized = unseen.filter(isAuthorizedHumanComment);
+    const cancelComment = authorized.find(
+      (c) => CANCEL_OR_STOP_PATTERN.test(c.body)
+    );
+    if (cancelComment) {
+      processedIds.push(cancelComment.id);
+      processedBodies.push(cancelComment.body);
+      cursor = maxSeenId;
+      cancelled = true;
+      latestStateResult = await updateIssueStateWithCas({
+        issueNumber: input.issueNumber,
+        store: input.store,
+        mutator: (prev) => toTerminalState(prev, {
+          status: "cancelled",
+          last_processed_comment_id: cursor
+        })
+      });
+      break;
+    }
+    for (const comment of authorized) {
+      processedIds.push(comment.id);
+      processedBodies.push(comment.body);
+    }
+    cursor = maxSeenId;
+    latestStateResult = await updateIssueStateWithCas({
+      issueNumber: input.issueNumber,
+      store: input.store,
+      mutator: (prev) => ({
+        ...prev,
+        status: "active",
+        last_processed_comment_id: cursor
+      })
+    });
+  }
+  return {
+    processed_comment_ids: processedIds,
+    processed_bodies: processedBodies,
+    last_processed_comment_id: cursor,
+    cancelled,
+    state: latestStateResult.state
+  };
 }
 
 // src/orchestrator/prompts/code-discipline.ts
@@ -11443,6 +11626,14 @@ async function integratePlanBranchIntoFeature(params) {
   const featurePathSet = new Set(
     featurePaths.map((p) => p.trim().replace(/^\/+/, ""))
   );
+  const adrSlugOf = (path) => normalizeAdrSlug(ADR_PATH_REGEX.exec(path)?.[2] ?? "");
+  const featureOnlyAdrPaths = [...featurePathSet].filter(
+    (p) => ADR_PATH_REGEX.test(p) && !devPathSet.has(p)
+  );
+  const featureOnlyAdrPathBySlug = new Map(
+    featureOnlyAdrPaths.map((p) => [adrSlugOf(p), p])
+  );
+  const keptFeatureAdrPaths = /* @__PURE__ */ new Set();
   const filesToCommit = [];
   const planAdrsToProcess = [];
   const specFilesToProcess = [];
@@ -11475,6 +11666,12 @@ async function integratePlanBranchIntoFeature(params) {
     } else if (featureContent !== null && featureContent !== devContent && featureContent !== previouslyIntegrated) {
       continue;
     } else if (ADR_PATH_REGEX.test(artifactPath)) {
+      const renumberedOnFeature = featureOnlyAdrPathBySlug.get(
+        adrSlugOf(artifactPath)
+      );
+      if (renumberedOnFeature !== void 0 && renumberedOnFeature !== artifactPath && planContent === previouslyIntegrated) {
+        keptFeatureAdrPaths.add(renumberedOnFeature);
+      }
       planAdrsToProcess.push({ path: artifactPath, content: planContent });
     } else if (artifactPath.startsWith("docs/specs/")) {
       specFilesToProcess.push({ path: artifactPath, content: planContent });
@@ -11483,7 +11680,7 @@ async function integratePlanBranchIntoFeature(params) {
     }
   }
   const renumberedResult = renumberCollidingAdrs({
-    devPaths,
+    devPaths: [...devPaths, ...featureOnlyAdrPaths],
     planAdrs: planAdrsToProcess,
     specFiles: specFilesToProcess,
     glossaryContent: filesToCommit.find((f) => f.path === "GLOSSARY.md")?.content
@@ -11497,7 +11694,10 @@ async function integratePlanBranchIntoFeature(params) {
       };
     }
   }
-  for (const adr of renumberedResult.adrs) {
+  const adrsToWrite = renumberedResult.adrs.filter(
+    (a) => !keptFeatureAdrPaths.has(a.path)
+  );
+  for (const adr of adrsToWrite) {
     filesToCommit.push({ path: adr.path, content: adr.content });
   }
   for (const spec of renumberedResult.specFiles) {
@@ -11505,12 +11705,12 @@ async function integratePlanBranchIntoFeature(params) {
   }
   const deletedAdrPaths = [...renumberedResult.deletedAdrPaths];
   const devAdrPaths = devPaths.map((p) => p.trim().replace(/^\/+/, "")).filter((p) => ADR_PATH_REGEX.test(p));
-  if (renumberedResult.adrs.length > 0 && (renumberedResult.adrs.some((a) => a.renumbered) || renumberedResult.deletedAdrPaths.length > 0 || devAdrPaths.length > 0)) {
+  if (adrsToWrite.length > 0 && (adrsToWrite.some((a) => a.renumbered) || renumberedResult.deletedAdrPaths.length > 0 || devAdrPaths.length > 0)) {
     await applyAdrLlmReconciliation({
       gh: params.gh,
       baseBranch,
       devAdrPaths,
-      featureAdrs: renumberedResult.adrs,
+      featureAdrs: adrsToWrite,
       specFiles: renumberedResult.specFiles,
       glossaryContent: filesToCommit.find((f) => f.path === "GLOSSARY.md")?.content,
       filesToMutate: filesToCommit,
@@ -11540,13 +11740,13 @@ async function integratePlanBranchIntoFeature(params) {
   return {
     featureHeadSha,
     committedPaths: filesToCommit.map((f) => f.path),
-    renumberedAdrs: renumberedResult.adrs.filter((a) => a.renumbered).map((a) => ({ oldPath: a.oldPath, newPath: a.path })),
+    renumberedAdrs: adrsToWrite.filter((a) => a.renumbered).map((a) => ({ oldPath: a.oldPath, newPath: a.path })),
     ...closedLegacyPlanPrNumber !== void 0 ? { closedLegacyPlanPrNumber } : {}
   };
 }
-var GIT_CONFLICT_BLOCK_REGEX = /^<{7}(?: .*)?$[\s\S]*?^={7}$[\s\S]*?^>{7}(?: .*)?$/m;
+var GIT_CONFLICT_MARKER_LINE_REGEX = /^(?:<{7}|>{7}|\|{7})(?: |$)/m;
 function containsGitConflictMarkers(content) {
-  return GIT_CONFLICT_BLOCK_REGEX.test(content.replace(/\r\n/g, "\n"));
+  return GIT_CONFLICT_MARKER_LINE_REGEX.test(content.replace(/\r\n/g, "\n"));
 }
 function createBaseSyncGuard(input) {
   let baseSha = null;
@@ -11673,9 +11873,24 @@ async function syncBranchWithBase(input) {
     };
   }
   const maxConflicts = input.maxConflictingFiles ?? 8;
-  if (!input.gh.compareCommits) {
-    throw new Error("syncBranchWithBase needs compareCommits to resolve a merge conflict.");
-  }
+  const escalateConflict = async (diag, paths = {}) => {
+    if (input.escalateToNeedsHuman) {
+      await input.escalateToNeedsHuman({
+        reason: "merge_conflict_unresolved",
+        ticketNumber: input.issueNumber,
+        branch: input.targetBranch,
+        ...paths,
+        diagnosticExcerpt: diag
+      });
+    }
+    return {
+      status: "escalated",
+      headSha: "",
+      conflictsResolved: [],
+      escalationReason: "merge_conflict_unresolved",
+      diagnosticExcerpt: diag
+    };
+  };
   const [targetHeadSha, baseHeadSha] = await Promise.all([
     input.gh.getDefaultBranchSha(input.targetBranch),
     input.gh.getDefaultBranchSha(input.baseBranch)
@@ -11689,11 +11904,21 @@ async function syncBranchWithBase(input) {
     targetHeadSha,
     baseHeadSha
   );
-  const [ancestorBlobs, baseBlobs, targetBlobs] = await Promise.all([
-    input.gh.listBranchBlobs(mergeBaseSha),
-    input.gh.listBranchBlobs(baseHeadSha),
-    input.gh.listBranchBlobs(targetHeadSha)
-  ]);
+  let ancestorBlobs;
+  let baseBlobs;
+  let targetBlobs;
+  try {
+    [ancestorBlobs, baseBlobs, targetBlobs] = await Promise.all([
+      input.gh.listBranchBlobs(mergeBaseSha),
+      input.gh.listBranchBlobs(baseHeadSha),
+      input.gh.listBranchBlobs(targetHeadSha)
+    ]);
+  } catch (err) {
+    if (err instanceof TruncatedGitTreeError) {
+      return await escalateConflict(err.message);
+    }
+    throw err;
+  }
   const candidateFiles = [];
   const baseOnlyChangedFiles = [];
   for (const path of /* @__PURE__ */ new Set([
@@ -11729,54 +11954,28 @@ async function syncBranchWithBase(input) {
     reviewersDir: input.reviewersDir
   });
   if (!pathGuard.allowed) {
-    const diag = `3-way conflict touched forbidden sensitive or traversal paths: ${[...pathGuard.sensitivePaths, ...pathGuard.traversalPaths].join(", ")}`;
-    if (input.escalateToNeedsHuman) {
-      await input.escalateToNeedsHuman({
-        reason: "merge_conflict_unresolved",
-        ticketNumber: input.issueNumber,
-        branch: input.targetBranch,
+    return await escalateConflict(
+      `3-way conflict touched forbidden sensitive or traversal paths: ${[...pathGuard.sensitivePaths, ...pathGuard.traversalPaths].join(", ")}`,
+      {
         sensitivePaths: pathGuard.sensitivePaths,
-        traversalPaths: pathGuard.traversalPaths,
-        diagnosticExcerpt: diag
-      });
-    }
-    return {
-      status: "escalated",
-      headSha: "",
-      conflictsResolved: [],
-      escalationReason: "merge_conflict_unresolved",
-      diagnosticExcerpt: diag
-    };
+        traversalPaths: pathGuard.traversalPaths
+      }
+    );
   }
   const codeConflictPaths = candidateFiles.filter((p) => p !== "GLOSSARY.md");
   const hasLlmResolver = Boolean(input.llmClient || input.llmApiKey);
   if (codeConflictPaths.length > maxConflicts || codeConflictPaths.length > 0 && !hasLlmResolver) {
-    const diag = codeConflictPaths.length > maxConflicts ? `3-way merge conflict involves ${codeConflictPaths.length} files (exceeds automated limit of ${maxConflicts}).` : `3-way merge conflict on ${codeConflictPaths.join(", ")} requires LLM client for resolution.`;
-    if (input.escalateToNeedsHuman) {
-      await input.escalateToNeedsHuman({
-        reason: "merge_conflict_unresolved",
-        ticketNumber: input.issueNumber,
-        branch: input.targetBranch,
-        diagnosticExcerpt: diag
-      });
-    }
-    return {
-      status: "escalated",
-      headSha: "",
-      conflictsResolved: [],
-      escalationReason: "merge_conflict_unresolved",
-      diagnosticExcerpt: diag
-    };
+    return await escalateConflict(
+      codeConflictPaths.length > maxConflicts ? `3-way merge conflict involves ${codeConflictPaths.length} files (exceeds automated limit of ${maxConflicts}).` : `3-way merge conflict on ${codeConflictPaths.join(", ")} requires LLM client for resolution.`
+    );
   }
   const resolvedFiles = [];
-  const baseNonConflictingFiles = [];
+  const baseOnlyBlobs = [];
   const baseDeletedFiles = [];
   for (const basePath of baseOnlyChangedFiles) {
-    if (baseBlobs.has(basePath)) {
-      baseNonConflictingFiles.push({
-        path: basePath,
-        content: await readPinnedFile(baseHeadSha, basePath)
-      });
+    const blob = baseBlobs.get(basePath);
+    if (blob) {
+      baseOnlyBlobs.push({ path: basePath, ...blob });
     } else {
       baseDeletedFiles.push(basePath);
     }
@@ -11852,22 +12051,9 @@ async function syncBranchWithBase(input) {
     const returnedPathsSet = new Set(returnedNormalizedPaths);
     const hasExact1To1Coverage = returnedNormalizedPaths.length === expectedPathsSet.size && returnedPathsSet.size === expectedPathsSet.size && Array.from(expectedPathsSet).every((p) => returnedPathsSet.has(p));
     if (!hasExact1To1Coverage) {
-      const diag = `LLM conflict resolution path mismatch: expected [${Array.from(expectedPathsSet).join(", ")}], received [${returnedNormalizedPaths.join(", ")}].`;
-      if (input.escalateToNeedsHuman) {
-        await input.escalateToNeedsHuman({
-          reason: "merge_conflict_unresolved",
-          ticketNumber: input.issueNumber,
-          branch: input.targetBranch,
-          diagnosticExcerpt: diag
-        });
-      }
-      return {
-        status: "escalated",
-        headSha: "",
-        conflictsResolved: [],
-        escalationReason: "merge_conflict_unresolved",
-        diagnosticExcerpt: diag
-      };
+      return await escalateConflict(
+        `LLM conflict resolution path mismatch: expected [${Array.from(expectedPathsSet).join(", ")}], received [${returnedNormalizedPaths.join(", ")}].`
+      );
     }
     const resolvedPathGuard = validateWorkspaceFileOperations({
       workDir: process.cwd(),
@@ -11877,43 +12063,19 @@ async function syncBranchWithBase(input) {
       reviewersDir: input.reviewersDir
     });
     if (!resolvedPathGuard.allowed) {
-      const diag = `LLM conflict resolution returned forbidden paths: ${[...resolvedPathGuard.sensitivePaths, ...resolvedPathGuard.traversalPaths].join(", ")}`;
-      if (input.escalateToNeedsHuman) {
-        await input.escalateToNeedsHuman({
-          reason: "merge_conflict_unresolved",
-          ticketNumber: input.issueNumber,
-          branch: input.targetBranch,
+      return await escalateConflict(
+        `LLM conflict resolution returned forbidden paths: ${[...resolvedPathGuard.sensitivePaths, ...resolvedPathGuard.traversalPaths].join(", ")}`,
+        {
           sensitivePaths: resolvedPathGuard.sensitivePaths,
-          traversalPaths: resolvedPathGuard.traversalPaths,
-          diagnosticExcerpt: diag
-        });
-      }
-      return {
-        status: "escalated",
-        headSha: "",
-        conflictsResolved: [],
-        escalationReason: "merge_conflict_unresolved",
-        diagnosticExcerpt: diag
-      };
+          traversalPaths: resolvedPathGuard.traversalPaths
+        }
+      );
     }
     for (const rf of resolutionData.resolved_files) {
       if (containsGitConflictMarkers(rf.content)) {
-        const diag = `LLM conflict resolution for '${rf.path}' still contained Git conflict markers.`;
-        if (input.escalateToNeedsHuman) {
-          await input.escalateToNeedsHuman({
-            reason: "merge_conflict_unresolved",
-            ticketNumber: input.issueNumber,
-            branch: input.targetBranch,
-            diagnosticExcerpt: diag
-          });
-        }
-        return {
-          status: "escalated",
-          headSha: "",
-          conflictsResolved: [],
-          escalationReason: "merge_conflict_unresolved",
-          diagnosticExcerpt: diag
-        };
+        return await escalateConflict(
+          `LLM conflict resolution for '${rf.path}' still contained Git conflict markers.`
+        );
       }
       resolvedFiles.push({
         path: rf.path.trim().replace(/^\/+/, ""),
@@ -11921,8 +12083,14 @@ async function syncBranchWithBase(input) {
       });
     }
   }
-  const allFilesToCommit = [...baseNonConflictingFiles, ...resolvedFiles];
-  if (input.sandboxRunner && allFilesToCommit.length > 0) {
+  if (input.sandboxRunner && resolvedFiles.length + baseOnlyBlobs.length > 0) {
+    const baseOnlyFiles = await Promise.all(
+      baseOnlyBlobs.map(async (b) => ({
+        path: b.path,
+        content: await readPinnedFile(baseHeadSha, b.path)
+      }))
+    );
+    const allFilesToCommit = [...baseOnlyFiles, ...resolvedFiles];
     const workspaceFiles = await input.gh.readBranchWorkspaceFiles(
       input.targetBranch,
       allFilesToCommit.map((f) => f.path).join(" "),
@@ -11970,7 +12138,8 @@ ${stage1Result.output.slice(0, 4e3)}`;
   const headSha = await input.gh.commitFilesToBranch({
     branch: input.targetBranch,
     commitMessage: `chore(sync): resolve merge conflicts from ${input.baseBranch} into ${input.targetBranch}`,
-    files: allFilesToCommit,
+    files: resolvedFiles,
+    blobs: baseOnlyBlobs,
     ...baseDeletedFiles.length > 0 ? { deletedFiles: baseDeletedFiles } : {},
     // Without the base as second parent the merge base never moves: the PR stays `dirty` and GitHub runs no `pull_request` CI.
     mergeParentSha: baseHeadSha
@@ -11985,6 +12154,7 @@ ${stage1Result.output.slice(0, 4e3)}`;
 // src/orchestrator/phases/epic-closure.ts
 var FEATURE_BRANCH_PHASES = /* @__PURE__ */ new Set([
   "implementation",
+  "review",
   "completed"
 ]);
 var PLANNING_PHASES = /* @__PURE__ */ new Set([
@@ -11999,12 +12169,12 @@ var CAN_CANCEL = /* @__PURE__ */ new Set([
 ]);
 async function handleEpicClosedByHuman(params) {
   const state = params.currentState;
-  const featureBranch = state?.active_branch ?? "";
+  const featureBranch = state?.feature_branch ?? state?.active_branch ?? "";
   const ignore = (reason) => ({
     executed: false,
     phase: state?.phase ?? "idle",
     status: state?.status ?? "active",
-    active_branch: featureBranch,
+    active_branch: state?.active_branch ?? "",
     summary_markdown: `Epic closure ignored: ${reason}.`,
     created_ticket_numbers: [],
     feature_pr_url: ""
@@ -12012,6 +12182,9 @@ async function handleEpicClosedByHuman(params) {
   const planning = state !== null && PLANNING_PHASES.has(state.phase);
   if (!state || state.status === "cancelled" || !planning && !FEATURE_BRANCH_PHASES.has(state.phase)) {
     return ignore("no plan in progress");
+  }
+  if ((await params.gh.getIssue(params.issueNumber)).state === "open") {
+    return ignore(`issue #${params.issueNumber} was reopened`);
   }
   if (!planning) {
     const mergedPr = await params.gh.findMergedPullRequestByHead(featureBranch, "dev");
@@ -12021,9 +12194,9 @@ async function handleEpicClosedByHuman(params) {
   }
   const permission = await params.gh.getCollaboratorPermission(params.actor);
   if (!CAN_CANCEL.has(permission)) {
-    const note = `\u2139\uFE0F L'issue #${params.issueNumber} a \xE9t\xE9 ferm\xE9e par \`@${params.actor}\` (permission \`${permission}\`) : seul un collaborateur \`write\` ou sup\xE9rieur annule un plan EPURE en fermant son issue. Le plan reste \`${state.status}\` en phase \`${state.phase}\`.`;
-    await params.gh.postIssueComment(params.issueNumber, note);
-    return { ...ignore(`closer @${params.actor} has permission ${permission}`), summary_markdown: note };
+    return ignore(
+      `closer @${params.actor} has permission ${permission}; only write or higher cancels the plan, which stays ${state.status} in phase ${state.phase}`
+    );
   }
   if (planning) {
     const updated2 = await updateIssueStateWithCas({
@@ -12054,7 +12227,7 @@ async function handleEpicClosedByHuman(params) {
     };
   }
   const [comparison, featurePr, taskPrs] = await Promise.all([
-    params.gh.compareCommits?.("dev", featureBranch),
+    params.gh.compareCommits("dev", featureBranch),
     params.gh.findOpenPullRequestByHead(featureBranch, "dev"),
     params.gh.listOpenPullRequestsByBase(featureBranch)
   ]);
@@ -12070,7 +12243,7 @@ async function handleEpicClosedByHuman(params) {
       "",
       `### \u{1F6D1} Issue de pilotage #${params.issueNumber} ferm\xE9e par \`@${params.actor}\` avant l'int\xE9gration dans \`dev\``,
       "",
-      `- **Branche de fonctionnalit\xE9** : \`${featureBranch}\` \u2014 ${comparison?.aheadBy ?? 0} commit(s) non int\xE9gr\xE9(s) dans \`dev\``,
+      `- **Branche de fonctionnalit\xE9** : \`${featureBranch}\` \u2014 ${comparison.aheadBy} commit(s) non int\xE9gr\xE9(s) dans \`dev\``,
       "- **Statut d'orchestration** : `cancelled` (Plan annul\xE9) ; aucune branche n'a \xE9t\xE9 supprim\xE9e.",
       openPrs.length > 0 ? `- **Pull Requests ouvertes, laiss\xE9es ouvertes** : ${openPrs.map((pr) => `[#${pr.number}](${pr.html_url})`).join(", ")}` : "- **Pull Requests ouvertes** : aucune",
       `- **Reprise** : rouvrez l'issue #${params.issueNumber}, puis postez \`/epure continue\`.`
@@ -12507,6 +12680,7 @@ async function runGrillAndPlanPhase(params) {
     accumulatedFiles: grillExplorationCache,
     devBranchPaths: [],
     phase: command === "to-spec" ? "spec" : "plan",
+    alwaysEnableRepoTools: true,
     reviewersDir,
     fetchImpl
   });
@@ -12519,7 +12693,8 @@ async function runGrillAndPlanPhase(params) {
         phase: "grilling",
         status: "active",
         active_branch: planBranch,
-        last_processed_comment_id: commentId ?? prev.last_processed_comment_id
+        plan_branch: prev.plan_branch ?? planBranch,
+        last_processed_comment_id: advanceCommentCursor(prev, commentId)
       })
     });
     const grillSystemInstruction = [
@@ -12658,7 +12833,8 @@ ${issue.body}`
           phase: "grilling",
           status: "active",
           active_branch: planBranch,
-          last_processed_comment_id: commentId ?? prev.last_processed_comment_id
+          plan_branch: prev.plan_branch ?? planBranch,
+          last_processed_comment_id: advanceCommentCursor(prev, commentId)
         })
       });
       const followUpBody = appendEpureCommandsSpoiler(
@@ -12697,7 +12873,8 @@ ${issue.body}`
         phase: "grilling",
         status: "awaiting_human_approval",
         active_branch: planBranch,
-        last_processed_comment_id: commentId ?? prev.last_processed_comment_id
+        plan_branch: prev.plan_branch ?? planBranch,
+        last_processed_comment_id: advanceCommentCursor(prev, commentId)
       })
     });
     const settledSummary = evalResult.settled_decisions_summary_markdown?.trim() || evalResult.rationale.trim() || "Toutes les questions de la fronti\xE8re de d\xE9cisions ont re\xE7u une r\xE9ponse.";
@@ -12904,7 +13081,8 @@ ${issue.body}`
           phase: "spec",
           status: "suspended",
           active_branch: planBranch,
-          last_processed_comment_id: commentId ?? prev.last_processed_comment_id
+          plan_branch: prev.plan_branch ?? planBranch,
+          last_processed_comment_id: advanceCommentCursor(prev, commentId)
         })
       });
       const escalationComment = appendEpureCommandsSpoiler(
@@ -13010,7 +13188,8 @@ ${issue.body}`
         phase: "spec",
         status: "awaiting_human_approval",
         active_branch: planBranch,
-        last_processed_comment_id: commentId ?? prev.last_processed_comment_id
+        plan_branch: prev.plan_branch ?? planBranch,
+        last_processed_comment_id: advanceCommentCursor(prev, commentId)
       })
     });
     const specManifestPayload = {
@@ -13254,7 +13433,8 @@ ${issue.body}`
         phase: "tickets",
         status: "suspended",
         active_branch: planBranch,
-        last_processed_comment_id: commentId ?? prev.last_processed_comment_id
+        plan_branch: prev.plan_branch ?? planBranch,
+        last_processed_comment_id: advanceCommentCursor(prev, commentId)
       })
     });
     const escalationComment = appendEpureCommandsSpoiler(
@@ -13403,7 +13583,8 @@ ${issue.body}`
       phase: "tickets",
       status: "awaiting_human_approval",
       active_branch: planBranch,
-      last_processed_comment_id: commentId ?? prev.last_processed_comment_id
+      plan_branch: prev.plan_branch ?? planBranch,
+      last_processed_comment_id: advanceCommentCursor(prev, commentId)
     })
   });
   const ticketLines = createdTicketsManifest.map((t) => {
@@ -14529,6 +14710,40 @@ async function runFeatureIntegrationPhase(params) {
     }
   }
   let currentFeaturePrHeadSha = featurePr.head_sha;
+  if (await params.gh.getPullRequestMergeableState(featurePr.number) === "dirty") {
+    const mergedBeforeResync = await params.stopIfFeaturePrMerged();
+    if (mergedBeforeResync) {
+      return mergedBeforeResync;
+    }
+    const resync = await syncBranchWithBase({
+      gh: params.gh,
+      targetBranch: params.featureBranch,
+      baseBranch: "dev",
+      issueNumber: params.issueNumber,
+      llmApiKey: params.llmApiKey,
+      fetchImpl: params.fetchImpl,
+      model: params.phaseModels.implementationModel,
+      providers: params.phaseModels.providers,
+      maxTransientRetries: params.phaseModels.maxTransientRetries,
+      transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
+      requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+      sandboxRunner: params.sandboxRunner,
+      reviewersDir
+    });
+    if (resync.status === "escalated") {
+      return await escalate({
+        reason: resync.escalationReason ?? "merge_conflict_unresolved",
+        ticketNumber: params.issueNumber,
+        branch: params.featureBranch,
+        prNumber: featurePr.number,
+        prUrl: featurePr.html_url,
+        featurePrUrl: featurePr.html_url,
+        diagnosticExcerpt: resync.diagnosticExcerpt
+      });
+    }
+    await params.baseSyncGuard.markSynced();
+    currentFeaturePrHeadSha = resync.headSha || currentFeaturePrHeadSha;
+  }
   const runStage2AndStage3ForFeaturePr = async (passParams) => {
     const currentChangedFeatureFiles = Array.from(
       (params.featureChangedFilesMap.size > 0 ? params.featureChangedFilesMap : params.accumulatedFiles).entries()
@@ -15001,6 +15216,10 @@ ${c}`).join("\n\n");
       const fixCommitTitle = parsedFeatureFix.commit_message && /^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9._/-]+\))?!?: .+/i.test(
         parsedFeatureFix.commit_message
       ) ? parsedFeatureFix.commit_message : `fix(review): address final feature review findings on #${params.issueNumber}`;
+      const mergedBeforeReviewFix = await params.stopIfFeaturePrMerged();
+      if (mergedBeforeReviewFix) {
+        return mergedBeforeReviewFix;
+      }
       await params.gh.commitFilesToBranch({
         branch: fixTaskBranch,
         fromBranch: params.featureBranch,
@@ -15041,9 +15260,14 @@ Refs #${params.issueNumber}`,
         conclusion: "success",
         summary: "Impeccable gate verified in synthesis loop."
       });
+      const mergedBeforeFixMerge = await params.stopIfFeaturePrMerged();
+      if (mergedBeforeFixMerge) {
+        return mergedBeforeFixMerge;
+      }
       await params.gh.mergePullRequest(fixPr.number, {
         headBranch: fixTaskBranch,
         baseBranch: params.featureBranch,
+        expectedHeadSha: fixPr.head_sha,
         commitTitle: `${fixCommitTitle} (#${fixPr.number})`,
         commitMessage: `Automated remediation of synthesis review findings.
 
@@ -16260,10 +16484,11 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
         });
         currentPrHeadSha = taskPr.head_sha;
       }
+      const openTaskPr = taskPr;
       let reviewedCommitShas = [];
       const resyncTaskPrIfConflicting = async () => {
-        const mergeableState = await params.gh.getPullRequestMergeableState?.(
-          taskPr.number
+        const mergeableState = await params.gh.getPullRequestMergeableState(
+          openTaskPr.number
         );
         if (mergeableState !== "dirty") {
           return void 0;
@@ -16274,8 +16499,8 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
             reason: resync.escalationReason ?? "merge_conflict_unresolved",
             ticketNumber: ticket.ticketIssueNumber,
             branch: taskBranch,
-            prNumber: taskPr.number,
-            prUrl: taskPr.html_url,
+            prNumber: openTaskPr.number,
+            prUrl: openTaskPr.html_url,
             diagnosticExcerpt: resync.diagnosticExcerpt
           });
         }
@@ -16305,7 +16530,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
         });
         const reviewRes = await runMultiAgentPrReviewPass({
           repository: params.repository,
-          prNumber: taskPr.number,
+          prNumber: openTaskPr.number,
           headBranch: taskBranch,
           baseBranch: params.featureBranch,
           ticketNumber: ticket.ticketIssueNumber,
@@ -16329,7 +16554,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
           onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
           fetchImpl: params.fetchImpl
         });
-        await params.gh.postPullRequestReview(taskPr.number, {
+        await params.gh.postPullRequestReview(openTaskPr.number, {
           commitId: passParams.headSha,
           body: reviewRes.review_body_markdown
         });
@@ -16364,7 +16589,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
               subphase: "waiting_ticket_ci",
               active_ticket_number: ticket.ticketIssueNumber,
               active_task_branch: taskBranch,
-              active_pr_number: taskPr.number,
+              active_pr_number: openTaskPr.number,
               active_head_sha: passParams.headSha
             })
           });
@@ -16372,7 +16597,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
             `<!-- epure-state:${JSON.stringify(updatedWaiting.state)} -->`,
             updatedWaiting.issue_mirror_markdown,
             "",
-            `### \u23F3 Attente \xE9v\xE9nementielle CI externe (\`waiting_ticket_ci\`) \u2014 Ticket #${ticket.ticketIssueNumber} (PR #${taskPr.number})`,
+            `### \u23F3 Attente \xE9v\xE9nementielle CI externe (\`waiting_ticket_ci\`) \u2014 Ticket #${ticket.ticketIssueNumber} (PR #${openTaskPr.number})`,
             `- **Branche du ticket** : \`${taskBranch}\` -> \`${params.featureBranch}\``,
             `- **HEAD SHA** : \`${passParams.headSha}\``,
             `- **Revue Multi-Agents (\`ai-review\`)** : \`${reviewRes.conclusion}\``,
@@ -16745,6 +16970,15 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
           reviewIntegrityCheck = retryEval.integrityCheck;
           testCheck = retryEval.testCheck;
         }
+        const featureMergedBeforeReviewFix = await params.stopIfFeaturePrMerged();
+        if (featureMergedBeforeReviewFix) {
+          return {
+            halted: true,
+            result: featureMergedBeforeReviewFix,
+            verificationProfile,
+            verificationGuideMarkdown
+          };
+        }
         if (!testCheck.passed) {
           if (!reviewIntegrityCheck.passed) {
             restoreViolatedBaselineFiles(reviewIntegrityCheck);
@@ -16878,6 +17112,15 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
         onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
         fetchImpl: params.fetchImpl
       });
+      const featureMergedBeforeTaskMerge = await params.stopIfFeaturePrMerged();
+      if (featureMergedBeforeTaskMerge) {
+        return {
+          halted: true,
+          result: featureMergedBeforeTaskMerge,
+          verificationProfile,
+          verificationGuideMarkdown
+        };
+      }
       await params.gh.updatePullRequest(taskPr.number, {
         title: squashCommit.pr_title
       });
@@ -16887,68 +17130,115 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
         conclusion: "success",
         summary: `Conventional Commit title verified: '${squashCommit.pr_title}'`
       });
-      const mergeTaskPr = () => params.gh.mergePullRequest(taskPr.number, {
+      const mergeTaskPr = () => params.gh.mergePullRequest(openTaskPr.number, {
         headBranch: taskBranch,
         baseBranch: params.featureBranch,
+        expectedHeadSha: currentPrHeadSha,
         commitTitle: squashCommit.commit_title,
         commitMessage: squashCommit.commit_message
       });
-      const resyncAndRetryTaskPrMerge = async (refusal) => {
-        const resync = await syncTaskBranchWithFeature();
-        if (resync.status === "merged" || resync.status === "resolved") {
+      const escalateRefusedMerge = (reason, diagnosticExcerpt) => params.escalateToNeedsHuman({
+        reason,
+        ticketNumber: ticket.ticketIssueNumber,
+        branch: taskBranch,
+        prNumber: openTaskPr.number,
+        prUrl: openTaskPr.html_url,
+        diagnosticExcerpt
+      });
+      const reverifyAndRetryTaskPrMerge = async (refusal) => {
+        if (refusal instanceof PullRequestHeadMovedError) {
+          const movedPr = await params.gh.findOpenPullRequestByHead(
+            taskBranch,
+            params.featureBranch
+          );
+          if (!movedPr) {
+            return await escalateRefusedMerge(
+              "pr_not_mergeable",
+              `${refusal.message} The pull request is no longer open.`
+            );
+          }
+          currentPrHeadSha = movedPr.head_sha;
+        } else {
+          const mergeableState = await params.gh.getPullRequestMergeableState(
+            openTaskPr.number
+          );
+          if (!isConflictRefusal(refusal, mergeableState)) {
+            return await escalateRefusedMerge(
+              "pr_not_mergeable",
+              describeMergeRefusal(refusal, mergeableState)
+            );
+          }
+          const resync = await syncTaskBranchWithFeature();
+          if (resync.status === "escalated") {
+            return await escalateRefusedMerge(
+              resync.escalationReason ?? "merge_conflict_unresolved",
+              resync.diagnosticExcerpt ?? refusal.message
+            );
+          }
+          if (resync.status === "up_to_date") {
+            return await escalateRefusedMerge(
+              "pr_not_mergeable",
+              describeMergeRefusal(refusal, mergeableState)
+            );
+          }
           currentPrHeadSha = resync.headSha;
-          const pass = await runStage2AndStage3ForTaskPr({
-            headSha: currentPrHeadSha,
-            isReReviewPass: true,
-            reviewFixAttemptsUsed: reviewFixAttempt
-          });
-          if (pass.releasedForAsyncCi) {
-            return pass.releasedForAsyncCi;
-          }
-          if (pass.reviewResult.conclusion === "failure" || !pass.ciGateResult.passed) {
-            return await params.escalateToNeedsHuman({
-              reason: "remediation_exhausted",
-              ticketNumber: ticket.ticketIssueNumber,
-              branch: taskBranch,
-              prNumber: taskPr.number,
-              prUrl: taskPr.html_url,
-              codeFixAttemptsUsed: reviewFixAttempt,
-              failedChecks: pass.ciGateResult.failedChecks,
-              mustFixFindings: pass.reviewResult.must_fix_findings,
-              diagnosticExcerpt: pass.ciGateResult.formattedDiagnostics
-            });
-          }
-          await params.gh.publishCheckRun({
-            name: "PR title",
-            headSha: currentPrHeadSha,
-            conclusion: "success",
-            summary: `Conventional Commit title verified: '${squashCommit.pr_title}'`
-          });
-          try {
-            await mergeTaskPr();
-            return void 0;
-          } catch (retryErr) {
-            if (!(retryErr instanceof PullRequestNotMergeableError)) {
-              throw retryErr;
-            }
-          }
         }
-        return await params.escalateToNeedsHuman({
-          reason: resync.escalationReason ?? "merge_conflict_unresolved",
-          ticketNumber: ticket.ticketIssueNumber,
-          branch: taskBranch,
-          prNumber: taskPr.number,
-          prUrl: taskPr.html_url,
-          diagnosticExcerpt: resync.diagnosticExcerpt ?? refusal.message
+        const pass = await runStage2AndStage3ForTaskPr({
+          headSha: currentPrHeadSha,
+          isReReviewPass: true,
+          reviewFixAttemptsUsed: reviewFixAttempt
         });
+        if (pass.releasedForAsyncCi) {
+          return pass.releasedForAsyncCi;
+        }
+        if (pass.reviewResult.conclusion === "failure" || !pass.ciGateResult.passed) {
+          return await params.escalateToNeedsHuman({
+            reason: "resync_verification_failed",
+            ticketNumber: ticket.ticketIssueNumber,
+            branch: taskBranch,
+            prNumber: openTaskPr.number,
+            prUrl: openTaskPr.html_url,
+            codeFixAttemptsUsed: reviewFixAttempt,
+            failedChecks: pass.ciGateResult.failedChecks,
+            mustFixFindings: pass.reviewResult.must_fix_findings,
+            diagnosticExcerpt: pass.ciGateResult.formattedDiagnostics
+          });
+        }
+        await params.gh.publishCheckRun({
+          name: "PR title",
+          headSha: currentPrHeadSha,
+          conclusion: "success",
+          summary: `Conventional Commit title verified: '${squashCommit.pr_title}'`
+        });
+        try {
+          await mergeTaskPr();
+          return void 0;
+        } catch (retryErr) {
+          if (retryErr instanceof PullRequestHeadMovedError) {
+            return await escalateRefusedMerge(
+              "branch_update_conflict",
+              retryErr.message
+            );
+          }
+          if (!(retryErr instanceof PullRequestNotMergeableError)) {
+            throw retryErr;
+          }
+          const mergeableState = await params.gh.getPullRequestMergeableState(
+            openTaskPr.number
+          );
+          return await escalateRefusedMerge(
+            isConflictRefusal(retryErr, mergeableState) ? "merge_conflict_unresolved" : "pr_not_mergeable",
+            describeMergeRefusal(retryErr, mergeableState)
+          );
+        }
       };
       try {
         await mergeTaskPr();
       } catch (err) {
-        if (!(err instanceof PullRequestNotMergeableError)) {
+        if (!(err instanceof PullRequestNotMergeableError) && !(err instanceof PullRequestHeadMovedError)) {
           throw err;
         }
-        const refusedMergeResult = await resyncAndRetryTaskPrMerge(err);
+        const refusedMergeResult = await reverifyAndRetryTaskPrMerge(err);
         if (refusedMergeResult) {
           return {
             halted: true,
@@ -17001,19 +17291,53 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
 
 // src/orchestrator/issue-orchestrator.ts
 var EscalationNotRecordedError = class extends Error {
-  constructor(issueNumber, reason, escalationMarkdown) {
+  constructor(issueNumber, reason, escalationMarkdown, resumeCommand) {
     super(
-      `GitHub API still rate limited: the \`${reason}\` escalation could not be posted on #${issueNumber}. Post \`/epure continue\` on #${issueNumber} once the limit resets.`
+      `GitHub API still rate limited: the \`${reason}\` escalation could not be posted on #${issueNumber}. Post \`${resumeCommand}\` on #${issueNumber} once the limit resets.`
     );
     this.issueNumber = issueNumber;
     this.reason = reason;
     this.escalationMarkdown = escalationMarkdown;
+    this.resumeCommand = resumeCommand;
   }
   issueNumber;
   reason;
   escalationMarkdown;
+  resumeCommand;
   name = "EscalationNotRecordedError";
 };
+var ClosureNotProcessedError = class extends Error {
+  constructor(issueNumber, cause) {
+    super(
+      `The closure of #${issueNumber} was not processed (${cause instanceof Error ? cause.message : String(cause)}); the plan state is unchanged. Re-run this job or post \`/epure cancel\` on #${issueNumber}.`,
+      { cause }
+    );
+    this.issueNumber = issueNumber;
+  }
+  issueNumber;
+  name = "ClosureNotProcessedError";
+};
+function resumeCommandForPhase(phase) {
+  switch (phase) {
+    case "idle":
+    case "grilling":
+      return "/epure plan";
+    case "spec":
+      return "/epure to-spec";
+    case "tickets":
+      return "/epure to-tickets";
+    default:
+      return "/epure continue";
+  }
+}
+var IMPLEMENTATION_PHASES = /* @__PURE__ */ new Set([
+  "implementation",
+  "review",
+  "completed"
+]);
+function resumesImplementationRun(state) {
+  return IMPLEMENTATION_PHASES.has(state.phase) && (state.status === "active" || state.status === "suspended");
+}
 async function orchestrateIssueCommand(input) {
   let mintedAppToken = null;
   let githubRequestCount = 0;
@@ -17048,21 +17372,19 @@ async function orchestrateIssueCommand(input) {
       token: activeToken,
       fetchImpl: githubFetch
     });
-    const store = input.stateStore ?? createGitHubApiRefStateStore({
+    const rawStore = input.stateStore ?? createGitHubApiRefStateStore({
       repository: input.repository,
       githubToken: activeToken,
       fetchImpl: githubFetch
     });
     const isAutomaticEntry = input.command === "continue" && (input.commentId ?? 0) <= 0;
     const triggerHeadSha = input.triggerHeadSha?.trim() || void 0;
-    const triggerBranch = input.triggerBranch?.trim() || void 0;
     let resolvedIssueNumber = input.issueNumber;
     if (resolvedIssueNumber <= 0 && input.command === "continue") {
-      const allStates = store.listIssueStates ? await store.listIssueStates() : [];
-      const waitingCandidates = allStates.filter(isAutomaticallyResumable);
-      const matched = triggerHeadSha ? waitingCandidates.find((s) => s.active_head_sha === triggerHeadSha) : triggerBranch ? waitingCandidates.find(
-        (s) => s.active_task_branch === triggerBranch || s.active_branch === triggerBranch
-      ) : waitingCandidates[0];
+      const allStates = triggerHeadSha && rawStore.listIssueStates ? await rawStore.listIssueStates() : [];
+      const matched = allStates.find(
+        (s) => isAutomaticallyResumable(s) && s.active_head_sha === triggerHeadSha
+      );
       if (!matched) {
         return {
           executed: false,
@@ -17084,9 +17406,120 @@ async function orchestrateIssueCommand(input) {
     let totalTransientRetriesUsed = 0;
     let initialTransientRetriesUsed = 0;
     const cumulativeTransientRetriesUsed = () => initialTransientRetriesUsed + totalTransientRetriesUsed;
+    let allowedTerminalSha = null;
+    let store = guardTerminalStates(rawStore, null);
+    const commandPhase = effectiveInput.command === "to-tickets" ? "tickets" : effectiveInput.command === "to-spec" ? "spec" : effectiveInput.command === "plan" || effectiveInput.command === "reply" ? "grilling" : "implementation";
+    const formatEscalation = (params, context) => formatNeedsHumanEscalationComment({
+      reason: params.reason,
+      issueNumber: effectiveInput.issueNumber,
+      ticketIssueNumber: context.ticketNumber,
+      prNumber: params.prNumber,
+      prUrl: params.prUrl,
+      branch: context.branch,
+      codeFixAttemptsUsed: context.codeFixAttemptsUsed,
+      maxCodeFixAttempts,
+      humanBudgetGrants: context.humanBudgetGrants,
+      graceWindowSeconds: params.graceWindowSeconds,
+      failedChecks: params.failedChecks,
+      mustFixFindings: params.mustFixFindings,
+      sensitivePaths: params.sensitivePaths,
+      traversalPaths: params.traversalPaths,
+      diagnosticExcerpt: params.diagnosticExcerpt,
+      epicConvergenceDetails: params.epicConvergenceDetails,
+      missingModelKeys: params.missingModelKeys,
+      resumeCommand: IMPLEMENTATION_PHASES.has(context.phase) ? void 0 : resumeCommandForPhase(context.phase)
+    });
+    const recordEscalation = async (params, via) => {
+      let duplicateOfLastEscalation = false;
+      let ticketNumber = effectiveInput.issueNumber;
+      const updatedSuspended = await updateIssueStateWithCas({
+        issueNumber: effectiveInput.issueNumber,
+        store: via.store,
+        mutator: (prev) => {
+          const phase = params.phase ?? (prev.phase !== "idle" ? prev.phase : commandPhase);
+          ticketNumber = params.ticketNumber ?? prev.active_ticket_number ?? effectiveInput.issueNumber;
+          const escalation = {
+            reason: params.reason,
+            head_sha: prev.active_head_sha ?? "",
+            ticket_number: ticketNumber,
+            budget_scope: params.budgetScope ?? activeBudgetScope(prev)
+          };
+          duplicateOfLastEscalation = isAutomaticEntry && prev.last_escalation?.reason === escalation.reason && prev.last_escalation?.head_sha === escalation.head_sha;
+          return toTerminalState(prev, {
+            phase,
+            status: "suspended",
+            active_branch: params.branch ?? (prev.active_branch || (IMPLEMENTATION_PHASES.has(phase) ? featureBranch : planBranch)),
+            code_fix_attempts_used: params.codeFixAttemptsUsed ?? prev.code_fix_attempts_used,
+            transient_retries_used: cumulativeTransientRetriesUsed(),
+            last_escalation: escalation,
+            last_processed_comment_id: Math.max(
+              effectiveInput.commentId ?? 0,
+              prev.last_processed_comment_id
+            )
+          });
+        }
+      });
+      const suspendedState = updatedSuspended.state;
+      const escalationMarkdown = appendEpureCommandsSpoiler(
+        [
+          updatedSuspended.issue_mirror_markdown,
+          "",
+          formatEscalation(params, {
+            phase: suspendedState.phase,
+            branch: suspendedState.active_branch,
+            ticketNumber,
+            codeFixAttemptsUsed: suspendedState.code_fix_attempts_used,
+            humanBudgetGrants: IMPLEMENTATION_PHASES.has(suspendedState.phase) ? suspendedState.human_budget_grants ?? 0 : void 0
+          })
+        ].join("\n"),
+        {
+          phase: "suspended",
+          status: "suspended",
+          issueNumber: effectiveInput.issueNumber
+        }
+      );
+      if (!duplicateOfLastEscalation) {
+        await via.gh.ensureLabel(
+          "needs-human",
+          "D93F0B",
+          "Requires human maintainer intervention"
+        );
+        await via.gh.addIssueLabels(effectiveInput.issueNumber, ["needs-human"]);
+        if (params.ticketNumber !== void 0 && params.ticketNumber !== effectiveInput.issueNumber) {
+          await via.gh.addIssueLabels(params.ticketNumber, ["needs-human"]);
+        }
+        await via.gh.postIssueComment(
+          effectiveInput.issueNumber,
+          escalationMarkdown
+        );
+      }
+      return {
+        executed: true,
+        phase: suspendedState.phase,
+        status: suspendedState.status,
+        active_branch: suspendedState.active_branch,
+        summary_markdown: escalationMarkdown,
+        created_ticket_numbers: params.createdTicketNumbers ?? [],
+        feature_pr_url: params.featurePrUrl ?? params.prUrl ?? ""
+      };
+    };
+    const escalateSuspension = (params) => recordEscalation(params, { gh, store });
+    const abortedResult = (err) => ({
+      executed: false,
+      phase: err.state.phase,
+      status: err.state.status,
+      active_branch: err.state.active_branch,
+      summary_markdown: `Run stopped without writing: ${err.message}`,
+      created_ticket_numbers: [],
+      feature_pr_url: ""
+    });
     try {
-      const currentSnapshot = await store.readRef(refName);
+      const currentSnapshot = await rawStore.readRef(refName);
       let currentState = currentSnapshot.state;
+      if (!isAutomaticEntry) {
+        allowedTerminalSha = currentSnapshot.sha;
+        store = guardTerminalStates(rawStore, allowedTerminalSha);
+      }
       initialTransientRetriesUsed = currentState?.transient_retries_used ?? 0;
       if (isAutomaticEntry) {
         const ignoredReason = !currentState ? "no orchestration state" : !isAutomaticallyResumable(currentState) ? `status \`${currentState.status}\` / subphase \`${currentState.subphase ?? "idle"}\` is not an active wait` : triggerHeadSha && triggerHeadSha !== currentState.active_head_sha ? `trigger SHA \`${triggerHeadSha}\` is not the active head SHA` : void 0;
@@ -17162,43 +17595,6 @@ async function orchestrateIssueCommand(input) {
           feature_pr_url: ""
         };
       }
-      if (effectiveInput.command === "continue" && (effectiveInput.commentId ?? 0) > 0 && currentState?.status === "cancelled" && PLANNING_PHASES.has(currentState.phase)) {
-        const updated = await updateIssueStateWithCas({
-          issueNumber: effectiveInput.issueNumber,
-          store,
-          mutator: (prev) => ({
-            ...prev,
-            status: prev.phase === "tickets" ? "awaiting_human_approval" : "active",
-            last_processed_comment_id: Math.max(
-              effectiveInput.commentId ?? 0,
-              prev.last_processed_comment_id
-            )
-          })
-        });
-        const nextStep = updated.state.phase === "grilling" ? "R\xE9pondez en commentaire pour poursuivre l'entretien, ou postez `/epure to-spec`." : updated.state.phase === "spec" ? "R\xE9pondez en commentaire pour r\xE9viser la sp\xE9cification, ou postez `/epure to-tickets`." : "Postez `/epure approve` pour lancer l'impl\xE9mentation.";
-        const body = appendEpureCommandsSpoiler(
-          [
-            updated.issue_mirror_markdown,
-            "",
-            `\u25B6\uFE0F Plan #${effectiveInput.issueNumber} repris par \`@${effectiveInput.actor}\` en phase \`${updated.state.phase}\`. ${nextStep}`
-          ].join("\n"),
-          {
-            phase: updated.state.phase,
-            status: updated.state.status,
-            issueNumber: effectiveInput.issueNumber
-          }
-        );
-        await gh.postIssueComment(effectiveInput.issueNumber, body);
-        return {
-          executed: true,
-          phase: updated.state.phase,
-          status: updated.state.status,
-          active_branch: updated.state.active_branch,
-          summary_markdown: body,
-          created_ticket_numbers: [],
-          feature_pr_url: ""
-        };
-      }
       if (effectiveInput.command === "closed") {
         return await handleEpicClosedByHuman({
           issueNumber: effectiveInput.issueNumber,
@@ -17211,8 +17607,82 @@ async function orchestrateIssueCommand(input) {
       const issue = await gh.getIssue(effectiveInput.issueNumber);
       const allComments = await gh.listIssueComments(effectiveInput.issueNumber);
       const planSlug = slugifyTitle(issue.title);
-      planBranch = `plan/${effectiveInput.issueNumber}-${planSlug}`;
-      featureBranch = currentState?.active_branch.startsWith(`${featureBranch}-`) ? currentState.active_branch : `feature/${effectiveInput.issueNumber}-${planSlug}`;
+      planBranch = currentState?.plan_branch ?? (currentState?.active_branch.startsWith(`${planBranch}-`) ? currentState.active_branch : `plan/${effectiveInput.issueNumber}-${planSlug}`);
+      featureBranch = currentState?.feature_branch ?? (currentState?.active_branch.startsWith(`${featureBranch}-`) ? currentState.active_branch : `feature/${effectiveInput.issueNumber}-${planSlug}`);
+      if (effectiveInput.command === "continue" && (effectiveInput.commentId ?? 0) > 0 && currentState?.status === "cancelled") {
+        if (issue.state === "closed") {
+          const reopenFirst = `\u23F8\uFE0F Le plan #${effectiveInput.issueNumber} est annul\xE9 et son issue est ferm\xE9e : rouvrez l'issue #${effectiveInput.issueNumber}, puis postez \`/epure continue\`.`;
+          await gh.postIssueComment(effectiveInput.issueNumber, reopenFirst);
+          return {
+            executed: false,
+            phase: currentState.phase,
+            status: currentState.status,
+            active_branch: currentState.active_branch,
+            summary_markdown: reopenFirst,
+            created_ticket_numbers: [],
+            feature_pr_url: ""
+          };
+        }
+        const restored = await updateIssueStateWithCas({
+          issueNumber: effectiveInput.issueNumber,
+          store,
+          mutator: (prev) => {
+            const from = prev.cancelled_from ?? {
+              phase: prev.phase,
+              status: "active"
+            };
+            const status = from.status === "active" && (from.phase === "spec" || from.phase === "tickets") ? "awaiting_human_approval" : from.status;
+            const restoredState = {
+              ...prev,
+              phase: from.phase,
+              status,
+              cancelled_from: void 0
+            };
+            return resumesImplementationRun(restoredState) ? restoredState : {
+              ...restoredState,
+              last_processed_comment_id: Math.max(
+                effectiveInput.commentId ?? 0,
+                prev.last_processed_comment_id
+              )
+            };
+          }
+        });
+        currentState = restored.state;
+        if (!resumesImplementationRun(currentState)) {
+          const suspended = currentState.status === "suspended";
+          if (suspended) {
+            await gh.ensureLabel(
+              "needs-human",
+              "D93F0B",
+              "Requires human maintainer intervention"
+            );
+            await gh.addIssueLabels(effectiveInput.issueNumber, ["needs-human"]);
+          }
+          const nextStep = suspended ? `Le plan reste \`suspended\` : postez \`${resumeCommandForPhase(currentState.phase)}\` pour relancer la phase.` : currentState.phase === "grilling" ? "R\xE9pondez en commentaire pour poursuivre l'entretien, ou postez `/epure to-spec`." : currentState.phase === "spec" ? "R\xE9pondez en commentaire pour r\xE9viser la sp\xE9cification, ou postez `/epure to-tickets`." : currentState.phase === "tickets" ? "Postez `/epure approve` pour lancer l'impl\xE9mentation." : "La Pull Request de fonctionnalit\xE9 attend la revue humaine et le squash-merge vers `dev`.";
+          const body = appendEpureCommandsSpoiler(
+            [
+              restored.issue_mirror_markdown,
+              "",
+              `\u25B6\uFE0F Plan #${effectiveInput.issueNumber} repris par \`@${effectiveInput.actor}\` en phase \`${currentState.phase}\`. ${nextStep}`
+            ].join("\n"),
+            {
+              phase: currentState.phase,
+              status: currentState.status,
+              issueNumber: effectiveInput.issueNumber
+            }
+          );
+          await gh.postIssueComment(effectiveInput.issueNumber, body);
+          return {
+            executed: true,
+            phase: currentState.phase,
+            status: currentState.status,
+            active_branch: currentState.active_branch,
+            summary_markdown: body,
+            created_ticket_numbers: [],
+            feature_pr_url: ""
+          };
+        }
+      }
       let agentsConfigError;
       let parsedDevAgentsConfig = null;
       try {
@@ -17259,64 +17729,23 @@ async function orchestrateIssueCommand(input) {
           });
         } catch (err) {
           if (err instanceof LLMError) {
-            await gh.ensureLabel(
-              "needs-human",
-              "D93F0B",
-              "Requires human maintainer intervention"
-            );
-            await gh.addIssueLabels(effectiveInput.issueNumber, ["needs-human"]);
-            const suspendedPhase = effectiveInput.command === "to-tickets" ? "tickets" : effectiveInput.command === "to-spec" || currentState?.phase === "spec" ? "spec" : "grilling";
-            const updatedSuspended = await updateIssueStateWithCas({
-              issueNumber: effectiveInput.issueNumber,
-              store,
-              mutator: (prev) => toTerminalState(prev, {
-                phase: suspendedPhase,
-                status: "suspended",
-                active_branch: planBranch,
-                transient_retries_used: cumulativeTransientRetriesUsed(),
-                last_processed_comment_id: Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
-              })
+            return await escalateSuspension({
+              reason: resolveLlmEscalationReason(err),
+              ticketNumber: effectiveInput.issueNumber,
+              branch: planBranch,
+              phase: effectiveInput.command === "to-tickets" ? "tickets" : effectiveInput.command === "to-spec" || currentState?.phase === "spec" ? "spec" : "grilling",
+              diagnosticExcerpt: redactSecrets(err.message, [
+                activeToken,
+                effectiveInput.llmApiKey
+              ])
             });
-            const escalationMarkdown = appendEpureCommandsSpoiler(
-              [
-                updatedSuspended.issue_mirror_markdown,
-                "",
-                formatNeedsHumanEscalationComment({
-                  reason: resolveLlmEscalationReason(err),
-                  issueNumber: effectiveInput.issueNumber,
-                  ticketIssueNumber: effectiveInput.issueNumber,
-                  branch: planBranch,
-                  maxCodeFixAttempts,
-                  resumeCommand: suspendedPhase === "tickets" ? "/epure to-tickets" : suspendedPhase === "spec" ? "/epure to-spec" : "/epure plan",
-                  diagnosticExcerpt: redactSecrets(err.message, [
-                    activeToken,
-                    effectiveInput.llmApiKey
-                  ])
-                })
-              ].join("\n"),
-              {
-                phase: "suspended",
-                status: "suspended",
-                issueNumber: effectiveInput.issueNumber
-              }
-            );
-            await gh.postIssueComment(effectiveInput.issueNumber, escalationMarkdown);
-            return {
-              executed: true,
-              phase: updatedSuspended.state.phase,
-              status: updatedSuspended.state.status,
-              active_branch: planBranch,
-              summary_markdown: escalationMarkdown,
-              created_ticket_numbers: [],
-              feature_pr_url: ""
-            };
           }
           throw err;
         }
       }
       if (effectiveInput.command === "sync" || effectiveInput.command === "rebase") {
         const phaseModels = requirePhaseModels();
-        const targetBranch = currentState?.active_branch && !currentState.active_branch.startsWith("plan/") ? currentState.active_branch : featureBranch;
+        const targetBranch = featureBranch;
         await gh.ensureBranch("dev", "main");
         await gh.ensureBranch(targetBranch, "dev");
         if (currentState?.active_branch?.startsWith("plan/")) {
@@ -17350,50 +17779,12 @@ async function orchestrateIssueCommand(input) {
           reviewersDir
         });
         if (syncRes.status === "escalated") {
-          await gh.ensureLabel(
-            "needs-human",
-            "D93F0B",
-            "Requires human maintainer intervention"
-          );
-          await gh.addIssueLabels(effectiveInput.issueNumber, ["needs-human"]);
-          const updatedSuspended = await updateIssueStateWithCas({
-            issueNumber: effectiveInput.issueNumber,
-            store,
-            mutator: (prev) => toTerminalState(prev, {
-              status: "suspended",
-              active_branch: targetBranch,
-              last_processed_comment_id: Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
-            })
+          return await escalateSuspension({
+            reason: syncRes.escalationReason ?? "merge_conflict_unresolved",
+            ticketNumber: effectiveInput.issueNumber,
+            branch: targetBranch,
+            diagnosticExcerpt: syncRes.diagnosticExcerpt
           });
-          const escalationMd = appendEpureCommandsSpoiler(
-            [
-              updatedSuspended.issue_mirror_markdown,
-              "",
-              formatNeedsHumanEscalationComment({
-                reason: syncRes.escalationReason ?? "merge_conflict_unresolved",
-                issueNumber: effectiveInput.issueNumber,
-                ticketIssueNumber: effectiveInput.issueNumber,
-                branch: targetBranch,
-                maxCodeFixAttempts,
-                diagnosticExcerpt: syncRes.diagnosticExcerpt
-              })
-            ].join("\n"),
-            {
-              phase: "suspended",
-              status: "suspended",
-              issueNumber: effectiveInput.issueNumber
-            }
-          );
-          await gh.postIssueComment(effectiveInput.issueNumber, escalationMd);
-          return {
-            executed: true,
-            phase: updatedSuspended.state.phase,
-            status: updatedSuspended.state.status,
-            active_branch: targetBranch,
-            summary_markdown: escalationMd,
-            created_ticket_numbers: [],
-            feature_pr_url: ""
-          };
         }
         if (currentState?.active_task_branch) {
           const taskSyncRes = await syncBranchWithBase({
@@ -17412,55 +17803,12 @@ async function orchestrateIssueCommand(input) {
             reviewersDir
           });
           if (taskSyncRes.status === "escalated") {
-            await gh.ensureLabel(
-              "needs-human",
-              "D93F0B",
-              "Requires human maintainer intervention"
-            );
-            await gh.addIssueLabels(effectiveInput.issueNumber, [
-              "needs-human"
-            ]);
-            const updatedTaskSuspended = await updateIssueStateWithCas({
-              issueNumber: effectiveInput.issueNumber,
-              store,
-              mutator: (prev) => toTerminalState(prev, {
-                status: "suspended",
-                active_branch: targetBranch,
-                last_processed_comment_id: Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
-              })
+            return await escalateSuspension({
+              reason: taskSyncRes.escalationReason ?? "merge_conflict_unresolved",
+              ticketNumber: currentState.active_ticket_number ?? effectiveInput.issueNumber,
+              branch: currentState.active_task_branch,
+              diagnosticExcerpt: taskSyncRes.diagnosticExcerpt
             });
-            const taskEscalationMd = appendEpureCommandsSpoiler(
-              [
-                updatedTaskSuspended.issue_mirror_markdown,
-                "",
-                formatNeedsHumanEscalationComment({
-                  reason: taskSyncRes.escalationReason ?? "merge_conflict_unresolved",
-                  issueNumber: effectiveInput.issueNumber,
-                  ticketIssueNumber: currentState.active_ticket_number ?? effectiveInput.issueNumber,
-                  branch: currentState.active_task_branch,
-                  maxCodeFixAttempts,
-                  diagnosticExcerpt: taskSyncRes.diagnosticExcerpt
-                })
-              ].join("\n"),
-              {
-                phase: "suspended",
-                status: "suspended",
-                issueNumber: effectiveInput.issueNumber
-              }
-            );
-            await gh.postIssueComment(
-              effectiveInput.issueNumber,
-              taskEscalationMd
-            );
-            return {
-              executed: true,
-              phase: updatedTaskSuspended.state.phase,
-              status: updatedTaskSuspended.state.status,
-              active_branch: targetBranch,
-              summary_markdown: taskEscalationMd,
-              created_ticket_numbers: [],
-              feature_pr_url: ""
-            };
           }
         }
         const updatedSync = await updateIssueStateWithCas({
@@ -17469,6 +17817,7 @@ async function orchestrateIssueCommand(input) {
           mutator: (prev) => ({
             ...prev,
             active_branch: targetBranch,
+            feature_branch: prev.feature_branch ?? targetBranch,
             last_processed_comment_id: Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
           })
         });
@@ -17500,90 +17849,10 @@ async function orchestrateIssueCommand(input) {
           feature_pr_url: ""
         };
       }
-      const escalateSuspension = async (params) => {
-        let duplicateOfLastEscalation = false;
-        const updatedSuspended = await updateIssueStateWithCas({
-          issueNumber: effectiveInput.issueNumber,
-          store,
-          mutator: (prev) => {
-            const escalation = {
-              reason: params.reason,
-              head_sha: prev.active_head_sha ?? "",
-              ticket_number: params.ticketNumber,
-              budget_scope: params.budgetScope ?? "ticket"
-            };
-            duplicateOfLastEscalation = isAutomaticEntry && prev.last_escalation?.reason === escalation.reason && prev.last_escalation?.head_sha === escalation.head_sha;
-            return toTerminalState(prev, {
-              phase: params.phase ?? "implementation",
-              status: "suspended",
-              active_branch: params.branch,
-              code_fix_attempts_used: params.codeFixAttemptsUsed ?? prev.code_fix_attempts_used,
-              transient_retries_used: cumulativeTransientRetriesUsed(),
-              last_escalation: escalation,
-              last_processed_comment_id: Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
-            });
-          }
-        });
-        if (!duplicateOfLastEscalation) {
-          await gh.ensureLabel(
-            "needs-human",
-            "D93F0B",
-            "Requires human maintainer intervention"
-          );
-          await gh.addIssueLabels(effectiveInput.issueNumber, ["needs-human"]);
-          if (params.ticketNumber !== effectiveInput.issueNumber) {
-            await gh.addIssueLabels(params.ticketNumber, ["needs-human"]);
-          }
-        }
-        const escalationMarkdown = appendEpureCommandsSpoiler(
-          [
-            updatedSuspended.issue_mirror_markdown,
-            "",
-            formatNeedsHumanEscalationComment({
-              reason: params.reason,
-              issueNumber: effectiveInput.issueNumber,
-              ticketIssueNumber: params.ticketNumber,
-              prNumber: params.prNumber,
-              prUrl: params.prUrl,
-              branch: params.branch,
-              codeFixAttemptsUsed: updatedSuspended.state.code_fix_attempts_used,
-              maxCodeFixAttempts,
-              humanBudgetGrants: updatedSuspended.state.human_budget_grants ?? 0,
-              graceWindowSeconds: params.graceWindowSeconds,
-              failedChecks: params.failedChecks,
-              mustFixFindings: params.mustFixFindings,
-              sensitivePaths: params.sensitivePaths,
-              traversalPaths: params.traversalPaths,
-              diagnosticExcerpt: params.diagnosticExcerpt,
-              epicConvergenceDetails: params.epicConvergenceDetails
-            })
-          ].join("\n"),
-          {
-            phase: "suspended",
-            status: "suspended",
-            issueNumber: effectiveInput.issueNumber
-          }
-        );
-        if (!duplicateOfLastEscalation) {
-          await gh.postIssueComment(
-            effectiveInput.issueNumber,
-            escalationMarkdown
-          );
-        }
-        return {
-          executed: true,
-          phase: updatedSuspended.state.phase,
-          status: updatedSuspended.state.status,
-          active_branch: params.branch,
-          summary_markdown: escalationMarkdown,
-          created_ticket_numbers: params.createdTicketNumbers ?? [],
-          feature_pr_url: params.featurePrUrl ?? params.prUrl ?? ""
-        };
-      };
       let forceOneRemediationRoundOnOpenPr = false;
       if (effectiveInput.command === "continue") {
         const isWaitingExternalCi = currentState !== null && isAutomaticallyResumable(currentState);
-        const isManualContinueInImplementation = !isWaitingExternalCi && (effectiveInput.commentId ?? 0) > 0 && currentState?.phase === "implementation";
+        const isManualContinueInImplementation = !isWaitingExternalCi && (effectiveInput.commentId ?? 0) > 0 && currentState !== null && resumesImplementationRun(currentState);
         if (!isWaitingExternalCi && !isManualContinueInImplementation) {
           return {
             executed: false,
@@ -17601,7 +17870,7 @@ async function orchestrateIssueCommand(input) {
           const expectedContinueWorkflows = discoverExpectedExternalWorkflows({
             workflowFilesMap: devWorkflowsMapForContinue,
             changedPaths: ["src/index.ts"],
-            targetBranch: currentState.subphase === "waiting_feature_ci" ? "dev" : currentState.active_branch || featureBranch
+            targetBranch: currentState.subphase === "waiting_feature_ci" ? "dev" : featureBranch
           });
           const snapshot = await evaluateSingleExternalCiSnapshot({
             headSha: activeHeadSha,
@@ -17623,11 +17892,28 @@ async function orchestrateIssueCommand(input) {
               feature_pr_url: ""
             };
           }
+          const waitingState = currentState;
+          await updateIssueStateWithCas({
+            issueNumber: effectiveInput.issueNumber,
+            store,
+            mutator: (prev) => {
+              if (prev.status !== "active" || prev.subphase !== waitingState.subphase || prev.active_head_sha !== waitingState.active_head_sha) {
+                throw new StateTransitionAbortedError(
+                  prev,
+                  "this CI wait was already claimed or ended by another run"
+                );
+              }
+              return {
+                ...prev,
+                subphase: prev.subphase === "waiting_feature_ci" ? "remediating_feature" : "implementing_ticket"
+              };
+            }
+          });
           if (snapshot.passed && snapshot.aiReviewPassed) {
             if (currentState.subphase === "waiting_feature_ci") {
               const featurePrNumber = currentState.active_pr_number ?? 0;
               const openFeaturePr = await gh.findOpenPullRequestByHead(
-                currentState.active_branch || featureBranch,
+                featureBranch,
                 "dev"
               );
               const featurePrUrl = openFeaturePr?.html_url ?? "";
@@ -17681,7 +17967,7 @@ async function orchestrateIssueCommand(input) {
             const ticketNum = currentState.active_ticket_number ?? effectiveInput.issueNumber;
             const taskBranchToMerge = currentState.active_task_branch ?? `task/${ticketNum}`;
             const prNumberToMerge = currentState.active_pr_number ?? 0;
-            const targetFeatureBranch = currentState.active_branch || featureBranch;
+            const targetFeatureBranch = featureBranch;
             const openTaskPr = prNumberToMerge > 0 ? await gh.findOpenPullRequestByHead(
               taskBranchToMerge,
               targetFeatureBranch
@@ -17690,7 +17976,12 @@ async function orchestrateIssueCommand(input) {
               taskBranchToMerge,
               targetFeatureBranch
             ) !== null;
-            if (prNumberToMerge > 0 && !mergedByHuman) {
+            const featurePrAlreadyMerged = prNumberToMerge > 0 && !mergedByHuman && await gh.findMergedPullRequestByHead(
+              targetFeatureBranch,
+              "dev"
+            ) !== null;
+            let ticketPrNeedsReview = false;
+            if (prNumberToMerge > 0 && !mergedByHuman && !featurePrAlreadyMerged) {
               const prFiles = await gh.listPullRequestFiles(prNumberToMerge);
               const changedFilesForSquash = await Promise.all(
                 prFiles.map(async (f) => ({
@@ -17729,16 +18020,41 @@ async function orchestrateIssueCommand(input) {
                 conclusion: "success",
                 summary: `Conventional Commit title verified: '${squashCommit.pr_title}'`
               });
+              let refusal;
               try {
                 await gh.mergePullRequest(prNumberToMerge, {
                   headBranch: taskBranchToMerge,
                   baseBranch: targetFeatureBranch,
+                  expectedHeadSha: activeHeadSha,
                   commitTitle: squashCommit.commit_title,
                   commitMessage: squashCommit.commit_message
                 });
               } catch (err) {
-                if (!(err instanceof PullRequestNotMergeableError)) {
+                if (err instanceof PullRequestHeadMovedError) {
+                  ticketPrNeedsReview = true;
+                } else if (err instanceof PullRequestNotMergeableError) {
+                  refusal = err;
+                } else {
                   throw err;
+                }
+              }
+              if (refusal) {
+                const mergeableState = await gh.getPullRequestMergeableState(
+                  prNumberToMerge
+                );
+                const escalateRefusedMerge = (reason, diagnosticExcerpt) => escalateSuspension({
+                  reason,
+                  ticketNumber: ticketNum,
+                  branch: taskBranchToMerge,
+                  prNumber: prNumberToMerge,
+                  prUrl: openTaskPr?.html_url,
+                  diagnosticExcerpt
+                });
+                if (!isConflictRefusal(refusal, mergeableState)) {
+                  return await escalateRefusedMerge(
+                    "pr_not_mergeable",
+                    describeMergeRefusal(refusal, mergeableState)
+                  );
                 }
                 const resync = await syncBranchWithBase({
                   gh,
@@ -17755,67 +18071,76 @@ async function orchestrateIssueCommand(input) {
                   sandboxRunner: effectiveInput.sandboxRunner,
                   reviewersDir
                 });
-                if (resync.status !== "merged" && resync.status !== "resolved") {
-                  return await escalateSuspension({
-                    reason: resync.escalationReason ?? "merge_conflict_unresolved",
-                    ticketNumber: ticketNum,
-                    branch: taskBranchToMerge,
-                    prNumber: prNumberToMerge,
-                    prUrl: openTaskPr?.html_url,
-                    diagnosticExcerpt: resync.diagnosticExcerpt ?? err.message
-                  });
+                if (resync.status === "escalated") {
+                  return await escalateRefusedMerge(
+                    resync.escalationReason ?? "merge_conflict_unresolved",
+                    resync.diagnosticExcerpt ?? refusal.message
+                  );
                 }
-                await gh.publishCheckRun({
-                  name: "ai-review",
-                  headSha: resync.headSha,
-                  conclusion: "success",
-                  summary: `Review of \`${activeHeadSha}\` carried over: \`${resync.headSha}\` only merges \`${targetFeatureBranch}\` into \`${taskBranchToMerge}\`.`
-                });
-                const updatedResynced = await updateIssueStateWithCas({
-                  issueNumber: effectiveInput.issueNumber,
-                  store,
-                  mutator: (prev) => ({
-                    ...prev,
-                    subphase: "waiting_ticket_ci",
-                    active_head_sha: resync.headSha
-                  })
-                });
-                return {
-                  executed: true,
-                  phase: updatedResynced.state.phase,
-                  status: updatedResynced.state.status,
-                  active_branch: updatedResynced.state.active_branch,
-                  summary_markdown: `PR #${prNumberToMerge} was not mergeable; \`${taskBranchToMerge}\` re-synced with \`${targetFeatureBranch}\` at \`${resync.headSha}\`. Waiting for external CI on the new head.`,
-                  created_ticket_numbers: [],
-                  feature_pr_url: ""
-                };
+                if (resync.status === "up_to_date") {
+                  return await escalateRefusedMerge(
+                    "pr_not_mergeable",
+                    describeMergeRefusal(refusal, mergeableState)
+                  );
+                }
+                if (resync.status === "resolved") {
+                  ticketPrNeedsReview = true;
+                } else {
+                  await gh.publishCheckRun({
+                    name: "ai-review",
+                    headSha: resync.headSha,
+                    conclusion: "success",
+                    summary: `Review of \`${activeHeadSha}\` carried over: \`${resync.headSha}\` only merges \`${targetFeatureBranch}\` into \`${taskBranchToMerge}\`.`
+                  });
+                  const updatedResynced = await updateIssueStateWithCas({
+                    issueNumber: effectiveInput.issueNumber,
+                    store,
+                    mutator: (prev) => ({
+                      ...prev,
+                      subphase: "waiting_ticket_ci",
+                      active_head_sha: resync.headSha
+                    })
+                  });
+                  return {
+                    executed: true,
+                    phase: updatedResynced.state.phase,
+                    status: updatedResynced.state.status,
+                    active_branch: updatedResynced.state.active_branch,
+                    summary_markdown: `PR #${prNumberToMerge} was not mergeable; \`${taskBranchToMerge}\` re-synced with \`${targetFeatureBranch}\` at \`${resync.headSha}\`. Waiting for external CI on the new head.`,
+                    created_ticket_numbers: [],
+                    feature_pr_url: ""
+                  };
+                }
               }
             }
-            if (ticketNum !== effectiveInput.issueNumber) {
-              await gh.closeIssue(ticketNum);
+            if (ticketPrNeedsReview) {
+              forceOneRemediationRoundOnOpenPr = true;
+            } else if (!featurePrAlreadyMerged) {
+              if (ticketNum !== effectiveInput.issueNumber) {
+                await gh.closeIssue(ticketNum);
+              }
+              const updatedAfterTicketMerge = await updateIssueStateWithCas({
+                issueNumber: effectiveInput.issueNumber,
+                store,
+                mutator: (prev) => ({
+                  ...prev,
+                  subphase: "idle",
+                  active_ticket_number: void 0,
+                  active_task_branch: void 0,
+                  active_pr_number: void 0,
+                  active_head_sha: void 0,
+                  code_fix_attempts_used: 0
+                })
+              });
+              currentState = updatedAfterTicketMerge.state;
             }
-            const updatedAfterTicketMerge = await updateIssueStateWithCas({
-              issueNumber: effectiveInput.issueNumber,
-              store,
-              mutator: (prev) => ({
-                ...prev,
-                subphase: "idle",
-                active_ticket_number: void 0,
-                active_task_branch: void 0,
-                active_pr_number: void 0,
-                active_head_sha: void 0,
-                code_fix_attempts_used: 0
-              })
-            });
-            currentState = updatedAfterTicketMerge.state;
           } else {
             const attemptsUsed = readActiveCodeFixAttempts(currentState);
             if (attemptsUsed >= maxCodeFixAttempts) {
               return await escalateSuspension({
                 reason: "remediation_exhausted",
                 ticketNumber: currentState.active_ticket_number ?? effectiveInput.issueNumber,
-                branch: currentState.active_task_branch || currentState.active_branch || featureBranch,
-                budgetScope: activeBudgetScope(currentState),
+                branch: currentState.active_task_branch || featureBranch,
                 prNumber: currentState.active_pr_number,
                 codeFixAttemptsUsed: attemptsUsed,
                 failedChecks: snapshot.failedChecks,
@@ -17978,6 +18303,7 @@ async function orchestrateIssueCommand(input) {
               id: c.id,
               authorLogin: c.user.login,
               authorType: c.user.type ?? "User",
+              viaGitHubApp: Boolean(c.performed_via_github_app),
               body: c.body
             })),
             afterCommentId: currentState.last_processed_comment_id,
@@ -17989,15 +18315,26 @@ async function orchestrateIssueCommand(input) {
           issueNumber: effectiveInput.issueNumber,
           store,
           mutator: (prev) => ({
-            ...prev.status === "suspended" ? grantHumanBudget(prev) : prev,
+            ...isAutomaticEntry ? prev : resumeAfterEscalation(prev, {
+              actor: effectiveInput.actor,
+              commentId: effectiveInput.commentId ?? 0
+            }),
             phase: "implementation",
             status: "active",
             active_branch: featureBranch,
+            feature_branch: prev.feature_branch ?? featureBranch,
             epic_phase: prev.epic_phase ?? 1,
             ...integratePlan ? { integrated_plan_sha: planHeadSha ?? void 0 } : {},
             last_processed_comment_id: Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
           })
         });
+        const grant = updatedStart.state.human_budget_grant_log?.at(-1);
+        if (grant && (updatedStart.state.human_budget_grants ?? 0) > (currentState?.human_budget_grants ?? 0)) {
+          await gh.postIssueComment(
+            effectiveInput.issueNumber,
+            `\u25B6\uFE0F Reprise par \`@${grant.actor}\` : budget de rem\xE9diation remis \xE0 z\xE9ro pour ${grant.scope === "feature" ? "la Pull Request de fonctionnalit\xE9" : `le ticket #${grant.ticket}`} (\`human_budget_grants\` : ${updatedStart.state.human_budget_grants ?? 0}).`
+          );
+        }
         const baseSyncGuard = createBaseSyncGuard({
           gh,
           store,
@@ -18351,22 +18688,21 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
         feature_pr_url: ""
       };
     } catch (err) {
+      if (err instanceof StateTransitionAbortedError) {
+        return abortedResult(err);
+      }
+      if (effectiveInput.command === "closed") {
+        throw new ClosureNotProcessedError(effectiveInput.issueNumber, err);
+      }
       const rawErrMessage = err instanceof Error ? err.message : String(err);
-      const escalationReason = err instanceof LLMError ? resolveLlmEscalationReason(err) : err instanceof GitHubRateLimitError ? "github_rate_limited" : err instanceof BranchUpdateConflictError ? "branch_update_conflict" : err instanceof MissingModelConfigError ? "model_config_missing" : "internal_error";
-      const commandPhase = effectiveInput.command === "approve" || effectiveInput.command === "continue" ? "implementation" : effectiveInput.command === "to-tickets" ? "tickets" : effectiveInput.command === "to-spec" ? "spec" : "grilling";
-      const escalationCommentFor = (branch, codeFixAttemptsUsed) => formatNeedsHumanEscalationComment({
-        reason: escalationReason,
-        issueNumber: effectiveInput.issueNumber,
-        ticketIssueNumber: effectiveInput.issueNumber,
-        branch,
-        codeFixAttemptsUsed,
-        maxCodeFixAttempts,
+      const escalation = {
+        reason: err instanceof LLMError ? resolveLlmEscalationReason(err) : err instanceof GitHubRateLimitError ? "github_rate_limited" : err instanceof BranchUpdateConflictError ? "branch_update_conflict" : err instanceof MissingModelConfigError ? "model_config_missing" : "internal_error",
         missingModelKeys: err instanceof MissingModelConfigError ? err.missingKeys : void 0,
         diagnosticExcerpt: redactSecrets(rawErrMessage, [
           activeToken,
           effectiveInput.llmApiKey
         ])
-      });
+      };
       const rateLimited = err instanceof GitHubRateLimitError;
       const recordFetch = rateLimited ? createGitHubRateLimitedFetch({
         fetchImpl: countedFetch,
@@ -18377,81 +18713,35 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
         token: activeToken,
         fetchImpl: recordFetch
       }) : gh;
-      const recordStore = rateLimited && !input.stateStore ? createGitHubApiRefStateStore({
-        repository: input.repository,
-        githubToken: activeToken,
-        fetchImpl: recordFetch
-      }) : store;
+      const recordStore = rateLimited && !input.stateStore ? guardTerminalStates(
+        createGitHubApiRefStateStore({
+          repository: input.repository,
+          githubToken: activeToken,
+          fetchImpl: recordFetch
+        }),
+        allowedTerminalSha
+      ) : store;
       try {
-        const latestSnap = await recordStore.readRef(refName);
-        const fallbackPhase = latestSnap.state?.phase && latestSnap.state.phase !== "idle" ? latestSnap.state.phase : commandPhase;
-        const fallbackBranch = latestSnap.state?.active_branch || (fallbackPhase === "implementation" ? featureBranch : planBranch);
-        let duplicateOfLastEscalation = false;
-        const updatedSuspended = await updateIssueStateWithCas({
-          issueNumber: effectiveInput.issueNumber,
-          store: recordStore,
-          mutator: (prev) => {
-            const escalation = {
-              reason: escalationReason,
-              head_sha: prev.active_head_sha ?? "",
-              ticket_number: prev.active_ticket_number ?? effectiveInput.issueNumber,
-              budget_scope: activeBudgetScope(prev)
-            };
-            duplicateOfLastEscalation = isAutomaticEntry && prev.last_escalation?.reason === escalation.reason && prev.last_escalation?.head_sha === escalation.head_sha;
-            return toTerminalState(prev, {
-              phase: prev.phase !== "idle" ? prev.phase : fallbackPhase,
-              status: "suspended",
-              active_branch: prev.active_branch || fallbackBranch,
-              transient_retries_used: cumulativeTransientRetriesUsed(),
-              last_escalation: escalation,
-              last_processed_comment_id: Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
-            });
-          }
+        return await recordEscalation(escalation, {
+          gh: recordGh,
+          store: recordStore
         });
-        const escalationMarkdown = appendEpureCommandsSpoiler(
-          [
-            updatedSuspended.issue_mirror_markdown,
-            "",
-            escalationCommentFor(
-              updatedSuspended.state.active_branch || fallbackBranch,
-              updatedSuspended.state.code_fix_attempts_used
-            )
-          ].join("\n"),
-          {
-            phase: "suspended",
-            status: "suspended",
-            issueNumber: effectiveInput.issueNumber
-          }
-        );
-        if (!duplicateOfLastEscalation) {
-          await recordGh.ensureLabel(
-            "needs-human",
-            "D93F0B",
-            "Requires human maintainer intervention"
-          );
-          await recordGh.addIssueLabels(effectiveInput.issueNumber, ["needs-human"]);
-          await recordGh.postIssueComment(effectiveInput.issueNumber, escalationMarkdown);
-        }
-        return {
-          executed: true,
-          phase: updatedSuspended.state.phase,
-          status: updatedSuspended.state.status,
-          active_branch: updatedSuspended.state.active_branch,
-          summary_markdown: escalationMarkdown,
-          created_ticket_numbers: [],
-          feature_pr_url: ""
-        };
       } catch (recordErr) {
+        if (recordErr instanceof StateTransitionAbortedError) {
+          return abortedResult(recordErr);
+        }
         if (!(recordErr instanceof GitHubRateLimitError)) {
           throw recordErr;
         }
         throw new EscalationNotRecordedError(
           effectiveInput.issueNumber,
-          escalationReason,
-          escalationCommentFor(
-            commandPhase === "implementation" ? featureBranch : planBranch,
-            void 0
-          )
+          escalation.reason,
+          formatEscalation(escalation, {
+            phase: commandPhase,
+            branch: IMPLEMENTATION_PHASES.has(commandPhase) ? featureBranch : planBranch,
+            ticketNumber: effectiveInput.issueNumber
+          }),
+          resumeCommandForPhase(commandPhase)
         );
       }
     }
