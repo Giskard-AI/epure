@@ -3323,6 +3323,10 @@ function formatIssueStateMirrorMarkdown(state) {
     `- **Retries**: \`code_fix_attempts_used: ${state.code_fix_attempts_used}\`, \`transient_retries_used: ${state.transient_retries_used}\``
   ].join("\n");
 }
+function formatIssueStateMarker(state) {
+  const { plan_manifest: _plan, spec_manifest: _spec, ...summary } = state;
+  return `<!-- epure-state:${JSON.stringify(summary)} -->`;
+}
 async function updateIssueStateWithCas(input) {
   const refName = buildIssueStateRefName(input.issueNumber);
   const maxRetries = input.maxCasRetries ?? 5;
@@ -3885,8 +3889,24 @@ function createGitHubRestHelper(params) {
         title: data?.title ?? `Issue #${issueNumber}`,
         body: data?.body ?? "",
         state: data?.state ?? "open",
-        state_reason: data?.state_reason ?? null
+        state_reason: data?.state_reason ?? null,
+        ...typeof data?.user?.login === "string" ? { user: { login: data.user.login } } : {},
+        performed_via_github_app: data?.performed_via_github_app ?? null,
+        is_pull_request: data?.pull_request !== void 0 && data.pull_request !== null
       };
+    },
+    // Only the first page: a plan has far fewer than 100 tickets.
+    async listSubIssueNumbers(parentIssueNumber) {
+      const { status, data } = await apiRequest(
+        "GET",
+        `/repos/${owner}/${repo}/issues/${parentIssueNumber}/sub_issues?per_page=100`,
+        void 0,
+        true
+      );
+      if (status === 404 || !Array.isArray(data)) {
+        return [];
+      }
+      return data.map((s) => s.number).filter((n) => typeof n === "number");
     },
     // Oldest first, up to 30 pages (3,000 comments).
     async listIssueComments(issueNumber) {
@@ -4031,9 +4051,9 @@ function createGitHubRestHelper(params) {
       );
       return res.data?.object?.sha ?? null;
     },
-    async listBranchPaths(branch) {
-      return (await readCompleteTree(branch)).flatMap(
-        (e) => e.type === "blob" && typeof e.path === "string" ? [e.path] : []
+    async listDirectoryPaths(branch, dirPath) {
+      return (await listDirectoryFiles(branch, dirPath)).flatMap(
+        (e) => e.path ? [e.path] : []
       );
     },
     async listBranchPathHints(branch) {
@@ -7083,6 +7103,11 @@ function parseAgentsYaml(yamlContent) {
     ...t.build_command ? { build_command: t.build_command } : {}
   }));
   const hasVerificationOverrides = wait_for_external_ci !== void 0 || external_ci_timeout_minutes !== void 0 || grace_window_seconds !== void 0 || deferred_external_workflows !== void 0 || hasTargetsKey || parsedTargets.length > 0;
+  if (reviewers_dir !== void 0 && reviewers_dir.split(/[\\/]/).some((s) => s === "." || s === "..")) {
+    throw new Error(
+      `reviewers_dir '${reviewers_dir}' must not contain '.' or '..' path segments.`
+    );
+  }
   const overrides = {
     ...harness ? { harness } : {},
     ...Object.keys(models).length > 0 ? { models } : {},
@@ -9293,6 +9318,8 @@ function formatNeedsHumanEscalationComment(input) {
     reasonHeadline = "Branch kept moving under EPURE: its commit could not be fast-forwarded after re-basing on the new head (`branch_update_conflict`) \u2014 no commit overwritten, code-fix budget preserved";
   } else if (input.reason === "ambiguous_feature_branch") {
     reasonHeadline = "Several `feature/<N>-*` branches match this plan and no single one has an open or merged PR to `dev` (`ambiguous_feature_branch`) \u2014 EPURE does not guess; code-fix budget preserved";
+  } else if (input.reason === "plan_manifest_missing") {
+    reasonHeadline = "The ticket graph EPURE generated for this plan cannot be read (`plan_manifest_missing`) \u2014 EPURE does not implement the issue body in its place. Before implementation, `/epure to-tickets` regenerates the graph; once implementation has started, close the plan and open a new one";
   } else if (input.reason === "internal_error") {
     reasonHeadline = "Internal orchestrator error \u2014 code-fix budget preserved";
   } else {
@@ -9686,9 +9713,6 @@ var EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT = [
   "- **Mode `caveman-lite` (`Zero-Filler`) dans les r\xE9sum\xE9s et tours d'outils** : supprime toute formule de politesse, pr\xE9ambule, remplissage ou h\xE9sitation (\xAB Bien s\xFBr \xBB, \xAB Voici la correction \xBB, \xAB Il semble que \xBB) tout en conservant la structure grammaticale compl\xE8te Sujet-Verbe-Objet d'ASD-STE100.",
   "- **Fronti\xE8re stricte d'Auto-Clarity (100 % exact et non abr\xE9g\xE9)** : ne compresse JAMAIS le code source, les chemins de fichiers, les commandes shell, les identifiants techniques, les sch\xE9mas JSON de sortie (`commit_message`, `test_summary`, `patches`, `files`, `deleted_files`), les diagnostics de s\xE9curit\xE9 ni les messages de commit Conventional Commits."
 ].join("\n");
-
-// src/orchestrator/workspace/repo-tools.ts
-import { createHash } from "node:crypto";
 
 // src/orchestrator/workspace/web-tools.ts
 var DEFAULT_WEB_TOOLS_PHASES = [
@@ -10567,37 +10591,6 @@ async function applyTicketImplementationPayload(params) {
     ([path, content]) => ({ path, content })
   );
 }
-function manifestSha256(manifestJson) {
-  return createHash("sha256").update(manifestJson).digest("hex");
-}
-function isTrustedManifest(comment, manifestJson, trustedSha256) {
-  return trustedSha256 !== void 0 ? manifestSha256(manifestJson) === trustedSha256 : comment.user.type === "Bot";
-}
-function parsePlanManifestFromComments(comments, trustedSha256) {
-  for (let i = comments.length - 1; i >= 0; i -= 1) {
-    const comment = comments[i];
-    const match = /<!-- epure-plan-manifest:([\s\S]*?)-->/.exec(comment?.body ?? "");
-    const manifestJson = match?.[1]?.trim();
-    if (comment && manifestJson && isTrustedManifest(comment, manifestJson, trustedSha256)) {
-      try {
-        const parsed = JSON.parse(manifestJson);
-        if (Array.isArray(parsed.tickets) && parsed.tickets.length > 0) {
-          return {
-            ...typeof parsed.planBranch === "string" ? { planBranch: parsed.planBranch } : {},
-            ...typeof parsed.specPath === "string" ? { specPath: parsed.specPath } : {},
-            ...parsed.epicGoalContract ? { epicGoalContract: parsed.epicGoalContract } : {},
-            tickets: parsed.tickets
-          };
-        }
-      } catch {
-      }
-    }
-  }
-  return null;
-}
-function parseTrackedTicketsFromComments(comments, trustedSha256) {
-  return parsePlanManifestFromComments(comments, trustedSha256)?.tickets ?? [];
-}
 async function runTestsInIsolatedWorkspace(params) {
   const isGha = process.env.GITHUB_ACTIONS === "true";
   const groupTitle = params.label ? `[EPURE][Sandbox] ${params.label}` : "[EPURE][Sandbox] Verify Polyglot Stage 1 Suite";
@@ -11353,6 +11346,13 @@ ${formattedBlocks}`;
 `;
 }
 var ADR_PATH_REGEX = /^docs\/adr\/(\d{4})-(.+)\.md$/;
+async function listPlanArtifactPaths(gh, branch) {
+  const [adrPaths, specPaths] = await Promise.all([
+    gh.listDirectoryPaths(branch, "docs/adr"),
+    gh.listDirectoryPaths(branch, "docs/specs")
+  ]);
+  return ["GLOSSARY.md", ...adrPaths, ...specPaths];
+}
 function normalizeAdrSlug(rawSlug) {
   return rawSlug.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 }
@@ -11688,11 +11688,13 @@ async function integratePlanBranchIntoFeature(params) {
     };
   }
   const [devPaths, planPaths, featurePaths] = await Promise.all([
-    params.gh.listBranchPaths(baseBranch),
-    params.gh.listBranchPaths(params.planBranch),
-    params.gh.listBranchPaths(params.featureBranch)
+    listPlanArtifactPaths(params.gh, baseBranch),
+    listPlanArtifactPaths(params.gh, params.planBranch),
+    listPlanArtifactPaths(params.gh, params.featureBranch)
   ]);
-  const candidatePlanArtifactPaths = planPaths.map((p) => p.trim().replace(/^\/+/, "")).filter((p) => p === "GLOSSARY.md" || p.startsWith("docs/"));
+  const candidatePlanArtifactPaths = planPaths.map(
+    (p) => p.trim().replace(/^\/+/, "")
+  );
   if (candidatePlanArtifactPaths.length === 0) {
     return {
       featureHeadSha: featureInitialSha,
@@ -11864,10 +11866,10 @@ async function syncBranchWithBase(input) {
     commitMessage: `chore(sync): merge ${input.baseBranch} into ${input.targetBranch}`
   });
   if (mergeRes.status === "up_to_date" || mergeRes.status === "merged") {
-    if (mergeRes.status === "merged" && typeof input.gh.listBranchPaths === "function" && typeof input.gh.readSingleBranchFile === "function" && (input.targetBranch.startsWith("feature/") || input.targetBranch.startsWith("plan/"))) {
+    if (mergeRes.status === "merged" && typeof input.gh.listDirectoryPaths === "function" && typeof input.gh.readSingleBranchFile === "function" && (input.targetBranch.startsWith("feature/") || input.targetBranch.startsWith("plan/"))) {
       const [basePathsAfterMerge, targetPathsAfterMerge] = await Promise.all([
-        input.gh.listBranchPaths(input.baseBranch),
-        input.gh.listBranchPaths(input.targetBranch)
+        input.gh.listDirectoryPaths(input.baseBranch, "docs/adr"),
+        listPlanArtifactPaths(input.gh, input.targetBranch)
       ]);
       const baseAdrSet = new Set(
         basePathsAfterMerge.map((p) => p.trim().replace(/^\/+/, "")).filter((p) => ADR_PATH_REGEX.test(p))
@@ -12299,18 +12301,29 @@ async function handleEpicClosedByHuman(params) {
   if ((await params.gh.getIssue(params.issueNumber)).state === "open") {
     return ignore(`issue #${params.issueNumber} was reopened`);
   }
-  const featureBranch = planning ? void 0 : await findExistingFeatureBranch(params.gh, state);
-  if (featureBranch) {
-    const mergedPr = await params.gh.findMergedPullRequestByHead(featureBranch, "dev");
-    if (mergedPr) {
-      return ignore(`feature PR #${mergedPr.number} is already merged into dev`);
-    }
-  }
   const permission = await params.gh.getCollaboratorPermission(params.actor);
   if (!CAN_CANCEL.has(permission)) {
     return ignore(
       `closer @${params.actor} has permission ${permission}; only write or higher cancels the plan, which stays ${state.status} in phase ${state.phase}`
     );
+  }
+  let featureBranch;
+  let ambiguousCandidates = [];
+  if (!planning) {
+    try {
+      featureBranch = await findExistingFeatureBranch(params.gh, state);
+    } catch (err) {
+      if (!(err instanceof AmbiguousFeatureBranchError)) {
+        throw err;
+      }
+      ambiguousCandidates = err.candidates;
+    }
+  }
+  for (const branch of featureBranch ? [featureBranch] : ambiguousCandidates) {
+    const mergedPr = await params.gh.findMergedPullRequestByHead(branch, "dev");
+    if (mergedPr) {
+      return ignore(`feature PR #${mergedPr.number} is already merged into dev`);
+    }
   }
   if (planning) {
     const updated2 = await updateIssueStateWithCas({
@@ -12357,7 +12370,7 @@ async function handleEpicClosedByHuman(params) {
       "",
       `### \u{1F6D1} Issue de pilotage #${params.issueNumber} ferm\xE9e par \`@${params.actor}\` avant l'int\xE9gration dans \`dev\``,
       "",
-      featureBranch && comparison ? `- **Branche de fonctionnalit\xE9** : \`${featureBranch}\` \u2014 ${comparison.aheadBy} commit(s) non int\xE9gr\xE9(s) dans \`dev\`` : `- **Branche de fonctionnalit\xE9** : aucune branche \`feature/${params.issueNumber}-*\` sur GitHub`,
+      featureBranch && comparison ? `- **Branche de fonctionnalit\xE9** : \`${featureBranch}\` \u2014 ${comparison.aheadBy} commit(s) non int\xE9gr\xE9(s) dans \`dev\`` : ambiguousCandidates.length > 0 ? `- **Branches de fonctionnalit\xE9 candidates** (aucune n'est identifi\xE9e comme celle du plan) : ${ambiguousCandidates.map((b) => `\`${b}\``).join(", ")}` : `- **Branche de fonctionnalit\xE9** : aucune branche \`feature/${params.issueNumber}-*\` sur GitHub`,
       "- **Statut d'orchestration** : `cancelled` (Plan annul\xE9) ; aucune branche n'a \xE9t\xE9 supprim\xE9e.",
       openPrs.length > 0 ? `- **Pull Requests ouvertes, laiss\xE9es ouvertes** : ${openPrs.map((pr) => `[#${pr.number}](${pr.html_url})`).join(", ")}` : "- **Pull Requests ouvertes** : aucune",
       `- **Reprise** : rouvrez l'issue #${params.issueNumber}, puis postez \`/epure continue\`.`
@@ -12378,6 +12391,84 @@ async function handleEpicClosedByHuman(params) {
     created_ticket_numbers: [],
     feature_pr_url: featurePr?.html_url ?? ""
   };
+}
+
+// src/orchestrator/plan-manifest.ts
+var GITHUB_ACTIONS_APP_ID = 15368;
+function isEpureAuthored(item, identity) {
+  return item.performed_via_github_app?.id === identity.appId;
+}
+function embedManifestJson(manifest) {
+  return JSON.stringify(manifest).replace(/--/g, "-\\u002d");
+}
+function latestEpureManifests(comments, marker, identity) {
+  const pattern = new RegExp(`<!-- ${marker}:([\\s\\S]*?)-->`);
+  const manifests = [];
+  for (let i = comments.length - 1; i >= 0; i -= 1) {
+    const comment = comments[i];
+    const json = comment && isEpureAuthored(comment, identity) ? pattern.exec(comment.body)?.[1]?.trim() : void 0;
+    if (json) {
+      try {
+        manifests.push(JSON.parse(json));
+      } catch {
+      }
+    }
+  }
+  return manifests;
+}
+function parsePlanManifestFromComments(comments, identity) {
+  for (const raw of latestEpureManifests(comments, "epure-plan-manifest", identity)) {
+    const parsed = raw;
+    if (Array.isArray(parsed.tickets) && parsed.tickets.length > 0) {
+      return {
+        planBranch: typeof parsed.planBranch === "string" ? parsed.planBranch : "",
+        ...typeof parsed.specPath === "string" ? { specPath: parsed.specPath } : {},
+        ...parsed.epicGoalContract ? { epicGoalContract: parsed.epicGoalContract } : {},
+        tickets: parsed.tickets
+      };
+    }
+  }
+  return null;
+}
+function parseSpecManifestFromComments(comments, identity) {
+  for (const raw of latestEpureManifests(comments, "epure-spec-manifest", identity)) {
+    const parsed = raw;
+    if (typeof parsed.planBranch === "string" && typeof parsed.specPath === "string" && Array.isArray(parsed.adrPaths)) {
+      const strings = (values) => Array.isArray(values) ? values.filter((v) => typeof v === "string") : [];
+      return {
+        planBranch: parsed.planBranch,
+        specPath: parsed.specPath,
+        adrPaths: strings(parsed.adrPaths),
+        targetFilesHint: strings(parsed.targetFilesHint),
+        ...parsed.epicGoalContract ? { epicGoalContract: parsed.epicGoalContract } : {}
+      };
+    }
+  }
+  return null;
+}
+function resolveSpecManifest(state, comments, identity) {
+  return state?.spec_manifest ?? parseSpecManifestFromComments(comments, identity);
+}
+var TICKETS_TASKLIST_MARKER = "<!-- epure-tickets-tasklist:start -->";
+function resolvePlanManifest(params) {
+  const recorded = params.state?.plan_manifest;
+  if (recorded) {
+    return recorded.superseded ? {
+      kind: "missing",
+      reason: "the last `/epure to-tickets` stopped while it regenerated the ticket graph: the recorded tickets are superseded"
+    } : { kind: "recorded", manifest: recorded, fromLegacyComment: false };
+  }
+  const legacy = parsePlanManifestFromComments(params.comments, params.identity);
+  if (legacy) {
+    return { kind: "recorded", manifest: legacy, fromLegacyComment: true };
+  }
+  return params.state?.phase === "tickets" || params.epicBody.includes(TICKETS_TASKLIST_MARKER) ? {
+    kind: "missing",
+    reason: "a ticket graph was generated for this plan, but no manifest written by EPURE's GitHub App was found in the state ref or the issue comments"
+  } : { kind: "none" };
+}
+function isSupersedableTicket(ticket, parentIssueNumber, identity) {
+  return ticket.is_pull_request !== true && ticket.state === "open" && isEpureAuthored(ticket, identity) && ticket.body.split("\n", 1)[0]?.trim() === `Parent Plan: #${parentIssueNumber}`;
 }
 
 // src/orchestrator/types.ts
@@ -12633,6 +12724,7 @@ async function createLinkedPhaseTicketsOnGitHub(params) {
       body: ticketBody,
       labels: ["ready-for-agent"]
     });
+    params.onTicketCreated?.(createdIssue.number);
     indexToIssueNumber.set(ticket.index, createdIssue.number);
     if (typeof createdIssue.id === "number") {
       indexToIssueDatabaseId.set(ticket.index, createdIssue.id);
@@ -12742,38 +12834,14 @@ var IMPLEMENTATION_STARTED_PHASES = /* @__PURE__ */ new Set([
   "review",
   "completed"
 ]);
-function parseLatestSpecManifest(comments, trustedSha256) {
-  for (let i = comments.length - 1; i >= 0; i -= 1) {
-    const comment = comments[i];
-    const match = (comment?.body ?? "").match(/<!-- epure-spec-manifest:(\{[\s\S]*?\}) -->/);
-    if (comment && match?.[1] && isTrustedManifest(comment, match[1], trustedSha256)) {
-      try {
-        const parsed = JSON.parse(match[1]);
-        if (typeof parsed.planBranch === "string" && typeof parsed.specPath === "string" && Array.isArray(parsed.adrPaths)) {
-          return {
-            planBranch: parsed.planBranch,
-            specPath: parsed.specPath,
-            adrPaths: parsed.adrPaths.filter(
-              (p) => typeof p === "string"
-            ),
-            targetFilesHint: Array.isArray(parsed.targetFilesHint) ? parsed.targetFilesHint.filter(
-              (f) => typeof f === "string"
-            ) : [],
-            ...parsed.epicGoalContract ? { epicGoalContract: parsed.epicGoalContract } : {}
-          };
-        }
-      } catch {
-      }
-    }
-  }
-  return null;
-}
 async function runGrillAndPlanPhase(params) {
   const {
     command,
     currentPhase,
     currentStatus,
-    trustedManifestSha256,
+    planManifest,
+    specManifest,
+    epureIdentity,
     repository,
     issueNumber,
     commentId,
@@ -12789,7 +12857,7 @@ async function runGrillAndPlanPhase(params) {
     onTransientRetriesUsed,
     fetchImpl
   } = params;
-  const supersededTickets = command === "to-tickets" ? parseTrackedTicketsFromComments(allComments, trustedManifestSha256.plan) : [];
+  const supersededTickets = command === "to-tickets" ? planManifest?.tickets ?? [] : [];
   const implementationStarted = command === "to-tickets" && (IMPLEMENTATION_STARTED_PHASES.has(currentPhase ?? "") || supersededTickets.length > 0 && (await gh.listBranchesByPrefix(`feature/${issueNumber}-`)).length > 0);
   if (implementationStarted) {
     const kept = await updateIssueStateWithCas({
@@ -13066,9 +13134,8 @@ ${issue.body}`
   };
   if (command === "to-spec" || command === "reply" && currentPhase === "spec") {
     const isSpecRevision = command === "reply" && currentPhase === "spec";
-    const existingManifest = parseLatestSpecManifest(allComments, trustedManifestSha256.spec);
     const currentSpecOnBranch = await readRepoFileSafely(
-      existingManifest?.specPath ?? `docs/specs/${planSlug}.md`,
+      specManifest?.specPath ?? `docs/specs/${planSlug}.md`,
       planBranch
     );
     const specOnlySystemInstruction = [
@@ -13331,7 +13398,6 @@ ${issue.body}`
       targetFilesHint,
       ...specArtifacts.epic_goal_contract ? { epicGoalContract: specArtifacts.epic_goal_contract } : {}
     };
-    const specManifestJson = JSON.stringify(specManifestPayload);
     const updatedSpec = await updateIssueStateWithCas({
       issueNumber,
       store,
@@ -13341,7 +13407,7 @@ ${issue.body}`
         status: "awaiting_human_approval",
         active_branch: planBranch,
         plan_branch: prev.plan_branch ?? planBranch,
-        spec_manifest_sha256: manifestSha256(specManifestJson),
+        spec_manifest: specManifestPayload,
         last_processed_comment_id: advanceCommentCursor(prev, commentId)
       })
     });
@@ -13364,7 +13430,7 @@ ${issue.body}`
         "- Pour demander un ajustement ou une correction de la sp\xE9cification, **r\xE9pondez directement en commentaire** (sans commande slash).",
         "- Si la sp\xE9cification est valid\xE9e, postez **`/epure to-tickets`** pour g\xE9n\xE9rer le graphe de tickets TDD (`ready-for-agent`).",
         "",
-        `<!-- epure-spec-manifest:${specManifestJson} -->`
+        `<!-- epure-spec-manifest:${embedManifestJson(specManifestPayload)} -->`
       ].join("\n"),
       {
         phase: "spec",
@@ -13383,8 +13449,7 @@ ${issue.body}`
       feature_pr_url: ""
     };
   }
-  const storedSpecManifest = parseLatestSpecManifest(allComments, trustedManifestSha256.spec);
-  const candidateSpecPath = storedSpecManifest?.specPath ?? `docs/specs/${planSlug}.md`;
+  const candidateSpecPath = specManifest?.specPath ?? `docs/specs/${planSlug}.md`;
   const existingSpecOnPlanBranch = await readRepoFileSafely(
     candidateSpecPath,
     planBranch
@@ -13392,7 +13457,7 @@ ${issue.body}`
   let bundle;
   if (existingSpecOnPlanBranch && existingSpecOnPlanBranch.trim().length > 0) {
     const existingGlossary = await readRepoFileSafely("GLOSSARY.md", planBranch) ?? await readRepoFileSafely("GLOSSARY.md", "dev") ?? "# Glossary\n\n- **Domain Term**: Canonical project definition.\n";
-    const adrPathsToRead = storedSpecManifest?.adrPaths ?? [];
+    const adrPathsToRead = specManifest?.adrPaths ?? [];
     const loadedAdrs = [];
     for (const adrPath of adrPathsToRead) {
       const adrContent = await readRepoFileSafely(adrPath, planBranch);
@@ -13481,7 +13546,7 @@ ${issue.body}`
       spec_path: candidateSpecPath,
       spec_markdown: existingSpecOnPlanBranch,
       tickets: ticketDag.tickets,
-      ...storedSpecManifest?.epicGoalContract ? { epic_goal_contract: storedSpecManifest.epicGoalContract } : {}
+      ...specManifest?.epicGoalContract ? { epic_goal_contract: specManifest.epicGoalContract } : {}
     };
   } else {
     const specSystemInstruction = [
@@ -13687,65 +13752,102 @@ ${issue.body}`
     "0E8A16",
     "Ticket ready for autonomous EPURE agent execution"
   );
-  for (const old of supersededTickets) {
+  const supersededCandidates = /* @__PURE__ */ new Set([
+    ...supersededTickets.map((t) => t.ticketIssueNumber),
+    ...await gh.listSubIssueNumbers?.(issueNumber) ?? []
+  ]);
+  const ticketsToClose = [];
+  for (const candidate of supersededCandidates) {
+    if (isSupersedableTicket(await gh.getIssue(candidate), issueNumber, epureIdentity)) {
+      ticketsToClose.push(candidate);
+    }
+  }
+  if (planManifest || ticketsToClose.length > 0) {
+    await updateIssueStateWithCas({
+      issueNumber,
+      store,
+      mutator: (prev) => ({
+        ...prev,
+        plan_manifest: {
+          ...prev.plan_manifest ?? planManifest ?? { planBranch, tickets: [] },
+          superseded: true
+        }
+      })
+    });
+  }
+  for (const ticketNumber of ticketsToClose) {
     await gh.postIssueComment(
-      old.ticketIssueNumber,
+      ticketNumber,
       `\u267B\uFE0F Ticket remplac\xE9 : le graphe de tickets de #${issueNumber} est r\xE9g\xE9n\xE9r\xE9 par \`/epure to-tickets\` apr\xE8s r\xE9vision de la sp\xE9cification. Ce ticket ne sera pas impl\xE9ment\xE9.`
     );
-    await gh.closeIssue(old.ticketIssueNumber, "not_planned");
+    await gh.closeIssue(ticketNumber, "not_planned");
   }
-  const createdTicketsManifest = await createLinkedPhaseTicketsOnGitHub({
-    gh,
-    parentIssueNumber: issueNumber,
-    phase: 1,
-    spoilerContext: {
-      phase: "tickets",
-      status: "awaiting-human"
-    },
-    tickets: bundle.tickets.map((ticket) => {
-      const ticketTouchesUi = ticket.files_to_create_or_update.some(
-        (f) => /\.(?:tsx|jsx|css|scss|html)$/i.test(f)
-      );
-      const enrichedAcceptanceCriteria = [
-        ...ticket.acceptance_criteria,
-        ...ticketTouchesUi && designGate ? designGate.ux_acceptance_criteria : []
-      ];
-      return {
-        index: ticket.index,
-        slug: ticket.slug,
-        title: ticket.title,
-        description: ticket.description,
-        acceptanceCriteria: enrichedAcceptanceCriteria,
-        blockedByIndices: ticket.blocked_by_indices,
-        filesToTouch: ticket.files_to_create_or_update,
-        acceptanceSectionHeading: "Acceptance Criteria (TDD & UX)"
-      };
-    })
-  });
-  await upsertParentIssueTicketsTasklist({
-    gh,
-    parentIssueNumber: issueNumber,
-    fallbackBody: issue.body,
-    tickets: createdTicketsManifest
-  });
-  const planManifestJson = JSON.stringify({
-    planBranch,
-    specPath: bundle.spec_path,
-    ...bundle.epic_goal_contract ? { epicGoalContract: bundle.epic_goal_contract } : {},
-    tickets: createdTicketsManifest
-  });
-  const updated = await updateIssueStateWithCas({
-    issueNumber,
-    store,
-    mutator: (prev) => ({
-      ...prev,
-      phase: "tickets",
-      status: "awaiting_human_approval",
-      active_branch: planBranch,
-      plan_branch: prev.plan_branch ?? planBranch,
-      plan_manifest_sha256: manifestSha256(planManifestJson),
-      last_processed_comment_id: advanceCommentCursor(prev, commentId)
-    })
+  const createdTicketNumbers = [];
+  const createAndRecordTicketGraph = async () => {
+    const createdTicketsManifest2 = await createLinkedPhaseTicketsOnGitHub({
+      gh,
+      parentIssueNumber: issueNumber,
+      phase: 1,
+      onTicketCreated: (ticketNumber) => createdTicketNumbers.push(ticketNumber),
+      spoilerContext: {
+        phase: "tickets",
+        status: "awaiting-human"
+      },
+      tickets: bundle.tickets.map((ticket) => {
+        const ticketTouchesUi = ticket.files_to_create_or_update.some(
+          (f) => /\.(?:tsx|jsx|css|scss|html)$/i.test(f)
+        );
+        const enrichedAcceptanceCriteria = [
+          ...ticket.acceptance_criteria,
+          ...ticketTouchesUi && designGate ? designGate.ux_acceptance_criteria : []
+        ];
+        return {
+          index: ticket.index,
+          slug: ticket.slug,
+          title: ticket.title,
+          description: ticket.description,
+          acceptanceCriteria: enrichedAcceptanceCriteria,
+          blockedByIndices: ticket.blocked_by_indices,
+          filesToTouch: ticket.files_to_create_or_update,
+          acceptanceSectionHeading: "Acceptance Criteria (TDD & UX)"
+        };
+      })
+    });
+    await upsertParentIssueTicketsTasklist({
+      gh,
+      parentIssueNumber: issueNumber,
+      fallbackBody: issue.body,
+      tickets: createdTicketsManifest2
+    });
+    const planManifestRecord2 = {
+      planBranch,
+      specPath: bundle.spec_path,
+      ...bundle.epic_goal_contract ? { epicGoalContract: bundle.epic_goal_contract } : {},
+      tickets: createdTicketsManifest2
+    };
+    const updated2 = await updateIssueStateWithCas({
+      issueNumber,
+      store,
+      mutator: (prev) => ({
+        ...prev,
+        phase: "tickets",
+        status: "awaiting_human_approval",
+        active_branch: planBranch,
+        plan_branch: prev.plan_branch ?? planBranch,
+        plan_manifest: planManifestRecord2,
+        last_processed_comment_id: advanceCommentCursor(prev, commentId)
+      })
+    });
+    return { createdTicketsManifest: createdTicketsManifest2, planManifestRecord: planManifestRecord2, updated: updated2 };
+  };
+  const { createdTicketsManifest, planManifestRecord, updated } = await createAndRecordTicketGraph().catch(async (err) => {
+    for (const ticketNumber of createdTicketNumbers) {
+      try {
+        await gh.closeIssue(ticketNumber, "not_planned");
+      } catch {
+      }
+    }
+    throw err;
   });
   const ticketLines = createdTicketsManifest.map((t) => {
     const blockedText = t.blockedByIssueNumbers.length > 0 ? ` (blocked_by: ${t.blockedByIssueNumbers.map((n) => `#${n}`).join(", ")})` : " (ready \u2014 root)";
@@ -13770,7 +13872,7 @@ ${issue.body}`
       "",
       "\u{1F449} **Action requise** : V\xE9rifiez les livrables sur la branche de plan et les tickets ci-dessus, puis postez `/epure approve` sur cette issue pour verrouiller le p\xE9rim\xE8tre et lancer l'impl\xE9mentation TDD autonome.",
       "",
-      `<!-- epure-plan-manifest:${planManifestJson} -->`
+      `<!-- epure-plan-manifest:${embedManifestJson(planManifestRecord)} -->`
     ].join("\n"),
     {
       phase: "tickets",
@@ -13948,13 +14050,13 @@ async function spawnPhase2ConvergenceTickets(params) {
     fallbackBody: params.issue.body,
     tickets: combinedTickets
   });
-  const planManifestJson = JSON.stringify({
+  const planManifest = {
     planBranch: params.planBranch,
     specPath: params.specPath,
     epicGoalContract: params.epicGoalContract,
     tickets: combinedTickets
-  });
-  const stateMirrorMarkdown = await params.recordPlanManifest(planManifestJson);
+  };
+  const stateMirrorMarkdown = await params.recordPlanManifest(planManifest);
   const phaseComment = appendEpureCommandsSpoiler(
     [
       stateMirrorMarkdown,
@@ -13977,7 +14079,7 @@ async function spawnPhase2ConvergenceTickets(params) {
         (t) => `- **#${t.ticketIssueNumber}** \u2014 ${t.title}`
       ),
       "",
-      `<!-- epure-plan-manifest:${planManifestJson} -->`
+      `<!-- epure-plan-manifest:${embedManifestJson(planManifest)} -->`
     ].join("\n"),
     {
       phase: "implementation",
@@ -14980,7 +15082,7 @@ async function runFeatureIntegrationPhase(params) {
         })
       });
       const asyncFeatureSummary = [
-        `<!-- epure-state:${JSON.stringify(updatedWaitingFeature.state)} -->`,
+        formatIssueStateMarker(updatedWaitingFeature.state),
         updatedWaitingFeature.issue_mirror_markdown,
         "",
         `### \u23F3 Attente \xE9v\xE9nementielle CI externe (\`waiting_feature_ci\`) \u2014 Feature PR #${featurePr.number}`,
@@ -15007,7 +15109,8 @@ async function runFeatureIntegrationPhase(params) {
           active_branch: params.featureBranch,
           summary_markdown: asyncFeatureSummary,
           created_ticket_numbers: allTicketNumbers,
-          feature_pr_url: featurePr.html_url
+          feature_pr_url: featurePr.html_url,
+          waiting_ci_head_sha: passParams.headSha
         }
       };
     }
@@ -15635,7 +15738,7 @@ async function checkMidLoopCancellation(params) {
   if (snapshot.state?.status === "cancelled") {
     const cancelMarkdown = appendEpureCommandsSpoiler(
       [
-        `<!-- epure-state:${JSON.stringify(snapshot.state)} -->`,
+        formatIssueStateMarker(snapshot.state),
         "",
         `\u{1F6D1} Plan #${params.issueNumber} execution halted because status is **cancelled**.`
       ].join("\n"),
@@ -15682,7 +15785,7 @@ async function checkMidLoopCancellation(params) {
   if (batchResult.cancelled) {
     const cancelMarkdown = appendEpureCommandsSpoiler(
       [
-        `<!-- epure-state:${JSON.stringify(batchResult.state)} -->`,
+        formatIssueStateMarker(batchResult.state),
         "",
         `\u{1F6D1} Plan #${params.issueNumber} has been **cancelled** mid-run via \`/epure cancel\`. Halting remaining ticket executions.`
       ].join("\n"),
@@ -16751,7 +16854,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
             })
           });
           const asyncSummary = [
-            `<!-- epure-state:${JSON.stringify(updatedWaiting.state)} -->`,
+            formatIssueStateMarker(updatedWaiting.state),
             updatedWaiting.issue_mirror_markdown,
             "",
             `### \u23F3 Attente \xE9v\xE9nementielle CI externe (\`waiting_ticket_ci\`) \u2014 Ticket #${ticket.ticketIssueNumber} (PR #${openTaskPr.number})`,
@@ -16781,7 +16884,8 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
               created_ticket_numbers: params.ticketsManifest.map(
                 (t) => t.ticketIssueNumber
               ),
-              feature_pr_url: ""
+              feature_pr_url: "",
+              waiting_ci_head_sha: passParams.headSha
             }
           };
         }
@@ -17454,9 +17558,28 @@ function indentOf(line) {
 function parseJobTimeoutMinutes(workflowYaml, jobId) {
   const lines = workflowYaml.split(/\r?\n/);
   const escapedJobId = jobId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const header = lines.findIndex(
-    (line) => new RegExp(`^\\s+${escapedJobId}:\\s*(#.*)?$`).test(line)
-  );
+  const headerPattern = new RegExp(`^\\s+${escapedJobId}:\\s*(#.*)?$`);
+  const jobsLine = lines.findIndex((line) => /^jobs:\s*(#.*)?$/.test(line));
+  if (jobsLine < 0) {
+    return void 0;
+  }
+  let header = -1;
+  let jobIndent;
+  for (let i = jobsLine + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^\s*(#.*)?$/.test(line)) {
+      continue;
+    }
+    const indent = indentOf(line);
+    if (indent === 0) {
+      break;
+    }
+    jobIndent ??= indent;
+    if (indent === jobIndent && headerPattern.test(line)) {
+      header = i;
+      break;
+    }
+  }
   if (header < 0) {
     return void 0;
   }
@@ -17540,6 +17663,24 @@ function resumesImplementationRun(state) {
   return IMPLEMENTATION_PHASES.has(state.phase) && (state.status === "active" || state.status === "suspended");
 }
 async function orchestrateIssueCommand(input) {
+  let result = await runIssueCommand(input);
+  const checkedHeads = /* @__PURE__ */ new Set();
+  while (result.waiting_ci_head_sha && !checkedHeads.has(result.waiting_ci_head_sha)) {
+    checkedHeads.add(result.waiting_ci_head_sha);
+    const resumed = await runIssueCommand({
+      ...input,
+      command: "continue",
+      commentId: 0,
+      triggerHeadSha: result.waiting_ci_head_sha
+    });
+    if (!resumed.executed) {
+      break;
+    }
+    result = resumed;
+  }
+  return result;
+}
+async function runIssueCommand(input) {
   let mintedAppToken = null;
   let githubRequestCount = 0;
   try {
@@ -17559,6 +17700,9 @@ async function orchestrateIssueCommand(input) {
         "Missing GitHub authentication: configure EPURE_AGENT_APP_ID + EPURE_AGENT_APP_PRIVATE_KEY (or fallback GITHUB_TOKEN)."
       );
     }
+    const epureIdentity = {
+      appId: mintedAppToken ? Number(input.agentAppId) : GITHUB_ACTIONS_APP_ID
+    };
     const baseFetch = input.fetchImpl ?? fetch;
     const countedFetch = (url, init) => {
       githubRequestCount += 1;
@@ -17957,10 +18101,9 @@ async function orchestrateIssueCommand(input) {
             command: effectiveInput.command,
             currentPhase: currentState?.phase,
             currentStatus: currentState?.status,
-            trustedManifestSha256: {
-              plan: currentState?.plan_manifest_sha256,
-              spec: currentState?.spec_manifest_sha256
-            },
+            planManifest: currentState?.plan_manifest ?? parsePlanManifestFromComments(allComments, epureIdentity),
+            specManifest: resolveSpecManifest(currentState, allComments, epureIdentity),
+            epureIdentity,
             repository: effectiveInput.repository,
             issueNumber: effectiveInput.issueNumber,
             commentId: effectiveInput.commentId,
@@ -18234,7 +18377,7 @@ async function orchestrateIssueCommand(input) {
               });
               const readyMd = appendEpureCommandsSpoiler(
                 [
-                  `<!-- epure-state:${JSON.stringify(updatedReviewReady.state)} -->`,
+                  formatIssueStateMarker(updatedReviewReady.state),
                   updatedReviewReady.issue_mirror_markdown,
                   "",
                   `### \u2705 Feature Pull Request pr\xEAte pour validation humaine \u2014 PR #${featurePrNumber}`,
@@ -18411,7 +18554,8 @@ async function orchestrateIssueCommand(input) {
                     active_branch: updatedResynced.state.active_branch,
                     summary_markdown: `PR #${prNumberToMerge} was not mergeable; \`${taskBranchToMerge}\` re-synced with \`${targetFeatureBranch}\` at \`${resync.headSha}\`. Waiting for external CI on the new head.`,
                     created_ticket_numbers: [],
-                    feature_pr_url: ""
+                    feature_pr_url: "",
+                    waiting_ci_head_sha: resync.headSha
                   };
                 }
               }
@@ -18456,13 +18600,23 @@ async function orchestrateIssueCommand(input) {
       }
       if (effectiveInput.command === "approve" || effectiveInput.command === "continue") {
         const phaseModels = requirePhaseModels();
+        const planManifestResolution = resolvePlanManifest({
+          state: currentState,
+          comments: allComments,
+          identity: epureIdentity,
+          epicBody: issue.body
+        });
+        if (planManifestResolution.kind === "missing") {
+          return await escalateSuspension({
+            reason: "plan_manifest_missing",
+            phase: currentState && IMPLEMENTATION_PHASES.has(currentState.phase) ? currentState.phase : "tickets",
+            diagnosticExcerpt: planManifestResolution.reason
+          });
+        }
         if (currentState?.status === "suspended") {
           await gh.removeIssueLabel?.(effectiveInput.issueNumber, "needs-human");
         }
-        const parsedPlanManifest = parsePlanManifestFromComments(
-          allComments,
-          currentState?.plan_manifest_sha256
-        );
+        const parsedPlanManifest = planManifestResolution.kind === "recorded" ? planManifestResolution.manifest : null;
         let ticketsManifest = parsedPlanManifest?.tickets ? [...parsedPlanManifest.tickets] : [];
         const hasExplicitPlanManifest = ticketsManifest.length > 0;
         if (!hasExplicitPlanManifest) {
@@ -18508,25 +18662,9 @@ async function orchestrateIssueCommand(input) {
             return mergedAtStart;
           }
         }
-        const planBranchToIntegrate = parsedPlanManifest?.planBranch ?? planBranch;
+        const planBranchToIntegrate = parsedPlanManifest?.planBranch || planBranch;
         const planHeadSha = hasExplicitPlanManifest && !existingFeaturePrCheck ? await gh.getDefaultBranchSha(planBranchToIntegrate) : null;
         const integratePlan = planHeadSha !== null && planHeadSha !== currentState?.integrated_plan_sha;
-        if (integratePlan) {
-          await integratePlanBranchIntoFeature({
-            gh,
-            planBranch: planBranchToIntegrate,
-            previousPlanSha: currentState?.integrated_plan_sha,
-            featureBranch,
-            baseBranch: "dev",
-            llmApiKey: effectiveInput.llmApiKey,
-            model: phaseModels.planningModel,
-            providers: phaseModels.providers,
-            maxTransientRetries: phaseModels.maxTransientRetries,
-            transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
-            requestTimeoutMs: phaseModels.requestTimeoutMs,
-            fetchImpl: effectiveInput.fetchImpl
-          });
-        }
         const remoteTrustedRoster = await gh.readTrustedBaseRosterFiles(
           "dev",
           reviewersDir
@@ -18578,6 +18716,7 @@ async function orchestrateIssueCommand(input) {
           })
         ) : "";
         const runLeaseMs = await resolveRunLeaseMs();
+        const migratedPlanManifest = planManifestResolution.kind === "recorded" && planManifestResolution.fromLegacyComment ? planManifestResolution.manifest : void 0;
         const updatedStart = await updateIssueStateWithCas({
           issueNumber: effectiveInput.issueNumber,
           store,
@@ -18604,12 +18743,41 @@ async function orchestrateIssueCommand(input) {
               active_branch: featureBranch,
               feature_branch: prev.feature_branch ?? featureBranch,
               epic_phase: prev.epic_phase ?? 1,
-              ...integratePlan ? { integrated_plan_sha: planHeadSha ?? void 0 } : {},
+              plan_manifest: prev.plan_manifest ?? migratedPlanManifest,
               last_processed_comment_id: advanceCommentCursor(prev, effectiveInput.commentId)
             };
           }
+        }).catch(async (err) => {
+          if (err instanceof StateTransitionAbortedError && !isAutomaticEntry) {
+            await gh.postIssueComment(
+              effectiveInput.issueNumber,
+              `\u23F8\uFE0F \`/epure ${effectiveInput.command}\` n'a pas \xE9t\xE9 appliqu\xE9 : ${err.reason}. V\xE9rifiez l'\xE9tat du plan avec \`/epure status\`, puis republiez la commande si n\xE9cessaire.`
+            );
+          }
+          throw err;
         });
         leaseExpiresAt = updatedStart.state.claim_expires_at;
+        if (integratePlan && planHeadSha !== null) {
+          await integratePlanBranchIntoFeature({
+            gh,
+            planBranch: planBranchToIntegrate,
+            previousPlanSha: currentState?.integrated_plan_sha,
+            featureBranch,
+            baseBranch: "dev",
+            llmApiKey: effectiveInput.llmApiKey,
+            model: phaseModels.planningModel,
+            providers: phaseModels.providers,
+            maxTransientRetries: phaseModels.maxTransientRetries,
+            transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+            requestTimeoutMs: phaseModels.requestTimeoutMs,
+            fetchImpl: effectiveInput.fetchImpl
+          });
+          await updateIssueStateWithCas({
+            issueNumber: effectiveInput.issueNumber,
+            store,
+            mutator: (prev) => ({ ...prev, integrated_plan_sha: planHeadSha })
+          });
+        }
         const grant = updatedStart.state.human_budget_grant_log?.at(-1);
         const grantsAfterStart = readHumanBudgetGrants(updatedStart.state);
         if (grant && grantsAfterStart > (currentState ? readHumanBudgetGrants(currentState) : 0)) {
@@ -18842,19 +19010,16 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
               gh,
               issueNumber: effectiveInput.issueNumber,
               issue,
-              planBranch: parsedPlanManifest?.planBranch ?? planBranch,
+              planBranch: parsedPlanManifest?.planBranch || planBranch,
               specPath: effectiveSpecPath,
               epicGoalContract,
               nextEpicPhase,
               existingTickets: ticketsManifest,
               auditResult: convergenceAudit,
-              recordPlanManifest: async (manifestJson) => (await updateIssueStateWithCas({
+              recordPlanManifest: async (manifest) => (await updateIssueStateWithCas({
                 issueNumber: effectiveInput.issueNumber,
                 store,
-                mutator: (prev) => ({
-                  ...prev,
-                  plan_manifest_sha256: manifestSha256(manifestJson)
-                })
+                mutator: (prev) => ({ ...prev, plan_manifest: manifest })
               })).issue_mirror_markdown
             });
             currentEpicPhase = nextEpicPhase;

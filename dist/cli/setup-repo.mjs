@@ -2601,6 +2601,11 @@ function parseAgentsYaml(yamlContent) {
     ...t.build_command ? { build_command: t.build_command } : {}
   }));
   const hasVerificationOverrides = wait_for_external_ci !== void 0 || external_ci_timeout_minutes !== void 0 || grace_window_seconds !== void 0 || deferred_external_workflows !== void 0 || hasTargetsKey || parsedTargets.length > 0;
+  if (reviewers_dir !== void 0 && reviewers_dir.split(/[\\/]/).some((s) => s === "." || s === "..")) {
+    throw new Error(
+      `reviewers_dir '${reviewers_dir}' must not contain '.' or '..' path segments.`
+    );
+  }
   const overrides = {
     ...harness ? { harness } : {},
     ...Object.keys(models).length > 0 ? { models } : {},
