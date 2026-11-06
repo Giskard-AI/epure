@@ -1611,15 +1611,38 @@ function buildCallerWorkflows(
         '          allow_implicit_planning_reply: "true"',
         "          github_token: ${{ secrets.GITHUB_TOKEN }}",
         "",
+        "  authorize-closure:",
+        '    name: "Authorize Issue Closure"',
+        "    if: ${{ github.event_name == 'issues' && github.event.sender.type == 'User' }}",
+        "    runs-on: ubuntu-26.04",
+        "    timeout-minutes: 5",
+        "    permissions:",
+        "      contents: read # read the closer's repository permission level",
+        "    outputs:",
+        "      authorized: ${{ steps.closer.outputs.authorized }}",
+        "    steps:",
+        "      - name: Check that the closer has write access",
+        "        id: closer",
+        "        env:",
+        "          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
+        "          CLOSER: ${{ github.event.sender.login }}",
+        "        run: |",
+        '          permission="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${CLOSER}/permission" --jq .permission)"',
+        '          case "$permission" in',
+        '            admin|write) echo "authorized=true" >> "$GITHUB_OUTPUT" ;;',
+        '            *) echo "authorized=false" >> "$GITHUB_OUTPUT" ;;',
+        "          esac",
+        "",
         "  orchestrate-command:",
         '    name: "Orchestrate Authorized /epure Lifecycle"',
-        "    needs: [authorize-command]",
-        "    if: ${{ always() && (needs.authorize-command.outputs.authorized == 'true' || (github.event_name == 'issues' && github.event.sender.type == 'User') || (github.event_name == 'workflow_run' && (startsWith(github.event.workflow_run.head_branch, 'task/') || startsWith(github.event.workflow_run.head_branch, 'feature/')))) }}",
+        "    needs: [authorize-command, authorize-closure]",
+        "    if: ${{ always() && (needs.authorize-command.outputs.authorized == 'true' || needs.authorize-closure.outputs.authorized == 'true' || (github.event_name == 'workflow_run' && github.event.workflow_run.head_repository.full_name == github.repository && (startsWith(github.event.workflow_run.head_branch, 'task/') || startsWith(github.event.workflow_run.head_branch, 'feature/')))) }}",
         "    runs-on: ubuntu-26.04",
         `    timeout-minutes: ${jobTimeoutMinutes}`,
         `    environment: ${llmEnvironment}`,
+        "    # A closure gets its own group so it never replaces a pending /epure run of the same issue.",
         "    concurrency:",
-        "      group: epure-issue-${{ github.event.issue.number || github.event.workflow_run.head_branch || github.run_id }}",
+        "      group: epure-issue-${{ github.event_name == 'issues' && 'closed-' || '' }}${{ github.event.issue.number || github.event.workflow_run.head_branch || github.run_id }}",
         "      cancel-in-progress: false",
         "    permissions:",
         "      contents: write # push task/feature branches and update refs/epure/state/*",
@@ -1760,6 +1783,7 @@ export function buildGovernanceRulesets(params: {
   readonly releaseAppName: string;
   readonly requirePrApprovalsOnDev?: number | undefined;
 }): {
+  readonly featureIntegrity: RepositoryRulesetSpec;
   readonly featureGovernance: RepositoryRulesetSpec;
   readonly devGovernance: RepositoryRulesetSpec;
   readonly releaseImmutability: RepositoryRulesetSpec;
@@ -1773,15 +1797,26 @@ export function buildGovernanceRulesets(params: {
     "Zizmor"
   ] as const;
 
+  // Nobody, the agent App included, deletes or force-pushes a feature/* branch.
+  const featureIntegrity: RepositoryRulesetSpec = {
+    name: "epure-feature-integrity",
+    enforcement: "active",
+    targetRefs: ["refs/heads/feature/*"],
+    blockDirectPushes: false,
+    blockForcePushes: true,
+    blockDeletions: true,
+    bypassActors: []
+  };
+
   // EPURE writes feature/* directly (plan integration, dev syncs as merge commits, conflict
-  // resolutions), so the agent App bypasses every rule there and linear history stays off.
+  // resolutions), so the agent App bypasses the PR and commit rules there and linear history stays off.
   const featureGovernance: RepositoryRulesetSpec = {
     name: "epure-feature-governance",
     enforcement: "active",
     targetRefs: ["refs/heads/feature/*"],
     blockDirectPushes: true,
-    blockForcePushes: true,
-    blockDeletions: true,
+    blockForcePushes: false,
+    blockDeletions: false,
     allowedMergeMethods: ["squash"],
     requiredApprovingReviewCount: 0,
     requiredStatusChecks: requiredChecks,
@@ -1827,10 +1862,11 @@ export function buildGovernanceRulesets(params: {
   };
 
   return {
+    featureIntegrity,
     featureGovernance,
     devGovernance,
     releaseImmutability,
-    all: [featureGovernance, devGovernance, releaseImmutability]
+    all: [featureIntegrity, featureGovernance, devGovernance, releaseImmutability]
   };
 }
 
@@ -2247,8 +2283,8 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
     },
     {
       id: "apply_branch_protections_and_release_ruleset",
-      title: "Confirm 3 Repository Rulesets (feature/*, dev, main+v*) and squash-only merge settings",
-      details: `Run 'setup-repo --apply --apply-github-settings' to enforce squash-only merges and provision 'epure-feature-governance', 'epure-dev-governance', and '${rulesetSpec.name}'.`
+      title: "Confirm 4 Repository Rulesets (feature/* integrity and governance, dev, main+v*) and squash-only merge settings",
+      details: `Run 'setup-repo --apply --apply-github-settings' to enforce squash-only merges and provision 'epure-feature-integrity', 'epure-feature-governance', 'epure-dev-governance', and '${rulesetSpec.name}'.`
     }
   ];
 

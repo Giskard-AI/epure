@@ -655,10 +655,10 @@ describeLive(
       });
     });
 
-    // The sandbox App has no `administration` permission: an admin token only creates and deletes a ruleset scoped to this run.
+    // The sandbox App has no `administration` permission: an admin token only creates and deletes rulesets scoped to this run.
     const ADMIN_TOKEN = process.env.EPURE_LIVE_GITHUB_ADMIN_TOKEN?.trim() ?? "";
-    (ADMIN_TOKEN ? describe : describe.skip)("setup-repo feature/* ruleset vs EPURE direct writes (#108)", () => {
-      let rulesetId = 0;
+    (ADMIN_TOKEN ? describe : describe.skip)("setup-repo feature/* rulesets vs EPURE direct writes (#108)", () => {
+      const rulesetIds: number[] = [];
 
       async function adminApi<T>(method: string, path: string, body?: unknown): Promise<ApiResult<T>> {
         const resp = await fetch(`https://api.github.com${path}`, {
@@ -670,36 +670,59 @@ describeLive(
         return { status: resp.status, headers: resp.headers, data: (text ? JSON.parse(text) : null) as T };
       }
 
+      async function installFeatureRulesets(slug: string, legacy: boolean): Promise<void> {
+        const generated = buildGovernanceRulesets({ agentAppName: "agent", releaseAppName: "release" });
+        const specs = legacy
+          ? [
+              {
+                ...generated.featureGovernance,
+                blockForcePushes: true,
+                blockDeletions: true,
+                requiredLinearHistory: true,
+                bypassActors: generated.featureGovernance.bypassActors.map((a) => ({ ...a, mode: "pull_request" as const }))
+              }
+            ]
+          : [generated.featureIntegrity, generated.featureGovernance];
+        for (const spec of specs) {
+          const created = await adminApi<{ id: number }>(
+            "POST",
+            `${R}/rulesets`,
+            buildGitHubRulesetApiPayload(
+              { ...spec, name: `${spec.name}-${RUN_ID}-${slug}`, targetRefs: [`refs/heads/${NS}/feature/*`] },
+              { agentAppIntegrationId: Number(cfg.appId) }
+            )
+          );
+          expect(created.status).toBe(201);
+          rulesetIds.push(created.data.id);
+        }
+      }
+
       afterEach(async () => {
-        if (rulesetId) {
-          await adminApi("DELETE", `${R}/rulesets/${rulesetId}`);
-          rulesetId = 0;
+        for (const id of rulesetIds.splice(0)) {
+          await adminApi("DELETE", `${R}/rulesets/${id}`);
         }
       });
 
+      it("integrity-ruleset-refuses-a-force-push-and-a-deletion-of-a-feature-branch-by-the-agent-app", async () => {
+        const feature = await createBranch("feature/integrity", await commitOnTop([baseSha], `${NS}/integrity.txt`, "feature work\n"));
+        await installFeatureRulesets("integrity", false);
+
+        const forcePush = await api("PATCH", `${R}/git/refs/heads/${feature}`, { sha: baseSha, force: true });
+        const deletion = await api("DELETE", `${R}/git/refs/heads/${feature}`);
+
+        expect(forcePush.status).toBe(422);
+        expect(deletion.status).toBe(422);
+        expect((await api("GET", `${R}/git/ref/heads/${feature}`)).status).toBe(200);
+      });
+
       it.each([
-        { id: "generated-ruleset-lets-plan-integration-and-a-dev-merge-sync-through", legacy: false },
+        { id: "generated-rulesets-let-plan-integration-and-a-dev-merge-sync-through", legacy: false },
         { id: "previous-pull-request-bypass-ruleset-rejects-the-plan-integration-with-422", legacy: true }
       ])("$id", async ({ legacy }) => {
         const slug = legacy ? "legacy" : "generated";
         const feature = await createBranch(`feature/${slug}`, baseSha);
         const dev = await createBranch(`dev-${slug}`, await commitOnTop([baseSha], `${NS}/${slug}-dev.txt`, "dev moved\n"));
-        const generated = buildGovernanceRulesets({ agentAppName: "agent", releaseAppName: "release" }).featureGovernance;
-        const spec = {
-          ...generated,
-          name: `epure-feature-governance-${RUN_ID}-${slug}`,
-          targetRefs: [`refs/heads/${NS}/feature/*`],
-          ...(legacy
-            ? { requiredLinearHistory: true, bypassActors: generated.bypassActors.map((a) => ({ ...a, mode: "pull_request" as const })) }
-            : {})
-        };
-        const created = await adminApi<{ id: number }>(
-          "POST",
-          `${R}/rulesets`,
-          buildGitHubRulesetApiPayload(spec, { agentAppIntegrationId: Number(cfg.appId) })
-        );
-        expect(created.status).toBe(201);
-        rulesetId = created.data.id;
+        await installFeatureRulesets(slug, legacy);
 
         const gh = createGitHubRestHelper({ repository: cfg.repository, token });
         const planIntegration = gh.commitFilesToBranch({

@@ -22,8 +22,8 @@ import {
   normalizeConventionalCommitTitle
 } from "../src/review/squash-commit-generator.js";
 
-describe("EPURE v1.2.0 — 3 Repository Rulesets, Multi-Agent Review Roster & Semantic Squash (Q91–Q96, ADR-0027)", () => {
-  describe("1. Three Governance Rulesets & GitHub API Application (Q91, Q95)", () => {
+describe("EPURE v1.2.0 — Repository Rulesets, Multi-Agent Review Roster & Semantic Squash (Q91–Q96, ADR-0027)", () => {
+  describe("1. Governance Rulesets & GitHub API Application (Q91, Q95)", () => {
     it.each([
       {
         id: "solo-maintainer-default-zero-approvals-on-dev-with-isolated-bypass-actors",
@@ -42,7 +42,9 @@ describe("EPURE v1.2.0 — 3 Repository Rulesets, Multi-Agent Review Roster & Se
         requirePrApprovalsOnDev
       });
 
-      expect(bundle.all).toHaveLength(3);
+      expect(bundle.all).toHaveLength(4);
+      expect(bundle.featureIntegrity.targetRefs).toEqual(["refs/heads/feature/*"]);
+      expect(bundle.featureIntegrity.bypassActors).toEqual([]);
       expect(bundle.featureGovernance.targetRefs).toEqual([
         "refs/heads/feature/*"
       ]);
@@ -71,7 +73,7 @@ describe("EPURE v1.2.0 — 3 Repository Rulesets, Multi-Agent Review Roster & Se
       ]);
     });
 
-    it("applies squash-only repository settings and creates/updates the 3 rulesets idempotently via GitHub REST API", async () => {
+    it("applies squash-only repository settings and creates/updates the 4 rulesets idempotently via GitHub REST API", async () => {
       const calls: Array<{ method: string; url: string; body?: unknown }> = [];
       const mockFetch: typeof fetch = async (input, init) => {
         const url = String(input);
@@ -114,6 +116,7 @@ describe("EPURE v1.2.0 — 3 Repository Rulesets, Multi-Agent Review Roster & Se
       expect(res.applied).toBe(true);
       expect(res.merge_settings_updated).toBe(true);
       expect(res.rulesets_applied).toEqual([
+        { name: "epure-feature-integrity", action: "created", id: 99 },
         { name: "epure-feature-governance", action: "created", id: 99 },
         { name: "epure-dev-governance", action: "updated", id: 42 },
         { name: "epure-release-immutability", action: "created", id: 99 }
@@ -132,9 +135,15 @@ describe("EPURE v1.2.0 — 3 Repository Rulesets, Multi-Agent Review Roster & Se
 
     it.each([
       {
-        id: "feature-ruleset-lets-the-agent-app-push-directly-and-allows-merge-commits",
+        id: "feature-integrity-ruleset-blocks-deletion-and-force-push-for-everyone-including-the-agent-app",
+        ruleset: "epure-feature-integrity",
+        expectedRules: ["deletion", "non_fast_forward"],
+        expectedBypass: []
+      },
+      {
+        id: "feature-governance-ruleset-lets-the-agent-app-push-directly-and-allows-merge-commits",
         ruleset: "epure-feature-governance",
-        expectedRules: ["deletion", "non_fast_forward", "pull_request", "commit_message_pattern"],
+        expectedRules: ["pull_request", "commit_message_pattern"],
         expectedBypass: [{ actor_id: 2888446, actor_type: "Integration", bypass_mode: "always" }]
       },
       {
@@ -172,15 +181,23 @@ describe("EPURE v1.2.0 — 3 Repository Rulesets, Multi-Agent Review Roster & Se
           rules: ["deletion", "non_fast_forward", "required_linear_history", "pull_request", "commit_message_pattern"],
           bypassMode: "pull_request"
         },
-        expected: { "epure-feature-governance": "update", "epure-dev-governance": "noop", "epure-release-immutability": "create" }
+        expected: { "epure-feature-integrity": "create", "epure-feature-governance": "update", "epure-dev-governance": "noop", "epure-release-immutability": "create" }
       },
       {
-        id: "feature-ruleset-already-generated-by-this-version-is-noop",
+        id: "previous-single-feature-ruleset-letting-the-agent-app-delete-and-force-push-is-reported-as-update",
         existingFeature: {
           rules: ["commit_message_pattern", "deletion", "non_fast_forward", "pull_request"],
           bypassMode: "always"
         },
-        expected: { "epure-feature-governance": "noop", "epure-dev-governance": "noop", "epure-release-immutability": "create" }
+        expected: { "epure-feature-integrity": "create", "epure-feature-governance": "update", "epure-dev-governance": "noop", "epure-release-immutability": "create" }
+      },
+      {
+        id: "feature-governance-ruleset-already-generated-by-this-version-is-noop",
+        existingFeature: {
+          rules: ["commit_message_pattern", "pull_request"],
+          bypassMode: "always"
+        },
+        expected: { "epure-feature-integrity": "create", "epure-feature-governance": "noop", "epure-dev-governance": "noop", "epure-release-immutability": "create" }
       }
     ])("$id", async ({ existingFeature, expected }) => {
       const rulesets = buildGovernanceRulesets({ agentAppName: "a", releaseAppName: "r" });

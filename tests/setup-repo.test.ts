@@ -104,8 +104,9 @@ describe("1. Dry-run simulation & guided application (planAndApplyRepoSetup)", (
         ])
       );
 
-      // Verify Q80 & Q91 3 Repository Rulesets
+      // Verify Q80 & Q91 Repository Rulesets (feature/* split into integrity and governance)
       expect(result.governance_rulesets.map((r) => r.name)).toEqual([
+        "epure-feature-integrity",
         "epure-feature-governance",
         "epure-dev-governance",
         "epure-release-immutability"
@@ -208,7 +209,11 @@ describe("1. Dry-run simulation & guided application (planAndApplyRepoSetup)", (
 
   it.each([
     { id: "listens-to-issues-closed-events", expected: "  issues:\n    types: [closed]\n" },
-    { id: "runs-the-orchestrator-for-a-human-closing-the-issue", expected: "(github.event_name == 'issues' && github.event.sender.type == 'User')" },
+    { id: "checks-the-closer-permission-in-a-job-without-secrets", expected: "  authorize-closure:\n    name: \"Authorize Issue Closure\"\n    if: ${{ github.event_name == 'issues' && github.event.sender.type == 'User' }}\n" },
+    { id: "only-a-write-or-admin-closer-is-authorized", expected: "            admin|write) echo \"authorized=true\" >> \"$GITHUB_OUTPUT\" ;;\n" },
+    { id: "runs-the-orchestrator-only-for-an-authorized-closer", expected: "needs.authorize-closure.outputs.authorized == 'true'" },
+    { id: "runs-workflow_run-continuations-only-for-same-repository-heads", expected: "github.event.workflow_run.head_repository.full_name == github.repository" },
+    { id: "closure-runs-in-their-own-concurrency-group", expected: "group: epure-issue-${{ github.event_name == 'issues' && 'closed-' || '' }}${{ github.event.issue.number ||" },
     { id: "maps-an-issues-event-to-the-internal-closed-command", expected: "command: ${{ github.event_name == 'issues' && 'closed' ||" }
   ])("caller issue workflow [$id]", ({ expected }) => {
     const tempRepoDir = mkdtempSync(join(tmpdir(), "epure-setup-closed-"));
