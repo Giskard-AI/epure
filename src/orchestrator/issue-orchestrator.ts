@@ -61,7 +61,10 @@ import {
   slugifyTitle,
   verifyPublisherMergeBoundary
 } from "./github/rest-client.js";
-import { handleEpicClosedByHuman } from "./phases/epic-closure.js";
+import {
+  handleEpicClosedByHuman,
+  PLANNING_PHASES
+} from "./phases/epic-closure.js";
 import {
   runEpicConvergenceAudit,
   spawnPhase2ConvergenceTickets
@@ -394,6 +397,54 @@ export async function orchestrateIssueCommand(
           {
             phase: "cancelled",
             status: "cancelled",
+            issueNumber: effectiveInput.issueNumber
+          }
+        );
+        await gh.postIssueComment(effectiveInput.issueNumber, body);
+        return {
+          executed: true,
+          phase: updated.state.phase,
+          status: updated.state.status,
+          active_branch: updated.state.active_branch,
+          summary_markdown: body,
+          created_ticket_numbers: [],
+          feature_pr_url: ""
+        };
+      }
+
+      if (
+        effectiveInput.command === "continue" &&
+        (effectiveInput.commentId ?? 0) > 0 &&
+        currentState?.status === "cancelled" &&
+        PLANNING_PHASES.has(currentState.phase)
+      ) {
+        const updated = await updateIssueStateWithCas({
+          issueNumber: effectiveInput.issueNumber,
+          store,
+          mutator: (prev) => ({
+            ...prev,
+            status: prev.phase === "tickets" ? "awaiting_human_approval" : "active",
+            last_processed_comment_id: Math.max(
+              effectiveInput.commentId ?? 0,
+              prev.last_processed_comment_id
+            )
+          })
+        });
+        const nextStep =
+          updated.state.phase === "grilling"
+            ? "Répondez en commentaire pour poursuivre l'entretien, ou postez `/epure to-spec`."
+            : updated.state.phase === "spec"
+              ? "Répondez en commentaire pour réviser la spécification, ou postez `/epure to-tickets`."
+              : "Postez `/epure approve` pour lancer l'implémentation.";
+        const body = appendEpureCommandsSpoiler(
+          [
+            updated.issue_mirror_markdown,
+            "",
+            `▶️ Plan #${effectiveInput.issueNumber} repris par \`@${effectiveInput.actor}\` en phase \`${updated.state.phase}\`. ${nextStep}`
+          ].join("\n"),
+          {
+            phase: updated.state.phase,
+            status: updated.state.status,
             issueNumber: effectiveInput.issueNumber
           }
         );

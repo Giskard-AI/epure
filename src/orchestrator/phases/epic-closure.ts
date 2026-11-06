@@ -15,6 +15,11 @@ const FEATURE_BRANCH_PHASES: ReadonlySet<EpureIssueState["phase"]> = new Set([
   "implementation",
   "completed"
 ]);
+export const PLANNING_PHASES: ReadonlySet<EpureIssueState["phase"]> = new Set([
+  "grilling",
+  "spec",
+  "tickets"
+]);
 const CAN_CANCEL: ReadonlySet<CollaboratorPermission> = new Set([
   "write",
   "maintain",
@@ -22,9 +27,9 @@ const CAN_CANCEL: ReadonlySet<CollaboratorPermission> = new Set([
 ]);
 
 /**
- * A human closed the plan issue before its feature branch reached `dev`: a closer with
- * `write` or higher cancels the plan, keeps every branch and open PR, and gets told how
- * to resume; anyone else only gets a note.
+ * A human closed the plan issue during planning, or before its feature branch reached `dev`:
+ * a closer with `write` or higher cancels the plan, keeps every branch and open PR, and gets
+ * told how to resume; anyone else only gets a note.
  */
 export async function handleEpicClosedByHuman(params: {
   readonly issueNumber: number;
@@ -45,12 +50,19 @@ export async function handleEpicClosedByHuman(params: {
     feature_pr_url: ""
   });
 
-  if (!state || state.status === "cancelled" || !FEATURE_BRANCH_PHASES.has(state.phase)) {
-    return ignore("no feature branch in progress");
+  const planning = state !== null && PLANNING_PHASES.has(state.phase);
+  if (
+    !state ||
+    state.status === "cancelled" ||
+    (!planning && !FEATURE_BRANCH_PHASES.has(state.phase))
+  ) {
+    return ignore("no plan in progress");
   }
-  const mergedPr = await params.gh.findMergedPullRequestByHead(featureBranch, "dev");
-  if (mergedPr) {
-    return ignore(`feature PR #${mergedPr.number} is already merged into dev`);
+  if (!planning) {
+    const mergedPr = await params.gh.findMergedPullRequestByHead(featureBranch, "dev");
+    if (mergedPr) {
+      return ignore(`feature PR #${mergedPr.number} is already merged into dev`);
+    }
   }
 
   const permission = await params.gh.getCollaboratorPermission(params.actor);
@@ -58,6 +70,35 @@ export async function handleEpicClosedByHuman(params: {
     const note = `ℹ️ L'issue #${params.issueNumber} a été fermée par \`@${params.actor}\` (permission \`${permission}\`) : seul un collaborateur \`write\` ou supérieur annule un plan EPURE en fermant son issue. Le plan reste \`${state.status}\` en phase \`${state.phase}\`.`;
     await params.gh.postIssueComment(params.issueNumber, note);
     return { ...ignore(`closer @${params.actor} has permission ${permission}`), summary_markdown: note };
+  }
+
+  if (planning) {
+    const updated = await updateIssueStateWithCas({
+      issueNumber: params.issueNumber,
+      store: params.store,
+      mutator: (prev) => toTerminalState(prev, { status: "cancelled" })
+    });
+    const body = appendEpureCommandsSpoiler(
+      [
+        updated.issue_mirror_markdown,
+        "",
+        `### 🛑 Issue de pilotage #${params.issueNumber} fermée par \`@${params.actor}\` pendant la phase \`${state.phase}\``,
+        "",
+        "- **Statut d'orchestration** : `cancelled` (Plan annulé) ; aucune branche n'a été supprimée.",
+        `- **Reprise** : rouvrez l'issue #${params.issueNumber}, puis postez \`/epure continue\`.`
+      ].join("\n"),
+      { phase: "cancelled", status: "cancelled", issueNumber: params.issueNumber }
+    );
+    await params.gh.postIssueComment(params.issueNumber, body);
+    return {
+      executed: true,
+      phase: updated.state.phase,
+      status: updated.state.status,
+      active_branch: updated.state.active_branch,
+      summary_markdown: body,
+      created_ticket_numbers: [],
+      feature_pr_url: ""
+    };
   }
 
   const [comparison, featurePr, taskPrs] = await Promise.all([

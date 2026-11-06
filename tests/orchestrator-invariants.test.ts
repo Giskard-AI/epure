@@ -915,7 +915,6 @@ describe("Lot 1 — a human closing the epic before its feature branch reaches d
 
   it.each([
     { id: "feature-pr-already-merged-into-dev-is-ignored", seed: { status: "done", phase: "completed", subphase: "idle" }, mergedFeaturePr: true },
-    { id: "grilling-phase-without-feature-branch-is-ignored", seed: { status: "active", phase: "grilling", subphase: "idle" }, mergedFeaturePr: false },
     { id: "already-cancelled-plan-is-ignored", seed: { status: "cancelled", subphase: "idle" }, mergedFeaturePr: false }
   ] as const)("$id", async ({ seed, mergedFeaturePr }) => {
     const store = await seedState(seed);
@@ -932,10 +931,10 @@ describe("Lot 1 — a human closing the epic before its feature branch reaches d
 
   it.each([
     { id: "read-closer-of-an-implementation-epic-leaves-the-plan-active", seed: { status: "active", subphase: "waiting_ticket_ci" }, closerPermission: "read", expectsCancel: false },
-    { id: "triage-closer-of-an-idle-implementation-epic-leaves-the-plan-active", seed: { status: "active", subphase: "idle" }, closerPermission: "triage", expectsCancel: false },
+    { id: "triage-closer-of-a-grilling-epic-leaves-the-plan-active", seed: { status: "active", phase: "grilling", subphase: "idle" }, closerPermission: "triage", expectsCancel: false },
     { id: "issue-author-without-repo-access-leaves-the-plan-suspended", seed: { status: "suspended", subphase: "idle" }, closerPermission: "none", expectsCancel: false },
     { id: "maintain-closer-cancels-the-plan", seed: { status: "active", subphase: "waiting_ticket_ci" }, closerPermission: "maintain", expectsCancel: true },
-    { id: "admin-closer-cancels-the-plan", seed: { status: "suspended", subphase: "idle" }, closerPermission: "admin", expectsCancel: true }
+    { id: "admin-closer-cancels-the-plan", seed: { status: "active", phase: "grilling", subphase: "idle" }, closerPermission: "admin", expectsCancel: true }
   ] as const)("$id", async ({ seed, closerPermission, expectsCancel }) => {
     const store = await seedState(seed);
     const before = await readState(store);
@@ -957,6 +956,33 @@ describe("Lot 1 — a human closing the epic before its feature branch reaches d
     }
   });
 
+  it.each([
+    { id: "grilling-close-cancels-then-continue-reopens-the-interview", phase: "grilling", status: "active", expectedNextStep: "poursuivre l'entretien" },
+    { id: "spec-close-cancels-then-continue-reopens-the-spec-review", phase: "spec", status: "active", expectedNextStep: "réviser la spécification" },
+    { id: "tickets-awaiting-approval-close-cancels-then-continue-awaits-approval-again", phase: "tickets", status: "awaiting_human_approval", expectedNextStep: "Postez `/epure approve`" },
+    { id: "suspended-grilling-close-cancels-then-continue-reopens-the-interview", phase: "grilling", status: "suspended", expectedNextStep: "poursuivre l'entretien" }
+  ] as const)("$id", async ({ phase, status, expectedNextStep }) => {
+    const store = await seedState({ phase, status, subphase: "idle", active_branch: "plan/77-async-ci-feature" });
+    const router = declareClosureReads(createGitHubMockRouter(), { mergedFeaturePr: false, aheadBy: 0, featurePr: false, taskPrs: [] });
+
+    const closed = await run(router, store, { command: "closed", actor: "maintainer", issueNumber: ISSUE, commentId: 0 });
+    const afterClose = await readState(store);
+    const closeBody = (router.requests.at(-1)?.body as { body: string }).body;
+    const resumed = await run(router, store, { command: "continue", actor: "maintainer", issueNumber: ISSUE, commentId: 900 });
+    const resumeBody = (router.requests.at(-1)?.body as { body: string }).body;
+
+    expect(router.unmatched).toEqual([]);
+    expect(closed.executed).toBe(true);
+    expect(afterClose).toMatchObject({ status: "cancelled", phase });
+    expect(terminalResidue(afterClose)).toEqual(CLEAN_TERMINAL);
+    expect(closeBody).toContain(`pendant la phase \`${phase}\``);
+    expect(closeBody).toContain("rouvrez l'issue #77, puis postez `/epure continue`");
+    expect(router.calls("GET", /\/compare\//) + router.calls("GET", /\/pulls\?/)).toBe(0);
+    expect(router.requests.filter((r) => r.method === "DELETE" || r.method === "PATCH")).toEqual([]);
+    expect(resumed.executed).toBe(true);
+    expect(await readState(store)).toMatchObject({ phase, status: status === "suspended" ? "active" : status, last_processed_comment_id: 900 });
+    expect(resumeBody).toContain(expectedNextStep);
+  });
 });
 
 describe("Lot 1 — GitHub API rate limits are waited out within 5 minutes, then escalate github_rate_limited", () => {
