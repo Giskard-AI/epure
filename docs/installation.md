@@ -123,7 +123,7 @@ git push origin dev
 5. **Squash-Only Merge Governance & 4 Repository Rulesets**:
    - Configures the repository to allow **Squash merge only** (`allow_squash_merge: true`, `allow_merge_commit: false`, `allow_rebase_merge: false`, `delete_branch_on_merge: true`).
    - Installs the 4 GitHub Repository Rulesets:
-     - `epure-feature-integrity` (`refs/heads/feature/*`): blocks deletion and force-push with no bypass actor, so not even the `Agent App` can rewrite or delete a feature branch.
+     - `epure-feature-integrity` (`refs/heads/feature/*`): blocks deletion and force-push with no bypass actor, so not even the `Agent App` can rewrite or delete a feature branch. Consequence: merged `feature/*` branches stay on GitHub. `delete_branch_on_merge` cannot remove them and neither can an admin; to prune them, temporarily disable this ruleset (Settings → Rules → Rulesets), delete the merged branches, then re-enable it.
      - `epure-feature-governance` (`refs/heads/feature/*`): `Agent App` in `always` bypass for autonomous `task/* -> feature/*` squash-merges once checks pass and for EPURE's direct writes (plan integration, `dev` merge syncs, conflict resolutions); humans still go through PRs.
      - `epure-dev-governance` (`refs/heads/dev`): No `Agent App` bypass (`required_approving_review_count: 0` by default for solo-maintainer compatibility; configurable via `--require-pr-approvals <N>`).
      - `epure-release-immutability` (`refs/heads/main`, `refs/tags/v*`): `Release App` as sole Bypass Actor.
