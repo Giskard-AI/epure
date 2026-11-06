@@ -2843,7 +2843,6 @@ function buildGovernanceRulesets(params) {
     blockDirectPushes: true,
     blockForcePushes: true,
     blockDeletions: true,
-    requiredLinearHistory: true,
     allowedMergeMethods: ["squash"],
     requiredApprovingReviewCount: 0,
     requiredStatusChecks: requiredChecks,
@@ -2852,7 +2851,7 @@ function buildGovernanceRulesets(params) {
       {
         appRole: "agent",
         appName: params.agentAppName,
-        mode: "pull_request"
+        mode: "always"
       }
     ]
   };
@@ -3346,6 +3345,47 @@ function buildGitHubRulesetApiPayload(spec, appIntegrationIds) {
     rules
   };
 }
+function rulesetFingerprint(ruleset) {
+  return JSON.stringify({
+    include: [...ruleset.conditions?.ref_name?.include ?? []].sort(),
+    rules: (ruleset.rules ?? []).map((r) => r.type).sort(),
+    bypass: (ruleset.bypass_actors ?? []).map((a) => `${a.actor_type}:${a.actor_id}:${a.bypass_mode}`).sort()
+  });
+}
+async function planGitHubRulesetChanges(input) {
+  const fetchFn = input.fetchImpl ?? fetch;
+  const baseUrl = `https://api.github.com/repos/${input.repository.trim()}`;
+  const headers = {
+    Authorization: `Bearer ${input.githubToken.trim()}`,
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28"
+  };
+  const get = async (path) => {
+    const resp = await fetchFn(`${baseUrl}${path}`, { method: "GET", headers });
+    if (!resp.ok) {
+      throw new Error(
+        `Failed to read ${path} on ${input.repository} (HTTP ${resp.status}): ${await resp.text()}`
+      );
+    }
+    return await resp.json();
+  };
+  const existing = await get("/rulesets");
+  const plan = [];
+  for (const spec of input.governanceRulesets) {
+    const match = existing.find((r) => r.name === spec.name);
+    if (!match) {
+      plan.push({ name: spec.name, action: "create" });
+      continue;
+    }
+    const desired = buildGitHubRulesetApiPayload(spec, input);
+    const current = await get(`/rulesets/${match.id}`);
+    plan.push({
+      name: spec.name,
+      action: rulesetFingerprint(current) === rulesetFingerprint(desired) ? "noop" : "update"
+    });
+  }
+  return plan;
+}
 async function applyGitHubRepositoryGovernance(input) {
   const [owner, repo] = input.repository.trim().split("/");
   if (!owner || !repo) {
@@ -3585,27 +3625,47 @@ async function main() {
     agentsOverrides: args.agentsOverrides,
     dryRun: args.dryRun
   });
-  if (result.status !== "error" && !args.dryRun && args.applyGithubSettings) {
+  let githubRulesetsPlan;
+  if (result.status !== "error" && args.applyGithubSettings) {
     const token = resolveGitHubToken(args.githubToken);
     if (!token) {
       throw new Error(
         "Missing GitHub token for --apply-github-settings. Authenticate via 'gh auth login' or set GITHUB_TOKEN."
       );
     }
-    await applyGitHubRepositoryGovernance({
+    const governanceInput = {
       repository: args.repository,
       githubToken: token,
       governanceRulesets: result.governance_rulesets,
       agentAppIntegrationId: args.agentAppIntegrationId,
       releaseAppIntegrationId: args.releaseAppIntegrationId
-    });
+    };
+    if (args.dryRun) {
+      githubRulesetsPlan = await planGitHubRulesetChanges(governanceInput);
+    } else {
+      await applyGitHubRepositoryGovernance(governanceInput);
+    }
   }
   if (args.json) {
-    process.stdout.write(`${JSON.stringify(result, null, 2)}
-`);
+    process.stdout.write(
+      `${JSON.stringify(
+        githubRulesetsPlan ? { ...result, github_rulesets_plan: githubRulesetsPlan } : result,
+        null,
+        2
+      )}
+`
+    );
   } else {
     process.stdout.write(`${result.summary_markdown}
 `);
+    if (githubRulesetsPlan) {
+      process.stdout.write(
+        `
+#### GitHub Rulesets (dry-run against ${args.repository})
+${githubRulesetsPlan.map((p) => `- \`${p.name}\`: \`${p.action}\``).join("\n")}
+`
+      );
+    }
   }
   if (result.status === "error") {
     process.exitCode = 1;

@@ -4366,6 +4366,30 @@ function slugifyTitle(raw, fallback = "feature") {
   const clean = raw.toLowerCase().replace(/\[plan\]/gi, "").replace(/^\[ticket\s*\d+\]\s*/i, "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 36).replace(/-+$/g, "");
   return clean || fallback;
 }
+var BRANCH_COMMIT_MAX_ATTEMPTS = 3;
+var BranchUpdateConflictError = class extends Error {
+  constructor(branch, attempts) {
+    super(
+      `Branch '${branch}' moved during ${attempts} commit attempt(s); its update was not a fast-forward and EPURE did not force it.`
+    );
+    this.branch = branch;
+    this.attempts = attempts;
+  }
+  branch;
+  attempts;
+  name = "BranchUpdateConflictError";
+};
+var PullRequestNotMergeableError = class extends Error {
+  constructor(prNumber) {
+    super(`GitHub refused to merge PR #${prNumber} (HTTP 405: not mergeable).`);
+    this.prNumber = prNumber;
+  }
+  prNumber;
+  name = "PullRequestNotMergeableError";
+};
+function encodeGitHubContentsPath(filePath) {
+  return filePath.split("/").filter((segment) => segment.length > 0).map((segment) => encodeURIComponent(segment)).join("/");
+}
 function createGitHubRestHelper(params) {
   const [owner, repo] = params.repository.trim().split("/");
   const baseUrl = "https://api.github.com";
@@ -4376,7 +4400,7 @@ function createGitHubRestHelper(params) {
     "Content-Type": "application/json",
     "X-GitHub-Api-Version": "2022-11-28"
   };
-  async function apiRequest(method, path, body, allow404 = false) {
+  async function apiRequest(method, path, body, allow404 = false, expectedErrorStatuses = []) {
     let resp;
     let lastErr;
     for (let attempt = 0; attempt <= 3; attempt += 1) {
@@ -4405,8 +4429,8 @@ function createGitHubRestHelper(params) {
     if (!resp) {
       throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
     }
-    if (allow404 && resp.status === 404) {
-      return { status: 404, data: null };
+    if (allow404 && resp.status === 404 || expectedErrorStatuses.includes(resp.status)) {
+      return { status: resp.status, data: null };
     }
     if (!resp.ok) {
       const errText = await resp.text();
@@ -4419,6 +4443,49 @@ function createGitHubRestHelper(params) {
     }
     const json = await resp.json();
     return { status: resp.status, data: json };
+  }
+  function decodeBase64(content) {
+    return Buffer.from(content.replace(/\s+/g, ""), "base64").toString("utf8");
+  }
+  async function readBlob(sha) {
+    const { data } = await apiRequest(
+      "GET",
+      `/repos/${owner}/${repo}/git/blobs/${sha}`,
+      void 0,
+      true
+    );
+    return data?.encoding === "base64" && typeof data.content === "string" ? decodeBase64(data.content) : null;
+  }
+  async function resolveCommitSha(branchOrSha) {
+    if (/^[0-9a-f]{40}$/i.test(branchOrSha)) {
+      return branchOrSha;
+    }
+    const { data } = await apiRequest(
+      "GET",
+      `/repos/${owner}/${repo}/git/ref/heads/${encodeURIComponent(branchOrSha)}`,
+      void 0,
+      true
+    );
+    return data?.object?.sha ?? null;
+  }
+  const treesByCommitSha = /* @__PURE__ */ new Map();
+  async function readBranchTree(branchOrSha) {
+    const sha = await resolveCommitSha(branchOrSha);
+    if (!sha) {
+      return [];
+    }
+    let pending = treesByCommitSha.get(sha);
+    if (!pending) {
+      pending = apiRequest(
+        "GET",
+        `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(sha)}?recursive=1`,
+        void 0,
+        true
+      ).then((res) => res.data?.tree ?? []);
+      treesByCommitSha.set(sha, pending);
+      pending.catch(() => treesByCommitSha.delete(sha));
+    }
+    return await pending;
   }
   return {
     token: params.token,
@@ -4569,44 +4636,32 @@ function createGitHubRestHelper(params) {
       return res.data?.object?.sha ?? null;
     },
     async listBranchPaths(branch) {
-      try {
-        const treeRes = await apiRequest(
-          "GET",
-          `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
-          void 0,
-          true
-        );
-        return (treeRes.data?.tree ?? []).filter((e) => e.type === "blob" && typeof e.path === "string").map((e) => e.path);
-      } catch {
-        return [];
+      return (await readBranchTree(branch)).filter((e) => e.type === "blob" && typeof e.path === "string").map((e) => e.path);
+    },
+    async listBranchBlobs(branchOrSha) {
+      const blobs = /* @__PURE__ */ new Map();
+      for (const e of await readBranchTree(branchOrSha)) {
+        if (e.type === "blob" && e.path && e.sha) {
+          blobs.set(e.path, { sha: e.sha, mode: e.mode ?? "100644" });
+        }
       }
+      return blobs;
     },
     async readSingleBranchFile(branch, filePath) {
-      try {
-        const cleanPath = filePath.trim().replace(/^\/+/, "");
-        const treeRes = await apiRequest(
-          "GET",
-          `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
-          void 0,
-          true
-        );
-        const match = (treeRes.data?.tree ?? []).find(
-          (e) => e.type === "blob" && e.path === cleanPath
-        );
-        if (!match?.sha) {
-          return null;
-        }
-        const blobRes = await apiRequest("GET", `/repos/${owner}/${repo}/git/blobs/${match.sha}`, void 0, true);
-        if (blobRes.data?.content && blobRes.data.encoding === "base64") {
-          return Buffer.from(
-            blobRes.data.content.replace(/\s+/g, ""),
-            "base64"
-          ).toString("utf8");
-        }
-        return null;
-      } catch {
+      const cleanPath = filePath.trim().replace(/^\/+/, "");
+      const { data } = await apiRequest(
+        "GET",
+        `/repos/${owner}/${repo}/contents/${encodeGitHubContentsPath(cleanPath)}?ref=${encodeURIComponent(branch)}`,
+        void 0,
+        true
+      );
+      if (!data || Array.isArray(data) || data.type !== "file") {
         return null;
       }
+      if (data.encoding === "base64" && typeof data.content === "string") {
+        return decodeBase64(data.content);
+      }
+      return data.sha ? await readBlob(data.sha) : null;
     },
     async readBranchWorkspaceFiles(branch, hintText = "", pinnedPaths = [], reviewersDir = DEFAULT_REVIEWERS_DIR) {
       const filesMap = /* @__PURE__ */ new Map();
@@ -4874,36 +4929,14 @@ function createGitHubRestHelper(params) {
     },
     async readDevWorkflowsMap(branch) {
       const workflowsMap = /* @__PURE__ */ new Map();
-      try {
-        const treeRes = await apiRequest(
-          "GET",
-          `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
-          void 0,
-          true
-        );
-        const entries = treeRes.data?.tree ?? [];
-        for (const entry of entries) {
-          if (entry.type !== "blob" || !entry.path || !entry.sha) {
-            continue;
-          }
-          if (!/^\.github\/workflows\/[^/]+\.ya?ml$/i.test(entry.path)) {
-            continue;
-          }
-          const blobRes = await apiRequest(
-            "GET",
-            `/repos/${owner}/${repo}/git/blobs/${entry.sha}`,
-            void 0,
-            true
-          );
-          if (blobRes.data?.content && blobRes.data.encoding === "base64") {
-            const decoded = Buffer.from(
-              blobRes.data.content.replace(/\s+/g, ""),
-              "base64"
-            ).toString("utf8");
-            workflowsMap.set(entry.path, decoded);
-          }
+      for (const entry of await readBranchTree(branch)) {
+        if (entry.type !== "blob" || !entry.path || !entry.sha || !/^\.github\/workflows\/[^/]+\.ya?ml$/i.test(entry.path)) {
+          continue;
         }
-      } catch {
+        const content = await readBlob(entry.sha);
+        if (content !== null) {
+          workflowsMap.set(entry.path, content);
+        }
       }
       return workflowsMap;
     },
@@ -4921,25 +4954,27 @@ function createGitHubRestHelper(params) {
           `Cannot create branch '${branch}': neither '${fromBranch}' nor 'main' exists.`
         );
       }
-      await apiRequest("POST", `/repos/${owner}/${repo}/git/refs`, {
-        ref: `refs/heads/${branch}`,
-        sha: baseSha
-      });
+      const created = await apiRequest(
+        "POST",
+        `/repos/${owner}/${repo}/git/refs`,
+        { ref: `refs/heads/${branch}`, sha: baseSha },
+        false,
+        [422]
+      );
+      if (created.status === 422) {
+        const concurrentSha = await this.getDefaultBranchSha(branch);
+        if (!concurrentSha) {
+          throw new Error(`Cannot create branch '${branch}': GitHub rejected the ref.`);
+        }
+        return concurrentSha;
+      }
       return baseSha;
     },
     async commitFilesToBranch(input) {
-      const baseBranch = input.fromBranch ?? "main";
-      await this.ensureBranch(input.branch, baseBranch);
-      const branchRef = await apiRequest(
-        "GET",
-        `/repos/${owner}/${repo}/git/ref/heads/${encodeURIComponent(input.branch)}`
+      let parentCommitSha = await this.ensureBranch(
+        input.branch,
+        input.fromBranch ?? "main"
       );
-      const parentCommitSha = branchRef.data.object.sha;
-      const parentCommit = await apiRequest(
-        "GET",
-        `/repos/${owner}/${repo}/git/commits/${parentCommitSha}`
-      );
-      const baseTreeSha = parentCommit.data.tree.sha;
       const treeEntries = [];
       const seenTreePaths = /* @__PURE__ */ new Set();
       for (const file of input.files) {
@@ -4969,64 +5004,86 @@ function createGitHubRestHelper(params) {
         seenTreePaths.add(cleanPath);
         pendingDeletedPaths.push(cleanPath);
       }
-      if (pendingDeletedPaths.length > 0) {
-        let existingTreePaths = null;
-        try {
-          const baseTreeListing = await apiRequest(
-            "GET",
-            `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(baseTreeSha)}?recursive=1`,
-            void 0,
-            true
-          );
-          if (Array.isArray(baseTreeListing.data?.tree)) {
-            existingTreePaths = new Set(
-              baseTreeListing.data.tree.filter((e) => e.type === "blob" && typeof e.path === "string").map((e) => e.path.trim().replace(/^\/+/, ""))
+      for (let attempt = 1; ; attempt += 1) {
+        const parentCommit = await apiRequest(
+          "GET",
+          `/repos/${owner}/${repo}/git/commits/${parentCommitSha}`
+        );
+        const baseTreeSha = parentCommit.data.tree.sha;
+        const attemptEntries = [...treeEntries];
+        if (pendingDeletedPaths.length > 0) {
+          let existingTreePaths = null;
+          try {
+            const baseTreeListing = await apiRequest(
+              "GET",
+              `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(baseTreeSha)}?recursive=1`,
+              void 0,
+              true
             );
+            if (Array.isArray(baseTreeListing.data?.tree)) {
+              existingTreePaths = new Set(
+                baseTreeListing.data.tree.filter((e) => e.type === "blob" && typeof e.path === "string").map((e) => e.path.trim().replace(/^\/+/, ""))
+              );
+            }
+          } catch {
+            existingTreePaths = null;
           }
-        } catch {
-          existingTreePaths = null;
-        }
-        for (const cleanPath of pendingDeletedPaths) {
-          if (existingTreePaths && !existingTreePaths.has(cleanPath)) {
-            continue;
+          for (const cleanPath of pendingDeletedPaths) {
+            if (existingTreePaths && !existingTreePaths.has(cleanPath)) {
+              continue;
+            }
+            attemptEntries.push({
+              path: cleanPath,
+              mode: "100644",
+              type: "blob",
+              sha: null
+            });
           }
-          treeEntries.push({
-            path: cleanPath,
-            mode: "100644",
-            type: "blob",
-            sha: null
-          });
         }
+        if (attemptEntries.length === 0 && !input.mergeParentSha) {
+          return parentCommitSha;
+        }
+        const treeSha = attemptEntries.length === 0 ? baseTreeSha : (await apiRequest(
+          "POST",
+          `/repos/${owner}/${repo}/git/trees`,
+          {
+            base_tree: baseTreeSha,
+            tree: attemptEntries
+          }
+        )).data.sha;
+        if (treeSha === baseTreeSha && !input.mergeParentSha) {
+          return parentCommitSha;
+        }
+        const newCommit = await apiRequest(
+          "POST",
+          `/repos/${owner}/${repo}/git/commits`,
+          {
+            message: input.commitMessage,
+            tree: treeSha,
+            parents: input.mergeParentSha ? [parentCommitSha, input.mergeParentSha] : [parentCommitSha]
+          }
+        );
+        const update = await apiRequest(
+          "PATCH",
+          `/repos/${owner}/${repo}/git/refs/heads/${encodeURIComponent(input.branch)}`,
+          { sha: newCommit.data.sha, force: false },
+          false,
+          [422]
+        );
+        if (update.status !== 422) {
+          return newCommit.data.sha;
+        }
+        const movedHead = await this.getDefaultBranchSha(input.branch);
+        if (movedHead === parentCommitSha) {
+          throw new Error(
+            `GitHub refused to update branch '${input.branch}' (HTTP 422) although it did not move: a repository ruleset or branch protection blocks direct pushes by the EPURE App (for feature/*, re-run setup-repo --apply --apply-github-settings).`
+          );
+        }
+        if (!movedHead || attempt >= BRANCH_COMMIT_MAX_ATTEMPTS) {
+          throw new BranchUpdateConflictError(input.branch, attempt);
+        }
+        parentCommitSha = movedHead;
       }
-      if (treeEntries.length === 0) {
-        return parentCommitSha;
-      }
-      const newTree = await apiRequest(
-        "POST",
-        `/repos/${owner}/${repo}/git/trees`,
-        {
-          base_tree: baseTreeSha,
-          tree: treeEntries
-        }
-      );
-      const newCommit = await apiRequest(
-        "POST",
-        `/repos/${owner}/${repo}/git/commits`,
-        {
-          message: input.commitMessage,
-          tree: newTree.data.sha,
-          parents: [parentCommitSha]
-        }
-      );
-      await apiRequest(
-        "PATCH",
-        `/repos/${owner}/${repo}/git/refs/heads/${encodeURIComponent(input.branch)}`,
-        {
-          sha: newCommit.data.sha,
-          force: true
-        }
-      );
-      return newCommit.data.sha;
     },
     async listPullRequestFiles(prNumber) {
       try {
@@ -5175,19 +5232,15 @@ function createGitHubRestHelper(params) {
       );
     },
     async compareCommits(base, head) {
-      try {
-        const res = await apiRequest(
-          "GET",
-          `/repos/${owner}/${repo}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`,
-          void 0,
-          true
-        );
-        const mergeBaseSha = res.data?.merge_base_commit?.sha ?? base;
-        const changedFiles = Array.isArray(res.data?.files) ? res.data.files.map((f) => f.filename?.trim().replace(/^\/+/, "") ?? "").filter((p) => p.length > 0) : [];
-        return { mergeBaseSha, changedFiles, aheadBy: res.data?.ahead_by ?? 0 };
-      } catch {
-        return { mergeBaseSha: base, changedFiles: [], aheadBy: 0 };
-      }
+      const res = await apiRequest(
+        "GET",
+        `/repos/${owner}/${repo}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`,
+        void 0,
+        true
+      );
+      const mergeBaseSha = res.data?.merge_base_commit?.sha ?? base;
+      const changedFiles = Array.isArray(res.data?.files) ? res.data.files.map((f) => f.filename?.trim().replace(/^\/+/, "") ?? "").filter((p) => p.length > 0) : [];
+      return { mergeBaseSha, changedFiles, aheadBy: res.data?.ahead_by ?? 0 };
     },
     async postPullRequestReview(prNumber, input) {
       try {
@@ -5211,20 +5264,32 @@ function createGitHubRestHelper(params) {
         }
       }
     },
+    async getPullRequestMergeableState(prNumber) {
+      const { data } = await apiRequest(
+        "GET",
+        `/repos/${owner}/${repo}/pulls/${prNumber}`
+      );
+      return data?.mergeable_state ?? "unknown";
+    },
     async mergePullRequest(prNumber, input) {
       verifyPublisherMergeBoundary({
         headBranch: input.headBranch,
         baseBranch: input.baseBranch
       });
-      await apiRequest(
+      const merged = await apiRequest(
         "PUT",
         `/repos/${owner}/${repo}/pulls/${prNumber}/merge`,
         {
           commit_title: input.commitTitle,
           commit_message: input.commitMessage ?? "",
           merge_method: "squash"
-        }
+        },
+        false,
+        [405]
       );
+      if (merged.status === 405) {
+        throw new PullRequestNotMergeableError(prNumber);
+      }
       const cleanHead = input.headBranch.trim().replace(/^refs\/heads\//, "");
       if (cleanHead.startsWith("task/") || cleanHead.startsWith("plan/")) {
         try {
@@ -9094,6 +9159,8 @@ function formatNeedsHumanEscalationComment(input) {
     reasonHeadline = `LLM model configuration missing \u2014 set ${keys} in \`.github/agents.yml\` (or the action \`model\` input); no fallback model`;
   } else if (input.reason === "github_rate_limited") {
     reasonHeadline = "GitHub API rate limit still exceeded after waiting up to 5 minutes (`github_rate_limited`) \u2014 code-fix budget preserved";
+  } else if (input.reason === "branch_update_conflict") {
+    reasonHeadline = "Branch kept moving under EPURE: its commit could not be fast-forwarded after re-basing on the new head (`branch_update_conflict`) \u2014 no commit overwritten, code-fix budget preserved";
   } else if (input.reason === "internal_error") {
     reasonHeadline = "Internal orchestrator error \u2014 code-fix budget preserved";
   } else {
@@ -10942,6 +11009,21 @@ function parseGlossaryTerms(markdown) {
   flushHeadingSectionAsTermIfNoBullets();
   return terms;
 }
+function glossaryTermsChangedSince(planGlossary, previousPlanGlossary) {
+  const previous = new Map(
+    parseGlossaryTerms(previousPlanGlossary).map((t) => [t.key, t.blockText])
+  );
+  const blocksBySection = /* @__PURE__ */ new Map();
+  for (const term of parseGlossaryTerms(planGlossary)) {
+    if (previous.get(term.key) !== term.blockText) {
+      blocksBySection.set(term.sectionHeader, [
+        ...blocksBySection.get(term.sectionHeader) ?? [],
+        term.blockText
+      ]);
+    }
+  }
+  return [...blocksBySection.entries()].map(([header, blocks]) => [header, ...blocks].filter(Boolean).join("\n\n")).join("\n\n");
+}
 function mergeGlossaryMarkdownAdditively(baseGlossary, planGlossary) {
   const cleanBase = (baseGlossary ?? "").replace(/\r\n/g, "\n").trim();
   const cleanPlan = (planGlossary ?? "").replace(/\r\n/g, "\n").trim();
@@ -11343,9 +11425,10 @@ async function integratePlanBranchIntoFeature(params) {
       ...closedLegacyPlanPrNumber !== void 0 ? { closedLegacyPlanPrNumber } : {}
     };
   }
-  const [devPaths, planPaths] = await Promise.all([
+  const [devPaths, planPaths, featurePaths] = await Promise.all([
     params.gh.listBranchPaths(baseBranch),
-    params.gh.listBranchPaths(params.planBranch)
+    params.gh.listBranchPaths(params.planBranch),
+    params.gh.listBranchPaths(params.featureBranch)
   ]);
   const candidatePlanArtifactPaths = planPaths.map((p) => p.trim().replace(/^\/+/, "")).filter((p) => p === "GLOSSARY.md" || p.startsWith("docs/"));
   if (candidatePlanArtifactPaths.length === 0) {
@@ -11357,6 +11440,9 @@ async function integratePlanBranchIntoFeature(params) {
     };
   }
   const devPathSet = new Set(devPaths.map((p) => p.trim().replace(/^\/+/, "")));
+  const featurePathSet = new Set(
+    featurePaths.map((p) => p.trim().replace(/^\/+/, ""))
+  );
   const filesToCommit = [];
   const planAdrsToProcess = [];
   const specFilesToProcess = [];
@@ -11372,12 +11458,22 @@ async function integratePlanBranchIntoFeature(params) {
     if (devContent !== null && devContent === planContent) {
       continue;
     }
+    const featureContent = featurePathSet.has(artifactPath) ? await params.gh.readSingleBranchFile(params.featureBranch, artifactPath) : null;
+    if (featureContent === planContent) {
+      continue;
+    }
+    const previouslyIntegrated = params.previousPlanSha ? await params.gh.readSingleBranchFile(params.previousPlanSha, artifactPath) : null;
     if (artifactPath === "GLOSSARY.md") {
+      const planTerms = previouslyIntegrated === null ? planContent : glossaryTermsChangedSince(planContent, previouslyIntegrated);
       const mergedGlossary = mergeGlossaryMarkdownAdditively(
-        devContent ?? "",
-        planContent
+        featureContent ?? devContent ?? "",
+        planTerms
       );
-      filesToCommit.push({ path: "GLOSSARY.md", content: mergedGlossary });
+      if (planTerms.trim() && mergedGlossary !== featureContent) {
+        filesToCommit.push({ path: "GLOSSARY.md", content: mergedGlossary });
+      }
+    } else if (featureContent !== null && featureContent !== devContent && featureContent !== previouslyIntegrated) {
+      continue;
     } else if (ADR_PATH_REGEX.test(artifactPath)) {
       planAdrsToProcess.push({ path: artifactPath, content: planContent });
     } else if (artifactPath.startsWith("docs/specs/")) {
@@ -11447,6 +11543,10 @@ async function integratePlanBranchIntoFeature(params) {
     renumberedAdrs: renumberedResult.adrs.filter((a) => a.renumbered).map((a) => ({ oldPath: a.oldPath, newPath: a.path })),
     ...closedLegacyPlanPrNumber !== void 0 ? { closedLegacyPlanPrNumber } : {}
   };
+}
+var GIT_CONFLICT_BLOCK_REGEX = /^<{7}(?: .*)?$[\s\S]*?^={7}$[\s\S]*?^>{7}(?: .*)?$/m;
+function containsGitConflictMarkers(content) {
+  return GIT_CONFLICT_BLOCK_REGEX.test(content.replace(/\r\n/g, "\n"));
 }
 function createBaseSyncGuard(input) {
   let baseSha = null;
@@ -11573,54 +11673,57 @@ async function syncBranchWithBase(input) {
     };
   }
   const maxConflicts = input.maxConflictingFiles ?? 8;
-  let mergeBaseSha = input.baseBranch;
-  let candidateFiles = [];
-  let baseOnlyChangedFiles = [];
-  if (input.gh.compareCommits) {
-    const [baseToTarget, targetToBase] = await Promise.all([
-      input.gh.compareCommits(input.baseBranch, input.targetBranch),
-      input.gh.compareCommits(input.targetBranch, input.baseBranch)
-    ]);
-    mergeBaseSha = baseToTarget.mergeBaseSha || input.baseBranch;
-    const targetChanged = new Set(baseToTarget.changedFiles);
-    const bothChanged = targetToBase.changedFiles.filter(
-      (f) => targetChanged.has(f)
+  if (!input.gh.compareCommits) {
+    throw new Error("syncBranchWithBase needs compareCommits to resolve a merge conflict.");
+  }
+  const [targetHeadSha, baseHeadSha] = await Promise.all([
+    input.gh.getDefaultBranchSha(input.targetBranch),
+    input.gh.getDefaultBranchSha(input.baseBranch)
+  ]);
+  if (!targetHeadSha || !baseHeadSha) {
+    throw new Error(
+      `Cannot resolve the merge conflict: '${input.targetBranch}' or '${input.baseBranch}' no longer exists.`
     );
-    if (bothChanged.length > 0) {
-      candidateFiles = bothChanged;
-      baseOnlyChangedFiles = targetToBase.changedFiles.filter(
-        (f) => !targetChanged.has(f)
-      );
+  }
+  const { mergeBaseSha } = await input.gh.compareCommits(
+    targetHeadSha,
+    baseHeadSha
+  );
+  const [ancestorBlobs, baseBlobs, targetBlobs] = await Promise.all([
+    input.gh.listBranchBlobs(mergeBaseSha),
+    input.gh.listBranchBlobs(baseHeadSha),
+    input.gh.listBranchBlobs(targetHeadSha)
+  ]);
+  const candidateFiles = [];
+  const baseOnlyChangedFiles = [];
+  for (const path of /* @__PURE__ */ new Set([
+    ...ancestorBlobs.keys(),
+    ...baseBlobs.keys(),
+    ...targetBlobs.keys()
+  ])) {
+    const ancestor = ancestorBlobs.get(path)?.sha;
+    const theirs = baseBlobs.get(path)?.sha;
+    const ours = targetBlobs.get(path)?.sha;
+    if (theirs === ours || ancestor === theirs) {
+      continue;
+    }
+    if (ancestor === ours) {
+      baseOnlyChangedFiles.push(path);
     } else {
-      candidateFiles = [
-        .../* @__PURE__ */ new Set([
-          ...baseToTarget.changedFiles,
-          ...targetToBase.changedFiles
-        ])
-      ];
+      candidateFiles.push(path);
     }
   }
-  if (candidateFiles.length === 0) {
-    const [basePaths, targetPaths] = await Promise.all([
-      input.gh.listBranchPaths(input.baseBranch),
-      input.gh.listBranchPaths(input.targetBranch)
-    ]);
-    const commonPaths = targetPaths.filter((p) => basePaths.includes(p));
-    for (const p of commonPaths) {
-      const [oursContent, theirsContent] = await Promise.all([
-        input.gh.readSingleBranchFile(input.targetBranch, p),
-        input.gh.readSingleBranchFile(input.baseBranch, p)
-      ]);
-      if (oursContent !== theirsContent) {
-        candidateFiles.push(p);
-      }
+  const readPinnedFile = async (sha, path) => {
+    const content = await input.gh.readSingleBranchFile(sha, path);
+    if (content === null) {
+      throw new Error(`'${path}' exists at ${sha} but could not be read.`);
     }
-  }
+    return content;
+  };
+  const readVersion = async (blobs, sha, path) => blobs.has(path) ? await readPinnedFile(sha, path) : "";
   const pathGuard = validateWorkspaceFileOperations({
     workDir: process.cwd(),
-    files: [...candidateFiles, ...baseOnlyChangedFiles].map((path) => ({
-      path
-    })),
+    files: candidateFiles.map((path) => ({ path })),
     targets: [],
     isTaskBranch: true,
     reviewersDir: input.reviewersDir
@@ -11669,55 +11772,42 @@ async function syncBranchWithBase(input) {
   const baseNonConflictingFiles = [];
   const baseDeletedFiles = [];
   for (const basePath of baseOnlyChangedFiles) {
-    const baseFileContent = await input.gh.readSingleBranchFile(
-      input.baseBranch,
-      basePath
-    );
-    if (baseFileContent !== null) {
-      baseNonConflictingFiles.push({ path: basePath, content: baseFileContent });
+    if (baseBlobs.has(basePath)) {
+      baseNonConflictingFiles.push({
+        path: basePath,
+        content: await readPinnedFile(baseHeadSha, basePath)
+      });
     } else {
       baseDeletedFiles.push(basePath);
     }
   }
   if (candidateFiles.includes("GLOSSARY.md")) {
     const [theirsGlossary, oursGlossary] = await Promise.all([
-      input.gh.readSingleBranchFile(input.baseBranch, "GLOSSARY.md"),
-      input.gh.readSingleBranchFile(input.targetBranch, "GLOSSARY.md")
+      readVersion(baseBlobs, baseHeadSha, "GLOSSARY.md"),
+      readVersion(targetBlobs, targetHeadSha, "GLOSSARY.md")
     ]);
     resolvedFiles.push({
       path: "GLOSSARY.md",
-      content: mergeGlossaryMarkdownAdditively(
-        theirsGlossary ?? "",
-        oursGlossary ?? ""
-      )
+      content: mergeGlossaryMarkdownAdditively(theirsGlossary, oursGlossary)
     });
   }
   if (codeConflictPaths.length > 0 && hasLlmResolver) {
     const fileTriplets = [];
     for (const filePath of codeConflictPaths) {
       const [baseContent, oursContent, theirsContent] = await Promise.all([
-        input.gh.readSingleBranchFile(mergeBaseSha, filePath),
-        input.gh.readSingleBranchFile(input.targetBranch, filePath),
-        input.gh.readSingleBranchFile(input.baseBranch, filePath)
+        readVersion(ancestorBlobs, mergeBaseSha, filePath),
+        readVersion(targetBlobs, targetHeadSha, filePath),
+        readVersion(baseBlobs, baseHeadSha, filePath)
       ]);
       fileTriplets.push(
         [
           `### File: \`${filePath}\` (untruncated 3-way versions)`,
           "#### `<base_version>` (common ancestor):",
-          wrapUntrustedContent(
-            "untrusted_workspace_files",
-            baseContent ?? ""
-          ),
+          wrapUntrustedContent("untrusted_workspace_files", baseContent),
           `#### \`<ours_target_branch>\` (\`${input.targetBranch}\`):`,
-          wrapUntrustedContent(
-            "untrusted_workspace_files",
-            oursContent ?? ""
-          ),
+          wrapUntrustedContent("untrusted_workspace_files", oursContent),
           `#### \`<theirs_base_branch>\` (\`${input.baseBranch}\`):`,
-          wrapUntrustedContent(
-            "untrusted_workspace_files",
-            theirsContent ?? ""
-          )
+          wrapUntrustedContent("untrusted_workspace_files", theirsContent)
         ].join("\n")
       );
     }
@@ -11807,7 +11897,7 @@ async function syncBranchWithBase(input) {
       };
     }
     for (const rf of resolutionData.resolved_files) {
-      if (rf.content.includes("<<<<<<<") || rf.content.includes("=======") || rf.content.includes(">>>>>>>")) {
+      if (containsGitConflictMarkers(rf.content)) {
         const diag = `LLM conflict resolution for '${rf.path}' still contained Git conflict markers.`;
         if (input.escalateToNeedsHuman) {
           await input.escalateToNeedsHuman({
@@ -11881,7 +11971,9 @@ ${stage1Result.output.slice(0, 4e3)}`;
     branch: input.targetBranch,
     commitMessage: `chore(sync): resolve merge conflicts from ${input.baseBranch} into ${input.targetBranch}`,
     files: allFilesToCommit,
-    ...baseDeletedFiles.length > 0 ? { deletedFiles: baseDeletedFiles } : {}
+    ...baseDeletedFiles.length > 0 ? { deletedFiles: baseDeletedFiles } : {},
+    // Without the base as second parent the merge base never moves: the PR stays `dirty` and GitHub runs no `pull_request` CI.
+    mergeParentSha: baseHeadSha
   });
   return {
     status: "resolved",
@@ -11895,6 +11987,16 @@ var FEATURE_BRANCH_PHASES = /* @__PURE__ */ new Set([
   "implementation",
   "completed"
 ]);
+var PLANNING_PHASES = /* @__PURE__ */ new Set([
+  "grilling",
+  "spec",
+  "tickets"
+]);
+var CAN_CANCEL = /* @__PURE__ */ new Set([
+  "write",
+  "maintain",
+  "admin"
+]);
 async function handleEpicClosedByHuman(params) {
   const state = params.currentState;
   const featureBranch = state?.active_branch ?? "";
@@ -11907,12 +12009,49 @@ async function handleEpicClosedByHuman(params) {
     created_ticket_numbers: [],
     feature_pr_url: ""
   });
-  if (!state || state.status === "cancelled" || !FEATURE_BRANCH_PHASES.has(state.phase)) {
-    return ignore("no feature branch in progress");
+  const planning = state !== null && PLANNING_PHASES.has(state.phase);
+  if (!state || state.status === "cancelled" || !planning && !FEATURE_BRANCH_PHASES.has(state.phase)) {
+    return ignore("no plan in progress");
   }
-  const mergedPr = await params.gh.findMergedPullRequestByHead(featureBranch, "dev");
-  if (mergedPr) {
-    return ignore(`feature PR #${mergedPr.number} is already merged into dev`);
+  if (!planning) {
+    const mergedPr = await params.gh.findMergedPullRequestByHead(featureBranch, "dev");
+    if (mergedPr) {
+      return ignore(`feature PR #${mergedPr.number} is already merged into dev`);
+    }
+  }
+  const permission = await params.gh.getCollaboratorPermission(params.actor);
+  if (!CAN_CANCEL.has(permission)) {
+    const note = `\u2139\uFE0F L'issue #${params.issueNumber} a \xE9t\xE9 ferm\xE9e par \`@${params.actor}\` (permission \`${permission}\`) : seul un collaborateur \`write\` ou sup\xE9rieur annule un plan EPURE en fermant son issue. Le plan reste \`${state.status}\` en phase \`${state.phase}\`.`;
+    await params.gh.postIssueComment(params.issueNumber, note);
+    return { ...ignore(`closer @${params.actor} has permission ${permission}`), summary_markdown: note };
+  }
+  if (planning) {
+    const updated2 = await updateIssueStateWithCas({
+      issueNumber: params.issueNumber,
+      store: params.store,
+      mutator: (prev) => toTerminalState(prev, { status: "cancelled" })
+    });
+    const body2 = appendEpureCommandsSpoiler(
+      [
+        updated2.issue_mirror_markdown,
+        "",
+        `### \u{1F6D1} Issue de pilotage #${params.issueNumber} ferm\xE9e par \`@${params.actor}\` pendant la phase \`${state.phase}\``,
+        "",
+        "- **Statut d'orchestration** : `cancelled` (Plan annul\xE9) ; aucune branche n'a \xE9t\xE9 supprim\xE9e.",
+        `- **Reprise** : rouvrez l'issue #${params.issueNumber}, puis postez \`/epure continue\`.`
+      ].join("\n"),
+      { phase: "cancelled", status: "cancelled", issueNumber: params.issueNumber }
+    );
+    await params.gh.postIssueComment(params.issueNumber, body2);
+    return {
+      executed: true,
+      phase: updated2.state.phase,
+      status: updated2.state.status,
+      active_branch: updated2.state.active_branch,
+      summary_markdown: body2,
+      created_ticket_numbers: [],
+      feature_pr_url: ""
+    };
   }
   const [comparison, featurePr, taskPrs] = await Promise.all([
     params.gh.compareCommits?.("dev", featureBranch),
@@ -14274,6 +14413,10 @@ async function runFeatureIntegrationPhase(params) {
     });
   }
   if (await params.baseSyncGuard.needsSync()) {
+    const mergedBeforeSync = await params.stopIfFeaturePrMerged();
+    if (mergedBeforeSync) {
+      return mergedBeforeSync;
+    }
     const featureSync = await syncBranchWithBase({
       gh: params.gh,
       targetBranch: params.featureBranch,
@@ -14352,6 +14495,10 @@ async function runFeatureIntegrationPhase(params) {
       issueNumber: params.issueNumber
     }
   );
+  const mergedBeforeOpening = existingFeaturePr ? null : await params.stopIfFeaturePrMerged();
+  if (mergedBeforeOpening) {
+    return mergedBeforeOpening;
+  }
   const featurePr = existingFeaturePr ? existingFeaturePr : await params.gh.openPullRequest({
     head: params.featureBranch,
     base: "dev",
@@ -15366,10 +15513,11 @@ async function runTicketExecutionLoop(params) {
       gh: params.gh,
       store: params.store
     });
-    if (cancelledBeforeTicket) {
+    const haltBeforeTicket = cancelledBeforeTicket ?? await params.stopIfFeaturePrMerged();
+    if (haltBeforeTicket) {
       return {
         halted: true,
-        result: cancelledBeforeTicket,
+        result: haltBeforeTicket,
         verificationProfile,
         verificationGuideMarkdown
       };
@@ -15492,6 +15640,20 @@ async function runTicketExecutionLoop(params) {
       continue;
     }
     const taskBranch = `task/${ticket.ticketIssueNumber}-${ticket.slug}`;
+    const mergedTaskPr = await params.gh.findMergedPullRequestByHead(
+      taskBranch,
+      params.featureBranch
+    );
+    if (mergedTaskPr) {
+      if (ticket.ticketIssueNumber !== params.issueNumber) {
+        await params.gh.closeIssue(ticket.ticketIssueNumber);
+      }
+      completedTicketNumbers.add(ticket.ticketIssueNumber);
+      params.completedTicketsSummary.push(
+        `- **#${ticket.ticketIssueNumber}** (${ticket.title}) \u2014 PR [#${mergedTaskPr.number}](${mergedTaskPr.html_url}) already merged into \`${params.featureBranch}\``
+      );
+      continue;
+    }
     if (ticket.ticketIssueNumber !== params.issueNumber) {
       await params.gh.removeIssueLabel?.(ticket.ticketIssueNumber, "needs-human");
     }
@@ -15534,22 +15696,23 @@ async function runTicketExecutionLoop(params) {
       }
     }
     await params.gh.ensureBranch(taskBranch, params.featureBranch);
+    const syncTaskBranchWithFeature = () => syncBranchWithBase({
+      gh: params.gh,
+      targetBranch: taskBranch,
+      baseBranch: params.featureBranch,
+      issueNumber: ticket.ticketIssueNumber,
+      llmApiKey: params.llmApiKey,
+      fetchImpl: params.fetchImpl,
+      model: params.phaseModels.implementationModel,
+      providers: params.phaseModels.providers,
+      maxTransientRetries: params.phaseModels.maxTransientRetries,
+      transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
+      requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+      sandboxRunner: params.sandboxRunner,
+      reviewersDir
+    });
     if (syncWithBase) {
-      const taskSync = await syncBranchWithBase({
-        gh: params.gh,
-        targetBranch: taskBranch,
-        baseBranch: params.featureBranch,
-        issueNumber: ticket.ticketIssueNumber,
-        llmApiKey: params.llmApiKey,
-        fetchImpl: params.fetchImpl,
-        model: params.phaseModels.implementationModel,
-        providers: params.phaseModels.providers,
-        maxTransientRetries: params.phaseModels.maxTransientRetries,
-        transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
-        requestTimeoutMs: params.phaseModels.requestTimeoutMs,
-        sandboxRunner: params.sandboxRunner,
-        reviewersDir
-      });
+      const taskSync = await syncTaskBranchWithFeature();
       if (taskSync.status === "escalated") {
         const escalated = await params.escalateToNeedsHuman({
           reason: taskSync.escalationReason ?? "merge_conflict_unresolved",
@@ -16055,6 +16218,15 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
             verificationGuideMarkdown
           };
         }
+        const featureMergedBeforeTaskPr = await params.stopIfFeaturePrMerged();
+        if (featureMergedBeforeTaskPr) {
+          return {
+            halted: true,
+            result: featureMergedBeforeTaskPr,
+            verificationProfile,
+            verificationGuideMarkdown
+          };
+        }
         await params.gh.commitFilesToBranch({
           branch: taskBranch,
           fromBranch: params.featureBranch,
@@ -16089,6 +16261,27 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
         currentPrHeadSha = taskPr.head_sha;
       }
       let reviewedCommitShas = [];
+      const resyncTaskPrIfConflicting = async () => {
+        const mergeableState = await params.gh.getPullRequestMergeableState?.(
+          taskPr.number
+        );
+        if (mergeableState !== "dirty") {
+          return void 0;
+        }
+        const resync = await syncTaskBranchWithFeature();
+        if (resync.status === "escalated") {
+          return await params.escalateToNeedsHuman({
+            reason: resync.escalationReason ?? "merge_conflict_unresolved",
+            ticketNumber: ticket.ticketIssueNumber,
+            branch: taskBranch,
+            prNumber: taskPr.number,
+            prUrl: taskPr.html_url,
+            diagnosticExcerpt: resync.diagnosticExcerpt
+          });
+        }
+        currentPrHeadSha = resync.headSha || currentPrHeadSha;
+        return void 0;
+      };
       const runStage2AndStage3ForTaskPr = async (passParams) => {
         const reviewGuard = evaluateReviewFeedbackTrigger({
           commitSha: passParams.headSha,
@@ -16243,6 +16436,15 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
           escalateToHuman: reviewGuard.escalate_to_human
         };
       };
+      const initialConflictEscalation = await resyncTaskPrIfConflicting();
+      if (initialConflictEscalation) {
+        return {
+          halted: true,
+          result: initialConflictEscalation,
+          verificationProfile,
+          verificationGuideMarkdown
+        };
+      }
       const initialPass = await runStage2AndStage3ForTaskPr({
         headSha: currentPrHeadSha,
         isReReviewPass: false,
@@ -16579,6 +16781,15 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
           files: impl.files,
           deletedFiles: Array.from(ticketDeletedFilesSet)
         });
+        const nextConflictEscalation = await resyncTaskPrIfConflicting();
+        if (nextConflictEscalation) {
+          return {
+            halted: true,
+            result: nextConflictEscalation,
+            verificationProfile,
+            verificationGuideMarkdown
+          };
+        }
         const nextPass = await runStage2AndStage3ForTaskPr({
           headSha: currentPrHeadSha,
           isReReviewPass: true,
@@ -16676,12 +16887,77 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
         conclusion: "success",
         summary: `Conventional Commit title verified: '${squashCommit.pr_title}'`
       });
-      await params.gh.mergePullRequest(taskPr.number, {
+      const mergeTaskPr = () => params.gh.mergePullRequest(taskPr.number, {
         headBranch: taskBranch,
         baseBranch: params.featureBranch,
         commitTitle: squashCommit.commit_title,
         commitMessage: squashCommit.commit_message
       });
+      const resyncAndRetryTaskPrMerge = async (refusal) => {
+        const resync = await syncTaskBranchWithFeature();
+        if (resync.status === "merged" || resync.status === "resolved") {
+          currentPrHeadSha = resync.headSha;
+          const pass = await runStage2AndStage3ForTaskPr({
+            headSha: currentPrHeadSha,
+            isReReviewPass: true,
+            reviewFixAttemptsUsed: reviewFixAttempt
+          });
+          if (pass.releasedForAsyncCi) {
+            return pass.releasedForAsyncCi;
+          }
+          if (pass.reviewResult.conclusion === "failure" || !pass.ciGateResult.passed) {
+            return await params.escalateToNeedsHuman({
+              reason: "remediation_exhausted",
+              ticketNumber: ticket.ticketIssueNumber,
+              branch: taskBranch,
+              prNumber: taskPr.number,
+              prUrl: taskPr.html_url,
+              codeFixAttemptsUsed: reviewFixAttempt,
+              failedChecks: pass.ciGateResult.failedChecks,
+              mustFixFindings: pass.reviewResult.must_fix_findings,
+              diagnosticExcerpt: pass.ciGateResult.formattedDiagnostics
+            });
+          }
+          await params.gh.publishCheckRun({
+            name: "PR title",
+            headSha: currentPrHeadSha,
+            conclusion: "success",
+            summary: `Conventional Commit title verified: '${squashCommit.pr_title}'`
+          });
+          try {
+            await mergeTaskPr();
+            return void 0;
+          } catch (retryErr) {
+            if (!(retryErr instanceof PullRequestNotMergeableError)) {
+              throw retryErr;
+            }
+          }
+        }
+        return await params.escalateToNeedsHuman({
+          reason: resync.escalationReason ?? "merge_conflict_unresolved",
+          ticketNumber: ticket.ticketIssueNumber,
+          branch: taskBranch,
+          prNumber: taskPr.number,
+          prUrl: taskPr.html_url,
+          diagnosticExcerpt: resync.diagnosticExcerpt ?? refusal.message
+        });
+      };
+      try {
+        await mergeTaskPr();
+      } catch (err) {
+        if (!(err instanceof PullRequestNotMergeableError)) {
+          throw err;
+        }
+        const refusedMergeResult = await resyncAndRetryTaskPrMerge(err);
+        if (refusedMergeResult) {
+          return {
+            halted: true,
+            result: refusedMergeResult,
+            verificationProfile,
+            verificationGuideMarkdown
+          };
+        }
+      }
       if (ticket.ticketIssueNumber !== params.issueNumber) {
         await params.gh.closeIssue(ticket.ticketIssueNumber);
       }
@@ -16724,8 +17000,23 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
 }
 
 // src/orchestrator/issue-orchestrator.ts
+var EscalationNotRecordedError = class extends Error {
+  constructor(issueNumber, reason, escalationMarkdown) {
+    super(
+      `GitHub API still rate limited: the \`${reason}\` escalation could not be posted on #${issueNumber}. Post \`/epure continue\` on #${issueNumber} once the limit resets.`
+    );
+    this.issueNumber = issueNumber;
+    this.reason = reason;
+    this.escalationMarkdown = escalationMarkdown;
+  }
+  issueNumber;
+  reason;
+  escalationMarkdown;
+  name = "EscalationNotRecordedError";
+};
 async function orchestrateIssueCommand(input) {
   let mintedAppToken = null;
+  let githubRequestCount = 0;
   try {
     let activeToken = (input.fallbackGithubToken ?? "").trim();
     if (input.agentAppId && input.agentAppId.trim() && input.agentAppPrivateKey && input.agentAppPrivateKey.trim()) {
@@ -16743,8 +17034,13 @@ async function orchestrateIssueCommand(input) {
         "Missing GitHub authentication: configure EPURE_AGENT_APP_ID + EPURE_AGENT_APP_PRIVATE_KEY (or fallback GITHUB_TOKEN)."
       );
     }
+    const baseFetch = input.fetchImpl ?? fetch;
+    const countedFetch = (url, init) => {
+      githubRequestCount += 1;
+      return baseFetch(url, init);
+    };
     const githubFetch = createGitHubRateLimitedFetch({
-      fetchImpl: input.fetchImpl ?? fetch,
+      fetchImpl: countedFetch,
       sleepFn: input.sleepFn
     });
     const gh = createGitHubRestHelper({
@@ -16866,6 +17162,43 @@ async function orchestrateIssueCommand(input) {
           feature_pr_url: ""
         };
       }
+      if (effectiveInput.command === "continue" && (effectiveInput.commentId ?? 0) > 0 && currentState?.status === "cancelled" && PLANNING_PHASES.has(currentState.phase)) {
+        const updated = await updateIssueStateWithCas({
+          issueNumber: effectiveInput.issueNumber,
+          store,
+          mutator: (prev) => ({
+            ...prev,
+            status: prev.phase === "tickets" ? "awaiting_human_approval" : "active",
+            last_processed_comment_id: Math.max(
+              effectiveInput.commentId ?? 0,
+              prev.last_processed_comment_id
+            )
+          })
+        });
+        const nextStep = updated.state.phase === "grilling" ? "R\xE9pondez en commentaire pour poursuivre l'entretien, ou postez `/epure to-spec`." : updated.state.phase === "spec" ? "R\xE9pondez en commentaire pour r\xE9viser la sp\xE9cification, ou postez `/epure to-tickets`." : "Postez `/epure approve` pour lancer l'impl\xE9mentation.";
+        const body = appendEpureCommandsSpoiler(
+          [
+            updated.issue_mirror_markdown,
+            "",
+            `\u25B6\uFE0F Plan #${effectiveInput.issueNumber} repris par \`@${effectiveInput.actor}\` en phase \`${updated.state.phase}\`. ${nextStep}`
+          ].join("\n"),
+          {
+            phase: updated.state.phase,
+            status: updated.state.status,
+            issueNumber: effectiveInput.issueNumber
+          }
+        );
+        await gh.postIssueComment(effectiveInput.issueNumber, body);
+        return {
+          executed: true,
+          phase: updated.state.phase,
+          status: updated.state.status,
+          active_branch: updated.state.active_branch,
+          summary_markdown: body,
+          created_ticket_numbers: [],
+          feature_pr_url: ""
+        };
+      }
       if (effectiveInput.command === "closed") {
         return await handleEpicClosedByHuman({
           issueNumber: effectiveInput.issueNumber,
@@ -16879,7 +17212,7 @@ async function orchestrateIssueCommand(input) {
       const allComments = await gh.listIssueComments(effectiveInput.issueNumber);
       const planSlug = slugifyTitle(issue.title);
       planBranch = `plan/${effectiveInput.issueNumber}-${planSlug}`;
-      featureBranch = `feature/${effectiveInput.issueNumber}-${planSlug}`;
+      featureBranch = currentState?.active_branch.startsWith(`${featureBranch}-`) ? currentState.active_branch : `feature/${effectiveInput.issueNumber}-${planSlug}`;
       let agentsConfigError;
       let parsedDevAgentsConfig = null;
       try {
@@ -17349,11 +17682,15 @@ async function orchestrateIssueCommand(input) {
             const taskBranchToMerge = currentState.active_task_branch ?? `task/${ticketNum}`;
             const prNumberToMerge = currentState.active_pr_number ?? 0;
             const targetFeatureBranch = currentState.active_branch || featureBranch;
-            if (prNumberToMerge > 0) {
-              const openTaskPr = await gh.findOpenPullRequestByHead(
-                taskBranchToMerge,
-                targetFeatureBranch
-              );
+            const openTaskPr = prNumberToMerge > 0 ? await gh.findOpenPullRequestByHead(
+              taskBranchToMerge,
+              targetFeatureBranch
+            ) : null;
+            const mergedByHuman = prNumberToMerge > 0 && !openTaskPr && await gh.findMergedPullRequestByHead(
+              taskBranchToMerge,
+              targetFeatureBranch
+            ) !== null;
+            if (prNumberToMerge > 0 && !mergedByHuman) {
               const prFiles = await gh.listPullRequestFiles(prNumberToMerge);
               const changedFilesForSquash = await Promise.all(
                 prFiles.map(async (f) => ({
@@ -17392,12 +17729,67 @@ async function orchestrateIssueCommand(input) {
                 conclusion: "success",
                 summary: `Conventional Commit title verified: '${squashCommit.pr_title}'`
               });
-              await gh.mergePullRequest(prNumberToMerge, {
-                headBranch: taskBranchToMerge,
-                baseBranch: targetFeatureBranch,
-                commitTitle: squashCommit.commit_title,
-                commitMessage: squashCommit.commit_message
-              });
+              try {
+                await gh.mergePullRequest(prNumberToMerge, {
+                  headBranch: taskBranchToMerge,
+                  baseBranch: targetFeatureBranch,
+                  commitTitle: squashCommit.commit_title,
+                  commitMessage: squashCommit.commit_message
+                });
+              } catch (err) {
+                if (!(err instanceof PullRequestNotMergeableError)) {
+                  throw err;
+                }
+                const resync = await syncBranchWithBase({
+                  gh,
+                  targetBranch: taskBranchToMerge,
+                  baseBranch: targetFeatureBranch,
+                  issueNumber: ticketNum,
+                  llmApiKey: effectiveInput.llmApiKey,
+                  fetchImpl: effectiveInput.fetchImpl,
+                  model: phaseModels.implementationModel,
+                  providers: phaseModels.providers,
+                  maxTransientRetries: phaseModels.maxTransientRetries,
+                  transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+                  requestTimeoutMs: phaseModels.requestTimeoutMs,
+                  sandboxRunner: effectiveInput.sandboxRunner,
+                  reviewersDir
+                });
+                if (resync.status !== "merged" && resync.status !== "resolved") {
+                  return await escalateSuspension({
+                    reason: resync.escalationReason ?? "merge_conflict_unresolved",
+                    ticketNumber: ticketNum,
+                    branch: taskBranchToMerge,
+                    prNumber: prNumberToMerge,
+                    prUrl: openTaskPr?.html_url,
+                    diagnosticExcerpt: resync.diagnosticExcerpt ?? err.message
+                  });
+                }
+                await gh.publishCheckRun({
+                  name: "ai-review",
+                  headSha: resync.headSha,
+                  conclusion: "success",
+                  summary: `Review of \`${activeHeadSha}\` carried over: \`${resync.headSha}\` only merges \`${targetFeatureBranch}\` into \`${taskBranchToMerge}\`.`
+                });
+                const updatedResynced = await updateIssueStateWithCas({
+                  issueNumber: effectiveInput.issueNumber,
+                  store,
+                  mutator: (prev) => ({
+                    ...prev,
+                    subphase: "waiting_ticket_ci",
+                    active_head_sha: resync.headSha
+                  })
+                });
+                return {
+                  executed: true,
+                  phase: updatedResynced.state.phase,
+                  status: updatedResynced.state.status,
+                  active_branch: updatedResynced.state.active_branch,
+                  summary_markdown: `PR #${prNumberToMerge} was not mergeable; \`${taskBranchToMerge}\` re-synced with \`${targetFeatureBranch}\` at \`${resync.headSha}\`. Waiting for external CI on the new head.`,
+                  created_ticket_numbers: [],
+                  feature_pr_url: ""
+                };
+              }
             }
             if (ticketNum !== effectiveInput.issueNumber) {
               await gh.closeIssue(ticketNum);
@@ -17479,8 +17871,7 @@ async function orchestrateIssueCommand(input) {
           featureBranch,
           "dev"
         );
-        const mergedFeaturePr = existingFeaturePrCheck ? null : await gh.findMergedPullRequestByHead(featureBranch, "dev");
-        if (mergedFeaturePr) {
+        const completeEpicMergedByHuman = async (mergedFeaturePr) => {
           const updatedDone = await updateIssueStateWithCas({
             issueNumber: effectiveInput.issueNumber,
             store,
@@ -17513,11 +17904,28 @@ async function orchestrateIssueCommand(input) {
             created_ticket_numbers: [],
             feature_pr_url: mergedFeaturePr.html_url
           };
+        };
+        const stopIfFeaturePrMerged = async () => {
+          const merged = await gh.findMergedPullRequestByHead(
+            featureBranch,
+            "dev"
+          );
+          return merged ? await completeEpicMergedByHuman(merged) : null;
+        };
+        if (!existingFeaturePrCheck) {
+          const mergedAtStart = await stopIfFeaturePrMerged();
+          if (mergedAtStart) {
+            return mergedAtStart;
+          }
         }
-        if (hasExplicitPlanManifest && !existingFeaturePrCheck) {
+        const planBranchToIntegrate = parsedPlanManifest?.planBranch ?? planBranch;
+        const planHeadSha = hasExplicitPlanManifest && !existingFeaturePrCheck ? await gh.getDefaultBranchSha(planBranchToIntegrate) : null;
+        const integratePlan = planHeadSha !== null && planHeadSha !== currentState?.integrated_plan_sha;
+        if (integratePlan) {
           await integratePlanBranchIntoFeature({
             gh,
-            planBranch: parsedPlanManifest?.planBranch ?? planBranch,
+            planBranch: planBranchToIntegrate,
+            previousPlanSha: currentState?.integrated_plan_sha,
             featureBranch,
             baseBranch: "dev",
             llmApiKey: effectiveInput.llmApiKey,
@@ -17586,6 +17994,7 @@ async function orchestrateIssueCommand(input) {
             status: "active",
             active_branch: featureBranch,
             epic_phase: prev.epic_phase ?? 1,
+            ...integratePlan ? { integrated_plan_sha: planHeadSha ?? void 0 } : {},
             last_processed_comment_id: Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
           })
         });
@@ -17710,7 +18119,8 @@ ${t.filesToTouch.join(" ")}`
           forceOneRemediationRoundOnOpenPr,
           initialCodeFixAttemptsByTicket,
           baseSyncGuard,
-          resumeContextMarkdown
+          resumeContextMarkdown,
+          stopIfFeaturePrMerged
         });
         if (loopOutcome.halted && loopOutcome.result) {
           return loopOutcome.result;
@@ -17861,7 +18271,8 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
               forceOneRemediationRoundOnOpenPr: false,
               initialCodeFixAttemptsByTicket,
               baseSyncGuard,
-              resumeContextMarkdown
+              resumeContextMarkdown,
+              stopIfFeaturePrMerged
             });
             if (loopOutcome.halted && loopOutcome.result) {
               return loopOutcome.result;
@@ -17911,7 +18322,8 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
             forceOneRemediationRoundOnOpenPr,
             initialFeatureCodeFixAttemptsUsed,
             baseSyncGuard,
-            resumeContextMarkdown
+            resumeContextMarkdown,
+            stopIfFeaturePrMerged
           });
         } catch (err) {
           if (err instanceof LLMError) {
@@ -17940,76 +18352,114 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
       };
     } catch (err) {
       const rawErrMessage = err instanceof Error ? err.message : String(err);
-      const escalationReason = err instanceof LLMError ? resolveLlmEscalationReason(err) : err instanceof GitHubRateLimitError ? "github_rate_limited" : err instanceof MissingModelConfigError ? "model_config_missing" : "internal_error";
-      const latestSnap = await store.readRef(refName);
-      const fallbackPhase = latestSnap.state?.phase && latestSnap.state.phase !== "idle" ? latestSnap.state.phase : effectiveInput.command === "approve" || effectiveInput.command === "continue" ? "implementation" : effectiveInput.command === "to-tickets" ? "tickets" : effectiveInput.command === "to-spec" ? "spec" : "grilling";
-      const fallbackBranch = latestSnap.state?.active_branch || (fallbackPhase === "implementation" ? featureBranch : planBranch);
-      let duplicateOfLastEscalation = false;
-      const updatedSuspended = await updateIssueStateWithCas({
+      const escalationReason = err instanceof LLMError ? resolveLlmEscalationReason(err) : err instanceof GitHubRateLimitError ? "github_rate_limited" : err instanceof BranchUpdateConflictError ? "branch_update_conflict" : err instanceof MissingModelConfigError ? "model_config_missing" : "internal_error";
+      const commandPhase = effectiveInput.command === "approve" || effectiveInput.command === "continue" ? "implementation" : effectiveInput.command === "to-tickets" ? "tickets" : effectiveInput.command === "to-spec" ? "spec" : "grilling";
+      const escalationCommentFor = (branch, codeFixAttemptsUsed) => formatNeedsHumanEscalationComment({
+        reason: escalationReason,
         issueNumber: effectiveInput.issueNumber,
-        store,
-        mutator: (prev) => {
-          const escalation = {
-            reason: escalationReason,
-            head_sha: prev.active_head_sha ?? "",
-            ticket_number: prev.active_ticket_number ?? effectiveInput.issueNumber,
-            budget_scope: activeBudgetScope(prev)
-          };
-          duplicateOfLastEscalation = isAutomaticEntry && prev.last_escalation?.reason === escalation.reason && prev.last_escalation?.head_sha === escalation.head_sha;
-          return toTerminalState(prev, {
-            phase: prev.phase !== "idle" ? prev.phase : fallbackPhase,
-            status: "suspended",
-            active_branch: prev.active_branch || fallbackBranch,
-            transient_retries_used: cumulativeTransientRetriesUsed(),
-            last_escalation: escalation,
-            last_processed_comment_id: Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
-          });
-        }
+        ticketIssueNumber: effectiveInput.issueNumber,
+        branch,
+        codeFixAttemptsUsed,
+        maxCodeFixAttempts,
+        missingModelKeys: err instanceof MissingModelConfigError ? err.missingKeys : void 0,
+        diagnosticExcerpt: redactSecrets(rawErrMessage, [
+          activeToken,
+          effectiveInput.llmApiKey
+        ])
       });
-      const escalationMarkdown = appendEpureCommandsSpoiler(
-        [
-          updatedSuspended.issue_mirror_markdown,
-          "",
-          formatNeedsHumanEscalationComment({
-            reason: escalationReason,
-            issueNumber: effectiveInput.issueNumber,
-            ticketIssueNumber: effectiveInput.issueNumber,
-            branch: updatedSuspended.state.active_branch || fallbackBranch,
-            codeFixAttemptsUsed: updatedSuspended.state.code_fix_attempts_used,
-            maxCodeFixAttempts,
-            missingModelKeys: err instanceof MissingModelConfigError ? err.missingKeys : void 0,
-            diagnosticExcerpt: redactSecrets(rawErrMessage, [
-              activeToken,
-              effectiveInput.llmApiKey
-            ])
-          })
-        ].join("\n"),
-        {
-          phase: "suspended",
-          status: "suspended",
-          issueNumber: effectiveInput.issueNumber
-        }
-      );
-      if (!duplicateOfLastEscalation) {
-        await gh.ensureLabel(
-          "needs-human",
-          "D93F0B",
-          "Requires human maintainer intervention"
+      const rateLimited = err instanceof GitHubRateLimitError;
+      const recordFetch = rateLimited ? createGitHubRateLimitedFetch({
+        fetchImpl: countedFetch,
+        sleepFn: input.sleepFn
+      }) : githubFetch;
+      const recordGh = rateLimited ? createGitHubRestHelper({
+        repository: input.repository,
+        token: activeToken,
+        fetchImpl: recordFetch
+      }) : gh;
+      const recordStore = rateLimited && !input.stateStore ? createGitHubApiRefStateStore({
+        repository: input.repository,
+        githubToken: activeToken,
+        fetchImpl: recordFetch
+      }) : store;
+      try {
+        const latestSnap = await recordStore.readRef(refName);
+        const fallbackPhase = latestSnap.state?.phase && latestSnap.state.phase !== "idle" ? latestSnap.state.phase : commandPhase;
+        const fallbackBranch = latestSnap.state?.active_branch || (fallbackPhase === "implementation" ? featureBranch : planBranch);
+        let duplicateOfLastEscalation = false;
+        const updatedSuspended = await updateIssueStateWithCas({
+          issueNumber: effectiveInput.issueNumber,
+          store: recordStore,
+          mutator: (prev) => {
+            const escalation = {
+              reason: escalationReason,
+              head_sha: prev.active_head_sha ?? "",
+              ticket_number: prev.active_ticket_number ?? effectiveInput.issueNumber,
+              budget_scope: activeBudgetScope(prev)
+            };
+            duplicateOfLastEscalation = isAutomaticEntry && prev.last_escalation?.reason === escalation.reason && prev.last_escalation?.head_sha === escalation.head_sha;
+            return toTerminalState(prev, {
+              phase: prev.phase !== "idle" ? prev.phase : fallbackPhase,
+              status: "suspended",
+              active_branch: prev.active_branch || fallbackBranch,
+              transient_retries_used: cumulativeTransientRetriesUsed(),
+              last_escalation: escalation,
+              last_processed_comment_id: Math.max(effectiveInput.commentId ?? 0, prev.last_processed_comment_id)
+            });
+          }
+        });
+        const escalationMarkdown = appendEpureCommandsSpoiler(
+          [
+            updatedSuspended.issue_mirror_markdown,
+            "",
+            escalationCommentFor(
+              updatedSuspended.state.active_branch || fallbackBranch,
+              updatedSuspended.state.code_fix_attempts_used
+            )
+          ].join("\n"),
+          {
+            phase: "suspended",
+            status: "suspended",
+            issueNumber: effectiveInput.issueNumber
+          }
         );
-        await gh.addIssueLabels(effectiveInput.issueNumber, ["needs-human"]);
-        await gh.postIssueComment(effectiveInput.issueNumber, escalationMarkdown);
+        if (!duplicateOfLastEscalation) {
+          await recordGh.ensureLabel(
+            "needs-human",
+            "D93F0B",
+            "Requires human maintainer intervention"
+          );
+          await recordGh.addIssueLabels(effectiveInput.issueNumber, ["needs-human"]);
+          await recordGh.postIssueComment(effectiveInput.issueNumber, escalationMarkdown);
+        }
+        return {
+          executed: true,
+          phase: updatedSuspended.state.phase,
+          status: updatedSuspended.state.status,
+          active_branch: updatedSuspended.state.active_branch,
+          summary_markdown: escalationMarkdown,
+          created_ticket_numbers: [],
+          feature_pr_url: ""
+        };
+      } catch (recordErr) {
+        if (!(recordErr instanceof GitHubRateLimitError)) {
+          throw recordErr;
+        }
+        throw new EscalationNotRecordedError(
+          effectiveInput.issueNumber,
+          escalationReason,
+          escalationCommentFor(
+            commandPhase === "implementation" ? featureBranch : planBranch,
+            void 0
+          )
+        );
       }
-      return {
-        executed: true,
-        phase: updatedSuspended.state.phase,
-        status: updatedSuspended.state.status,
-        active_branch: updatedSuspended.state.active_branch,
-        summary_markdown: escalationMarkdown,
-        created_ticket_numbers: [],
-        feature_pr_url: ""
-      };
     }
   } finally {
+    process.stdout.write(
+      `[EPURE] GitHub API requests this run: ${githubRequestCount}
+`
+    );
     if (mintedAppToken) {
       try {
         await revokeGitHubInstallationToken({
@@ -18091,6 +18541,9 @@ async function run() {
       writeStepSummary(redactSecrets(result.summary_markdown, secrets));
     }
   } catch (err) {
+    if (err instanceof EscalationNotRecordedError) {
+      writeStepSummary(redactSecrets(err.escalationMarkdown, secrets));
+    }
     const msg = err instanceof Error ? err.message : String(err);
     const safeMsg = redactSecrets(msg, secrets);
     process.stderr.write(`::error title=EPURE Orchestration Failed::${safeMsg}
