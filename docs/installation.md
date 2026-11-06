@@ -127,3 +127,7 @@ git push origin dev
      - `epure-feature-governance` (`refs/heads/feature/*`): `Agent App` in `always` bypass for autonomous `task/* -> feature/*` squash-merges once checks pass and for EPURE's direct writes (plan integration, `dev` merge syncs, conflict resolutions); humans still go through PRs.
      - `epure-dev-governance` (`refs/heads/dev`): No `Agent App` bypass (`required_approving_review_count: 0` by default for solo-maintainer compatibility; configurable via `--require-pr-approvals <N>`).
      - `epure-release-immutability` (`refs/heads/main`, `refs/tags/v*`): `Release App` as sole Bypass Actor.
+
+## Fail-Closed Trade-Offs
+
+- **Resume guidance from maintainers with private organization membership**: when `/epure continue` or `/epure approve` resumes an implementation, EPURE forwards recent comments from `write`-or-higher contributors to the resumed session. To keep visitors from spending the permission lookups, it only looks up authors whose `author_association` is `OWNER`, `MEMBER` or `COLLABORATOR`. GitHub reports an organization member whose membership is private as `CONTRIBUTOR` or `NONE`, so that maintainer's comments are dropped from the resume context even though they hold `write`. Commands are not affected: every `/epure` command is still authorized by the effective permission. Make the membership public (organization → People), or add the maintainer as a direct collaborator, to have their guidance forwarded.
