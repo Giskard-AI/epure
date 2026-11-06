@@ -76,6 +76,7 @@ export interface IssueCommentRecord {
     readonly type?: string | undefined;
   };
   readonly created_at: string;
+  readonly author_association?: string | undefined;
   readonly performed_via_github_app?: { readonly slug?: string } | null | undefined;
 }
 

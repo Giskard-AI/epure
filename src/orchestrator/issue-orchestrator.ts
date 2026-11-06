@@ -1621,6 +1621,7 @@ export async function orchestrateIssueCommand(
                   id: c.id,
                   authorLogin: c.user.login,
                   authorType: c.user.type ?? "User",
+                  authorAssociation: c.author_association ?? "NONE",
                   viaGitHubApp: Boolean(c.performed_via_github_app),
                   body: c.body
                 })),

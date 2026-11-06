@@ -5,7 +5,7 @@ export function formatResumeContextPromptLines(
 ): string[] {
   return resumeContextMarkdown
     ? [
-        "Consignes humaines publiées depuis l'escalade (à prendre en compte pour cette reprise) :",
+        "Consignes humaines publiées depuis la dernière commande traitée (à prendre en compte pour cette reprise) :",
         wrapUntrustedContent("untrusted_issue_content", resumeContextMarkdown),
         ""
       ]

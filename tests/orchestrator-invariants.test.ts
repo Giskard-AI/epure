@@ -566,9 +566,10 @@ describe("Automatic resume skips dev -> feature -> task sync unless dev moved", 
   });
 });
 
-type CommentSpec = { readonly id: number; readonly login: string; readonly body: string; readonly type?: string; readonly viaApp?: boolean };
+type CommentSpec = { readonly id: number; readonly login: string; readonly body: string; readonly type?: string; readonly viaApp?: boolean; readonly association?: string };
 
 const PERMISSIONS: Readonly<Record<string, string>> = { maintainer: "write", owner: "admin", reader: "read" };
+const ASSOCIATIONS: Readonly<Record<string, string>> = { maintainer: "MEMBER", owner: "OWNER", reader: "COLLABORATOR" };
 
 function commentPages(comments: readonly CommentSpec[]): (readonly CommentSpec[])[] {
   const pages: (readonly CommentSpec[])[] = [];
@@ -594,7 +595,7 @@ function declareResumeFlow(comments: readonly CommentSpec[]): GitHubMockRouter {
     router.on(
       "GET",
       `${R}/issues/${ISSUE}/comments?per_page=100${index > 0 ? `&page=${index + 1}` : ""}`,
-      json(page.map((c) => ({ id: c.id, body: c.body, user: { login: c.login, type: c.type ?? "User" }, created_at: "2026-11-05T10:00:00Z", performed_via_github_app: c.viaApp ? { slug: "other-app" } : null })))
+      json(page.map((c) => ({ id: c.id, body: c.body, user: { login: c.login, type: c.type ?? "User" }, author_association: c.association ?? ASSOCIATIONS[c.login] ?? "NONE", created_at: "2026-11-05T10:00:00Z", performed_via_github_app: c.viaApp ? { slug: "other-app" } : null })))
     );
   });
   return router
@@ -613,10 +614,11 @@ function implementationPrompt(router: GitHubMockRouter): string {
 const ESCALATED_AT_CURSOR = 500;
 const RESUME_COMMENT = 600;
 
-describe("Resume context: comments since the escalation reach the resumed implementation session", () => {
+describe("Resume context: comments after the last processed command reach the resumed implementation session", () => {
   it.each([
     {
-      id: "write-and-admin-free-text-since-escalation-injected-bots-readers-commands-and-out-of-window-excluded",
+      id: "write-and-admin-free-text-after-the-cursor-injected-bots-readers-commands-and-out-of-window-excluded",
+      command: "continue",
       comments: [
         { id: 450, login: "maintainer", body: "BEFORE-ESCALATION guidance" },
         { id: 510, login: "maintainer", body: "GUIDANCE-A use the zod schema" },
@@ -628,19 +630,23 @@ describe("Resume context: comments since the escalation reach the resumed implem
         { id: 610, login: "maintainer", body: "AFTER-RESUME guidance" }
       ],
       included: ["GUIDANCE-A use the zod schema", "GUIDANCE-B keep the public API"],
-      excluded: ["BEFORE-ESCALATION", "BOT-NOISE", "READER-NOISE", "/epure status", "AFTER-RESUME"]
+      excluded: ["BEFORE-ESCALATION", "BOT-NOISE", "READER-NOISE", "/epure status", "AFTER-RESUME"],
+      expectedPermissionLookups: 3
     },
     {
       id: "more-than-10-eligible-comments-keeps-the-10-most-recent",
+      command: "continue",
       comments: [
         ...Array.from({ length: 12 }, (_, i) => ({ id: 501 + i, login: "maintainer", body: `NOTE-${String(i + 1).padStart(2, "0")}` })),
         { id: RESUME_COMMENT, login: "maintainer", body: "/epure continue" }
       ],
       included: ["NOTE-03", "NOTE-12"],
-      excluded: ["NOTE-01", "NOTE-02"]
+      excluded: ["NOTE-01", "NOTE-02"],
+      expectedPermissionLookups: 1
     },
     {
       id: "context-is-capped-at-8000-characters-keeping-the-most-recent-text",
+      command: "approve",
       comments: [
         { id: 510, login: "maintainer", body: `OLDEST-${"x".repeat(3000)}` },
         { id: 520, login: "maintainer", body: `MIDDLE-${"y".repeat(5000)}-MIDDLE-END` },
@@ -648,10 +654,12 @@ describe("Resume context: comments since the escalation reach the resumed implem
         { id: RESUME_COMMENT, login: "maintainer", body: "/epure approve" }
       ],
       included: ["NEWEST-", "MIDDLE-"],
-      excluded: ["OLDEST-", "-MIDDLE-END"]
+      excluded: ["OLDEST-", "-MIDDLE-END"],
+      expectedPermissionLookups: 1
     },
     {
       id: "same-command-definition-as-the-gate-app-comments-and-epure-own-comments-excluded",
+      command: "continue",
       comments: [
         { id: 510, login: "maintainer", body: "MULTILINE-COMMAND first\n/epure status" },
         { id: 520, login: "maintainer", body: "APP-NOISE posted through another app", viaApp: true },
@@ -660,32 +668,48 @@ describe("Resume context: comments since the escalation reach the resumed implem
         { id: RESUME_COMMENT, login: "maintainer", body: "/epure continue" }
       ],
       included: ["GUIDANCE-C not a command"],
-      excluded: ["MULTILINE-COMMAND", "APP-NOISE", "MIRROR-NOISE"]
+      excluded: ["MULTILINE-COMMAND", "APP-NOISE", "MIRROR-NOISE"],
+      expectedPermissionLookups: 1
     },
     {
       id: "guidance-on-the-second-comments-page-is-injected",
+      command: "continue",
       comments: [
         ...Array.from({ length: 100 }, (_, i) => ({ id: 1 + i, login: "maintainer", body: `OLD-PAGE-${i + 1}` })),
         { id: 510, login: "maintainer", body: "GUIDANCE-PAGE-2" },
         { id: RESUME_COMMENT, login: "maintainer", body: "/epure continue" }
       ],
       included: ["GUIDANCE-PAGE-2"],
-      excluded: ["OLD-PAGE-"]
+      excluded: ["OLD-PAGE-"],
+      expectedPermissionLookups: 1
     },
     {
-      id: "permission-lookups-stop-after-10-distinct-authors",
+      id: "visitors-without-a-repository-association-use-no-lookup-and-cannot-push-out-maintainer-guidance",
+      command: "continue",
       comments: [
         { id: 510, login: "maintainer", body: "OLDEST-WRITER" },
         ...Array.from({ length: 10 }, (_, i) => ({ id: 520 + i, login: `visitor-${i + 1}`, body: `VISITOR-${i + 1}` })),
         { id: RESUME_COMMENT, login: "maintainer", body: "/epure continue" }
       ],
+      included: ["OLDEST-WRITER"],
+      excluded: ["VISITOR-"],
+      expectedPermissionLookups: 1
+    },
+    {
+      id: "permission-lookups-stop-after-10-distinct-associated-authors",
+      command: "continue",
+      comments: [
+        { id: 510, login: "maintainer", body: "OLDEST-WRITER" },
+        ...Array.from({ length: 10 }, (_, i) => ({ id: 520 + i, login: `collaborator-${i + 1}`, body: `READ-ONLY-${i + 1}`, association: "COLLABORATOR" })),
+        { id: RESUME_COMMENT, login: "maintainer", body: "/epure continue" }
+      ],
       included: [],
-      excluded: ["OLDEST-WRITER", "VISITOR-"],
+      excluded: ["OLDEST-WRITER", "READ-ONLY-"],
       expectedPermissionLookups: 10
     }
-  ] satisfies ReadonlyArray<{ id: string; comments: readonly CommentSpec[]; included: readonly string[]; excluded: readonly string[]; expectedPermissionLookups?: number }>)(
+  ] satisfies ReadonlyArray<{ id: string; command: "continue" | "approve"; comments: readonly CommentSpec[]; included: readonly string[]; excluded: readonly string[]; expectedPermissionLookups: number }>)(
     "$id",
-    async ({ comments, included, excluded, ...rest }) => {
+    async ({ command, comments, included, excluded, expectedPermissionLookups }) => {
       const store = await seedState({
         status: "suspended",
         subphase: "idle",
@@ -693,7 +717,6 @@ describe("Resume context: comments since the escalation reach the resumed implem
         last_escalation: { reason: "remediation_exhausted", head_sha: HEAD_SHA, ticket_number: ISSUE, budget_scope: "ticket" }
       });
       const router = declareResumeFlow(comments);
-      const command = comments.find((c) => c.id === RESUME_COMMENT)!.body.split(" ")[1] as "continue" | "approve";
 
       await run(router, store, { command, actor: "maintainer", issueNumber: ISSUE, commentId: RESUME_COMMENT });
       const prompt = implementationPrompt(router);
@@ -705,9 +728,7 @@ describe("Resume context: comments since the escalation reach the resumed implem
       for (const text of excluded) {
         expect(prompt).not.toContain(text);
       }
-      if ("expectedPermissionLookups" in rest) {
-        expect(router.calls("GET", new RegExp(`^${R_RX}/collaborators/`))).toBe(rest.expectedPermissionLookups);
-      }
+      expect(router.calls("GET", new RegExp(`^${R_RX}/collaborators/`))).toBe(expectedPermissionLookups);
     }
   );
 
@@ -721,7 +742,7 @@ describe("Resume context: comments since the escalation reach the resumed implem
     await run(router, store, { command, actor: "maintainer", issueNumber: ISSUE, commentId: RESUME_COMMENT });
 
     expect(router.unmatched).toEqual([]);
-    expect(implementationPrompt(router)).not.toContain("Consignes humaines publiées depuis l'escalade");
+    expect(implementationPrompt(router)).not.toContain("Consignes humaines publiées");
     expect(router.calls("GET", new RegExp(`^${R_RX}/collaborators/`))).toBe(0);
   });
 });

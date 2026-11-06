@@ -57,15 +57,20 @@ export interface ResumeContextCandidate {
   readonly id: number;
   readonly authorLogin: string;
   readonly authorType: string;
+  readonly authorAssociation: string;
   readonly viaGitHubApp: boolean;
   readonly body: string;
 }
+
+const LOOKUP_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 
 /**
  * Selects the human guidance injected into a resumed implementation session: comments posted
  * after `afterCommentId` and before the resume command, by authors with `write` or higher,
  * excluding `/epure` commands, bots, GitHub App comments and EPURE's own comments. Keeps the
  * most recent ones within the comment, character and permission-lookup caps, oldest first.
+ * Authors outside OWNER/MEMBER/COLLABORATOR cannot hold `write`, so they never use a lookup;
+ * the association only narrows who is looked up, the lookup still decides.
  */
 export async function selectResumeContextComments(input: {
   readonly comments: readonly ResumeContextCandidate[];
@@ -82,6 +87,7 @@ export async function selectResumeContextComments(input: {
         c.id < input.resumeCommentId &&
         parseEpureCommand(c.body) === null &&
         !c.viaGitHubApp &&
+        LOOKUP_ASSOCIATIONS.has(c.authorAssociation) &&
         !c.body.includes(EPURE_COMMENT_MARKER) &&
         !isBotActor({ login: c.authorLogin, type: c.authorType })
     )
