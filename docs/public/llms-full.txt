@@ -231,7 +231,7 @@ git push origin dev
 5. **Squash-Only Merge Governance & 3 Repository Rulesets**:
    - Configures the repository to allow **Squash merge only** (`allow_squash_merge: true`, `allow_merge_commit: false`, `allow_rebase_merge: false`, `delete_branch_on_merge: true`).
    - Installs the 3 GitHub Repository Rulesets:
-     - `epure-feature-governance` (`refs/heads/feature/*`): `Agent App` in PR bypass for autonomous `task/* -> feature/*` squash-merges once checks pass.
+     - `epure-feature-governance` (`refs/heads/feature/*`): `Agent App` in `always` bypass for autonomous `task/* -> feature/*` squash-merges once checks pass and for EPURE's direct writes (plan integration, `dev` merge syncs, conflict resolutions); humans still go through PRs.
      - `epure-dev-governance` (`refs/heads/dev`): No `Agent App` bypass (`required_approving_review_count: 0` by default for solo-maintainer compatibility; configurable via `--require-pr-approvals <N>`).
      - `epure-release-immutability` (`refs/heads/main`, `refs/tags/v*`): `Release App` as sole Bypass Actor.
 
@@ -461,7 +461,7 @@ All `/epure` commands are posted as comments on a GitHub Issue. Every command is
 3. **Automatic Event-Driven CI Continuation (`workflow_run.completed`)**:
    - When `async_ci_continuation: "true"` is enabled, opening a `task/* -> feature/*` PR (`waiting_ticket_ci`) or `feature/* -> dev` PR (`waiting_feature_ci`) records the active PR/SHA in `refs/epure/state/<issue>` and immediately exits `0` to free the GitHub Actions runner.
    - When external CI finishes on `task/*` or `feature/*`, the `workflow_run.completed` event wakes `orchestrate-command` with `command: "continue"`, `trigger_head_sha`, and `trigger_branch` to run Stage 3 multi-agent review, AI semantic squash, or unified auto-remediation. The wake-up does nothing unless the issue is `active` and waiting on CI (`waiting_*`) for that exact `trigger_head_sha`; it never resumes a `suspended`, `done`, or `cancelled` issue.
-   - When a human closes the plan issue (`issues.closed`) while its `feature/*` branch is not merged into `dev`, `orchestrate-command` runs with `command: "closed"`: it posts an alert (branch, unmerged commit count, resume command), sets the plan to `cancelled`, keeps every branch, and lists the open PRs without closing them. Reopen the issue and post `/epure continue` to resume.
+   - When a human closes the plan issue (`issues.closed`) while its `feature/*` branch is not merged into `dev`, `orchestrate-command` runs with `command: "closed"`: it posts an alert (branch, unmerged commit count, resume command), sets the plan to `cancelled`, keeps every branch, and lists the open PRs without closing them. Closing the issue during grilling, spec or tickets also cancels the plan (no branch deleted). Only a closer with `write` permission or higher cancels; for anyone else EPURE posts a note and the plan is unchanged. Reopen the issue and post `/epure continue` to resume: a plan cancelled during planning returns to its grill, spec review or approval wait.
 4. **Pull Request Gates & Controlled Release Promotion**:
    - On `pull_request` events (`dev`, `main`, `feature/**`), `epure-check.yml` (`actions/epure-contract`), `pr-title.yml`, and `ci.yml` execute with `contents: read` and zero privileged secrets.
    - On human `workflow_dispatch` (`semver_tag`, `expected_dev_sha`), `release.yml` calls EPURE's reusable `release-promote.yml`, which runs inside the protected `environment: release` (`EPURE_RELEASE_APP_ID`, `EPURE_RELEASE_APP_PRIVATE_KEY`), checks the role boundary with `actions/verify-app-role`, fast-forwards `dev -> main`, tags, and publishes the GitHub Release.
@@ -515,7 +515,7 @@ node dist/cli/setup-repo.mjs \
 | `--repo <owner/name>` | *(Required)* | Target GitHub repository slug (e.g., `my-org/craft-calculator`). |
 | `--target-dir <path>` (aliases `--dir`, `--repo-root`) | Current directory | Local checkout path where `.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`, workflows, and the reviewer prompts (`<reviewers_dir>/*.md`) are written. |
 | `--pinned-sha <sha>` | Latest EPURE SHA | Immutable 40-character Git commit SHA of `Giskard-AI/epure` used to pin generated caller workflows. |
-| `--dry-run` | `true` (if `--apply` omitted) | Prints the complete bootstrap plan without modifying local files or calling write APIs. |
+| `--dry-run` | `true` (if `--apply` omitted) | Prints the complete bootstrap plan without modifying local files or calling write APIs. With `--apply-github-settings`, reads the existing rulesets and reports `create`, `update` or `noop` for each. |
 | `--apply` | `false` | Writes configuration files (`.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`), caller workflows, and base reviewer prompts (`<reviewers_dir>/*.md`, default `.agents/reviewers/*.md`). |
 | `--apply-github-settings` | `false` | Applies squash-only repository settings and the 3 Repository Rulesets via the GitHub REST API. |
 | `--no-frontend-reviewers` | `false` | Omits `frontend-reviewer`, `accessibility-reviewer`, and `design-reviewer` for headless repositories. |
@@ -526,7 +526,7 @@ node dist/cli/setup-repo.mjs \
 | `--planning-model <provider/model>` | `anthropic/claude-sonnet-4-20250514` | Sets `models.planning`. |
 | `--implementation-model <provider/model>` | `anthropic/claude-sonnet-4-20250514` | Sets `models.implementation`. |
 | `--review-model <provider/model>` | `openai/gpt-4.1` | Sets `models.review`. |
-| `--agent-app-id <id>` | Optional | Numeric GitHub App ID of `<owner>-epure-agent` added as PR Bypass Actor on `epure-feature-governance` (`feature/*`). |
+| `--agent-app-id <id>` | Optional | Numeric GitHub App ID of `<owner>-epure-agent` added as Bypass Actor (`always`) on `epure-feature-governance` (`feature/*`), so EPURE can push plan integrations, `dev` syncs and conflict resolutions directly. |
 | `--release-app-id <id>` | Optional | Numeric GitHub App ID of `<owner>-epure-release` added as sole Bypass Actor on `epure-release-immutability` (`main` and `v*`). |
 | `--require-pr-approvals <N>` | `0` | Number of human PR review approvals required on `dev` (`0` for solo-maintainer compatibility; `>=1` for teams). |
 | `--json` | `false` | Emits the full structured `SetupRepoResult` JSON payload to stdout instead of the Markdown summary. |
@@ -1206,7 +1206,7 @@ This page provides the aligned **English <-> French** ubiquitous language refere
 | English Term | French Canonical Term (`GLOSSARY.md`) | Definition & Invariant |
 | --- | --- | --- |
 | **Secretless Sandbox & LLM Proxy** | *Proxy LLM de sandbox* | Isolation boundary stripping `LLM_API_KEY` and GitHub App private keys from consumer test/build subprocesses; fails closed if isolation is unavailable. |
-| **Three Governance Rulesets (`epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`)** | *Séparation des trois Rulesets de gouvernance* | Three distinct GitHub Repository Rulesets: `Agent App` bypasses PRs only on `feature/*`; `dev` requires human merge (`0` review approvals by default for solo maintainer compatibility); `main` and `v*` allow only `Release App`. |
+| **Three Governance Rulesets (`epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`)** | *Séparation des trois Rulesets de gouvernance* | Three distinct GitHub Repository Rulesets: `Agent App` bypasses every rule (`always`) only on `feature/*`, where EPURE pushes plan integrations, `dev` merge syncs and conflict resolutions directly (no linear-history rule there); `dev` requires human merge (`0` review approvals by default for solo maintainer compatibility); `main` and `v*` allow only `Release App`. |
 | **Trusted `dev` Reviewer Roster (`reviewers_dir`)** | *Roster de reviewers spécialisés et transverses* | Read-only reviewer definitions (`<name>.md`) initialized by `setup-repo` in the configurable reviewer roster directory (`reviewers_dir`, default `.agents/reviewers/`), always loaded at runtime from `dev` (never from `task/*`), capped at 4 specialists per diff + `spec-parity-reviewer`. |
 | **Persona UX Gate (`user-advocate`)** | *Porte UX orientée personas (`user-advocate`)* | Specialist evaluating end-user journeys in `design-gate` mode (enriching ticket acceptance criteria before `/epure approve`) and `implementation-review` mode (blocking PR check on UI changes). |
 | **Blocking Design Violation (`impeccable-gate`)** | *Violation de design bloquante* | Objective new UI regression (WCAG 2.1 AA contrast, layout overflow, missing `DESIGN.md` tokens, or missing `loading`/`ready`/`error` interaction states) that blocks PR merge. |
@@ -1450,7 +1450,7 @@ git push origin dev
 5. **Politique Squash-Only & 3 Repository Rulesets** :
    - Configure le dépôt en **Squash merge exclusif** (`allow_squash_merge: true`, `allow_merge_commit: false`, `allow_rebase_merge: false`, `delete_branch_on_merge: true`).
    - Installe les 3 Rulesets GitHub :
-     - `epure-feature-governance` (`refs/heads/feature/*`) : `Agent App` en bypass PR pour le squash-merge autonome des PRs `task/* -> feature/*`.
+     - `epure-feature-governance` (`refs/heads/feature/*`) : `Agent App` en bypass `always` pour le squash-merge autonome des PRs `task/* -> feature/*` et les écritures directes d'EPURE (intégration du plan, synchronisations depuis `dev` en commits de merge, résolutions de conflits) ; les humains passent toujours par une PR.
      - `epure-dev-governance` (`refs/heads/dev`) : aucun bypass pour l'`Agent App` (`required_approving_review_count: 0` par défaut pour permettre à un mainteneur solo de merger ses PRs ; configurable via `--require-pr-approvals <N>`).
      - `epure-release-immutability` (`refs/heads/main`, `refs/tags/v*`) : `Release App` comme unique Bypass Actor.
 
@@ -1680,7 +1680,7 @@ Toutes les commandes `/epure` se postent sous forme de commentaires sur une Issu
 3. **Réveil Événementiel Automatique de la CI (`workflow_run.completed`)** :
    - Avec `async_ci_continuation: "true"`, dès l'ouverture d'une PR `task/* -> feature/*` (`waiting_ticket_ci`) ou `feature/* -> dev` (`waiting_feature_ci`), l'orchestrateur persiste la PR et le `head_sha` dans `refs/epure/state/<issue>` et termine immédiatement (`exit 0`) pour libérer le runner GitHub Actions.
    - Dès que la CI externe se termine sur `task/*` ou `feature/*`, l'événement `workflow_run.completed` réveille `orchestrate-command` avec `command: "continue"`, `trigger_head_sha` et `trigger_branch` afin d'exécuter la revue multi-agents Stage 3, le squash sémantique IA ou un round d'auto-remédiation unifié. Le réveil n'agit que si l'issue est `active` en attente de CI (`waiting_*`) sur ce même `trigger_head_sha` ; il ne reprend jamais une issue `suspended`, `done` ou `cancelled`.
-   - Lorsqu'un humain ferme l'issue de pilotage (`issues.closed`) alors que sa branche `feature/*` n'est pas intégrée dans `dev`, `orchestrate-command` s'exécute avec `command: "closed"` : il publie une alerte (branche, nombre de commits non intégrés, commande de reprise), passe le plan en `cancelled`, conserve toutes les branches et liste les PR ouvertes sans les fermer. Rouvrez l'issue puis postez `/epure continue` pour reprendre.
+   - Lorsqu'un humain ferme l'issue de pilotage (`issues.closed`) alors que sa branche `feature/*` n'est pas intégrée dans `dev`, `orchestrate-command` s'exécute avec `command: "closed"` : il publie une alerte (branche, nombre de commits non intégrés, commande de reprise), passe le plan en `cancelled`, conserve toutes les branches et liste les PR ouvertes sans les fermer. Fermer l'issue pendant le grill, la spécification ou les tickets annule aussi le plan (aucune branche supprimée). Seul un collaborateur `write` ou supérieur annule ainsi le plan ; pour tout autre auteur de la fermeture, EPURE publie une note et le plan reste inchangé. Rouvrez l'issue puis postez `/epure continue` pour reprendre : un plan annulé pendant la planification revient à l'attente du grill, de la revue de spécification ou de l'approbation.
 4. **Portes de Contrat PR & Promotion de Release Protégée** :
    - Sur `pull_request` (`dev`, `main`, `feature/**`), `epure-check.yml` (`actions/epure-contract`), `pr-title.yml` et `ci.yml` s'exécutent en `contents: read` sans aucun secret privilégié.
    - Sur `workflow_dispatch` humain (`semver_tag`, `expected_dev_sha`), `release.yml` appelle le workflow réutilisable `release-promote.yml` d'EPURE, qui s'exécute dans l'environnement protégé `environment: release` (`EPURE_RELEASE_APP_ID`, `EPURE_RELEASE_APP_PRIVATE_KEY`), vérifie la frontière de rôle avec `actions/verify-app-role`, promeut `dev -> main` en fast-forward, pose le tag et publie la GitHub Release.
@@ -1734,7 +1734,7 @@ node dist/cli/setup-repo.mjs \
 | `--repo <owner/name>` | *(Obligatoire)* | Identifiant du dépôt GitHub cible (ex. `my-org/craft-calculator`). |
 | `--target-dir <chemin>` (alias `--dir`, `--repo-root`) | Répertoire courant | Chemin local où sont écrits `.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`, les workflows et les prompts des reviewers (`<reviewers_dir>/*.md`). |
 | `--pinned-sha <sha>` | Dernier SHA EPURE | SHA Git immuable de 40 caractères de `Giskard-AI/epure` utilisé pour épingler les workflows appelants générés. |
-| `--dry-run` | `true` (si `--apply` omis) | Affiche le plan complet de bootstrap sans modifier aucun fichier ni appeler d'API d'écriture. |
+| `--dry-run` | `true` (si `--apply` omis) | Affiche le plan complet de bootstrap sans modifier aucun fichier ni appeler d'API d'écriture. Avec `--apply-github-settings`, lit les Rulesets existants et indique pour chacun `create`, `update` ou `noop`. |
 | `--apply` | `false` | Écrit les fichiers de configuration (`.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`), les workflows appelants et le socle des prompts de reviewers (`<reviewers_dir>/*.md`, par défaut `.agents/reviewers/*.md`). |
 | `--apply-github-settings` | `false` | Applique le mode squash-only et les 3 Repository Rulesets via l'API REST GitHub. |
 | `--no-frontend-reviewers` | `false` | Omet `frontend-reviewer`, `accessibility-reviewer` et `design-reviewer` pour les dépôts sans UI. |
@@ -1745,7 +1745,7 @@ node dist/cli/setup-repo.mjs \
 | `--planning-model <fournisseur/modèle>` | `anthropic/claude-sonnet-4-20250514` | Définit `models.planning`. |
 | `--implementation-model <fournisseur/modèle>` | `anthropic/claude-sonnet-4-20250514` | Définit `models.implementation`. |
 | `--review-model <fournisseur/modèle>` | `openai/gpt-4.1` | Définit `models.review`. |
-| `--agent-app-id <id>` | Optionnel | ID numérique de `<owner>-epure-agent` ajouté en Bypass Actor PR sur `epure-feature-governance` (`feature/*`). |
+| `--agent-app-id <id>` | Optionnel | ID numérique de `<owner>-epure-agent` ajouté en Bypass Actor (`always`) sur `epure-feature-governance` (`feature/*`), pour qu'EPURE pousse directement les intégrations de plan, synchronisations depuis `dev` et résolutions de conflits. |
 | `--release-app-id <id>` | Optionnel | ID numérique de `<owner>-epure-release` ajouté comme unique Bypass Actor sur `epure-release-immutability` (`main` et `v*`). |
 | `--require-pr-approvals <N>` | `0` | Nombre d'approbations humaines requises sur `dev` (`0` pour compatibilité mainteneur solo ; `>=1` en équipe). |
 | `--json` | `false` | Affiche le résultat structuré complet `SetupRepoResult` au format JSON sur la sortie standard au lieu du résumé Markdown. |
