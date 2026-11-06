@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { EscalationNotRecordedError, orchestrateIssueCommand } from "../src/orchestrator/issue-orchestrator.js";
 import type { OrchestrateIssueInput } from "../src/orchestrator/types.js";
 import {
+  createGitHubApiRefStateStore,
   createInMemoryGitRefStateStore,
   updateIssueStateWithCas,
   type EpureIssueState,
@@ -9,11 +10,13 @@ import {
 } from "../src/state/git-ref-state.js";
 import {
   createGitHubMockRouter,
+  installFakeGitDataApi,
   json,
   noContent,
   notFound,
   primaryRateLimit,
   secondaryRateLimit,
+  serverError,
   tooManyRequests,
   type GitHubMockRouter,
   type RouteStep
@@ -1037,6 +1040,35 @@ describe("Lot 1 — GitHub API rate limits are waited out within 5 minutes, then
     expect((await readState(store)).status).toBe("cancelled");
   });
 
+  it("primary-403-reset-already-passed-on-every-retry-backs-off-exponentially-then-completes-the-command", async () => {
+    const store = await seedWaitingTicket();
+    const waits: number[] = [];
+    const past = primaryRateLimit(nowSeconds() - 10);
+    const router = declareIssueWrites(createGitHubMockRouter())
+      .on("POST", `${R}/issues/${ISSUE}/comments`, past, past, past, json({ html_url: "c" }, 201));
+
+    await orchestrateIssueCommand({
+      repository: REPO,
+      commandArgs: "",
+      fallbackGithubToken: "ghs_test",
+      llmApiKey: "key_test",
+      model: "openai/gpt-test",
+      stateStore: store,
+      fetchImpl: router.fetch,
+      sleepFn: async (ms) => {
+        waits.push(ms);
+      },
+      command: "cancel",
+      actor: "maintainer",
+      issueNumber: ISSUE,
+      commentId: 501
+    });
+
+    expect(router.unmatched).toEqual([]);
+    expect(waits.map((ms) => Math.ceil(ms / 1000))).toEqual([1, 2, 4]);
+    expect((await readState(store)).status).toBe("cancelled");
+  });
+
   it.each([
     { id: "primary-403-reset-beyond-the-budget-escalates-without-waiting", limited: () => primaryRateLimit(nowSeconds() + 3600), expectedWaitsSeconds: [] },
     { id: "secondary-403-retry-after-120-waits-twice-then-escalates-before-exceeding-300s", limited: () => secondaryRateLimit(120), expectedWaitsSeconds: [120, 120] },
@@ -1125,6 +1157,88 @@ describe("Lot 1 — GitHub API rate limits are waited out within 5 minutes, then
       expect((outcome as EscalationNotRecordedError).escalationMarkdown).toContain("`github_rate_limited`");
       expect((outcome as EscalationNotRecordedError).escalationMarkdown).toContain("Postez `/epure continue`");
     }
+  });
+});
+
+describe("State ref read and write failures never act on an empty or stale state", () => {
+  const STATE_REF = `refs/epure/state/${ISSUE}`;
+  const nowSeconds = () => Math.floor(Date.now() / 1000);
+
+  async function seedRefState(router: GitHubMockRouter) {
+    const git = installFakeGitDataApi(router, REPO);
+    const store = createGitHubApiRefStateStore({ repository: REPO, githubToken: "ghs_test", fetchImpl: router.fetch });
+    await updateIssueStateWithCas({
+      issueNumber: ISSUE,
+      store,
+      mutator: (prev) => ({ ...prev, phase: "implementation", status: "active", subphase: "waiting_ticket_ci", active_branch: FEATURE_BRANCH, active_head_sha: HEAD_SHA })
+    });
+    return git;
+  }
+
+  function graphqlRateLimitedOnce(inner: typeof fetch, resetEpochSeconds: number): typeof fetch {
+    let armed = true;
+    return async (input, init) => {
+      if (armed && String(input).endsWith("/graphql")) {
+        armed = false;
+        return new Response(JSON.stringify({ errors: [{ type: "RATE_LIMITED", message: "API rate limit exceeded for installation ID 1." }] }), {
+          status: 200,
+          headers: { "content-type": "application/json", "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(resetEpochSeconds) }
+        });
+      }
+      return await inner(input, init);
+    };
+  }
+
+  function cancelThroughRefStore(fetchImpl: typeof fetch, waits: number[] = []) {
+    return orchestrateIssueCommand({
+      repository: REPO,
+      commandArgs: "",
+      fallbackGithubToken: "ghs_test",
+      llmApiKey: "key_test",
+      model: "openai/gpt-test",
+      fetchImpl,
+      sleepFn: async (ms) => {
+        waits.push(ms);
+      },
+      command: "cancel",
+      actor: "maintainer",
+      issueNumber: ISSUE,
+      commentId: 501
+    });
+  }
+
+  it("502-on-the-state-commit-read-rejects-the-command-without-posting-or-writing", async () => {
+    const router = declareIssueWrites(createGitHubMockRouter());
+    const git = await seedRefState(router);
+    const refBefore = git.getRef(STATE_REF);
+    router.on("GET", /\/git\/commits\/[0-9a-f]+$/, serverError());
+
+    await expect(cancelThroughRefStore(router.fetch)).rejects.toThrow(/HTTP 502/);
+
+    expect(router.unmatched).toEqual([]);
+    expect(router.calls("POST", `${R}/issues/${ISSUE}/comments`)).toBe(0);
+    expect(git.getRef(STATE_REF)).toBe(refBefore);
+  });
+
+  it.each([
+    { id: "graphql-rate-limited-state-write-waits-for-the-reset-then-cancels", resetIn: 30, expectedWaitsSeconds: [30], expected: { status: "cancelled" } },
+    {
+      id: "graphql-rate-limited-state-write-beyond-the-wait-budget-escalates-github_rate_limited-not-a-cas-conflict",
+      resetIn: 3600,
+      expectedWaitsSeconds: [],
+      expected: { status: "suspended", last_escalation: { reason: "github_rate_limited" } }
+    }
+  ])("$id", async ({ resetIn, expectedWaitsSeconds, expected }) => {
+    const router = declareIssueWrites(createGitHubMockRouter());
+    await seedRefState(router);
+    const waits: number[] = [];
+
+    await cancelThroughRefStore(graphqlRateLimitedOnce(router.fetch, nowSeconds() + resetIn), waits);
+    const store = createGitHubApiRefStateStore({ repository: REPO, githubToken: "ghs_test", fetchImpl: router.fetch });
+
+    expect(router.unmatched).toEqual([]);
+    expect(waits.map((ms) => Math.ceil(ms / 1000))).toEqual(expectedWaitsSeconds);
+    expect((await store.readRef(STATE_REF)).state).toMatchObject(expected);
   });
 });
 

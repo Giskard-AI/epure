@@ -13,8 +13,12 @@ import {
 } from "../src/state/git-ref-state.js";
 import {
   createGitHubMockRouter,
-  installFakeGitDataApi
+  installFakeGitDataApi,
+  json,
+  serverError
 } from "./fixtures/github-mock-router.js";
+
+type ApiStore = ReturnType<typeof createGitHubApiRefStateStore>;
 
 describe("Ticket 09 (#10) — Atomic Git ref state (refs/epure/state/*) & concurrent CAS", () => {
   it.each([
@@ -179,6 +183,44 @@ describe("Ticket 09 (#10) — Atomic Git ref state (refs/epure/state/*) & concur
     expect(writes.filter((r) => r.path === "/graphql")).toHaveLength(expected.updateRefs);
     expect(writes.filter((r) => r.method === "PATCH")).toHaveLength(expected.patches);
     expect((await store.readRef(ref)).state).toMatchObject({ phase: "tickets", version: before.state!.version + 1 });
+  });
+
+  it.each([
+    {
+      id: "502-on-the-state-commit-read-rejects-instead-of-reading-an-empty-state",
+      failing: { method: "GET", path: /\/git\/commits\/[0-9a-f]+$/, reply: serverError() },
+      act: (store: ApiStore) => store.readRef("refs/epure/state/10"),
+      expectedError: /state object .* \(HTTP 502\)/
+    },
+    {
+      id: "502-on-the-state-ref-listing-rejects-instead-of-listing-no-state",
+      failing: { method: "GET", path: /\/git\/matching-refs\//, reply: serverError() },
+      act: (store: ApiStore) => store.listIssueStates(),
+      expectedError: /list EPURE state refs \(HTTP 502\)/
+    },
+    {
+      id: "502-on-the-state-commit-creation-rejects-instead-of-retrying-as-a-cas-conflict",
+      failing: { method: "POST", path: "/repos/acme/demo/git/commits", reply: serverError() },
+      act: (store: ApiStore) => updateIssueStateWithCas({ issueNumber: 10, store, mutator: (prev) => prev }),
+      expectedError: /state commit .* \(HTTP 502\)/
+    },
+    {
+      id: "graphql-error-while-the-ref-did-not-move-rejects-instead-of-retrying-as-a-cas-conflict",
+      failing: { method: "POST", path: "/graphql", reply: json({ errors: [{ type: "FORBIDDEN", message: "Resource not accessible by integration" }] }) },
+      act: (store: ApiStore) => updateIssueStateWithCas({ issueNumber: 10, store, mutator: (prev) => prev }),
+      expectedError: /Failed to update Git ref 'refs\/epure\/state\/10' \(HTTP 200\): .*Resource not accessible/
+    }
+  ] as const)("createGitHubApiRefStateStore fails closed [$id]", async ({ failing, act, expectedError }) => {
+    const router = createGitHubMockRouter();
+    installFakeGitDataApi(router, "acme/demo");
+    const store = createGitHubApiRefStateStore({ repository: "acme/demo", githubToken: "ghs_test", fetchImpl: router.fetch });
+    await updateIssueStateWithCas({ issueNumber: 10, store, mutator: (prev) => ({ ...prev, phase: "spec" }) });
+    const callsBefore = router.calls(failing.method, failing.path);
+    router.on(failing.method, failing.path, failing.reply);
+
+    await expect(act(store)).rejects.toThrow(expectedError);
+    expect(router.unmatched).toEqual([]);
+    expect(router.calls(failing.method, failing.path) - callsBefore).toBe(1);
   });
 
   it("formatIssueStateMirrorMarkdown renders deterministic human-readable state summary", () => {

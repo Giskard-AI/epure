@@ -25,6 +25,17 @@ export async function githubRateLimitWaitMs(
   resp: Response,
   nowMs: number
 ): Promise<number | null> {
+  const resetSeconds = Number(resp.headers.get("x-ratelimit-reset") ?? Number.NaN);
+  const quotaSpent = resp.headers.get("x-ratelimit-remaining") === "0";
+  const untilReset = Math.max(MIN_RATE_LIMIT_WAIT_MS, resetSeconds * 1000 - nowMs);
+  // GraphQL reports its primary rate limit as HTTP 200 with a RATE_LIMITED error.
+  if (resp.status === 200) {
+    return quotaSpent &&
+      Number.isFinite(resetSeconds) &&
+      /"type"\s*:\s*"RATE_LIMITED"/.test(await resp.clone().text())
+      ? untilReset
+      : null;
+  }
   if (resp.status !== 403 && resp.status !== 429) {
     return null;
   }
@@ -32,9 +43,8 @@ export async function githubRateLimitWaitMs(
   if (Number.isFinite(retryAfterSeconds)) {
     return Math.max(MIN_RATE_LIMIT_WAIT_MS, retryAfterSeconds * 1000);
   }
-  const resetSeconds = Number(resp.headers.get("x-ratelimit-reset") ?? Number.NaN);
-  if (resp.headers.get("x-ratelimit-remaining") === "0" && Number.isFinite(resetSeconds)) {
-    return Math.max(MIN_RATE_LIMIT_WAIT_MS, resetSeconds * 1000 - nowMs);
+  if (quotaSpent && Number.isFinite(resetSeconds)) {
+    return untilReset;
   }
   if (resp.status === 429) {
     return SECONDARY_RATE_LIMIT_DEFAULT_WAIT_MS;
@@ -55,12 +65,14 @@ export function createGitHubRateLimitedFetch(params: {
   const now = params.now ?? Date.now;
   let waitedMs = 0;
   return async (input, init) => {
-    for (;;) {
+    for (let retry = 0; ; retry += 1) {
       const resp = await params.fetchImpl(input, init);
-      const waitMs = await githubRateLimitWaitMs(resp, now());
-      if (waitMs === null) {
+      const advisedMs = await githubRateLimitWaitMs(resp, now());
+      if (advisedMs === null) {
         return resp;
       }
+      // A reset already in the past would otherwise retry every second until the budget is spent.
+      const waitMs = Math.max(advisedMs, MIN_RATE_LIMIT_WAIT_MS * 2 ** retry);
       if (waitedMs + waitMs > GITHUB_RATE_LIMIT_MAX_WAIT_MS) {
         throw new GitHubRateLimitError(
           (init?.method ?? "GET").toUpperCase(),

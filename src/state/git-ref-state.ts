@@ -369,7 +369,7 @@ interface GitRefObject {
 
 export function createGitHubApiRefStateStore(
   options: GitApiRefStateStoreOptions
-): GitRefStateStore {
+): Required<GitRefStateStore> {
   const [owner, repo] = options.repository.trim().split("/");
   const baseUrl = (options.apiBaseUrl ?? "https://api.github.com").replace(
     /\/+$/,
@@ -419,25 +419,24 @@ export function createGitHubApiRefStateStore(
   const readStateObject = async (
     object: GitRefObject
   ): Promise<EpureIssueState | null> => {
-    if (object.type === "commit") {
-      const commitResp = await fetchFn(`${repoUrl}/git/commits/${object.sha}`, {
-        method: "GET",
-        headers
-      });
-      if (!commitResp.ok) {
-        return null;
-      }
-      const commit = (await commitResp.json()) as { message?: string };
-      return JSON.parse(commit.message ?? "") as EpureIssueState;
-    }
-    const blobResp = await fetchFn(`${repoUrl}/git/blobs/${object.sha}`, {
+    const kind = object.type === "commit" ? "commits" : "blobs";
+    const resp = await fetchFn(`${repoUrl}/git/${kind}/${object.sha}`, {
       method: "GET",
       headers
     });
-    if (!blobResp.ok) {
+    if (resp.status === 404) {
       return null;
     }
-    const blobData = (await blobResp.json()) as {
+    if (!resp.ok) {
+      throw new Error(
+        `Failed to read state object '${object.sha}' (HTTP ${resp.status}).`
+      );
+    }
+    if (object.type === "commit") {
+      const commit = (await resp.json()) as { message?: string };
+      return JSON.parse(commit.message ?? "") as EpureIssueState;
+    }
+    const blobData = (await resp.json()) as {
       content?: string;
       encoding?: string;
     };
@@ -446,6 +445,21 @@ export function createGitHubApiRefStateStore(
       blobData.encoding === "base64" ? "base64" : "utf8"
     ).toString("utf8");
     return JSON.parse(rawJson) as EpureIssueState;
+  };
+
+  // A rejected write is a CAS conflict only when the ref really moved; anything else is an error.
+  const refMovedFrom = async (
+    refName: string,
+    current: GitRefObject | null,
+    resp: Response
+  ): Promise<boolean> => {
+    const now = await getRefObject(refName);
+    if ((now?.sha ?? null) !== (current?.sha ?? null)) {
+      return true;
+    }
+    throw new Error(
+      `Failed to update Git ref '${refName}' (HTTP ${resp.status}): ${(await resp.text()).slice(0, 300)}`
+    );
   };
 
   const writeRef = async (
@@ -460,7 +474,10 @@ export function createGitHubApiRefStateStore(
         headers,
         body: JSON.stringify({ ref: refName, sha: newSha })
       });
-      return createRefResp.ok;
+      return (
+        createRefResp.ok ||
+        !(await refMovedFrom(refName, current, createRefResp))
+      );
     }
     if (current.type !== "commit") {
       const migrateResp = await fetchFn(`${repoUrl}/git/${refName}`, {
@@ -468,7 +485,9 @@ export function createGitHubApiRefStateStore(
         headers,
         body: JSON.stringify({ sha: newSha })
       });
-      return migrateResp.ok;
+      return (
+        migrateResp.ok || !(await refMovedFrom(refName, current, migrateResp))
+      );
     }
     repositoryNodeId ??= await fetchRepositoryNodeId();
     const updateRefsResp = await fetchFn(`${baseUrl}/graphql`, {
@@ -484,13 +503,16 @@ export function createGitHubApiRefStateStore(
         }
       })
     });
-    if (!updateRefsResp.ok) {
-      return false;
+    // GitHub answers a stale `beforeOid` with HTTP 200 and an opaque error, like any other failure.
+    if (updateRefsResp.ok) {
+      const payload = (await updateRefsResp.clone().json()) as {
+        data?: { updateRefs?: unknown };
+      };
+      if (payload.data?.updateRefs) {
+        return true;
+      }
     }
-    const payload = (await updateRefsResp.json()) as {
-      data?: { updateRefs?: unknown };
-    };
-    return Boolean(payload.data?.updateRefs);
+    return !(await refMovedFrom(refName, current, updateRefsResp));
   };
 
   return {
@@ -510,8 +532,8 @@ export function createGitHubApiRefStateStore(
     ): Promise<{ readonly swapped: boolean; readonly newSha: string }> => {
       const notSwapped = { swapped: false, newSha: "" } as const;
       const fullRefName = refName.startsWith("refs/") ? refName : `refs/${refName}`;
-      const current = await getRefObject(fullRefName).catch(() => undefined);
-      if (current === undefined || (current?.sha ?? null) !== expectedOldSha) {
+      const current = await getRefObject(fullRefName);
+      if ((current?.sha ?? null) !== expectedOldSha) {
         return notSwapped;
       }
 
@@ -524,13 +546,13 @@ export function createGitHubApiRefStateStore(
           parents: current?.type === "commit" ? [current.sha] : []
         })
       });
-      if (!createCommitResp.ok) {
-        return notSwapped;
-      }
-      const newSha =
-        ((await createCommitResp.json()) as { sha?: string }).sha ?? "";
+      const newSha = createCommitResp.ok
+        ? ((await createCommitResp.json()) as { sha?: string }).sha
+        : undefined;
       if (!newSha) {
-        return notSwapped;
+        throw new Error(
+          `Failed to create the state commit for '${fullRefName}' (HTTP ${createCommitResp.status}).`
+        );
       }
 
       return (await writeRef(fullRefName, current, newSha))
@@ -539,39 +561,34 @@ export function createGitHubApiRefStateStore(
     },
 
     listIssueStates: async (): Promise<readonly EpureIssueState[]> => {
-      try {
-        const listResp = await fetchFn(
-          `${repoUrl}/git/matching-refs/epure/state/`,
-          { method: "GET", headers }
+      const listResp = await fetchFn(
+        `${repoUrl}/git/matching-refs/epure/state/`,
+        { method: "GET", headers }
+      );
+      if (!listResp.ok) {
+        throw new Error(
+          `Failed to list EPURE state refs (HTTP ${listResp.status}).`
         );
-        if (!listResp.ok) {
-          return [];
-        }
-        const entries = (await listResp.json()) as Array<{
-          ref?: string;
-          object?: { sha?: string; type?: string };
-        }>;
-        if (!Array.isArray(entries)) {
-          return [];
-        }
-        const states: EpureIssueState[] = [];
-        for (const entry of entries) {
-          const sha = entry.object?.sha;
-          if (!sha) {
-            continue;
-          }
-          const state = await readStateObject({
-            sha,
-            type: entry.object?.type ?? "commit"
-          });
-          if (state) {
-            states.push(state);
-          }
-        }
-        return states;
-      } catch {
-        return [];
       }
+      const entries = (await listResp.json()) as Array<{
+        ref?: string;
+        object?: { sha?: string; type?: string };
+      }>;
+      const states: EpureIssueState[] = [];
+      for (const entry of entries) {
+        const sha = entry.object?.sha;
+        if (!sha) {
+          continue;
+        }
+        const state = await readStateObject({
+          sha,
+          type: entry.object?.type ?? "commit"
+        });
+        if (state) {
+          states.push(state);
+        }
+      }
+      return states;
     }
   };
 }
