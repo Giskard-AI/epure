@@ -1126,8 +1126,16 @@ export async function orchestrateIssueCommand(
                 taskBranchToMerge,
                 targetFeatureBranch
               )) !== null;
+            // A feature PR already merged into dev is left untouched: step 5 marks the plan done.
+            const featurePrAlreadyMerged =
+              prNumberToMerge > 0 &&
+              !mergedByHuman &&
+              (await gh.findMergedPullRequestByHead(
+                targetFeatureBranch,
+                "dev"
+              )) !== null;
             let ticketPrNeedsReview = false;
-            if (prNumberToMerge > 0 && !mergedByHuman) {
+            if (prNumberToMerge > 0 && !mergedByHuman && !featurePrAlreadyMerged) {
               const prFiles = await gh.listPullRequestFiles(prNumberToMerge);
               const changedFilesForSquash = await Promise.all(
                 prFiles.map(async (f) => ({
@@ -1277,7 +1285,7 @@ export async function orchestrateIssueCommand(
 
             if (ticketPrNeedsReview) {
               forceOneRemediationRoundOnOpenPr = true;
-            } else {
+            } else if (!featurePrAlreadyMerged) {
               if (ticketNum !== effectiveInput.issueNumber) {
                 await gh.closeIssue(ticketNum);
               }

@@ -288,6 +288,44 @@ export async function runFeatureIntegrationPhase(
   }
 
   let currentFeaturePrHeadSha = featurePr.head_sha;
+  // GitHub runs no `pull_request` workflow on a conflicting PR: re-sync `dev` into the feature branch first.
+  if (
+    (await params.gh.getPullRequestMergeableState(featurePr.number)) === "dirty"
+  ) {
+    const mergedBeforeResync = await params.stopIfFeaturePrMerged();
+    if (mergedBeforeResync) {
+      return mergedBeforeResync;
+    }
+    const resync = await syncBranchWithBase({
+      gh: params.gh,
+      targetBranch: params.featureBranch,
+      baseBranch: "dev",
+      issueNumber: params.issueNumber,
+      llmApiKey: params.llmApiKey,
+      fetchImpl: params.fetchImpl,
+      model: params.phaseModels.implementationModel,
+      providers: params.phaseModels.providers,
+      maxTransientRetries: params.phaseModels.maxTransientRetries,
+      transientRetryBackoffSeconds:
+        params.phaseModels.transientRetryBackoffSeconds,
+      requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+      sandboxRunner: params.sandboxRunner,
+      reviewersDir
+    });
+    if (resync.status === "escalated") {
+      return await escalate({
+        reason: resync.escalationReason ?? "merge_conflict_unresolved",
+        ticketNumber: params.issueNumber,
+        branch: params.featureBranch,
+        prNumber: featurePr.number,
+        prUrl: featurePr.html_url,
+        featurePrUrl: featurePr.html_url,
+        diagnosticExcerpt: resync.diagnosticExcerpt
+      });
+    }
+    await params.baseSyncGuard.markSynced();
+    currentFeaturePrHeadSha = resync.headSha || currentFeaturePrHeadSha;
+  }
   const runStage2AndStage3ForFeaturePr = async (passParams: {
     headSha: string;
     isReReviewPass: boolean;
@@ -852,6 +890,10 @@ export async function runFeatureIntegrationPhase(
           ? parsedFeatureFix.commit_message
           : `fix(review): address final feature review findings on #${params.issueNumber}`;
 
+      const mergedBeforeReviewFix = await params.stopIfFeaturePrMerged();
+      if (mergedBeforeReviewFix) {
+        return mergedBeforeReviewFix;
+      }
       await params.gh.commitFilesToBranch({
         branch: fixTaskBranch,
         fromBranch: params.featureBranch,
@@ -896,6 +938,10 @@ export async function runFeatureIntegrationPhase(
         summary: "Impeccable gate verified in synthesis loop."
       });
 
+      const mergedBeforeFixMerge = await params.stopIfFeaturePrMerged();
+      if (mergedBeforeFixMerge) {
+        return mergedBeforeFixMerge;
+      }
       await params.gh.mergePullRequest(fixPr.number, {
         headBranch: fixTaskBranch,
         baseBranch: params.featureBranch,

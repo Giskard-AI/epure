@@ -1884,6 +1884,15 @@ export async function runTicketExecutionLoop(
           reviewIntegrityCheck = retryEval.integrityCheck;
           testCheck = retryEval.testCheck;
         }
+        const featureMergedBeforeReviewFix = await params.stopIfFeaturePrMerged();
+        if (featureMergedBeforeReviewFix) {
+          return {
+            halted: true,
+            result: featureMergedBeforeReviewFix,
+            verificationProfile,
+            verificationGuideMarkdown
+          };
+        }
         if (!testCheck.passed) {
           if (!reviewIntegrityCheck.passed) {
             restoreViolatedBaselineFiles(reviewIntegrityCheck);
@@ -2031,6 +2040,15 @@ export async function runTicketExecutionLoop(
         fetchImpl: params.fetchImpl
       });
 
+      const featureMergedBeforeTaskMerge = await params.stopIfFeaturePrMerged();
+      if (featureMergedBeforeTaskMerge) {
+        return {
+          halted: true,
+          result: featureMergedBeforeTaskMerge,
+          verificationProfile,
+          verificationGuideMarkdown
+        };
+      }
       await params.gh.updatePullRequest(taskPr.number, {
         title: squashCommit.pr_title
       });

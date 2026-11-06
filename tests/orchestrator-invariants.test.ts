@@ -276,6 +276,26 @@ describe("Invariant 2 — suspended, done and cancelled imply subphase idle and 
   });
 });
 
+describe("feature PR integration — a conflicting feature PR is re-synced with dev before its CI is awaited (#105)", () => {
+  it.each([
+    { id: "dirty-feature-pr-gets-a-second-dev-merge-into-the-feature-branch", mergeableState: "dirty", expectedFeatureSyncs: 2 },
+    { id: "clean-feature-pr-keeps-the-single-pre-integration-sync", mergeableState: "clean", expectedFeatureSyncs: 1 }
+  ] as const)("$id", async ({ mergeableState, expectedFeatureSyncs }) => {
+    const store = await seedState(FEATURE_INTEGRATION_PENDING_STATE);
+    const router = declareImplementationFlow(createGitHubMockRouter(), "success", { taskPr: false, featurePr: true })
+      .on("GET", `${R}/pulls/105`, json({ mergeable_state: mergeableState }), json({ mergeable_state: "clean" }));
+
+    await run(router, store, { command: "approve", actor: "maintainer", issueNumber: ISSUE, commentId: 900 });
+
+    expect(router.unmatched).toEqual([]);
+    expect((await readState(store)).status).toBe("done");
+    const featureSyncs = router.requests.filter(
+      (r) => r.method === "POST" && r.path === `${R}/merges` && (r.body as { base: string }).base === FEATURE_BRANCH
+    );
+    expect(featureSyncs).toHaveLength(expectedFeatureSyncs);
+  });
+});
+
 describe("Invariant 3 — only an explicit human command gets an issue out of cancelled or done", () => {
   it.each([
     { id: "cancelled-in-spec-phase-not-reopened-by-plain-human-reply", status: "cancelled", phase: "spec" },
@@ -981,6 +1001,27 @@ describe("A feature PR is never opened twice for the same epic", () => {
     expect(router.calls("POST", "/v1/chat/completions", "api.openai.com") > 0).toBe(!expectsShortCircuit);
     expect(after.status === "done").toBe(expectsShortCircuit);
     expect(postedComments(router).some((body) => body.includes("[#105](pr105) de `feature/77-async-ci-feature` est déjà fusionnée dans `dev`"))).toBe(expectsShortCircuit);
+  });
+});
+
+describe("A feature PR merged by a human while a ticket CI was awaited stops the run before any branch write (#107)", () => {
+  it("green-ticket-ci-after-the-feature-pr-was-merged-marks-the-plan-done-without-merging-the-task-pr", async () => {
+    const store = await seedState(FEATURE_INTEGRATION_PENDING_STATE);
+    const router = declareImplementationFlow(createGitHubMockRouter(), "success", { taskPr: true, featurePr: false })
+      .on("GET", /\/pulls\?state=closed&head=/, (req) =>
+        json(
+          req.path.includes(encodeURIComponent(`${OWNER}:${FEATURE_BRANCH}`))
+            ? [{ number: 105, html_url: "pr105", merged_at: "2026-11-01T00:00:00Z" }]
+            : []
+        )
+      );
+
+    await run(router, store, { command: "continue", actor: "github-actions[bot]", ...TRIGGERS.workflowRun });
+
+    expect(router.unmatched).toEqual([]);
+    expect(router.requests.filter((r) => r.method === "PUT" || r.path.endsWith("/git/commits"))).toEqual([]);
+    expect(await readState(store)).toMatchObject({ status: "done", active_pr_number: undefined });
+    expect(postedComments(router).some((body) => body.includes("[#105](pr105) de `feature/77-async-ci-feature` est déjà fusionnée dans `dev`"))).toBe(true);
   });
 });
 
