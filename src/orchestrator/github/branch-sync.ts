@@ -255,18 +255,25 @@ export interface RenumberCollidingAdrsResult {
 const ADR_PATH_REGEX = /^docs\/adr\/(\d{4})-(.+)\.md$/;
 
 /**
- * Paths of the planning artifacts on a branch: `GLOSSARY.md` plus the files of `docs/adr/` and `docs/specs/`.
- * `GLOSSARY.md` is always listed; a missing one reads as null like an absent path.
+ * Paths of the planning artifacts on a branch: `GLOSSARY.md` and `extraPaths` plus the files of `docs/adr/` and `docs/specs/`.
+ * `GLOSSARY.md` and `extraPaths` are always listed; a missing one reads as null like an absent path.
  */
 async function listPlanArtifactPaths(
   gh: Pick<GitHubRestHelper, "listDirectoryPaths">,
-  branch: string
+  branch: string,
+  extraPaths: readonly string[] = []
 ): Promise<string[]> {
   const [adrPaths, specPaths] = await Promise.all([
     gh.listDirectoryPaths(branch, "docs/adr"),
     gh.listDirectoryPaths(branch, "docs/specs")
   ]);
-  return ["GLOSSARY.md", ...adrPaths, ...specPaths];
+  return [
+    ...new Set(
+      ["GLOSSARY.md", ...extraPaths, ...adrPaths, ...specPaths].map((p) =>
+        p.trim().replace(/^\/+/, "")
+      )
+    )
+  ];
 }
 
 function normalizeAdrSlug(rawSlug: string): string {
@@ -731,6 +738,13 @@ export async function integratePlanBranchIntoFeature(params: {
   readonly baseBranch?: string | undefined;
   // `plan/*` head integrated last time: a feature file still equal to it was not edited by a human.
   readonly previousPlanSha?: string | undefined;
+  // Paths recorded in the manifests: integrated wherever they live, the directory listing only adds to them.
+  readonly manifestPaths?:
+    | {
+        readonly specPaths: readonly string[];
+        readonly adrPaths: readonly string[];
+      }
+    | undefined;
   readonly llmClient?: LLMClient | undefined;
   readonly llmApiKey?: string | undefined;
   readonly model: string;
@@ -774,15 +788,24 @@ export async function integratePlanBranchIntoFeature(params: {
     };
   }
 
+  const manifestSpecPaths = new Set(
+    (params.manifestPaths?.specPaths ?? []).map((p) => p.trim().replace(/^\/+/, ""))
+  );
+  const manifestPaths = [
+    ...manifestSpecPaths,
+    ...(params.manifestPaths?.adrPaths ?? [])
+  ];
+  // dev and feature/* get only the non-ADR manifest paths: an unlisted ADR path would count as a number allocated on dev.
+  const manifestNonAdrPaths = manifestPaths.filter(
+    (p) => !ADR_PATH_REGEX.test(p.trim().replace(/^\/+/, ""))
+  );
   const [devPaths, planPaths, featurePaths] = await Promise.all([
-    listPlanArtifactPaths(params.gh, baseBranch),
-    listPlanArtifactPaths(params.gh, params.planBranch),
-    listPlanArtifactPaths(params.gh, params.featureBranch)
+    listPlanArtifactPaths(params.gh, baseBranch, manifestNonAdrPaths),
+    listPlanArtifactPaths(params.gh, params.planBranch, manifestPaths),
+    listPlanArtifactPaths(params.gh, params.featureBranch, manifestNonAdrPaths)
   ]);
 
-  const candidatePlanArtifactPaths = planPaths.map((p) =>
-    p.trim().replace(/^\/+/, "")
-  );
+  const candidatePlanArtifactPaths = planPaths;
 
   if (candidatePlanArtifactPaths.length === 0) {
     return {
@@ -871,7 +894,10 @@ export async function integratePlanBranchIntoFeature(params: {
         keptFeatureAdrPaths.add(renumberedOnFeature);
       }
       planAdrsToProcess.push({ path: artifactPath, content: planContent });
-    } else if (artifactPath.startsWith("docs/specs/")) {
+    } else if (
+      artifactPath.startsWith("docs/specs/") ||
+      manifestSpecPaths.has(artifactPath)
+    ) {
       specFilesToProcess.push({ path: artifactPath, content: planContent });
     } else {
       filesToCommit.push({ path: artifactPath, content: planContent });

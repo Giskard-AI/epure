@@ -285,6 +285,17 @@ const IMPLEMENTATION_PHASES: ReadonlySet<EpureIssueState["phase"]> = new Set([
   "completed"
 ]);
 
+function manifestArtifactPaths(
+  state: Pick<EpureIssueState, "plan_manifest" | "spec_manifest"> | null
+): { readonly specPaths: string[]; readonly adrPaths: string[] } {
+  return {
+    specPaths: [state?.plan_manifest?.specPath, state?.spec_manifest?.specPath].filter(
+      (p): p is string => Boolean(p)
+    ),
+    adrPaths: [...(state?.spec_manifest?.adrPaths ?? [])]
+  };
+}
+
 /** `/epure continue` re-enters the implementation run (an awaiting or done plan only waits for a human). */
 function resumesImplementationRun(
   state: Pick<EpureIssueState, "phase" | "status">
@@ -1042,6 +1053,7 @@ async function runIssueCommand(
             planBranch: currentState.active_branch,
             featureBranch: targetBranch,
             baseBranch: "dev",
+            manifestPaths: manifestArtifactPaths(currentState),
             llmApiKey: effectiveInput.llmApiKey,
             model: phaseModels.planningModel,
             providers: phaseModels.providers,
@@ -1760,6 +1772,7 @@ async function runIssueCommand(
           previousPlanSha: currentState?.integrated_plan_sha,
           featureBranch,
           baseBranch: "dev",
+          manifestPaths: manifestArtifactPaths(updatedStart.state),
           llmApiKey: effectiveInput.llmApiKey,
           model: phaseModels.planningModel,
           providers: phaseModels.providers,

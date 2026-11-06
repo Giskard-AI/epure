@@ -40,7 +40,7 @@ const MANIFEST = {
   ]
 };
 
-function arrange() {
+function arrange(specPath: string = SPEC) {
   const router = createGitHubMockRouter();
   const git = installFakeGitDataApi(router, REPO);
   const devHead = git.commitFiles("dev", { "README.md": "readme\n", "GLOSSARY.md": "# Glossaire\n\n## Terme Dev\nDev.\n" });
@@ -48,12 +48,13 @@ function arrange() {
   git.commitFiles(PLAN, {
     "GLOSSARY.md": "# Glossaire\n\n## Terme Dev\nDev.\n\n## Terme Plan\nPlan.\n",
     [ADR]: "# ADR-0001: Storage\nUse a file.\n",
-    [SPEC]: "# Spec\nStore v1.\n"
+    [specPath]: "# Spec\nStore v1.\n"
   });
+  const manifest = { ...MANIFEST, specPath };
   router
     .on("GET", `${R}/issues/${ISSUE}`, json({ number: ISSUE, title: "Plan once", body: "- [ ] Store", state: "open" }))
     .on("GET", `${R}/issues/${TICKET}`, json({ number: TICKET, title: "[Ticket 1] Store", body: "", state: "open" }))
-    .on("GET", `${R}/issues/${ISSUE}/comments?per_page=100`, json([{ id: 10, body: `<!-- epure-plan-manifest:${JSON.stringify(MANIFEST)} -->`, user: { login: "github-actions[bot]", type: "Bot" }, performed_via_github_app: { id: 15368 } }]))
+    .on("GET", `${R}/issues/${ISSUE}/comments?per_page=100`, json([{ id: 10, body: `<!-- epure-plan-manifest:${JSON.stringify(manifest)} -->`, user: { login: "github-actions[bot]", type: "Bot" }, performed_via_github_app: { id: 15368 } }]))
     .on("GET", /\/pulls\?state=(open|closed)&head=/, json([]))
     .on("GET", /\/labels\/[^/]+$/, json({}))
     .on("POST", /\/issues\/\d+\/labels$/, json([]))
@@ -118,6 +119,22 @@ describe("plan artifacts are integrated into feature/* once, not on every run (#
     expect(planCommitsOnFeature(git)).toBe(1);
     expect(git.getRef(`refs/heads/${FEATURE}`)).toBe(featureAfterApprove);
     expect((await store.readRef(`refs/epure/state/${ISSUE}`)).state!.integrated_plan_sha).toBe(git.getRef(`refs/heads/${PLAN}`));
+  });
+
+  it.each([
+    { id: "spec-directly-in-docs-specs-is-integrated", specPath: SPEC },
+    { id: "nested-spec-under-docs-specs-is-integrated", specPath: "docs/specs/77-plan-once/spec.md" },
+    { id: "spec-outside-docs-specs-is-integrated", specPath: "design/77-plan-once.md" }
+  ])("$id", async ({ specPath }) => {
+    const { router, git } = arrange(specPath);
+    const store = await approvedStore();
+
+    await enter(router, store, "approve", 100);
+
+    expect(router.unmatched).toEqual([]);
+    expect(git.readFile(FEATURE, specPath)).toBe("# Spec\nStore v1.\n");
+    expect(git.readFile(FEATURE, ADR)).toBe("# ADR-0001: Storage\nUse a file.\n");
+    expect(planCommitsOnFeature(git)).toBe(1);
   });
 
   it.each([
