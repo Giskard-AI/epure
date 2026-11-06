@@ -784,6 +784,16 @@ export async function integratePlanBranchIntoFeature(params: {
   const featurePathSet = new Set(
     featurePaths.map((p) => p.trim().replace(/^\/+/, ""))
   );
+  const adrSlugOf = (path: string) =>
+    normalizeAdrSlug(ADR_PATH_REGEX.exec(path)?.[2] ?? "");
+  // ADRs only on feature/*, incl. plan ADRs an earlier integration renumbered.
+  const featureOnlyAdrPaths = [...featurePathSet].filter(
+    (p) => ADR_PATH_REGEX.test(p) && !devPathSet.has(p)
+  );
+  const featureOnlyAdrPathBySlug = new Map(
+    featureOnlyAdrPaths.map((p) => [adrSlugOf(p), p])
+  );
+  const keptFeatureAdrPaths = new Set<string>();
   const filesToCommit: Array<{ path: string; content: string }> = [];
   const planAdrsToProcess: Array<{ path: string; content: string }> = [];
   const specFilesToProcess: Array<{ path: string; content: string }> = [];
@@ -833,6 +843,18 @@ export async function integratePlanBranchIntoFeature(params: {
       // Edited on feature/* since dev and the last integrated plan: the feature-side version wins.
       continue;
     } else if (ADR_PATH_REGEX.test(artifactPath)) {
+      const renumberedOnFeature = featureOnlyAdrPathBySlug.get(
+        adrSlugOf(artifactPath)
+      );
+      if (
+        renumberedOnFeature !== undefined &&
+        renumberedOnFeature !== artifactPath &&
+        planContent === previouslyIntegrated
+      ) {
+        // Integrated earlier under its renumbered path and unchanged on plan/* since: the feature/* copy stays,
+        // the ADR still goes through renumbering so spec and glossary references follow it.
+        keptFeatureAdrPaths.add(renumberedOnFeature);
+      }
       planAdrsToProcess.push({ path: artifactPath, content: planContent });
     } else if (artifactPath.startsWith("docs/specs/")) {
       specFilesToProcess.push({ path: artifactPath, content: planContent });
@@ -841,8 +863,9 @@ export async function integratePlanBranchIntoFeature(params: {
     }
   }
 
+  // feature/* ADR paths count as allocated, so a changed plan ADR lands on its renumbered path again.
   const renumberedResult = renumberCollidingAdrs({
-    devPaths,
+    devPaths: [...devPaths, ...featureOnlyAdrPaths],
     planAdrs: planAdrsToProcess,
     specFiles: specFilesToProcess,
     glossaryContent: filesToCommit.find((f) => f.path === "GLOSSARY.md")?.content
@@ -858,7 +881,10 @@ export async function integratePlanBranchIntoFeature(params: {
     }
   }
 
-  for (const adr of renumberedResult.adrs) {
+  const adrsToWrite = renumberedResult.adrs.filter(
+    (a) => !keptFeatureAdrPaths.has(a.path)
+  );
+  for (const adr of adrsToWrite) {
     filesToCommit.push({ path: adr.path, content: adr.content });
   }
   for (const spec of renumberedResult.specFiles) {
@@ -872,8 +898,8 @@ export async function integratePlanBranchIntoFeature(params: {
 
   // Semantic cross-ADR LLM reconciliation when collisions/renumbering or concurrent dev ADRs exist (ADR-0032, Q118)
   if (
-    renumberedResult.adrs.length > 0 &&
-    (renumberedResult.adrs.some((a) => a.renumbered) ||
+    adrsToWrite.length > 0 &&
+    (adrsToWrite.some((a) => a.renumbered) ||
       renumberedResult.deletedAdrPaths.length > 0 ||
       devAdrPaths.length > 0)
   ) {
@@ -881,7 +907,7 @@ export async function integratePlanBranchIntoFeature(params: {
       gh: params.gh,
       baseBranch,
       devAdrPaths,
-      featureAdrs: renumberedResult.adrs,
+      featureAdrs: adrsToWrite,
       specFiles: renumberedResult.specFiles,
       glossaryContent: filesToCommit.find((f) => f.path === "GLOSSARY.md")
         ?.content,
@@ -917,7 +943,7 @@ export async function integratePlanBranchIntoFeature(params: {
   return {
     featureHeadSha,
     committedPaths: filesToCommit.map((f) => f.path),
-    renumberedAdrs: renumberedResult.adrs
+    renumberedAdrs: adrsToWrite
       .filter((a) => a.renumbered)
       .map((a) => ({ oldPath: a.oldPath, newPath: a.path })),
     ...(closedLegacyPlanPrNumber !== undefined

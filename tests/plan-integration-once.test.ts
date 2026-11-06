@@ -21,6 +21,8 @@ const PLAN = "plan/77-plan-once";
 const FEATURE = "feature/77-plan-once";
 const ADR = "docs/adr/0001-storage.md";
 const SPEC = "docs/specs/77-plan-once.md";
+const DEV_ADR = "docs/adr/0001-other.md";
+const RENUMBERED_ADR = "docs/adr/0002-storage.md";
 
 const MANIFEST = {
   planBranch: PLAN,
@@ -156,6 +158,38 @@ describe("plan artifacts are integrated into feature/* once, not on every run (#
       expect(git.readFile(FEATURE, path)).toBe(content);
     }
     expect(planCommitsOnFeature(git)).toBe(expectedPlanCommits);
+  });
+
+  it.each([
+    {
+      id: "plan-moved-elsewhere-keeps-the-renumbered-adr-edited-on-feature-and-adds-no-second-copy",
+      featureEdit: { [RENUMBERED_ADR]: "# ADR-0002 : Stockage\nUn fichier.\n" },
+      planEdit: { [SPEC]: "# Spec\nStore v2, see ADR-0001.\n" },
+      expected: { [RENUMBERED_ADR]: "# ADR-0002 : Stockage\nUn fichier.\n", [SPEC]: "# Spec\nStore v2, see ADR-0002.\n" }
+    },
+    {
+      id: "plan-edit-of-the-adr-updates-its-renumbered-copy-on-feature",
+      featureEdit: {},
+      planEdit: { [ADR]: "# ADR-0001: Storage\nUse a database.\n" },
+      expected: { [RENUMBERED_ADR]: "# ADR-0002: Storage\nUse a database.\n" }
+    }
+  ])("$id", async ({ featureEdit, planEdit, expected }) => {
+    const { router, git } = arrange();
+    git.commitFiles("dev", { [DEV_ADR]: "# ADR-0001: Other\n" }, "concurrent ADR merged into dev");
+    const store = await approvedStore();
+    await enter(router, store, "approve", 100);
+    expect(git.readFile(FEATURE, RENUMBERED_ADR)).toBe("# ADR-0002: Storage\nUse a file.\n");
+
+    git.commitFiles(FEATURE, featureEdit, "human edit on feature");
+    git.commitFiles(PLAN, planEdit, "human edit on plan");
+    await enter(router, store, "continue", 101);
+
+    expect(router.unmatched).toEqual([]);
+    for (const [path, content] of Object.entries(expected)) {
+      expect(git.readFile(FEATURE, path)).toBe(content);
+    }
+    expect(git.readFile(FEATURE, DEV_ADR)).toBe("# ADR-0001: Other\n");
+    expect(git.readFile(FEATURE, "docs/adr/0003-storage.md")).toBeUndefined();
   });
 
   it.each([
