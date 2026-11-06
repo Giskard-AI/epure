@@ -506,6 +506,13 @@ async function runIssueCommand(
         issueNumber: effectiveInput.issueNumber,
         store: via.store,
         mutator: (prev) => {
+          const lease = readRunLease(prev);
+          if (lease && !lease.stale && lease.runId !== runId) {
+            throw new StateTransitionAbortedError(
+              prev,
+              `run \`${lease.runId}\` holds the plan until ${lease.expiresAt}, so this run does not suspend it`
+            );
+          }
           // An approval that fails before its run starts stays approved: `/epure continue` or `/epure approve` re-enters it.
           const phase =
             params.phase ??
@@ -1757,10 +1764,13 @@ async function runIssueCommand(
         }
       }).catch(async (err: unknown) => {
         if (err instanceof StateTransitionAbortedError && !isAutomaticEntry) {
-          await gh.postIssueComment(
-            effectiveInput.issueNumber,
-            `⏸️ \`/epure ${effectiveInput.command}\` n'a pas été appliqué : ${err.reason}. Vérifiez l'état du plan avec \`/epure status\`, puis republiez la commande si nécessaire.`
-          );
+          // Best effort: the abort is the outcome, a failed notice must not turn it into an escalation.
+          await gh
+            .postIssueComment(
+              effectiveInput.issueNumber,
+              `⏸️ \`/epure ${effectiveInput.command}\` n'a pas été appliqué : ${err.reason}. Vérifiez l'état du plan avec \`/epure status\`, puis republiez la commande si nécessaire.`
+            )
+            .catch(() => undefined);
         }
         throw err;
       });

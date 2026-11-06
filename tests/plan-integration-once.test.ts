@@ -9,6 +9,7 @@ import {
   createGitHubMockRouter,
   installFakeGitDataApi,
   json,
+  unprocessable,
   type FakeGitDataApi,
   type GitHubMockRouter
 } from "./fixtures/github-mock-router.js";
@@ -210,10 +211,14 @@ describe("plan artifacts are integrated into feature/* once, not on every run (#
   });
 
   it.each([
-    { id: "approve-whose-start-write-loses-the-lease-to-another-run-posts-a-notice-and-integrates-nothing", concurrentClaim: true },
-    { id: "approve-that-takes-the-lease-integrates-the-plan-and-posts-no-abort-notice", concurrentClaim: false }
-  ])("$id", async ({ concurrentClaim }) => {
+    { id: "approve-whose-start-write-loses-the-lease-to-another-run-posts-a-notice-and-integrates-nothing", concurrentClaim: true, noticeFails: false },
+    { id: "approve-that-loses-the-lease-and-fails-to-post-the-notice-still-aborts-without-escalating", concurrentClaim: true, noticeFails: true },
+    { id: "approve-that-takes-the-lease-integrates-the-plan-and-posts-no-abort-notice", concurrentClaim: false, noticeFails: false }
+  ])("$id", async ({ concurrentClaim, noticeFails }) => {
     const { router, git } = arrange();
+    if (noticeFails) {
+      router.on("POST", `${R}/issues/${ISSUE}/comments`, unprocessable("comment rejected"));
+    }
     const inner = await approvedStore();
     let claimed = false;
     const store: GitRefStateStore = {
@@ -257,7 +262,40 @@ describe("plan artifacts are integrated into feature/* once, not on every run (#
     expect(after.integrated_plan_sha).toBe(concurrentClaim ? undefined : git.getRef(`refs/heads/${PLAN}`));
     if (concurrentClaim) {
       expect(after.claimed_by_run_id).toBe("run-b");
+      expect(after.status).not.toBe("suspended");
+      expect(after.last_escalation).toBeUndefined();
     }
+  });
+
+  it.each([
+    { id: "escalation-does-not-suspend-a-plan-whose-fresh-lease-another-run-took", leaseMs: 3_600_000, suspended: false },
+    { id: "escalation-suspends-a-plan-whose-lease-from-another-run-has-expired", leaseMs: -60_000, suspended: true }
+  ])("$id", async ({ leaseMs, suspended }) => {
+    const { router } = arrange();
+    const inner = await approvedStore();
+    let claimed = false;
+    const store: GitRefStateStore = {
+      readRef: (refName) => inner.readRef(refName),
+      compareAndSwapRef: async (refName, expectedOldSha, nextState) => {
+        if (!claimed && nextState.status === "suspended") {
+          claimed = true;
+          await updateIssueStateWithCas({
+            issueNumber: ISSUE,
+            store: inner,
+            mutator: (prev) => ({ ...prev, claimed_by_run_id: "run-b", claim_expires_at: new Date(Date.now() + leaseMs).toISOString() })
+          });
+        }
+        return inner.compareAndSwapRef(refName, expectedOldSha, nextState);
+      }
+    };
+
+    await enter(router, store, "approve", 100);
+
+    expect(router.unmatched).toEqual([]);
+    expect(claimed).toBe(true);
+    const after = (await inner.readRef(`refs/epure/state/${ISSUE}`)).state!;
+    expect(after.status === "suspended").toBe(suspended);
+    expect(after.last_escalation !== undefined).toBe(suspended);
   });
 
   it.each([
