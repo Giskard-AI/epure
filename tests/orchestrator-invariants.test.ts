@@ -823,23 +823,35 @@ describe("Lot 1 — a feature PR is never opened twice for the same epic", () =>
   it.each([
     {
       id: "merged-feature-pr-for-the-epic-marks-the-plan-done-without-rerunning-tickets-or-opening-another",
+      issueTitle: "Async CI Feature",
+      closedPrs: [{ number: 105, html_url: "pr105", merged_at: "2026-11-01T00:00:00Z" }],
+      expectsShortCircuit: true
+    },
+    {
+      id: "merged-feature-pr-is-found-on-the-stored-branch-after-the-epic-title-was-renamed",
+      issueTitle: "Event-driven CI continuation",
       closedPrs: [{ number: 105, html_url: "pr105", merged_at: "2026-11-01T00:00:00Z" }],
       expectsShortCircuit: true
     },
     {
       id: "closed-unmerged-feature-pr-does-not-stop-the-implementation",
+      issueTitle: "Async CI Feature",
       closedPrs: [{ number: 104, html_url: "pr104", merged_at: null }],
       expectsShortCircuit: false
     },
     {
       id: "no-previous-feature-pr-does-not-stop-the-implementation",
+      issueTitle: "Async CI Feature",
       closedPrs: [],
       expectsShortCircuit: false
     }
-  ])("$id", async ({ closedPrs, expectsShortCircuit }) => {
+  ])("$id", async ({ issueTitle, closedPrs, expectsShortCircuit }) => {
     const store = await seedState(FEATURE_INTEGRATION_PENDING_STATE);
     const router = declareImplementationFlow(createGitHubMockRouter(), "success", { taskPr: false, featurePr: false })
-      .on("GET", /\/pulls\?state=closed&head=/, json(closedPrs));
+      .on("GET", `${R}/issues/${ISSUE}`, json({ number: ISSUE, title: issueTitle, body: "- [ ] Ship it", state: "open" }))
+      .on("GET", /\/pulls\?state=closed&head=/, (req) =>
+        json(req.path.includes(encodeURIComponent(`${OWNER}:${FEATURE_BRANCH}`)) ? closedPrs : [])
+      );
 
     await run(router, store, { command: "approve", actor: "maintainer", issueNumber: ISSUE, commentId: 900 });
     const posted = router.requests.filter((r) => r.method === "POST" && r.path === `${R}/issues/${ISSUE}/comments`);

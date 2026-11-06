@@ -474,7 +474,10 @@ export async function orchestrateIssueCommand(
       const allComments = await gh.listIssueComments(effectiveInput.issueNumber);
       const planSlug = slugifyTitle(issue.title);
       planBranch = `plan/${effectiveInput.issueNumber}-${planSlug}`;
-      featureBranch = `feature/${effectiveInput.issueNumber}-${planSlug}`;
+      // The slug follows the current title; a renamed epic keeps the feature branch it already uses.
+      featureBranch = currentState?.active_branch.startsWith(`${featureBranch}-`)
+        ? currentState.active_branch
+        : `feature/${effectiveInput.issueNumber}-${planSlug}`;
       let agentsConfigError: unknown;
       let parsedDevAgentsConfig: ParsedAgentsConfig | null = null;
       try {
