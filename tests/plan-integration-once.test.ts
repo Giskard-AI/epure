@@ -193,6 +193,57 @@ describe("plan artifacts are integrated into feature/* once, not on every run (#
   });
 
   it.each([
+    { id: "approve-whose-start-write-loses-the-lease-to-another-run-posts-a-notice-and-integrates-nothing", concurrentClaim: true },
+    { id: "approve-that-takes-the-lease-integrates-the-plan-and-posts-no-abort-notice", concurrentClaim: false }
+  ])("$id", async ({ concurrentClaim }) => {
+    const { router, git } = arrange();
+    const inner = await approvedStore();
+    let claimed = false;
+    const store: GitRefStateStore = {
+      readRef: (refName) => inner.readRef(refName),
+      compareAndSwapRef: async (refName, expectedOldSha, nextState) => {
+        if (concurrentClaim && !claimed && nextState.claimed_by_run_id === "run-a") {
+          claimed = true;
+          await updateIssueStateWithCas({
+            issueNumber: ISSUE,
+            store: inner,
+            mutator: (prev) => ({ ...prev, claimed_by_run_id: "run-b", claim_expires_at: new Date(Date.now() + 3_600_000).toISOString() })
+          });
+        }
+        return inner.compareAndSwapRef(refName, expectedOldSha, nextState);
+      }
+    };
+
+    await orchestrateIssueCommand({
+      repository: REPO,
+      issueNumber: ISSUE,
+      command: "approve",
+      commandArgs: "",
+      actor: "maintainer",
+      commentId: 100,
+      runId: "run-a",
+      fallbackGithubToken: "ghs_test",
+      llmApiKey: "key_test",
+      model: "openai/gpt-test",
+      stateStore: store,
+      fetchImpl: router.fetch
+    });
+    const notices = router.requests
+      .filter((r) => r.method === "POST" && r.path === `${R}/issues/${ISSUE}/comments`)
+      .map((r) => (r.body as { body: string }).body)
+      .filter((body) => body.includes("`/epure approve` n'a pas été appliqué"));
+
+    expect(router.unmatched).toEqual([]);
+    expect(notices).toHaveLength(concurrentClaim ? 1 : 0);
+    expect(planCommitsOnFeature(git)).toBe(concurrentClaim ? 0 : 1);
+    const after = (await inner.readRef(`refs/epure/state/${ISSUE}`)).state!;
+    expect(after.integrated_plan_sha).toBe(concurrentClaim ? undefined : git.getRef(`refs/heads/${PLAN}`));
+    if (concurrentClaim) {
+      expect(after.claimed_by_run_id).toBe("run-b");
+    }
+  });
+
+  it.each([
     { id: "continue-after-the-feature-pr-was-merged-writes-nothing-and-opens-no-pr", planMoved: false },
     { id: "continue-after-the-feature-pr-was-merged-ignores-a-moved-plan", planMoved: true }
   ])("$id", async ({ planMoved }) => {

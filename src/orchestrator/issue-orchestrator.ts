@@ -1612,22 +1612,6 @@ async function runIssueCommand(
           : null;
       const integratePlan =
         planHeadSha !== null && planHeadSha !== currentState?.integrated_plan_sha;
-      if (integratePlan) {
-        await integratePlanBranchIntoFeature({
-          gh,
-          planBranch: planBranchToIntegrate,
-          previousPlanSha: currentState?.integrated_plan_sha,
-          featureBranch,
-          baseBranch: "dev",
-          llmApiKey: effectiveInput.llmApiKey,
-          model: phaseModels.planningModel,
-          providers: phaseModels.providers,
-          maxTransientRetries: phaseModels.maxTransientRetries,
-          transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
-          requestTimeoutMs: phaseModels.requestTimeoutMs,
-          fetchImpl: effectiveInput.fetchImpl
-        });
-      }
 
       const remoteTrustedRoster = await gh.readTrustedBaseRosterFiles(
         "dev",
@@ -1754,14 +1738,42 @@ async function runIssueCommand(
             active_branch: featureBranch,
             feature_branch: prev.feature_branch ?? featureBranch,
             epic_phase: prev.epic_phase ?? 1,
-            ...(integratePlan ? { integrated_plan_sha: planHeadSha ?? undefined } : {}),
             plan_manifest: prev.plan_manifest ?? migratedPlanManifest,
             last_processed_comment_id:
               advanceCommentCursor(prev, effectiveInput.commentId)
           };
         }
+      }).catch(async (err: unknown) => {
+        if (err instanceof StateTransitionAbortedError && !isAutomaticEntry) {
+          await gh.postIssueComment(
+            effectiveInput.issueNumber,
+            `⏸️ \`/epure ${effectiveInput.command}\` n'a pas été appliqué : ${err.reason}. Vérifiez l'état du plan avec \`/epure status\`, puis republiez la commande si nécessaire.`
+          );
+        }
+        throw err;
       });
       leaseExpiresAt = updatedStart.state.claim_expires_at;
+      if (integratePlan && planHeadSha !== null) {
+        await integratePlanBranchIntoFeature({
+          gh,
+          planBranch: planBranchToIntegrate,
+          previousPlanSha: currentState?.integrated_plan_sha,
+          featureBranch,
+          baseBranch: "dev",
+          llmApiKey: effectiveInput.llmApiKey,
+          model: phaseModels.planningModel,
+          providers: phaseModels.providers,
+          maxTransientRetries: phaseModels.maxTransientRetries,
+          transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+          requestTimeoutMs: phaseModels.requestTimeoutMs,
+          fetchImpl: effectiveInput.fetchImpl
+        });
+        await updateIssueStateWithCas({
+          issueNumber: effectiveInput.issueNumber,
+          store,
+          mutator: (prev) => ({ ...prev, integrated_plan_sha: planHeadSha })
+        });
+      }
       const grant = updatedStart.state.human_budget_grant_log?.at(-1);
       const grantsAfterStart = readHumanBudgetGrants(updatedStart.state);
       if (
