@@ -552,6 +552,11 @@ describeLive(
         expect((await gh.listOpenPullRequestsByBase(base)).map((pr) => pr.number)).toEqual([prNumber]);
         expect((await gh.compareCommits?.(base, headBranch))?.aheadBy).toBe(1);
       });
+
+      it("a closer without repository access reads as permission none with the App token", async () => {
+        const gh = createGitHubRestHelper({ repository: cfg.repository, token });
+        expect(await gh.getCollaboratorPermission("octocat")).toBe("none");
+      });
     });
 
     describe("git data API", () => {
