@@ -87,6 +87,64 @@ const CONFLICTING_SERVICE: Divergence = {
   theirs: { "src/service.ts": "export const v = 'theirs';\n" }
 };
 
+const RESOLVED_SERVICE = "export const v = 'both';\n";
+
+describe("syncBranchWithBase — the sensitive-path guard covers only files changed on both sides (#103)", () => {
+  it.each([
+    {
+      id: "agents-yml-changed-only-on-dev-is-carried-over-without-escalation",
+      sharedExtra: { ".github/agents.yml": "models: {}\n" },
+      theirsExtra: { ".github/agents.yml": "models: { planning: x }\n" },
+      carried: [".github/agents.yml", "models: { planning: x }\n"]
+    },
+    {
+      id: "reviewer-file-added-only-on-dev-is-carried-over-without-escalation",
+      sharedExtra: {},
+      theirsExtra: { ".agents/reviewers/security-reviewer.md": "# Security\n" },
+      carried: [".agents/reviewers/security-reviewer.md", "# Security\n"]
+    },
+    {
+      id: "non-sensitive-file-changed-only-on-dev-is-carried-over",
+      sharedExtra: { "src/util.ts": "export const u = 1;\n" },
+      theirsExtra: { "src/util.ts": "export const u = 2;\n" },
+      carried: ["src/util.ts", "export const u = 2;\n"]
+    }
+  ])("$id", async ({ sharedExtra, theirsExtra, carried }) => {
+    const ctx = setup({
+      shared: { ...CONFLICTING_SERVICE.shared, ...sharedExtra },
+      ours: CONFLICTING_SERVICE.ours,
+      theirs: { ...CONFLICTING_SERVICE.theirs, ...theirsExtra }
+    });
+    answerConflictResolution(ctx.router, [{ path: "src/service.ts", content: RESOLVED_SERVICE }]);
+
+    const { result, escalations } = await sync(ctx);
+
+    expect(ctx.router.unmatched).toEqual([]);
+    expect(escalations).toEqual([]);
+    expect(result).toMatchObject({ status: "resolved", conflictsResolved: ["src/service.ts"] });
+    expect(ctx.git.readFile(FEATURE, carried[0]!)).toBe(carried[1]);
+    expect(ctx.git.readFile(FEATURE, "src/service.ts")).toBe(RESOLVED_SERVICE);
+  });
+
+  it("workflow-changed-on-both-sides-escalates-and-lists-only-that-path", async () => {
+    const ctx = setup({
+      shared: { ...CONFLICTING_SERVICE.shared, ".github/workflows/ci.yml": "on: push\n", ".github/agents.yml": "models: {}\n" },
+      ours: { ...CONFLICTING_SERVICE.ours, ".github/workflows/ci.yml": "on: [push]\n" },
+      theirs: { ...CONFLICTING_SERVICE.theirs, ".github/workflows/ci.yml": "on: pull_request\n", ".github/agents.yml": "models: { planning: x }\n" }
+    });
+    const headBefore = featureHead(ctx.git);
+
+    const { result, escalations } = await sync(ctx);
+
+    expect(result).toMatchObject({ status: "escalated", escalationReason: "merge_conflict_unresolved" });
+    expect(escalations.map((e) => [e.reason, e.sensitivePaths])).toEqual([
+      ["merge_conflict_unresolved", [".github/workflows/ci.yml"]]
+    ]);
+    expect(featureHead(ctx.git)).toBe(headBefore);
+    expect(ctx.router.calls("POST", "/v1/chat/completions", "api.openai.com")).toBe(0);
+  });
+});
+
 describe("syncBranchWithBase — a resolution is rejected only for real Git conflict blocks (#104)", () => {
   it.each([
     {

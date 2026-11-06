@@ -1140,11 +1140,10 @@ export async function syncBranchWithBase(
     }
   }
 
+  // Base-only changes are taken from the base as-is (a human committed them there); only files EPURE resolves are guarded.
   const pathGuard = validateWorkspaceFileOperations({
     workDir: process.cwd(),
-    files: [...candidateFiles, ...baseOnlyChangedFiles].map((path) => ({
-      path
-    })),
+    files: candidateFiles.map((path) => ({ path })),
     targets: [],
     isTaskBranch: true,
     reviewersDir: input.reviewersDir
