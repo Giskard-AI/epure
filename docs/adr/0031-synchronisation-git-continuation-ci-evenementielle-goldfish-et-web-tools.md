@@ -35,6 +35,7 @@ L'exploitation d'`EPURE` sur plusieurs **Issues de pilotage** exécutées en par
 - En cas de conflit Git (`409 Conflict` sur `POST /repos/{owner}/{repo}/merges`) :
   - Si un fichier en conflit touche un chemin sensible (`.github/workflows/**`, `<reviewers_dir>/**` (`.agents/reviewers/**` par défaut), `.github/agents.yml`, `.env*`) ou si plus de 8 fichiers de code sont en conflit, l'orchestrateur escalade immédiatement en `needs-human`.
   - Sinon, `GLOSSARY.md` est fusionné additivement et le modèle d'implémentation résout les fichiers en conflit à partir des trois versions (`base`, `ours`, `theirs`). L'arbre résultant est obligatoirement vérifié dans le **Sandbox Stage 1** (`runTestsInIsolatedWorkspace`) avant commit ; tout échec Stage 1 déclenche une escalade `needs-human`.
+  - L'ensemble en conflit est calculé **au niveau du fichier**, pas du hunk : tout chemin dont le blob diffère de la base de fusion à la fois sur la base et sur la cible est confié au modèle, même si les deux côtés touchent des lignes disjointes que `git merge` aurait fusionnées seul. L'API REST GitHub ne renvoie pas le détail des conflits d'un `409` et un diff3 par hunk demanderait une implémentation ou une dépendance dédiée ; l'écart (plus de fichiers envoyés au modèle et à la limite de 8, jamais moins) est accepté tant que le Stage 1 vérifie le résultat.
 
 ### 2. Machine à états événementielle avec relâchement du runner (`waiting_ticket_ci` / `waiting_feature_ci` + `continue`)
 

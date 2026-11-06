@@ -587,6 +587,56 @@ describeLive(
       });
     });
 
+    describe("commitFilesToBranch on a branch moved by a concurrent push (#109)", () => {
+      function fetchWithConcurrentPushBeforeRefUpdate(branch: string, push: () => Promise<string>): typeof fetch {
+        let armed = true;
+        return async (input, init) => {
+          if (armed && init?.method === "PATCH" && String(input).endsWith(`/git/refs/heads/${encodeURIComponent(branch)}`)) {
+            armed = false;
+            await push();
+          }
+          return await fetch(input, init);
+        };
+      }
+
+      it.each([
+        { id: "disjoint-concurrent-push-is-kept-and-the-commit-is-rebuilt-on-it", concurrentPath: "other.txt", overlaps: false },
+        { id: "concurrent-push-on-a-written-path-throws-BranchUpdateConflictError-without-overwriting-it", concurrentPath: "epure.txt", overlaps: true }
+      ])("$id", async ({ id, concurrentPath, overlaps }) => {
+        const branch = await createBranch(`concurrent-${overlaps ? "overlap" : "disjoint"}`, baseSha);
+        const epurePath = `${NS}/${id}/epure.txt`;
+        const humanPath = `${NS}/${id}/${concurrentPath}`;
+        let humanSha = "";
+        const gh = createGitHubRestHelper({
+          repository: cfg.repository,
+          token,
+          fetchImpl: fetchWithConcurrentPushBeforeRefUpdate(branch, async () => {
+            humanSha = await commitOnTop([baseSha], humanPath, "human push\n");
+            expect((await api("PATCH", `${R}/git/refs/heads/${branch}`, { sha: humanSha, force: false })).status).toBe(200);
+            return humanSha;
+          })
+        });
+
+        const commit = gh.commitFilesToBranch({
+          branch,
+          commitMessage: `test(${NS}): epure write`,
+          files: [{ path: epurePath, content: "epure write\n" }]
+        });
+
+        if (overlaps) {
+          await expect(commit).rejects.toMatchObject({ name: "BranchUpdateConflictError", overlappingPaths: [epurePath] });
+          const head = await api<{ object: { sha: string } }>("GET", `${R}/git/ref/heads/${branch}`);
+          expect(head.data.object.sha).toBe(humanSha);
+          return;
+        }
+        const headSha = await commit;
+        const head = await api<{ parents: Array<{ sha: string }> }>("GET", `${R}/git/commits/${headSha}`);
+        const tree = await api<{ tree: Array<{ path: string }> }>("GET", `${R}/git/trees/${headSha}?recursive=1`);
+        expect(head.data.parents.map((p) => p.sha)).toEqual([humanSha]);
+        expect(tree.data.tree.map((e) => e.path)).toEqual(expect.arrayContaining([epurePath, humanPath]));
+      });
+    });
+
     describe("3-way conflict resolution makes a conflicting PR mergeable (#105)", () => {
       const FILE = `${NS}/conflict.txt`;
       let base = "";
