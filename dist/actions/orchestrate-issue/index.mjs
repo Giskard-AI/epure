@@ -3858,6 +3858,23 @@ function createGitHubRestHelper(params) {
     }
     return tree.entries;
   }
+  async function listDirectoryFiles(branch, dirPath) {
+    const { data } = await apiRequest(
+      "GET",
+      `/repos/${owner}/${repo}/contents/${encodeGitHubContentsPath(dirPath)}?ref=${encodeURIComponent(branch)}`,
+      void 0,
+      true
+    );
+    if (!Array.isArray(data)) {
+      return [];
+    }
+    if (data.length >= 1e3) {
+      throw new TruncatedGitTreeError(`${branch}:${dirPath}`);
+    }
+    return data.flatMap(
+      (e) => e.type === "file" && e.path && e.sha ? [{ type: "blob", path: e.path, sha: e.sha }] : []
+    );
+  }
   return {
     token: params.token,
     async getIssue(issueNumber) {
@@ -3995,13 +4012,13 @@ function createGitHubRestHelper(params) {
       } catch {
       }
     },
-    async closeIssue(issueNumber) {
+    async closeIssue(issueNumber, stateReason = "completed") {
       await apiRequest(
         "PATCH",
         `/repos/${owner}/${repo}/issues/${issueNumber}`,
         {
           state: "closed",
-          state_reason: "completed"
+          state_reason: stateReason
         }
       );
     },
@@ -4018,6 +4035,19 @@ function createGitHubRestHelper(params) {
       return (await readCompleteTree(branch)).flatMap(
         (e) => e.type === "blob" && typeof e.path === "string" ? [e.path] : []
       );
+    },
+    async listBranchPathHints(branch) {
+      const tree = await readBranchTree(branch);
+      const paths = tree.entries.flatMap(
+        (e) => e.type === "blob" && typeof e.path === "string" ? [e.path] : []
+      );
+      if (tree.truncated) {
+        process.stdout.write(
+          `::warning title=EPURE partial file listing::GitHub truncated the file listing of ${branch}: workspace hints and prompt context use the first ${paths.length} paths only.
+`
+        );
+      }
+      return paths;
     },
     async listBranchBlobs(branchOrSha) {
       const blobs = /* @__PURE__ */ new Map();
@@ -4253,27 +4283,26 @@ function createGitHubRestHelper(params) {
     },
     async readTrustedBaseRosterFiles(branch, reviewersDir = DEFAULT_REVIEWERS_DIR) {
       const filesMap = /* @__PURE__ */ new Map();
-      const dirPrefix = `${reviewersDir.toLowerCase()}/`;
-      for (const entry of await readCompleteTree(branch)) {
-        if (entry.type !== "blob" || !entry.path || !entry.sha) {
-          continue;
-        }
-        const p = entry.path;
-        const isRosterFile = p.toLowerCase().startsWith(dirPrefix) && /^[a-z0-9-]+\.md$/i.test(p.slice(dirPrefix.length));
-        if (!isRosterFile && p !== "DESIGN.md") {
+      const dirPath = reviewersDir.replace(/\/+$/, "");
+      for (const entry of await listDirectoryFiles(branch, dirPath)) {
+        if (!entry.path || !entry.sha || !/^[a-z0-9-]+\.md$/i.test(entry.path.slice(dirPath.length + 1))) {
           continue;
         }
         const content = await readBlob(entry.sha);
         if (content !== null) {
-          filesMap.set(p, content);
+          filesMap.set(entry.path, content);
         }
+      }
+      const designMarkdown = await this.readSingleBranchFile(branch, "DESIGN.md");
+      if (designMarkdown !== null) {
+        filesMap.set("DESIGN.md", designMarkdown);
       }
       return filesMap;
     },
     async readDevWorkflowsMap(branch) {
       const workflowsMap = /* @__PURE__ */ new Map();
-      for (const entry of await readCompleteTree(branch)) {
-        if (entry.type !== "blob" || !entry.path || !entry.sha || !/^\.github\/workflows\/[^/]+\.ya?ml$/i.test(entry.path)) {
+      for (const entry of await listDirectoryFiles(branch, ".github/workflows")) {
+        if (!entry.path || !entry.sha || !/\.ya?ml$/i.test(entry.path)) {
           continue;
         }
         const content = await readBlob(entry.sha);
@@ -9262,6 +9291,8 @@ function formatNeedsHumanEscalationComment(input) {
     reasonHeadline = "GitHub API rate limit still exceeded after waiting up to 5 minutes (`github_rate_limited`) \u2014 code-fix budget preserved";
   } else if (input.reason === "branch_update_conflict") {
     reasonHeadline = "Branch kept moving under EPURE: its commit could not be fast-forwarded after re-basing on the new head (`branch_update_conflict`) \u2014 no commit overwritten, code-fix budget preserved";
+  } else if (input.reason === "ambiguous_feature_branch") {
+    reasonHeadline = "Several `feature/<N>-*` branches match this plan and no single one has an open or merged PR to `dev` (`ambiguous_feature_branch`) \u2014 EPURE does not guess; code-fix budget preserved";
   } else if (input.reason === "internal_error") {
     reasonHeadline = "Internal orchestrator error \u2014 code-fix budget preserved";
   } else {
@@ -9280,7 +9311,7 @@ function formatNeedsHumanEscalationComment(input) {
   );
   if (input.humanBudgetGrants !== void 0) {
     lines.push(
-      `- **Budgets de correction accord\xE9s par un humain** : \`${input.humanBudgetGrants}\` (\`human_budget_grants\`)`
+      `- **Budgets de correction accord\xE9s par un humain** : \`${input.humanBudgetGrants}\` (\`human_budget_grant_log\`)`
     );
   }
   if (input.reason === "model_config_missing") {
@@ -9362,7 +9393,7 @@ function formatNeedsHumanEscalationComment(input) {
   );
   if (input.reason === "remediation_exhausted" && !input.resumeCommand) {
     lines.push(
-      "4. La reprise remet \xE0 z\xE9ro le budget de rem\xE9diation de l'\xE9l\xE9ment bloqu\xE9 et l'enregistre dans `human_budget_grants`."
+      "4. La reprise remet \xE0 z\xE9ro le budget de rem\xE9diation de l'\xE9l\xE9ment bloqu\xE9 et l'enregistre dans `human_budget_grant_log`."
     );
   }
   return appendEpureCommandsSpoiler(lines.join("\n"), {
@@ -9655,6 +9686,9 @@ var EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT = [
   "- **Mode `caveman-lite` (`Zero-Filler`) dans les r\xE9sum\xE9s et tours d'outils** : supprime toute formule de politesse, pr\xE9ambule, remplissage ou h\xE9sitation (\xAB Bien s\xFBr \xBB, \xAB Voici la correction \xBB, \xAB Il semble que \xBB) tout en conservant la structure grammaticale compl\xE8te Sujet-Verbe-Objet d'ASD-STE100.",
   "- **Fronti\xE8re stricte d'Auto-Clarity (100 % exact et non abr\xE9g\xE9)** : ne compresse JAMAIS le code source, les chemins de fichiers, les commandes shell, les identifiants techniques, les sch\xE9mas JSON de sortie (`commit_message`, `test_summary`, `patches`, `files`, `deleted_files`), les diagnostics de s\xE9curit\xE9 ni les messages de commit Conventional Commits."
 ].join("\n");
+
+// src/orchestrator/workspace/repo-tools.ts
+import { createHash } from "node:crypto";
 
 // src/orchestrator/workspace/web-tools.ts
 var DEFAULT_WEB_TOOLS_PHASES = [
@@ -10533,13 +10567,20 @@ async function applyTicketImplementationPayload(params) {
     ([path, content]) => ({ path, content })
   );
 }
-function parsePlanManifestFromComments(comments) {
+function manifestSha256(manifestJson) {
+  return createHash("sha256").update(manifestJson).digest("hex");
+}
+function isTrustedManifest(comment, manifestJson, trustedSha256) {
+  return trustedSha256 !== void 0 ? manifestSha256(manifestJson) === trustedSha256 : comment.user.type === "Bot";
+}
+function parsePlanManifestFromComments(comments, trustedSha256) {
   for (let i = comments.length - 1; i >= 0; i -= 1) {
-    const body = comments[i]?.body ?? "";
-    const match = /<!-- epure-plan-manifest:([\s\S]*?)-->/.exec(body);
-    if (match?.[1]) {
+    const comment = comments[i];
+    const match = /<!-- epure-plan-manifest:([\s\S]*?)-->/.exec(comment?.body ?? "");
+    const manifestJson = match?.[1]?.trim();
+    if (comment && manifestJson && isTrustedManifest(comment, manifestJson, trustedSha256)) {
       try {
-        const parsed = JSON.parse(match[1].trim());
+        const parsed = JSON.parse(manifestJson);
         if (Array.isArray(parsed.tickets) && parsed.tickets.length > 0) {
           return {
             ...typeof parsed.planBranch === "string" ? { planBranch: parsed.planBranch } : {},
@@ -10554,8 +10595,8 @@ function parsePlanManifestFromComments(comments) {
   }
   return null;
 }
-function parseTrackedTicketsFromComments(comments) {
-  return parsePlanManifestFromComments(comments)?.tickets ?? [];
+function parseTrackedTicketsFromComments(comments, trustedSha256) {
+  return parsePlanManifestFromComments(comments, trustedSha256)?.tickets ?? [];
 }
 async function runTestsInIsolatedWorkspace(params) {
   const isGha = process.env.GITHUB_ACTIONS === "true";
@@ -11073,9 +11114,9 @@ function buildRepoExplorationToolsAndHandlers(params) {
         const rawQuery = String(args.query ?? "").trim().toLowerCase();
         const q = rawQuery === "*" || rawQuery === "**" || rawQuery === "." || rawQuery === "./" ? "" : rawQuery;
         const queryTokens = q.split("*").filter(Boolean);
-        let allPaths = await params.gh.listBranchPaths(params.branch);
+        let allPaths = await params.gh.listBranchPathHints(params.branch);
         if (allPaths.length === 0 && params.branch !== params.featureBranch) {
-          allPaths = await params.gh.listBranchPaths(params.featureBranch);
+          allPaths = await params.gh.listBranchPathHints(params.featureBranch);
         }
         const pathSet = new Set(
           allPaths.map((p) => p.trim().replace(/^\/+/, "")).filter(Boolean)
@@ -12205,6 +12246,18 @@ var CAN_CANCEL = /* @__PURE__ */ new Set([
   "maintain",
   "admin"
 ]);
+var AmbiguousFeatureBranchError = class extends Error {
+  constructor(issueNumber, candidates) {
+    super(
+      `Several feature branches match plan #${issueNumber} (${candidates.map((b) => `\`${b}\``).join(", ")}) and no single one has an open or merged PR to dev. Delete the branches the plan does not use (or open a PR to dev from the one it uses), then post \`/epure continue\` on #${issueNumber}.`
+    );
+    this.issueNumber = issueNumber;
+    this.candidates = candidates;
+  }
+  issueNumber;
+  candidates;
+  name = "AmbiguousFeatureBranchError";
+};
 async function findExistingFeatureBranch(gh, state) {
   if (state.feature_branch) {
     return state.feature_branch;
@@ -12213,7 +12266,20 @@ async function findExistingFeatureBranch(gh, state) {
   if (state.active_branch.startsWith(prefix)) {
     return state.active_branch;
   }
-  return (await gh.listBranchesByPrefix(prefix))[0];
+  const candidates = await gh.listBranchesByPrefix(prefix);
+  if (candidates.length <= 1) {
+    return candidates[0];
+  }
+  const withPrToDev = [];
+  for (const branch of candidates) {
+    if (await gh.findOpenPullRequestByHead(branch, "dev") || await gh.findMergedPullRequestByHead(branch, "dev")) {
+      withPrToDev.push(branch);
+    }
+  }
+  if (withPrToDev.length === 1) {
+    return withPrToDev[0];
+  }
+  throw new AmbiguousFeatureBranchError(state.issue_number, candidates);
 }
 async function handleEpicClosedByHuman(params) {
   const state = params.currentState;
@@ -12671,11 +12737,16 @@ ${a.content}`).join("\n\n");
     fetchImpl: params.fetchImpl
   });
 }
-function parseLatestSpecManifest(comments) {
+var IMPLEMENTATION_STARTED_PHASES = /* @__PURE__ */ new Set([
+  "implementation",
+  "review",
+  "completed"
+]);
+function parseLatestSpecManifest(comments, trustedSha256) {
   for (let i = comments.length - 1; i >= 0; i -= 1) {
-    const body = comments[i]?.body ?? "";
-    const match = body.match(/<!-- epure-spec-manifest:(\{[\s\S]*?\}) -->/);
-    if (match?.[1]) {
+    const comment = comments[i];
+    const match = (comment?.body ?? "").match(/<!-- epure-spec-manifest:(\{[\s\S]*?\}) -->/);
+    if (comment && match?.[1] && isTrustedManifest(comment, match[1], trustedSha256)) {
       try {
         const parsed = JSON.parse(match[1]);
         if (typeof parsed.planBranch === "string" && typeof parsed.specPath === "string" && Array.isArray(parsed.adrPaths)) {
@@ -12702,6 +12773,7 @@ async function runGrillAndPlanPhase(params) {
     command,
     currentPhase,
     currentStatus,
+    trustedManifestSha256,
     repository,
     issueNumber,
     commentId,
@@ -12717,8 +12789,9 @@ async function runGrillAndPlanPhase(params) {
     onTransientRetriesUsed,
     fetchImpl
   } = params;
-  const existingTickets = command === "to-tickets" ? parseTrackedTicketsFromComments(allComments) : [];
-  if (existingTickets.length > 0) {
+  const supersededTickets = command === "to-tickets" ? parseTrackedTicketsFromComments(allComments, trustedManifestSha256.plan) : [];
+  const implementationStarted = command === "to-tickets" && (IMPLEMENTATION_STARTED_PHASES.has(currentPhase ?? "") || supersededTickets.length > 0 && (await gh.listBranchesByPrefix(`feature/${issueNumber}-`)).length > 0);
+  if (implementationStarted) {
     const kept = await updateIssueStateWithCas({
       issueNumber,
       store,
@@ -12727,7 +12800,8 @@ async function runGrillAndPlanPhase(params) {
         last_processed_comment_id: advanceCommentCursor(prev, commentId)
       })
     });
-    const body = `\u23F8\uFE0F Le graphe de tickets de #${issueNumber} existe d\xE9j\xE0 (${existingTickets.map((t) => `#${t.ticketIssueNumber}`).join(", ")}) : \`/epure to-tickets\` n'en cr\xE9e pas un second. Postez \`/epure approve\` pour lancer ou reprendre l'impl\xE9mentation.`;
+    const ticketList = supersededTickets.map((t) => `#${t.ticketIssueNumber}`).join(", ");
+    const body = `\u23F8\uFE0F L'impl\xE9mentation de #${issueNumber} a commenc\xE9 : \`/epure to-tickets\` ne r\xE9g\xE9n\xE8re plus son graphe de tickets${ticketList ? ` (${ticketList})` : ""}. Postez \`/epure continue\` pour reprendre l'impl\xE9mentation.`;
     await gh.postIssueComment(issueNumber, body);
     return {
       executed: false,
@@ -12992,7 +13066,7 @@ ${issue.body}`
   };
   if (command === "to-spec" || command === "reply" && currentPhase === "spec") {
     const isSpecRevision = command === "reply" && currentPhase === "spec";
-    const existingManifest = parseLatestSpecManifest(allComments);
+    const existingManifest = parseLatestSpecManifest(allComments, trustedManifestSha256.spec);
     const currentSpecOnBranch = await readRepoFileSafely(
       existingManifest?.specPath ?? `docs/specs/${planSlug}.md`,
       planBranch
@@ -13250,6 +13324,14 @@ ${issue.body}`
       commitMessage: isSpecRevision ? `docs(plan): revise GLOSSARY, ADRs, and spec for #${issueNumber}` : `docs(plan): generate GLOSSARY, ADRs, spec, DESIGN.md, and adapted reviewer roster for #${issueNumber}`,
       files: planningFiles2
     });
+    const specManifestPayload = {
+      planBranch,
+      specPath: specArtifacts.spec_path,
+      adrPaths: specArtifacts.adrs.map((a) => a.path),
+      targetFilesHint,
+      ...specArtifacts.epic_goal_contract ? { epicGoalContract: specArtifacts.epic_goal_contract } : {}
+    };
+    const specManifestJson = JSON.stringify(specManifestPayload);
     const updatedSpec = await updateIssueStateWithCas({
       issueNumber,
       store,
@@ -13259,16 +13341,10 @@ ${issue.body}`
         status: "awaiting_human_approval",
         active_branch: planBranch,
         plan_branch: prev.plan_branch ?? planBranch,
+        spec_manifest_sha256: manifestSha256(specManifestJson),
         last_processed_comment_id: advanceCommentCursor(prev, commentId)
       })
     });
-    const specManifestPayload = {
-      planBranch,
-      specPath: specArtifacts.spec_path,
-      adrPaths: specArtifacts.adrs.map((a) => a.path),
-      targetFilesHint,
-      ...specArtifacts.epic_goal_contract ? { epicGoalContract: specArtifacts.epic_goal_contract } : {}
-    };
     const specReviewComment = appendEpureCommandsSpoiler(
       [
         updatedSpec.issue_mirror_markdown,
@@ -13288,7 +13364,7 @@ ${issue.body}`
         "- Pour demander un ajustement ou une correction de la sp\xE9cification, **r\xE9pondez directement en commentaire** (sans commande slash).",
         "- Si la sp\xE9cification est valid\xE9e, postez **`/epure to-tickets`** pour g\xE9n\xE9rer le graphe de tickets TDD (`ready-for-agent`).",
         "",
-        `<!-- epure-spec-manifest:${JSON.stringify(specManifestPayload)} -->`
+        `<!-- epure-spec-manifest:${specManifestJson} -->`
       ].join("\n"),
       {
         phase: "spec",
@@ -13307,7 +13383,7 @@ ${issue.body}`
       feature_pr_url: ""
     };
   }
-  const storedSpecManifest = parseLatestSpecManifest(allComments);
+  const storedSpecManifest = parseLatestSpecManifest(allComments, trustedManifestSha256.spec);
   const candidateSpecPath = storedSpecManifest?.specPath ?? `docs/specs/${planSlug}.md`;
   const existingSpecOnPlanBranch = await readRepoFileSafely(
     candidateSpecPath,
@@ -13611,6 +13687,13 @@ ${issue.body}`
     "0E8A16",
     "Ticket ready for autonomous EPURE agent execution"
   );
+  for (const old of supersededTickets) {
+    await gh.postIssueComment(
+      old.ticketIssueNumber,
+      `\u267B\uFE0F Ticket remplac\xE9 : le graphe de tickets de #${issueNumber} est r\xE9g\xE9n\xE9r\xE9 par \`/epure to-tickets\` apr\xE8s r\xE9vision de la sp\xE9cification. Ce ticket ne sera pas impl\xE9ment\xE9.`
+    );
+    await gh.closeIssue(old.ticketIssueNumber, "not_planned");
+  }
   const createdTicketsManifest = await createLinkedPhaseTicketsOnGitHub({
     gh,
     parentIssueNumber: issueNumber,
@@ -13645,6 +13728,12 @@ ${issue.body}`
     fallbackBody: issue.body,
     tickets: createdTicketsManifest
   });
+  const planManifestJson = JSON.stringify({
+    planBranch,
+    specPath: bundle.spec_path,
+    ...bundle.epic_goal_contract ? { epicGoalContract: bundle.epic_goal_contract } : {},
+    tickets: createdTicketsManifest
+  });
   const updated = await updateIssueStateWithCas({
     issueNumber,
     store,
@@ -13654,6 +13743,7 @@ ${issue.body}`
       status: "awaiting_human_approval",
       active_branch: planBranch,
       plan_branch: prev.plan_branch ?? planBranch,
+      plan_manifest_sha256: manifestSha256(planManifestJson),
       last_processed_comment_id: advanceCommentCursor(prev, commentId)
     })
   });
@@ -13680,12 +13770,7 @@ ${issue.body}`
       "",
       "\u{1F449} **Action requise** : V\xE9rifiez les livrables sur la branche de plan et les tickets ci-dessus, puis postez `/epure approve` sur cette issue pour verrouiller le p\xE9rim\xE8tre et lancer l'impl\xE9mentation TDD autonome.",
       "",
-      `<!-- epure-plan-manifest:${JSON.stringify({
-        planBranch,
-        specPath: bundle.spec_path,
-        ...bundle.epic_goal_contract ? { epicGoalContract: bundle.epic_goal_contract } : {},
-        tickets: createdTicketsManifest
-      })} -->`
+      `<!-- epure-plan-manifest:${planManifestJson} -->`
     ].join("\n"),
     {
       phase: "tickets",
@@ -13863,9 +13948,16 @@ async function spawnPhase2ConvergenceTickets(params) {
     fallbackBody: params.issue.body,
     tickets: combinedTickets
   });
+  const planManifestJson = JSON.stringify({
+    planBranch: params.planBranch,
+    specPath: params.specPath,
+    epicGoalContract: params.epicGoalContract,
+    tickets: combinedTickets
+  });
+  const stateMirrorMarkdown = await params.recordPlanManifest(planManifestJson);
   const phaseComment = appendEpureCommandsSpoiler(
     [
-      params.stateMirrorMarkdown,
+      stateMirrorMarkdown,
       "",
       `### \u{1F504} Audit de Convergence Goldfish (\`INCOMPLETE\`) \u2014 Lancement automatique de la Phase ${params.nextEpicPhase}`,
       "",
@@ -13885,12 +13977,7 @@ async function spawnPhase2ConvergenceTickets(params) {
         (t) => `- **#${t.ticketIssueNumber}** \u2014 ${t.title}`
       ),
       "",
-      `<!-- epure-plan-manifest:${JSON.stringify({
-        planBranch: params.planBranch,
-        specPath: params.specPath,
-        epicGoalContract: params.epicGoalContract,
-        tickets: combinedTickets
-      })} -->`
+      `<!-- epure-plan-manifest:${planManifestJson} -->`
     ].join("\n"),
     {
       phase: "implementation",
@@ -17359,21 +17446,63 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
   };
 }
 
+// src/orchestrator/job-timeout.ts
+var GITHUB_MAX_JOB_TIMEOUT_MINUTES = 360;
+function indentOf(line) {
+  return line.length - line.trimStart().length;
+}
+function parseJobTimeoutMinutes(workflowYaml, jobId) {
+  const lines = workflowYaml.split(/\r?\n/);
+  const escapedJobId = jobId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const header = lines.findIndex(
+    (line) => new RegExp(`^\\s+${escapedJobId}:\\s*(#.*)?$`).test(line)
+  );
+  if (header < 0) {
+    return void 0;
+  }
+  const headerIndent = indentOf(lines[header]);
+  let keyIndent;
+  for (const line of lines.slice(header + 1)) {
+    if (/^\s*(#.*)?$/.test(line)) {
+      continue;
+    }
+    const indent = indentOf(line);
+    if (indent <= headerIndent) {
+      return void 0;
+    }
+    keyIndent ??= indent;
+    if (indent !== keyIndent || !/^\s*timeout-minutes:/.test(line)) {
+      continue;
+    }
+    const minutes = Number(
+      /^\s*timeout-minutes:\s*["']?(\d+)["']?\s*(#.*)?$/.exec(line)?.[1]
+    );
+    return minutes > 0 ? minutes : void 0;
+  }
+  return void 0;
+}
+async function resolveJobTimeoutMinutes(gh, job) {
+  const workflowYaml = await gh.readSingleBranchFile(job.ref, job.path);
+  return (workflowYaml === null ? void 0 : parseJobTimeoutMinutes(workflowYaml, job.jobId)) ?? GITHUB_MAX_JOB_TIMEOUT_MINUTES;
+}
+
 // src/orchestrator/issue-orchestrator.ts
 var EscalationNotRecordedError = class extends Error {
-  constructor(issueNumber, reason, escalationMarkdown, resumeCommand) {
+  constructor(issueNumber, reason, escalationMarkdown, resumeCommand, leaseExpiresAt) {
     super(
-      `GitHub API still rate limited: the \`${reason}\` escalation could not be posted on #${issueNumber}. Post \`${resumeCommand}\` on #${issueNumber} once the limit resets.`
+      `GitHub API still rate limited: the \`${reason}\` escalation could not be posted on #${issueNumber}. Post \`${resumeCommand}\` on #${issueNumber} once the limit resets${leaseExpiresAt ? ` and this run's lease has expired (${leaseExpiresAt}); EPURE refuses the command until then` : ""}.`
     );
     this.issueNumber = issueNumber;
     this.reason = reason;
     this.escalationMarkdown = escalationMarkdown;
     this.resumeCommand = resumeCommand;
+    this.leaseExpiresAt = leaseExpiresAt;
   }
   issueNumber;
   reason;
   escalationMarkdown;
   resumeCommand;
+  leaseExpiresAt;
   name = "EscalationNotRecordedError";
 };
 var ClosureNotProcessedError = class extends Error {
@@ -17476,6 +17605,7 @@ async function orchestrateIssueCommand(input) {
     const refName = buildIssueStateRefName(effectiveInput.issueNumber);
     let planBranch = `plan/${effectiveInput.issueNumber}`;
     let featureBranch = `feature/${effectiveInput.issueNumber}`;
+    let leaseExpiresAt;
     let maxCodeFixAttempts = 3;
     let totalTransientRetriesUsed = 0;
     let initialTransientRetriesUsed = 0;
@@ -17534,6 +17664,7 @@ async function orchestrateIssueCommand(input) {
         }
       });
       const suspendedState = updatedSuspended.state;
+      leaseExpiresAt = suspendedState.claim_expires_at;
       const escalationMarkdown = appendEpureCommandsSpoiler(
         [
           updatedSuspended.issue_mirror_markdown,
@@ -17610,7 +17741,7 @@ async function orchestrateIssueCommand(input) {
         }
       }
       const heldLease = currentState ? readRunLease(currentState) : null;
-      if (!isAutomaticEntry && (effectiveInput.command === "continue" || effectiveInput.command === "approve") && heldLease && !heldLease.stale && heldLease.runId !== runId) {
+      if (!isAutomaticEntry && (effectiveInput.command === "continue" || effectiveInput.command === "approve" || effectiveInput.command === "sync" || effectiveInput.command === "rebase") && heldLease && !heldLease.stale && heldLease.runId !== runId) {
         const body = `\u23F3 L'ex\xE9cution EPURE \`${heldLease.runId}\` travaille encore sur le plan #${effectiveInput.issueNumber} (verrou valable jusqu'au ${heldLease.expiresAt}) : \`/epure ${effectiveInput.command}\` est ignor\xE9 pour ne pas lancer une seconde ex\xE9cution en parall\xE8le. Republiez-le une fois cette ex\xE9cution termin\xE9e, ou apr\xE8s l'expiration du verrou si elle a \xE9t\xE9 interrompue.`;
         await gh.postIssueComment(effectiveInput.issueNumber, body);
         return {
@@ -17811,7 +17942,13 @@ async function orchestrateIssueCommand(input) {
         return resolvedPhaseModels;
       };
       maxCodeFixAttempts = parsedDevAgentsConfig?.max_code_fix_attempts ?? 3;
-      const runLeaseMs = (parsedDevAgentsConfig?.job_timeout_minutes ?? DEFAULT_AGENTS_CONFIG.job_timeout_minutes) * 6e4;
+      let runLeaseMinutes;
+      const resolveRunLeaseMs = async () => {
+        runLeaseMinutes ??= effectiveInput.workflowJob ? resolveJobTimeoutMinutes(gh, effectiveInput.workflowJob) : Promise.resolve(
+          parsedDevAgentsConfig?.job_timeout_minutes ?? DEFAULT_AGENTS_CONFIG.job_timeout_minutes
+        );
+        return await runLeaseMinutes * 6e4;
+      };
       const reviewersDir = parsedDevAgentsConfig?.reviewers_dir ?? DEFAULT_REVIEWERS_DIR;
       if (effectiveInput.command === "plan" || effectiveInput.command === "to-spec" || effectiveInput.command === "to-tickets" || effectiveInput.command === "reply" && (currentState?.phase === "grilling" || currentState?.phase === "spec") && currentState?.status !== "cancelled") {
         const phaseModels = requirePhaseModels();
@@ -17820,6 +17957,10 @@ async function orchestrateIssueCommand(input) {
             command: effectiveInput.command,
             currentPhase: currentState?.phase,
             currentStatus: currentState?.status,
+            trustedManifestSha256: {
+              plan: currentState?.plan_manifest_sha256,
+              spec: currentState?.spec_manifest_sha256
+            },
             repository: effectiveInput.repository,
             issueNumber: effectiveInput.issueNumber,
             commentId: effectiveInput.commentId,
@@ -18049,7 +18190,8 @@ async function orchestrateIssueCommand(input) {
             };
           }
           const waitingState = currentState;
-          await updateIssueStateWithCas({
+          const ciClaimLeaseMs = await resolveRunLeaseMs();
+          const ciClaim = await updateIssueStateWithCas({
             issueNumber: effectiveInput.issueNumber,
             store,
             mutator: (prev) => {
@@ -18065,10 +18207,11 @@ async function orchestrateIssueCommand(input) {
                   subphase: waitsOnFeatureCi ? "remediating_feature" : "implementing_ticket"
                 },
                 runId,
-                runLeaseMs
+                ciClaimLeaseMs
               );
             }
           });
+          leaseExpiresAt = ciClaim.state.claim_expires_at;
           if (snapshot.passed && snapshot.aiReviewPassed) {
             if (waitsOnFeatureCi) {
               const featurePrNumber = currentState.active_pr_number ?? 0;
@@ -18316,8 +18459,11 @@ async function orchestrateIssueCommand(input) {
         if (currentState?.status === "suspended") {
           await gh.removeIssueLabel?.(effectiveInput.issueNumber, "needs-human");
         }
-        const parsedPlanManifest = parsePlanManifestFromComments(allComments);
-        let ticketsManifest = parsedPlanManifest?.tickets ? [...parsedPlanManifest.tickets] : parseTrackedTicketsFromComments(allComments);
+        const parsedPlanManifest = parsePlanManifestFromComments(
+          allComments,
+          currentState?.plan_manifest_sha256
+        );
+        let ticketsManifest = parsedPlanManifest?.tickets ? [...parsedPlanManifest.tickets] : [];
         const hasExplicitPlanManifest = ticketsManifest.length > 0;
         if (!hasExplicitPlanManifest) {
           const parsedCriteria = Array.from(
@@ -18389,7 +18535,7 @@ async function orchestrateIssueCommand(input) {
           trustedBaseFilesMap.set(relPath, content);
         }
         const devWorkflowsMap = await gh.readDevWorkflowsMap("dev");
-        const devBranchPaths = await gh.listBranchPaths("dev");
+        const devBranchPaths = await gh.listBranchPathHints("dev");
         const discoveredDevProfile = discoverVerificationProfile({
           targetFilesHint: [
             ...devBranchPaths,
@@ -18431,33 +18577,45 @@ async function orchestrateIssueCommand(input) {
             resolvePermission: (login) => gh.getCollaboratorPermission(login)
           })
         ) : "";
+        const runLeaseMs = await resolveRunLeaseMs();
         const updatedStart = await updateIssueStateWithCas({
           issueNumber: effectiveInput.issueNumber,
           store,
-          mutator: (prev) => ({
-            ...claimForRun(
-              isAutomaticEntry ? prev : resumeAfterEscalation(prev, {
-                actor: effectiveInput.actor,
-                commentId: effectiveInput.commentId ?? 0
-              }),
-              runId,
-              runLeaseMs
-            ),
-            phase: "implementation",
-            status: "active",
-            active_branch: featureBranch,
-            feature_branch: prev.feature_branch ?? featureBranch,
-            epic_phase: prev.epic_phase ?? 1,
-            ...integratePlan ? { integrated_plan_sha: planHeadSha ?? void 0 } : {},
-            last_processed_comment_id: advanceCommentCursor(prev, effectiveInput.commentId)
-          })
+          mutator: (prev) => {
+            if (prev.claimed_by_run_id !== void 0 && prev.claimed_by_run_id !== runId && (prev.claimed_by_run_id !== currentState?.claimed_by_run_id || prev.claim_expires_at !== currentState?.claim_expires_at)) {
+              throw new StateTransitionAbortedError(
+                prev,
+                `run \`${prev.claimed_by_run_id}\` claimed the plan after this run checked the lease`
+              );
+            }
+            return {
+              ...claimForRun(
+                isAutomaticEntry ? prev : resumeAfterEscalation(prev, {
+                  actor: effectiveInput.actor,
+                  commentId: effectiveInput.commentId ?? 0
+                }),
+                runId,
+                runLeaseMs
+              ),
+              // Leaving the CI wait makes the lease visible, so a workflow_run or continue cannot claim the plan too.
+              subphase: prev.subphase === "waiting_feature_ci" ? "remediating_feature" : prev.subphase === "waiting_ticket_ci" ? "implementing_ticket" : prev.subphase,
+              phase: "implementation",
+              status: "active",
+              active_branch: featureBranch,
+              feature_branch: prev.feature_branch ?? featureBranch,
+              epic_phase: prev.epic_phase ?? 1,
+              ...integratePlan ? { integrated_plan_sha: planHeadSha ?? void 0 } : {},
+              last_processed_comment_id: advanceCommentCursor(prev, effectiveInput.commentId)
+            };
+          }
         });
+        leaseExpiresAt = updatedStart.state.claim_expires_at;
         const grant = updatedStart.state.human_budget_grant_log?.at(-1);
         const grantsAfterStart = readHumanBudgetGrants(updatedStart.state);
         if (grant && grantsAfterStart > (currentState ? readHumanBudgetGrants(currentState) : 0)) {
           await gh.postIssueComment(
             effectiveInput.issueNumber,
-            `\u25B6\uFE0F Reprise par \`@${grant.actor}\` : budget de rem\xE9diation remis \xE0 z\xE9ro pour ${grant.scope === "feature" ? "la Pull Request de fonctionnalit\xE9" : `le ticket #${grant.ticket}`} (\`human_budget_grants\` : ${grantsAfterStart}).`
+            `\u25B6\uFE0F Reprise par \`@${grant.actor}\` : budget de rem\xE9diation remis \xE0 z\xE9ro pour ${grant.scope === "feature" ? "la Pull Request de fonctionnalit\xE9" : `le ticket #${grant.ticket}`} (\`human_budget_grant_log\` : ${grantsAfterStart}).`
           );
         }
         const baseSyncGuard = createBaseSyncGuard({
@@ -18669,7 +18827,7 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
               });
             }
             const nextEpicPhase = currentEpicPhase + 1;
-            const phase2State = await updateIssueStateWithCas({
+            await updateIssueStateWithCas({
               issueNumber: effectiveInput.issueNumber,
               store,
               mutator: (prev) => ({
@@ -18690,7 +18848,14 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
               nextEpicPhase,
               existingTickets: ticketsManifest,
               auditResult: convergenceAudit,
-              stateMirrorMarkdown: phase2State.issue_mirror_markdown
+              recordPlanManifest: async (manifestJson) => (await updateIssueStateWithCas({
+                issueNumber: effectiveInput.issueNumber,
+                store,
+                mutator: (prev) => ({
+                  ...prev,
+                  plan_manifest_sha256: manifestSha256(manifestJson)
+                })
+              })).issue_mirror_markdown
             });
             currentEpicPhase = nextEpicPhase;
             loopOutcome = await runTicketExecutionLoop({
@@ -18821,7 +18986,7 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
       }
       const rawErrMessage = err instanceof Error ? err.message : String(err);
       const escalation = {
-        reason: err instanceof LLMError ? resolveLlmEscalationReason(err) : err instanceof GitHubRateLimitError ? "github_rate_limited" : err instanceof BranchUpdateConflictError ? "branch_update_conflict" : err instanceof MissingModelConfigError ? "model_config_missing" : "internal_error",
+        reason: err instanceof LLMError ? resolveLlmEscalationReason(err) : err instanceof GitHubRateLimitError ? "github_rate_limited" : err instanceof BranchUpdateConflictError ? "branch_update_conflict" : err instanceof MissingModelConfigError ? "model_config_missing" : err instanceof AmbiguousFeatureBranchError ? "ambiguous_feature_branch" : "internal_error",
         missingModelKeys: err instanceof MissingModelConfigError ? err.missingKeys : void 0,
         diagnosticExcerpt: redactSecrets(rawErrMessage, [
           activeToken,
@@ -18868,7 +19033,8 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
             ticketNumber: effectiveInput.issueNumber,
             resumeCommand: approveAgain
           }),
-          approveAgain ?? resumeCommandForPhase(commandPhase)
+          approveAgain ?? resumeCommandForPhase(commandPhase),
+          leaseExpiresAt
         );
       }
     }
@@ -18924,6 +19090,14 @@ async function run() {
   const triggerHeadSha = (process.env.INPUT_TRIGGER_HEAD_SHA ?? "").trim();
   const asyncCiContinuation = (process.env.INPUT_ASYNC_CI_CONTINUATION ?? "").trim().toLowerCase() === "true";
   const runId = process.env.GITHUB_RUN_ID ? `${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT ?? "1"}` : void 0;
+  const workflowPath = /^[^/]+\/[^/]+\/(.+)@/.exec(
+    process.env.GITHUB_WORKFLOW_REF ?? ""
+  )?.[1];
+  const workflowJob = workflowPath && process.env.GITHUB_WORKFLOW_SHA && process.env.GITHUB_JOB ? {
+    path: workflowPath,
+    ref: process.env.GITHUB_WORKFLOW_SHA,
+    jobId: process.env.GITHUB_JOB
+  } : void 0;
   const secrets = [agentAppPrivateKey, fallbackGithubToken, llmApiKey].filter(
     (s) => s.length >= 4
   );
@@ -18942,7 +19116,8 @@ async function run() {
       model: model || void 0,
       ...triggerHeadSha ? { triggerHeadSha } : {},
       ...asyncCiContinuation ? { asyncCiContinuation } : {},
-      runId
+      runId,
+      workflowJob
     });
     writeGitHubOutputs(
       {
