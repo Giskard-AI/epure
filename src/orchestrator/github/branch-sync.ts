@@ -254,6 +254,21 @@ export interface RenumberCollidingAdrsResult {
 
 const ADR_PATH_REGEX = /^docs\/adr\/(\d{4})-(.+)\.md$/;
 
+/**
+ * Paths of the planning artifacts on a branch: `GLOSSARY.md` plus the files of `docs/adr/` and `docs/specs/`.
+ * `GLOSSARY.md` is always listed; a missing one reads as null like an absent path.
+ */
+async function listPlanArtifactPaths(
+  gh: Pick<GitHubRestHelper, "listDirectoryPaths">,
+  branch: string
+): Promise<string[]> {
+  const [adrPaths, specPaths] = await Promise.all([
+    gh.listDirectoryPaths(branch, "docs/adr"),
+    gh.listDirectoryPaths(branch, "docs/specs")
+  ]);
+  return ["GLOSSARY.md", ...adrPaths, ...specPaths];
+}
+
 function normalizeAdrSlug(rawSlug: string): string {
   return rawSlug
     .trim()
@@ -760,14 +775,14 @@ export async function integratePlanBranchIntoFeature(params: {
   }
 
   const [devPaths, planPaths, featurePaths] = await Promise.all([
-    params.gh.listBranchPaths(baseBranch),
-    params.gh.listBranchPaths(params.planBranch),
-    params.gh.listBranchPaths(params.featureBranch)
+    listPlanArtifactPaths(params.gh, baseBranch),
+    listPlanArtifactPaths(params.gh, params.planBranch),
+    listPlanArtifactPaths(params.gh, params.featureBranch)
   ]);
 
-  const candidatePlanArtifactPaths = planPaths
-    .map((p) => p.trim().replace(/^\/+/, ""))
-    .filter((p) => p === "GLOSSARY.md" || p.startsWith("docs/"));
+  const candidatePlanArtifactPaths = planPaths.map((p) =>
+    p.trim().replace(/^\/+/, "")
+  );
 
   if (candidatePlanArtifactPaths.length === 0) {
     return {
@@ -957,7 +972,7 @@ export interface SyncBranchWithBaseInput extends LlmRequestTuning {
     GitHubRestHelper,
     | "mergeBranches"
     | "getDefaultBranchSha"
-    | "listBranchPaths"
+    | "listDirectoryPaths"
     | "listBranchBlobs"
     | "readSingleBranchFile"
     | "commitFilesToBranch"
@@ -1067,14 +1082,14 @@ export async function syncBranchWithBase(
   if (mergeRes.status === "up_to_date" || mergeRes.status === "merged") {
     if (
       mergeRes.status === "merged" &&
-      typeof input.gh.listBranchPaths === "function" &&
+      typeof input.gh.listDirectoryPaths === "function" &&
       typeof input.gh.readSingleBranchFile === "function" &&
       (input.targetBranch.startsWith("feature/") ||
         input.targetBranch.startsWith("plan/"))
     ) {
       const [basePathsAfterMerge, targetPathsAfterMerge] = await Promise.all([
-        input.gh.listBranchPaths(input.baseBranch),
-        input.gh.listBranchPaths(input.targetBranch)
+        input.gh.listDirectoryPaths(input.baseBranch, "docs/adr"),
+        listPlanArtifactPaths(input.gh, input.targetBranch)
       ]);
       const baseAdrSet = new Set(
         basePathsAfterMerge

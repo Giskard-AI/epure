@@ -211,18 +211,14 @@ describe("EPURE v1.2 Chantier 1 & 2 — Git Sync, Concurrency & Event-Driven CI 
       const mockGh = {
         ensureBranch: async () => "feature-init-sha",
         findOpenPullRequestByHead: async () => null,
-        listBranchPaths: async (branch: string) => {
-          if (branch === "dev") {
-            return ["GLOSSARY.md", "docs/adr/0031-existing-on-dev.md"];
-          }
-          if (branch === "plan/42-sync") {
-            return [
-              "GLOSSARY.md",
-              "docs/adr/0031-new-plan-adr.md",
-              "docs/specs/42-sync.md"
-            ];
-          }
-          return [];
+        listDirectoryPaths: async (branch: string, dir: string) => {
+          const paths =
+            branch === "dev"
+              ? ["GLOSSARY.md", "docs/adr/0031-existing-on-dev.md"]
+              : branch === "plan/42-sync"
+                ? ["GLOSSARY.md", "docs/adr/0031-new-plan-adr.md", "docs/specs/42-sync.md"]
+                : [];
+          return paths.filter((p) => p.startsWith(`${dir}/`));
         },
         readSingleBranchFile: async (branch: string, path: string) => {
           if (branch === "dev" && path === "GLOSSARY.md") {

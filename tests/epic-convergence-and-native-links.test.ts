@@ -610,10 +610,12 @@ describe("EPURE Graphe GitHub Natif, Garde-fous d'Intégrité Inter-Tickets et C
           status: "merged" as const,
           sha: "sha-merged"
         }),
-        listBranchPaths: async (branch: string) =>
-          branch === "dev"
-            ? ["docs/adr/0031-first.md"]
-            : ["docs/adr/0031-first.md", "docs/adr/0032-second.md"],
+        listDirectoryPaths: async (branch: string, dir: string) =>
+          dir !== "docs/adr"
+            ? []
+            : branch === "dev"
+              ? ["docs/adr/0031-first.md"]
+              : ["docs/adr/0031-first.md", "docs/adr/0032-second.md"],
         listBranchBlobs: async () => new Map(),
         compareCommits: async () => ({ aheadBy: 1, mergeBaseSha: "sha-dev", changedFiles: [] }),
         readSingleBranchFile: async (_branch: string, path: string) =>

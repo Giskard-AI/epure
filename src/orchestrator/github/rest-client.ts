@@ -580,9 +580,9 @@ export function createGitHubRestHelper(params: {
       return res.data?.object?.sha ?? null;
     },
 
-    async listBranchPaths(branch: string): Promise<string[]> {
-      return (await readCompleteTree(branch)).flatMap((e) =>
-        e.type === "blob" && typeof e.path === "string" ? [e.path] : []
+    async listDirectoryPaths(branch: string, dirPath: string): Promise<string[]> {
+      return (await listDirectoryFiles(branch, dirPath)).flatMap((e) =>
+        e.path ? [e.path] : []
       );
     },
 

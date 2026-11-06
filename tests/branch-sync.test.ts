@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  integratePlanBranchIntoFeature,
   syncBranchWithBase,
   type SyncBranchWithBaseInput
 } from "../src/orchestrator/github/branch-sync.js";
@@ -321,21 +322,24 @@ describe("GitHub REST helper — branch reads return null or empty only on 404 (
   });
 
   it.each([
-    { id: "missing-branch-lists-no-path", ref: notFound(), tree: notFound(), dir: notFound(), expected: "empty" },
-    { id: "403-on-the-tree-throws", ref: json({ object: { sha: "c".repeat(40) } }), tree: json({ message: "Forbidden" }, 403), dir: json({ message: "Forbidden" }, 403), expected: "throws" },
-    { id: "403-on-the-ref-throws", ref: json({ message: "Forbidden" }, 403), tree: notFound(), dir: json({ message: "Forbidden" }, 403), expected: "throws" }
-  ])("listBranchPaths and readDevWorkflowsMap $id", async ({ ref, tree, dir, expected }) => {
+    { id: "missing-branch-or-directory-lists-no-path", ref: notFound(), tree: notFound(), dir: notFound(), expected: "empty" },
+    { id: "403-on-the-tree-or-directory-throws", ref: json({ object: { sha: "c".repeat(40) } }), tree: json({ message: "Forbidden" }, 403), dir: json({ message: "Forbidden" }, 403), expected: "throws" },
+    { id: "403-on-the-ref-or-directory-throws", ref: json({ message: "Forbidden" }, 403), tree: notFound(), dir: json({ message: "Forbidden" }, 403), expected: "throws" }
+  ])("listBranchBlobs, listDirectoryPaths and readDevWorkflowsMap $id", async ({ ref, tree, dir, expected }) => {
     const router = createGitHubMockRouter()
       .on("GET", `${R}/git/ref/heads/dev`, ref)
       .on("GET", new RegExp(`/git/trees/c{40}\\?recursive=1$`), tree)
-      .on("GET", `${R}/contents/.github/workflows?ref=dev`, dir);
+      .on("GET", `${R}/contents/.github/workflows?ref=dev`, dir)
+      .on("GET", `${R}/contents/docs/adr?ref=dev`, dir);
     const gh = createGitHubRestHelper({ repository: REPO, token: "ghs_test", fetchImpl: router.fetch });
 
     if (expected === "empty") {
-      expect(await gh.listBranchPaths("dev")).toEqual([]);
+      expect([...(await gh.listBranchBlobs("dev")).keys()]).toEqual([]);
+      expect(await gh.listDirectoryPaths("dev", "docs/adr")).toEqual([]);
       expect([...(await gh.readDevWorkflowsMap("dev")).keys()]).toEqual([]);
     } else {
-      await expect(gh.listBranchPaths("dev")).rejects.toThrow(/HTTP 403/);
+      await expect(gh.listBranchBlobs("dev")).rejects.toThrow(/HTTP 403/);
+      await expect(gh.listDirectoryPaths("dev", "docs/adr")).rejects.toThrow(/HTTP 403/);
       await expect(gh.readDevWorkflowsMap("dev")).rejects.toThrow(/HTTP 403/);
     }
   });
@@ -373,7 +377,7 @@ describe("GitHub REST helper — branch reads return null or empty only on 404 (
       .on("GET", /\/git\/blobs\//, json({ encoding: "base64", content: Buffer.from("a").toString("base64") }));
     const gh = createGitHubRestHelper({ repository: REPO, token: "ghs_test", fetchImpl: router.fetch });
 
-    await gh.listBranchPaths("dev");
+    await gh.listBranchBlobs("dev");
     await gh.readBranchWorkspaceFiles("dev", "src/a.ts");
     await gh.listBranchPathHints("dev");
 
@@ -436,16 +440,17 @@ describe("syncBranchWithBase — conflict reads stay bounded and incomplete data
     "src/a.ts": "export const a = 1;\n"
   };
 
-  it("branch-path-listing fails closed on a truncated tree listing", async () => {
+  it("branch-blob-listing fails closed on a truncated tree listing", async () => {
     const ctx = setup({ shared: SCOPED_FILES, ours: {}, theirs: {} });
     ctx.git.truncateTreeListings();
 
-    await expect(ctx.gh.listBranchPaths("dev")).rejects.toBeInstanceOf(TruncatedGitTreeError);
+    await expect(ctx.gh.listBranchBlobs("dev")).rejects.toBeInstanceOf(TruncatedGitTreeError);
   });
 
   it.each<{ id: string; read: (gh: RestHelper) => Promise<ReadonlyMap<string, string>>; expected: Record<string, string> }>([
     { id: "dev-workflows-map", read: (gh) => gh.readDevWorkflowsMap("dev"), expected: { ".github/workflows/ci.yml": "on: push\n" } },
-    { id: "trusted-reviewer-roster-and-design", read: (gh) => gh.readTrustedBaseRosterFiles("dev"), expected: { ".agents/reviewers/security.md": "# Security\n", "DESIGN.md": "# Design\n" } }
+    { id: "trusted-reviewer-roster-and-design", read: (gh) => gh.readTrustedBaseRosterFiles("dev"), expected: { ".agents/reviewers/security.md": "# Security\n", "DESIGN.md": "# Design\n" } },
+    { id: "directory-path-listing", read: async (gh) => new Map((await gh.listDirectoryPaths("dev", ".github/workflows")).map((p) => [p, ""])), expected: { ".github/workflows/ci.yml": "" } }
   ])("$id reads only its own directory, so a truncated repository-wide listing does not affect it", async ({ read, expected }) => {
     const ctx = setup({ shared: SCOPED_FILES, ours: {}, theirs: {} });
     ctx.git.truncateTreeListings();
@@ -456,7 +461,8 @@ describe("syncBranchWithBase — conflict reads stay bounded and incomplete data
 
   it.each<{ id: string; dir: string; read: (gh: RestHelper) => Promise<unknown> }>([
     { id: "dev-workflows-map", dir: ".github/workflows", read: (gh) => gh.readDevWorkflowsMap("dev") },
-    { id: "trusted-reviewer-roster", dir: ".agents/reviewers", read: (gh) => gh.readTrustedBaseRosterFiles("dev") }
+    { id: "trusted-reviewer-roster", dir: ".agents/reviewers", read: (gh) => gh.readTrustedBaseRosterFiles("dev") },
+    { id: "adr-directory-path-listing", dir: "docs/adr", read: (gh) => gh.listDirectoryPaths("dev", "docs/adr") }
   ])("$id fails closed when its directory listing reaches the 1,000-entry cap", async ({ dir, read }) => {
     const router = createGitHubMockRouter().on(
       "GET",
@@ -466,6 +472,24 @@ describe("syncBranchWithBase — conflict reads stay bounded and incomplete data
     const gh = createGitHubRestHelper({ repository: REPO, token: "ghs_test", fetchImpl: router.fetch });
 
     await expect(read(gh)).rejects.toBeInstanceOf(TruncatedGitTreeError);
+  });
+
+  it.each([
+    { id: "plan-integration-lists-only-the-artifact-directories", run: (ctx: ReturnType<typeof setup>) => integratePlanBranchIntoFeature({ gh: ctx.gh, planBranch: "plan/42-sync", featureBranch: FEATURE, model: "openai/gpt-test" }).then((r) => r.committedPaths) },
+    { id: "a-clean-sync-lists-only-the-artifact-directories", run: (ctx: ReturnType<typeof setup>) => sync(ctx).then((r) => r.result.status) }
+  ])("$id, so a truncated repository-wide listing does not affect it", async ({ id, run }) => {
+    const ctx = setup({ shared: SCOPED_FILES, ours: { "src/f.ts": "export const f = 1;\n" }, theirs: { "src/d.ts": "export const d = 1;\n" } });
+    ctx.git.setRef("refs/heads/plan/42-sync", ctx.git.getRef("refs/heads/dev")!);
+    ctx.git.commitFiles("plan/42-sync", { "GLOSSARY.md": "# Glossaire\n\n## Terme\nT.\n", "docs/adr/0001-plan.md": "# ADR-0001\n", "docs/specs/42-sync.md": "# Spec\n" }, "plan artifacts");
+    ctx.router.on("GET", /\/pulls\?state=open&head=/, json([]));
+    ctx.git.truncateTreeListings();
+
+    const outcome = await run(ctx);
+
+    expect(outcome).toEqual(
+      id.startsWith("plan-integration") ? ["GLOSSARY.md", "docs/adr/0001-plan.md", "docs/specs/42-sync.md"] : "merged"
+    );
+    expect(ctx.router.calls("GET", /\/git\/trees\/[^?]+\?recursive=1$/)).toBe(0);
   });
 
   it("path hints on a truncated listing return the partial listing with a warning", async () => {
