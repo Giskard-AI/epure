@@ -92,6 +92,7 @@ function createHybridLiveFetch(params: {
     labels: string[];
   }> = [];
 
+  const llmRequestBodies: string[] = [];
   const branchFiles = new Map<string, Map<string, string>>();
   const blobStore = new Map<string, string>();
   let blobSeq = 1;
@@ -141,6 +142,7 @@ function createHybridLiveFetch(params: {
 
     // Pass all non-GitHub requests directly to the real LLM provider over the network
     if (!urlStr.includes("api.github.com")) {
+      llmRequestBodies.push(typeof init?.body === "string" ? init.body : "");
       return await fetch(url, init);
     }
 
@@ -346,6 +348,7 @@ function createHybridLiveFetch(params: {
     hybridFetch,
     comments,
     createdSubIssues,
+    llmRequestBodies,
     getBranchFile: (branch: string, path: string) =>
       branchFiles.get(branch)?.get(path) ?? null
   };
@@ -444,6 +447,7 @@ describeLive(
         expect(planRes.phase).toBe("grilling");
         expect(planRes.status).toBe("active");
         expect(planRes.created_ticket_numbers).toEqual([]);
+        expect(ghState.llmRequestBodies.some((body) => body.includes("read_repo_file"))).toBe(true);
 
         // Stage 2: Human reply answering all questions and confirming everything is decided
         ghState.comments.push({

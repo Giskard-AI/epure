@@ -76,6 +76,7 @@ export interface IssueCommentRecord {
     readonly type?: string | undefined;
   };
   readonly created_at: string;
+  readonly performed_via_github_app?: { readonly slug?: string } | null | undefined;
 }
 
 export type IssueCommentSummary = IssueCommentRecord;

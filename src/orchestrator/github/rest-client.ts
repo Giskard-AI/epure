@@ -329,12 +329,20 @@ export function createGitHubRestHelper(params: {
       };
     },
 
+    // Oldest first, up to 30 pages (3,000 comments).
     async listIssueComments(issueNumber: number): Promise<IssueCommentRecord[]> {
-      const { data } = await apiRequest<IssueCommentRecord[]>(
-        "GET",
-        `/repos/${owner}/${repo}/issues/${issueNumber}/comments?per_page=100`
-      );
-      return data ?? [];
+      const comments: IssueCommentRecord[] = [];
+      for (let page = 1; page <= 30; page += 1) {
+        const { data } = await apiRequest<IssueCommentRecord[]>(
+          "GET",
+          `/repos/${owner}/${repo}/issues/${issueNumber}/comments?per_page=100${page > 1 ? `&page=${page}` : ""}`
+        );
+        comments.push(...(data ?? []));
+        if ((data ?? []).length < 100) {
+          break;
+        }
+      }
+      return comments;
     },
 
     async getCollaboratorPermission(

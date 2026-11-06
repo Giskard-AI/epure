@@ -543,23 +543,38 @@ describe("Automatic resume skips dev -> feature -> task sync unless dev moved", 
   });
 });
 
-type CommentSpec = { readonly id: number; readonly login: string; readonly body: string; readonly type?: string };
+type CommentSpec = { readonly id: number; readonly login: string; readonly body: string; readonly type?: string; readonly viaApp?: boolean };
 
 const PERMISSIONS: Readonly<Record<string, string>> = { maintainer: "write", owner: "admin", reader: "read" };
+
+function commentPages(comments: readonly CommentSpec[]): (readonly CommentSpec[])[] {
+  const pages: (readonly CommentSpec[])[] = [];
+  for (let i = 0; i <= comments.length; i += 100) {
+    pages.push(comments.slice(i, i + 100));
+  }
+  return pages;
+}
 
 function schemaName(body: unknown): string | undefined {
   return (body as { response_format?: { json_schema?: { name?: string } } }).response_format?.json_schema?.name;
 }
 
 function declareResumeFlow(comments: readonly CommentSpec[]): GitHubMockRouter {
-  return declareImplementationFlow(createGitHubMockRouter(), "failure", { taskPr: true, featurePr: true })
+  const router = declareImplementationFlow(createGitHubMockRouter(), "failure", { taskPr: true, featurePr: true })
     .on("POST", `${R}/issues/${TICKET}/labels`, json([]))
     .onHost("api.openai.com", "POST", "/v1/chat/completions", (req) =>
       schemaName(req.body) === "generated_ticket_implementation"
         ? json({ error: { message: "stop after capturing the implementation prompt" } }, 400)
         : json({ choices: [{ message: { content: JSON.stringify({ summary: "ok", findings: [] }) } }] })
-    )
-    .on("GET", `${R}/issues/${ISSUE}/comments?per_page=100`, json(comments.map((c) => ({ id: c.id, body: c.body, user: { login: c.login, type: c.type ?? "User" }, created_at: "2026-11-05T10:00:00Z" }))))
+    );
+  commentPages(comments).forEach((page, index) => {
+    router.on(
+      "GET",
+      `${R}/issues/${ISSUE}/comments?per_page=100${index > 0 ? `&page=${index + 1}` : ""}`,
+      json(page.map((c) => ({ id: c.id, body: c.body, user: { login: c.login, type: c.type ?? "User" }, created_at: "2026-11-05T10:00:00Z", performed_via_github_app: c.viaApp ? { slug: "other-app" } : null })))
+    );
+  });
+  return router
     .on("GET", new RegExp(`^${R_RX}/collaborators/([^/]+)/permission$`), (_req, m) => {
       const level = PERMISSIONS[decodeURIComponent(m![1]!)] ?? "none";
       return json({ permission: level, role_name: level });
@@ -611,10 +626,43 @@ describe("Resume context: comments since the escalation reach the resumed implem
       ],
       included: ["NEWEST-", "MIDDLE-"],
       excluded: ["OLDEST-", "-MIDDLE-END"]
+    },
+    {
+      id: "same-command-definition-as-the-gate-app-comments-and-epure-own-comments-excluded",
+      comments: [
+        { id: 510, login: "maintainer", body: "MULTILINE-COMMAND first\n/epure status" },
+        { id: 520, login: "maintainer", body: "APP-NOISE posted through another app", viaApp: true },
+        { id: 530, login: "maintainer", body: "<!-- epure-state-mirror:issue-77:v3 -->\nMIRROR-NOISE" },
+        { id: 540, login: "maintainer", body: "/epure someday GUIDANCE-C not a command" },
+        { id: RESUME_COMMENT, login: "maintainer", body: "/epure continue" }
+      ],
+      included: ["GUIDANCE-C not a command"],
+      excluded: ["MULTILINE-COMMAND", "APP-NOISE", "MIRROR-NOISE"]
+    },
+    {
+      id: "guidance-on-the-second-comments-page-is-injected",
+      comments: [
+        ...Array.from({ length: 100 }, (_, i) => ({ id: 1 + i, login: "maintainer", body: `OLD-PAGE-${i + 1}` })),
+        { id: 510, login: "maintainer", body: "GUIDANCE-PAGE-2" },
+        { id: RESUME_COMMENT, login: "maintainer", body: "/epure continue" }
+      ],
+      included: ["GUIDANCE-PAGE-2"],
+      excluded: ["OLD-PAGE-"]
+    },
+    {
+      id: "permission-lookups-stop-after-10-distinct-authors",
+      comments: [
+        { id: 510, login: "maintainer", body: "OLDEST-WRITER" },
+        ...Array.from({ length: 10 }, (_, i) => ({ id: 520 + i, login: `visitor-${i + 1}`, body: `VISITOR-${i + 1}` })),
+        { id: RESUME_COMMENT, login: "maintainer", body: "/epure continue" }
+      ],
+      included: [],
+      excluded: ["OLDEST-WRITER", "VISITOR-"],
+      expectedPermissionLookups: 10
     }
-  ] satisfies ReadonlyArray<{ id: string; comments: readonly CommentSpec[]; included: readonly string[]; excluded: readonly string[] }>)(
+  ] satisfies ReadonlyArray<{ id: string; comments: readonly CommentSpec[]; included: readonly string[]; excluded: readonly string[]; expectedPermissionLookups?: number }>)(
     "$id",
-    async ({ comments, included, excluded }) => {
+    async ({ comments, included, excluded, ...rest }) => {
       const store = await seedState({
         status: "suspended",
         subphase: "idle",
@@ -634,6 +682,9 @@ describe("Resume context: comments since the escalation reach the resumed implem
       for (const text of excluded) {
         expect(prompt).not.toContain(text);
       }
+      if ("expectedPermissionLookups" in rest) {
+        expect(router.calls("GET", new RegExp(`^${R_RX}/collaborators/`))).toBe(rest.expectedPermissionLookups);
+      }
     }
   );
 
@@ -649,6 +700,30 @@ describe("Resume context: comments since the escalation reach the resumed implem
     expect(router.unmatched).toEqual([]);
     expect(implementationPrompt(router)).not.toContain("Consignes humaines publiées depuis l'escalade");
     expect(router.calls("GET", new RegExp(`^${R_RX}/collaborators/`))).toBe(0);
+  });
+});
+
+describe("Planning LLM rounds can always read the repository", () => {
+  it.each([
+    { id: "plan-command-outside-github-actions-sends-the-repo-read-tools-with-the-grill-round", command: "plan" },
+    { id: "to-spec-command-outside-github-actions-sends-the-repo-read-tools-with-the-spec-round", command: "to-spec" }
+  ] as const)("$id", async ({ command }) => {
+    vi.stubEnv("GITHUB_ACTIONS", "");
+    const store = await seedState({ phase: "grilling", status: "active", subphase: "idle", active_branch: "plan/77-async-ci-feature", plan_branch: "plan/77-async-ci-feature" });
+    const router = declareIssueWrites(declareIssueReads(createGitHubMockRouter()))
+      .on("GET", /\/git\/ref\/heads\//, json({ object: { sha: "branch-sha" } }))
+      .on("POST", `${R}/git/refs`, json({ object: { sha: "branch-sha" } }, 201))
+      .onHost("api.openai.com", "POST", "/v1/chat/completions", json({ error: { message: "stop after capturing the planning prompt" } }, 400));
+
+    try {
+      await run(router, store, { command, actor: "maintainer", issueNumber: ISSUE, commentId: 900 });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    const llmRequest = router.requests.find((r) => r.host === "api.openai.com");
+
+    expect(router.unmatched).toEqual([]);
+    expect(JSON.stringify(llmRequest?.body)).toContain("read_repo_file");
   });
 });
 

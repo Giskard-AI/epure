@@ -1521,6 +1521,7 @@ export async function orchestrateIssueCommand(
                   id: c.id,
                   authorLogin: c.user.login,
                   authorType: c.user.type ?? "User",
+                  viaGitHubApp: Boolean(c.performed_via_github_app),
                   body: c.body
                 })),
                 afterCommentId: currentState.last_processed_comment_id,

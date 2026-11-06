@@ -1,4 +1,9 @@
-import { isBotActor } from "../auth/issue-command-gate.js";
+import { isBotActor, parseEpureCommand } from "../auth/issue-command-gate.js";
+import {
+  RESUME_CONTEXT_MAX_CHARS,
+  RESUME_CONTEXT_MAX_COMMENTS,
+  RESUME_CONTEXT_MAX_PERMISSION_LOOKUPS
+} from "../contract/resume-context.js";
 import {
   toTerminalState,
   updateIssueStateWithCas,
@@ -45,21 +50,22 @@ function isAuthorizedHumanComment(comment: IncomingIssueComment): boolean {
   );
 }
 
-export const RESUME_CONTEXT_MAX_COMMENTS = 10;
-export const RESUME_CONTEXT_MAX_CHARS = 8000;
-const EPURE_COMMAND_PATTERN = /^\s*\/epure\b/i;
+// Every comment EPURE posts carries one of its HTML markers (state mirror, manifests, audit trace).
+const EPURE_COMMENT_MARKER = "<!-- epure-";
 
 export interface ResumeContextCandidate {
   readonly id: number;
   readonly authorLogin: string;
   readonly authorType: string;
+  readonly viaGitHubApp: boolean;
   readonly body: string;
 }
 
 /**
  * Selects the human guidance injected into a resumed implementation session: comments posted
  * after `afterCommentId` and before the resume command, by authors with `write` or higher,
- * excluding `/epure` commands and bots. Keeps the most recent ones within both caps, oldest first.
+ * excluding `/epure` commands, bots, GitHub App comments and EPURE's own comments. Keeps the
+ * most recent ones within the comment, character and permission-lookup caps, oldest first.
  */
 export async function selectResumeContextComments(input: {
   readonly comments: readonly ResumeContextCandidate[];
@@ -74,7 +80,9 @@ export async function selectResumeContextComments(input: {
       (c) =>
         c.id > input.afterCommentId &&
         c.id < input.resumeCommentId &&
-        !EPURE_COMMAND_PATTERN.test(c.body) &&
+        parseEpureCommand(c.body) === null &&
+        !c.viaGitHubApp &&
+        !c.body.includes(EPURE_COMMENT_MARKER) &&
         !isBotActor({ login: c.authorLogin, type: c.authorType })
     )
     .sort((a, b) => b.id - a.id);
@@ -86,15 +94,19 @@ export async function selectResumeContextComments(input: {
     if (selected.length === RESUME_CONTEXT_MAX_COMMENTS || remainingChars <= 0) {
       break;
     }
-    if (!permissions.has(candidate.authorLogin)) {
-      permissions.set(
-        candidate.authorLogin,
-        await input.resolvePermission(candidate.authorLogin)
-      );
+    let permission = permissions.get(candidate.authorLogin);
+    if (permission === undefined) {
+      if (permissions.size === RESUME_CONTEXT_MAX_PERMISSION_LOOKUPS) {
+        continue;
+      }
+      permission = await input.resolvePermission(candidate.authorLogin);
+      permissions.set(candidate.authorLogin, permission);
     }
     const comment: IncomingIssueComment = {
-      ...candidate,
-      effectivePermission: permissions.get(candidate.authorLogin)!,
+      id: candidate.id,
+      authorLogin: candidate.authorLogin,
+      authorType: candidate.authorType,
+      effectivePermission: permission,
       body: candidate.body.trim().slice(0, remainingChars)
     };
     if (isAuthorizedHumanComment(comment)) {

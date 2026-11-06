@@ -401,6 +401,7 @@ export async function runGrillAndPlanPhase(params: {
     accumulatedFiles: grillExplorationCache,
     devBranchPaths: [],
     phase: command === "to-spec" ? "spec" : "plan",
+    alwaysEnableRepoTools: true,
     reviewersDir,
     fetchImpl
   });

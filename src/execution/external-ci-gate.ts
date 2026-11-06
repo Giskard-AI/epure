@@ -12,7 +12,7 @@ import { wrapUntrustedContent } from "../security/prompt-injection-guard.js";
 import {
   RESUME_CONTEXT_MAX_CHARS,
   RESUME_CONTEXT_MAX_COMMENTS
-} from "../state/comment-batch-cursor.js";
+} from "../contract/resume-context.js";
 
 export interface ExpectedExternalWorkflow {
   readonly path: string;
