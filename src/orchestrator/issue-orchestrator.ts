@@ -244,7 +244,7 @@ export class ClosureNotProcessedError extends Error {
     cause: unknown
   ) {
     super(
-      `The closure of #${issueNumber} was not processed (${cause instanceof Error ? cause.message : String(cause)}); the plan state is unchanged. Re-run this job or post \`/epure cancel\` on #${issueNumber}.`,
+      `The closure of #${issueNumber} was not processed (${cause instanceof Error ? cause.message : String(cause)}); the plan state is unchanged. Re-close the issue (reopen it, then close it) or post \`/epure cancel\` on #${issueNumber}.`,
       { cause }
     );
   }

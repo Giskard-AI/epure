@@ -1254,9 +1254,9 @@ describe("A human closing the epic before its feature branch reaches dev cancels
     const router = declareClosureReads(createGitHubMockRouter(), { mergedFeaturePr: false, aheadBy: 1, featurePr: false, taskPrs: [] })
       .on("GET", `${R}/issues/${ISSUE}`, primaryRateLimit(Math.floor(Date.now() / 1000) + 3600));
 
-    await expect(
-      run(router, store, { command: "closed", actor: "maintainer", issueNumber: ISSUE, commentId: 0 })
-    ).rejects.toBeInstanceOf(ClosureNotProcessedError);
+    const closure = run(router, store, { command: "closed", actor: "maintainer", issueNumber: ISSUE, commentId: 0 });
+    await expect(closure).rejects.toBeInstanceOf(ClosureNotProcessedError);
+    await expect(closure).rejects.toThrow("Re-close the issue (reopen it, then close it) or post `/epure cancel` on #77.");
 
     expect(router.unmatched).toEqual([]);
     expect(postedComments(router)).toEqual([]);
