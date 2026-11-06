@@ -78,6 +78,7 @@ import {
   verifyPublisherMergeBoundary
 } from "./github/rest-client.js";
 import {
+  AmbiguousFeatureBranchError,
   findExistingFeatureBranch,
   handleEpicClosedByHuman
 } from "./phases/epic-closure.js";
@@ -2118,7 +2119,9 @@ export async function orchestrateIssueCommand(
                 ? "branch_update_conflict"
                 : err instanceof MissingModelConfigError
                   ? "model_config_missing"
-                  : "internal_error",
+                  : err instanceof AmbiguousFeatureBranchError
+                    ? "ambiguous_feature_branch"
+                    : "internal_error",
         missingModelKeys:
           err instanceof MissingModelConfigError ? err.missingKeys : undefined,
         diagnosticExcerpt: redactSecrets(rawErrMessage, [

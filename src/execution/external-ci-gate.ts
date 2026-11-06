@@ -172,6 +172,7 @@ export type NeedsHumanEscalationReason =
   | "model_config_missing"
   | "github_rate_limited"
   | "branch_update_conflict"
+  | "ambiguous_feature_branch"
   | "internal_error";
 
 /**
@@ -1273,6 +1274,9 @@ export function formatNeedsHumanEscalationComment(
   } else if (input.reason === "branch_update_conflict") {
     reasonHeadline =
       "Branch kept moving under EPURE: its commit could not be fast-forwarded after re-basing on the new head (`branch_update_conflict`) — no commit overwritten, code-fix budget preserved";
+  } else if (input.reason === "ambiguous_feature_branch") {
+    reasonHeadline =
+      "Several `feature/<N>-*` branches match this plan and no single one has an open or merged PR to `dev` (`ambiguous_feature_branch`) — EPURE does not guess; code-fix budget preserved";
   } else if (input.reason === "internal_error") {
     reasonHeadline =
       "Internal orchestrator error — code-fix budget preserved";

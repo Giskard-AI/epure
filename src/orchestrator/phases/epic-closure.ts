@@ -27,9 +27,26 @@ const CAN_CANCEL: ReadonlySet<CollaboratorPermission> = new Set([
   "admin"
 ]);
 
+/** Several `feature/<N>-*` branches exist and no single one has an open or merged PR to `dev`. */
+export class AmbiguousFeatureBranchError extends Error {
+  override readonly name = "AmbiguousFeatureBranchError";
+
+  constructor(
+    readonly issueNumber: number,
+    readonly candidates: readonly string[]
+  ) {
+    super(
+      `Several feature branches match plan #${issueNumber} (${candidates.map((b) => `\`${b}\``).join(", ")}) and no single one has an open or merged PR to dev. Delete the branches the plan does not use (or open a PR to dev from the one it uses), then post \`/epure continue\` on #${issueNumber}.`
+    );
+  }
+}
+
 /** States written before `feature_branch` only name it in `active_branch` (a task branch while a ticket runs) or on GitHub. */
 export async function findExistingFeatureBranch(
-  gh: Pick<GitHubRestHelper, "listBranchesByPrefix">,
+  gh: Pick<
+    GitHubRestHelper,
+    "listBranchesByPrefix" | "findOpenPullRequestByHead" | "findMergedPullRequestByHead"
+  >,
   state: EpureIssueState
 ): Promise<string | undefined> {
   if (state.feature_branch) {
@@ -39,7 +56,23 @@ export async function findExistingFeatureBranch(
   if (state.active_branch.startsWith(prefix)) {
     return state.active_branch;
   }
-  return (await gh.listBranchesByPrefix(prefix))[0];
+  const candidates = await gh.listBranchesByPrefix(prefix);
+  if (candidates.length <= 1) {
+    return candidates[0];
+  }
+  const withPrToDev: string[] = [];
+  for (const branch of candidates) {
+    if (
+      (await gh.findOpenPullRequestByHead(branch, "dev")) ||
+      (await gh.findMergedPullRequestByHead(branch, "dev"))
+    ) {
+      withPrToDev.push(branch);
+    }
+  }
+  if (withPrToDev.length === 1) {
+    return withPrToDev[0];
+  }
+  throw new AmbiguousFeatureBranchError(state.issue_number, candidates);
 }
 
 /**

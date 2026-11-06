@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ClosureNotProcessedError, EscalationNotRecordedError, orchestrateIssueCommand } from "../src/orchestrator/issue-orchestrator.js";
+import { AmbiguousFeatureBranchError, findExistingFeatureBranch } from "../src/orchestrator/phases/epic-closure.js";
 import type { OrchestrateIssueInput } from "../src/orchestrator/types.js";
 import { manifestSha256, parsePlanManifestFromComments } from "../src/orchestrator/workspace/repo-tools.js";
 import {
@@ -1880,6 +1881,49 @@ describe("Commands on finished, legacy or already-planned states never redo or m
 
     expect(router.unmatched).toEqual([]);
     expect(await readState(store)).toMatchObject({ status: "done", active_branch: renamed });
+  });
+
+  it.each([
+    { id: "a-single-match-is-used-without-looking-up-prs", branches: ["feature/77-a"], openPr: [], mergedPr: [], expected: "feature/77-a" },
+    { id: "no-match-yields-no-branch", branches: [], openPr: [], mergedPr: [], expected: undefined },
+    { id: "of-two-matches-the-one-with-an-open-pr-to-dev-wins", branches: ["feature/77-a", "feature/77-b"], openPr: ["feature/77-b"], mergedPr: [], expected: "feature/77-b" },
+    { id: "of-two-matches-the-one-with-a-merged-pr-to-dev-wins", branches: ["feature/77-a", "feature/77-b"], openPr: [], mergedPr: ["feature/77-a"], expected: "feature/77-a" },
+    { id: "two-matches-without-any-pr-to-dev-are-ambiguous", branches: ["feature/77-a", "feature/77-b"], openPr: [], mergedPr: [], expected: AmbiguousFeatureBranchError },
+    { id: "two-matches-that-both-have-a-pr-to-dev-are-ambiguous", branches: ["feature/77-a", "feature/77-b"], openPr: ["feature/77-a"], mergedPr: ["feature/77-b"], expected: AmbiguousFeatureBranchError }
+  ] as ReadonlyArray<{ id: string; branches: string[]; openPr: string[]; mergedPr: string[]; expected: string | undefined | typeof AmbiguousFeatureBranchError }>)(
+    "legacy-feature-branch-lookup: $id",
+    async ({ branches, openPr, mergedPr, expected }) => {
+      const state = { ...(await readState(await seedState({ active_branch: TASK_BRANCH, feature_branch: undefined })))! };
+      const pr = { number: 1, html_url: "pr", head_sha: "s", title: "", body: "" };
+      const gh = {
+        listBranchesByPrefix: async () => branches,
+        findOpenPullRequestByHead: async (head: string) => (openPr.includes(head) ? pr : null),
+        findMergedPullRequestByHead: async (head: string) => (mergedPr.includes(head) ? pr : null)
+      };
+
+      const outcome = findExistingFeatureBranch(gh, state);
+
+      if (expected === AmbiguousFeatureBranchError) {
+        await expect(outcome).rejects.toThrow(AmbiguousFeatureBranchError);
+      } else {
+        await expect(outcome).resolves.toBe(expected);
+      }
+    }
+  );
+
+  it("sync-on-a-legacy-state-with-two-feature-branches-and-no-pr-to-dev-escalates-instead-of-guessing", async () => {
+    const store = await seedState({ status: "suspended", subphase: "idle", active_branch: TASK_BRANCH, feature_branch: undefined });
+    const router = declareIssueWrites(declareIssueReads(createGitHubMockRouter()))
+      .on("GET", `${R}/git/matching-refs/heads/feature/77-`, json([{ ref: "refs/heads/feature/77-a" }, { ref: "refs/heads/feature/77-b" }]))
+      .on("GET", /\/pulls\?state=(open|closed)&head=/, json([]));
+
+    await run(router, store, { command: "sync", actor: "maintainer", issueNumber: ISSUE, commentId: 900 });
+
+    expect(router.unmatched).toEqual([]);
+    expect(await readState(store)).toMatchObject({ status: "suspended", feature_branch: undefined });
+    expect(postedComments(router)).toEqual([
+      expect.stringMatching(/ambiguous_feature_branch[\s\S]*`feature\/77-a`, `feature\/77-b`/)
+    ]);
   });
 
   it("continue-on-a-legacy-cancellation-of-a-ticket-graph-resumes-suspended-and-names-to-tickets", async () => {
