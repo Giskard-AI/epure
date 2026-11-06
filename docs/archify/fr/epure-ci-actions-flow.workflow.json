@@ -48,11 +48,21 @@
     {
       "id": "epic_closed_event",
       "lane": "github_triggers",
-      "col": 2,
+      "col": 1,
       "type": "external",
       "label": "Epic Fermée",
       "sublabel": "issues.closed par un humain",
       "tag": "issues: closed",
+      "width": 132
+    },
+    {
+      "id": "closure_authorize",
+      "lane": "github_triggers",
+      "col": 2,
+      "type": "security",
+      "label": "Porte de Fermeture",
+      "sublabel": "authorize-closure",
+      "tag": "0 secret, write+",
       "width": 132
     },
     {
@@ -149,7 +159,8 @@
   "edges": [
     { "id": "cmd-to-job1", "from": "cmd_event", "to": "job1_authorize", "label": "webhook", "variant": "security" },
     { "id": "job1-to-job2", "from": "job1_authorize", "to": "job2_orchestrate", "label": "write+ ok", "variant": "emphasis" },
-    { "id": "closed-to-job2", "from": "epic_closed_event", "to": "job2_orchestrate", "label": "annule si write+", "variant": "dashed", "role": "branch" },
+    { "id": "closed-to-gate", "from": "epic_closed_event", "to": "closure_authorize", "label": "webhook", "variant": "security", "role": "branch" },
+    { "id": "gate-to-job2", "from": "closure_authorize", "to": "job2_orchestrate", "label": "annule si write+", "variant": "dashed", "role": "branch" },
     { "id": "ops-to-job2", "from": "ops_commands", "to": "job2_orchestrate", "label": "pilotage", "variant": "dashed", "role": "branch" },
     { "id": "job2-to-stage1", "from": "job2_orchestrate", "to": "stage1_sandbox", "label": "boucle TDD", "variant": "emphasis" },
     { "id": "stage1-to-stage2", "from": "stage1_sandbox", "to": "stage2_ci_checks", "label": "exit 0", "variant": "default" },
@@ -165,7 +176,8 @@
       "items": [
         "Triggers : issue_comment, issues: closed, workflow_run, pull_request, workflow_dispatch",
         "Commandes : /epure plan, réponses Grill/Spec, /epure to-spec, to-tickets, approve, continue, sync, status, cancel",
-        "epure-issue-command.yml sépare Job 1 authorize-command (0 secret) et Job 2 orchestrate-command (env: <llm-env>)"
+        "epure-issue-command.yml sépare Job 1 authorize-command (0 secret) et Job 2 orchestrate-command (env: <llm-env>)",
+        "issues: closed passe d'abord par authorize-closure (0 secret) : sous write, orchestrate-command ne démarre pas et rien n'est publié"
       ]
     },
     {
