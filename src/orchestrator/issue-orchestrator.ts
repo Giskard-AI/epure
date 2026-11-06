@@ -230,10 +230,15 @@ export class EscalationNotRecordedError extends Error {
     readonly issueNumber: number,
     readonly reason: string,
     readonly escalationMarkdown: string,
-    readonly resumeCommand: string
+    readonly resumeCommand: string,
+    readonly leaseExpiresAt?: string | undefined
   ) {
     super(
-      `GitHub API still rate limited: the \`${reason}\` escalation could not be posted on #${issueNumber}. Post \`${resumeCommand}\` on #${issueNumber} once the limit resets.`
+      `GitHub API still rate limited: the \`${reason}\` escalation could not be posted on #${issueNumber}. Post \`${resumeCommand}\` on #${issueNumber} once the limit resets${
+        leaseExpiresAt
+          ? ` and this run's lease has expired (${leaseExpiresAt}); EPURE refuses the command until then`
+          : ""
+      }.`
     );
   }
 }
@@ -390,6 +395,7 @@ export async function orchestrateIssueCommand(
     const refName = buildIssueStateRefName(effectiveInput.issueNumber);
     let planBranch = `plan/${effectiveInput.issueNumber}`;
     let featureBranch = `feature/${effectiveInput.issueNumber}`;
+    let leaseExpiresAt: string | undefined;
     let maxCodeFixAttempts = 3;
     let totalTransientRetriesUsed = 0;
     let initialTransientRetriesUsed = 0;
@@ -498,6 +504,7 @@ export async function orchestrateIssueCommand(
         }
       });
       const suspendedState = updatedSuspended.state;
+      leaseExpiresAt = suspendedState.claim_expires_at;
 
       const escalationMarkdown = appendEpureCommandsSpoiler(
         [
@@ -1177,7 +1184,7 @@ export async function orchestrateIssueCommand(
           // Claims the wait: a concurrent continuation, cancel or closure makes this run stop here.
           const waitingState = currentState;
           const ciClaimLeaseMs = await resolveRunLeaseMs();
-          await updateIssueStateWithCas({
+          const ciClaim = await updateIssueStateWithCas({
             issueNumber: effectiveInput.issueNumber,
             store,
             mutator: (prev) => {
@@ -1204,6 +1211,7 @@ export async function orchestrateIssueCommand(
               );
             }
           });
+          leaseExpiresAt = ciClaim.state.claim_expires_at;
 
           if (snapshot.passed && snapshot.aiReviewPassed) {
             if (waitsOnFeatureCi) {
@@ -1697,6 +1705,7 @@ export async function orchestrateIssueCommand(
           };
         }
       });
+      leaseExpiresAt = updatedStart.state.claim_expires_at;
       const grant = updatedStart.state.human_budget_grant_log?.at(-1);
       const grantsAfterStart = readHumanBudgetGrants(updatedStart.state);
       if (
@@ -2184,7 +2193,8 @@ export async function orchestrateIssueCommand(
             ticketNumber: effectiveInput.issueNumber,
             resumeCommand: approveAgain
           }),
-          approveAgain ?? resumeCommandForPhase(commandPhase)
+          approveAgain ?? resumeCommandForPhase(commandPhase),
+          leaseExpiresAt
         );
       }
     }

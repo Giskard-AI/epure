@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ClosureNotProcessedError, EscalationNotRecordedError, orchestrateIssueCommand } from "../src/orchestrator/issue-orchestrator.js";
+import { GitHubRateLimitError } from "../src/orchestrator/github/rate-limit.js";
 import { AmbiguousFeatureBranchError, findExistingFeatureBranch } from "../src/orchestrator/phases/epic-closure.js";
 import type { OrchestrateIssueInput } from "../src/orchestrator/types.js";
 import { manifestSha256, parsePlanManifestFromComments } from "../src/orchestrator/workspace/repo-tools.js";
@@ -1536,6 +1537,46 @@ describe("A run lease keeps a second run off a plan until the first one finishes
       expect.stringMatching(new RegExp(`L'exécution EPURE \`run-a\` travaille encore[\\s\\S]*\`/epure ${command}\` est ignoré`))
     ]);
     expect(await readState(store)).toEqual(before);
+  });
+
+  it.each([
+    { id: "throttled-state-write-keeps-the-lease-and-the-error-says-when-it-expires", throttle: "state" },
+    { id: "throttled-comment-after-the-suspension-was-recorded-does-not-mention-a-released-lease", throttle: "comment" }
+  ] as const)("$id", async ({ throttle }) => {
+    const seeded = await seedState({ ...claimedBy(PAST, "implementing_ticket"), active_pr_number: 106 });
+    const claims: string[] = [];
+    let throttledWrites = 0;
+    const store: GitRefStateStore = {
+      readRef: (refName) => seeded.readRef(refName),
+      compareAndSwapRef: async (refName, expectedOldSha, nextState) => {
+        const current = (await seeded.readRef(refName)).state;
+        if (current?.claimed_by_run_id === "run-b" && (throttle === "state" || throttledWrites === 0)) {
+          throttledWrites += 1;
+          throw new GitHubRateLimitError("PATCH", `${R}/git/refs/epure`, 3_600_000);
+        }
+        if (nextState.claimed_by_run_id === "run-b" && nextState.claim_expires_at) claims.push(nextState.claim_expires_at);
+        return await seeded.compareAndSwapRef(refName, expectedOldSha, nextState);
+      }
+    };
+    const router = declareImplementationFlow(createGitHubMockRouter(), "success", { taskPr: false, featurePr: true });
+    if (throttle === "comment") {
+      router.on("POST", `${R}/issues/${ISSUE}/comments`, primaryRateLimit(Math.floor(Date.now() / 1000) + 3600));
+    }
+
+    const outcome = await run(router, store, { command: "continue", actor: "maintainer", issueNumber: ISSUE, commentId: 900, runId: "run-b" }).then(
+      () => null,
+      (err: unknown) => err
+    );
+
+    expect(outcome).toBeInstanceOf(EscalationNotRecordedError);
+    expect(claims).toHaveLength(1);
+    if (throttle === "state") {
+      expect(await readState(store)).toMatchObject({ claimed_by_run_id: "run-b", claim_expires_at: claims[0] });
+      expect((outcome as Error).message).toContain(`this run's lease has expired (${claims[0]})`);
+    } else {
+      expect(await readState(store)).toMatchObject({ status: "suspended", claimed_by_run_id: undefined });
+      expect((outcome as Error).message).not.toContain("lease");
+    }
   });
 
   it("manual-continue-on-a-stale-lease-takes-the-plan-over", async () => {
