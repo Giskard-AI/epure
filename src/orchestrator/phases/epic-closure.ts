@@ -110,15 +110,6 @@ export async function handleEpicClosedByHuman(params: {
   if ((await params.gh.getIssue(params.issueNumber)).state === "open") {
     return ignore(`issue #${params.issueNumber} was reopened`);
   }
-  const featureBranch = planning
-    ? undefined
-    : await findExistingFeatureBranch(params.gh, state);
-  if (featureBranch) {
-    const mergedPr = await params.gh.findMergedPullRequestByHead(featureBranch, "dev");
-    if (mergedPr) {
-      return ignore(`feature PR #${mergedPr.number} is already merged into dev`);
-    }
-  }
 
   // No issue comment: anyone able to close an issue could otherwise make EPURE post on demand.
   const permission = await params.gh.getCollaboratorPermission(params.actor);
@@ -126,6 +117,25 @@ export async function handleEpicClosedByHuman(params: {
     return ignore(
       `closer @${params.actor} has permission ${permission}; only write or higher cancels the plan, which stays ${state.status} in phase ${state.phase}`
     );
+  }
+
+  let featureBranch: string | undefined;
+  let ambiguousCandidates: readonly string[] = [];
+  if (!planning) {
+    try {
+      featureBranch = await findExistingFeatureBranch(params.gh, state);
+    } catch (err) {
+      if (!(err instanceof AmbiguousFeatureBranchError)) {
+        throw err;
+      }
+      ambiguousCandidates = err.candidates;
+    }
+  }
+  for (const branch of featureBranch ? [featureBranch] : ambiguousCandidates) {
+    const mergedPr = await params.gh.findMergedPullRequestByHead(branch, "dev");
+    if (mergedPr) {
+      return ignore(`feature PR #${mergedPr.number} is already merged into dev`);
+    }
   }
 
   if (planning) {
@@ -179,7 +189,9 @@ export async function handleEpicClosedByHuman(params: {
       "",
       featureBranch && comparison
         ? `- **Branche de fonctionnalité** : \`${featureBranch}\` — ${comparison.aheadBy} commit(s) non intégré(s) dans \`dev\``
-        : `- **Branche de fonctionnalité** : aucune branche \`feature/${params.issueNumber}-*\` sur GitHub`,
+        : ambiguousCandidates.length > 0
+          ? `- **Branches de fonctionnalité candidates** (aucune n'est identifiée comme celle du plan) : ${ambiguousCandidates.map((b) => `\`${b}\``).join(", ")}`
+          : `- **Branche de fonctionnalité** : aucune branche \`feature/${params.issueNumber}-*\` sur GitHub`,
       "- **Statut d'orchestration** : `cancelled` (Plan annulé) ; aucune branche n'a été supprimée.",
       openPrs.length > 0
         ? `- **Pull Requests ouvertes, laissées ouvertes** : ${openPrs.map((pr) => `[#${pr.number}](${pr.html_url})`).join(", ")}`

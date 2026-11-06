@@ -1285,6 +1285,37 @@ describe("A human closing the epic before its feature branch reaches dev cancels
     expect((await readState(store)).status).not.toBe("cancelled");
   });
 
+  it.each([
+    { id: "read-closer-is-ignored-before-the-ambiguous-branch-lookup", closer: { permission: "read", role_name: "read" }, openPr: [], mergedPr: [], expected: "ignored" },
+    { id: "write-closer-with-a-candidate-merged-into-dev-is-ignored", closer: { permission: "write", role_name: "write" }, openPr: ["feature/77-a"], mergedPr: ["feature/77-b"], expected: "ignored" },
+    { id: "write-closer-without-any-merged-candidate-cancels-and-lists-the-candidates", closer: { permission: "write", role_name: "write" }, openPr: [], mergedPr: [], expected: "cancelled" }
+  ] as const)("ambiguous-legacy-feature-branch: $id", async ({ closer, openPr, mergedPr, expected }) => {
+    const store = await seedState({ status: "suspended", subphase: "idle", active_branch: TASK_BRANCH, feature_branch: undefined });
+    const before = await readState(store);
+    const headIn = (req: { path: string }, branches: readonly string[]) =>
+      branches.some((b) => req.path.includes(encodeURIComponent(`${OWNER}:${b}`)));
+    const router = declareClosureReads(createGitHubMockRouter(), { mergedFeaturePr: false, aheadBy: 0, featurePr: false, taskPrs: [], closer })
+      .on("GET", `${R}/git/matching-refs/heads/feature/77-`, json([{ ref: "refs/heads/feature/77-a" }, { ref: "refs/heads/feature/77-b" }]))
+      .on("GET", /\/pulls\?state=open&head=/, (req) => json(headIn(req, openPr) ? [{ number: 201, html_url: "pr201", head: { sha: HEAD_SHA } }] : []))
+      .on("GET", /\/pulls\?state=closed&head=/, (req) => json(headIn(req, mergedPr) ? [{ number: 202, html_url: "pr202", merged_at: "2026-11-01T00:00:00Z" }] : []));
+
+    const res = await run(router, store, { command: "closed", actor: "author", issueNumber: ISSUE, commentId: 0 });
+
+    expect(router.unmatched).toEqual([]);
+    if (expected === "ignored") {
+      expect(res.executed).toBe(false);
+      expect(postedComments(router)).toEqual([]);
+      expect(await readState(store)).toEqual(before);
+    } else {
+      expect(res.executed).toBe(true);
+      expect((await readState(store)).status).toBe("cancelled");
+      expect(postedComments(router)).toEqual([expect.stringContaining("`feature/77-a`, `feature/77-b`")]);
+    }
+    if (closer.permission === "read") {
+      expect(router.calls("GET", /\/git\/matching-refs\//)).toBe(0);
+    }
+  });
+
   it("rate-limit-past-the-budget-during-a-closure-rejects-with-closure-not-processed-and-leaves-the-plan-untouched", async () => {
     const store = await seedState({ status: "active", subphase: "waiting_ticket_ci" });
     const before = await readState(store);
