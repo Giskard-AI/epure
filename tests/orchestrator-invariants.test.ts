@@ -882,7 +882,7 @@ describe("Lot 1 — a human closing the epic before its feature branch reaches d
     return declareIssueWrites(router)
       .on("GET", /\/collaborators\/[^/]+\/permission$/, json({ permission: params.closerPermission ?? "write" }))
       .on("GET", /\/pulls\?state=closed&head=/, json(params.mergedFeaturePr ? [{ number: 105, html_url: "pr105", merged_at: "2026-11-01T00:00:00Z" }] : []))
-      .on("GET", new RegExp(`/compare/dev\\.\\.\\.${encodeURIComponent(FEATURE_BRANCH)}$`), json({ ahead_by: params.aheadBy, files: [] }))
+      .on("GET", new RegExp(`/compare/dev\\.\\.\\.${encodeURIComponent(FEATURE_BRANCH)}$`), json({ ahead_by: params.aheadBy, merge_base_commit: { sha: "dev-sha" }, files: [] }))
       .on("GET", /\/pulls\?state=open&head=/, json(params.featurePr ? [{ number: 105, html_url: "pr105", head: { sha: HEAD_SHA } }] : []))
       .on("GET", /\/pulls\?state=open&base=/, json(params.taskPrs.map((n) => ({ number: n, html_url: `pr${n}` }))));
   }

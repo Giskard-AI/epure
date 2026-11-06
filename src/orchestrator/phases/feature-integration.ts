@@ -899,6 +899,7 @@ export async function runFeatureIntegrationPhase(
       await params.gh.mergePullRequest(fixPr.number, {
         headBranch: fixTaskBranch,
         baseBranch: params.featureBranch,
+        expectedHeadSha: fixPr.head_sha,
         commitTitle: `${fixCommitTitle} (#${fixPr.number})`,
         commitMessage: `Automated remediation of synthesis review findings.\n\nRefs #${params.issueNumber}`
       });

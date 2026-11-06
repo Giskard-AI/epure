@@ -25,6 +25,9 @@ import type {
   GitHubRestHelper
 } from "../types.js";
 import { runTestsInIsolatedWorkspace } from "../workspace/repo-tools.js";
+import { TruncatedGitTreeError } from "./rest-client.js";
+
+type Escalation = Parameters<EscalateToNeedsHumanFn>[0];
 
 interface ParsedGlossaryTerm {
   readonly key: string;
@@ -128,11 +131,6 @@ export function parseGlossaryTerms(markdown: string): ParsedGlossaryTerm[] {
   return terms;
 }
 
-/**
- * Deterministically merges `planGlossary` into `baseGlossary` (`dev`) additively:
- * - Preserves 100% of terms present in `baseGlossary` (`dev`), including terms added concurrently by other issues.
- * - Updates any existing term if `planGlossary` explicitly changed its definition, and appends all new terms/sections from `planGlossary`.
- */
 // Only the plan terms added or reworded since `previousPlanGlossary`, so terms the plan left alone keep their feature/* wording.
 function glossaryTermsChangedSince(
   planGlossary: string,
@@ -155,6 +153,11 @@ function glossaryTermsChangedSince(
     .join("\n\n");
 }
 
+/**
+ * Deterministically merges `planGlossary` into `baseGlossary` (`dev`) additively:
+ * - Preserves 100% of terms present in `baseGlossary` (`dev`), including terms added concurrently by other issues.
+ * - Updates any existing term if `planGlossary` explicitly changed its definition, and appends all new terms/sections from `planGlossary`.
+ */
 export function mergeGlossaryMarkdownAdditively(
   baseGlossary: string | null | undefined,
   planGlossary: string | null | undefined
@@ -962,13 +965,12 @@ export interface SyncBranchWithBaseResult {
   readonly diagnosticExcerpt?: string | undefined;
 }
 
-// A Git conflict block is a `<<<<<<<` line, then a line that is exactly `=======`, then a `>>>>>>>` line.
-// Comment banners (`// =====`) or setext headings never form that sequence.
-const GIT_CONFLICT_BLOCK_REGEX =
-  /^<{7}(?: .*)?$[\s\S]*?^={7}$[\s\S]*?^>{7}(?: .*)?$/m;
+// Any `<<<<<<<`, `|||||||` (diff3 base) or `>>>>>>>` marker line, even without the rest of its block.
+// A lone `=======` line is tolerated: it is also a setext heading or a comment banner.
+const GIT_CONFLICT_MARKER_LINE_REGEX = /^(?:<{7}|>{7}|\|{7})(?: |$)/m;
 
 function containsGitConflictMarkers(content: string): boolean {
-  return GIT_CONFLICT_BLOCK_REGEX.test(content.replace(/\r\n/g, "\n"));
+  return GIT_CONFLICT_MARKER_LINE_REGEX.test(content.replace(/\r\n/g, "\n"));
 }
 
 export interface BaseSyncGuard {
@@ -1149,9 +1151,27 @@ export async function syncBranchWithBase(
 
   // 409 Conflict: classify every path by comparing blob SHAs at the merge base, the base head and the target head.
   const maxConflicts = input.maxConflictingFiles ?? 8;
-  if (!input.gh.compareCommits) {
-    throw new Error("syncBranchWithBase needs compareCommits to resolve a merge conflict.");
-  }
+  const escalateConflict = async (
+    diag: string,
+    paths: Pick<Escalation, "sensitivePaths" | "traversalPaths"> = {}
+  ): Promise<SyncBranchWithBaseResult> => {
+    if (input.escalateToNeedsHuman) {
+      await input.escalateToNeedsHuman({
+        reason: "merge_conflict_unresolved",
+        ticketNumber: input.issueNumber,
+        branch: input.targetBranch,
+        ...paths,
+        diagnosticExcerpt: diag
+      });
+    }
+    return {
+      status: "escalated",
+      headSha: "",
+      conflictsResolved: [],
+      escalationReason: "merge_conflict_unresolved",
+      diagnosticExcerpt: diag
+    };
+  };
   const [targetHeadSha, baseHeadSha] = await Promise.all([
     input.gh.getDefaultBranchSha(input.targetBranch),
     input.gh.getDefaultBranchSha(input.baseBranch)
@@ -1165,11 +1185,21 @@ export async function syncBranchWithBase(
     targetHeadSha,
     baseHeadSha
   );
-  const [ancestorBlobs, baseBlobs, targetBlobs] = await Promise.all([
-    input.gh.listBranchBlobs(mergeBaseSha),
-    input.gh.listBranchBlobs(baseHeadSha),
-    input.gh.listBranchBlobs(targetHeadSha)
-  ]);
+  let ancestorBlobs: ReadonlyMap<string, GitBlobRef>;
+  let baseBlobs: ReadonlyMap<string, GitBlobRef>;
+  let targetBlobs: ReadonlyMap<string, GitBlobRef>;
+  try {
+    [ancestorBlobs, baseBlobs, targetBlobs] = await Promise.all([
+      input.gh.listBranchBlobs(mergeBaseSha),
+      input.gh.listBranchBlobs(baseHeadSha),
+      input.gh.listBranchBlobs(targetHeadSha)
+    ]);
+  } catch (err) {
+    if (err instanceof TruncatedGitTreeError) {
+      return await escalateConflict(err.message);
+    }
+    throw err;
+  }
   const candidateFiles: string[] = [];
   const baseOnlyChangedFiles: string[] = [];
   for (const path of new Set([
@@ -1203,7 +1233,8 @@ export async function syncBranchWithBase(
     path: string
   ): Promise<string> => (blobs.has(path) ? await readPinnedFile(sha, path) : "");
 
-  // Base-only changes are taken from the base as-is (a human committed them there); only files EPURE resolves are guarded.
+  // Base-only changes are carried unchanged: the base is `dev` (human-reviewed merges) or `feature/*` (EPURE-reviewed
+  // ticket merges under the feature rulesets), never content EPURE wrote in this sync. Only files EPURE resolves are guarded.
   const pathGuard = validateWorkspaceFileOperations({
     workDir: process.cwd(),
     files: candidateFiles.map((path) => ({ path })),
@@ -1212,24 +1243,13 @@ export async function syncBranchWithBase(
     reviewersDir: input.reviewersDir
   });
   if (!pathGuard.allowed) {
-    const diag = `3-way conflict touched forbidden sensitive or traversal paths: ${[...pathGuard.sensitivePaths, ...pathGuard.traversalPaths].join(", ")}`;
-    if (input.escalateToNeedsHuman) {
-      await input.escalateToNeedsHuman({
-        reason: "merge_conflict_unresolved",
-        ticketNumber: input.issueNumber,
-        branch: input.targetBranch,
+    return await escalateConflict(
+      `3-way conflict touched forbidden sensitive or traversal paths: ${[...pathGuard.sensitivePaths, ...pathGuard.traversalPaths].join(", ")}`,
+      {
         sensitivePaths: pathGuard.sensitivePaths,
-        traversalPaths: pathGuard.traversalPaths,
-        diagnosticExcerpt: diag
-      });
-    }
-    return {
-      status: "escalated",
-      headSha: "",
-      conflictsResolved: [],
-      escalationReason: "merge_conflict_unresolved",
-      diagnosticExcerpt: diag
-    };
+        traversalPaths: pathGuard.traversalPaths
+      }
+    );
   }
 
   const codeConflictPaths = candidateFiles.filter((p) => p !== "GLOSSARY.md");
@@ -1238,37 +1258,21 @@ export async function syncBranchWithBase(
     codeConflictPaths.length > maxConflicts ||
     (codeConflictPaths.length > 0 && !hasLlmResolver)
   ) {
-    const diag =
+    return await escalateConflict(
       codeConflictPaths.length > maxConflicts
         ? `3-way merge conflict involves ${codeConflictPaths.length} files (exceeds automated limit of ${maxConflicts}).`
-        : `3-way merge conflict on ${codeConflictPaths.join(", ")} requires LLM client for resolution.`;
-    if (input.escalateToNeedsHuman) {
-      await input.escalateToNeedsHuman({
-        reason: "merge_conflict_unresolved",
-        ticketNumber: input.issueNumber,
-        branch: input.targetBranch,
-        diagnosticExcerpt: diag
-      });
-    }
-    return {
-      status: "escalated",
-      headSha: "",
-      conflictsResolved: [],
-      escalationReason: "merge_conflict_unresolved",
-      diagnosticExcerpt: diag
-    };
+        : `3-way merge conflict on ${codeConflictPaths.join(", ")} requires LLM client for resolution.`
+    );
   }
 
   const resolvedFiles: Array<{ path: string; content: string }> = [];
-  const baseNonConflictingFiles: Array<{ path: string; content: string }> = [];
+  const baseOnlyBlobs: Array<{ path: string } & GitBlobRef> = [];
   const baseDeletedFiles: string[] = [];
 
   for (const basePath of baseOnlyChangedFiles) {
-    if (baseBlobs.has(basePath)) {
-      baseNonConflictingFiles.push({
-        path: basePath,
-        content: await readPinnedFile(baseHeadSha, basePath)
-      });
+    const blob = baseBlobs.get(basePath);
+    if (blob) {
+      baseOnlyBlobs.push({ path: basePath, ...blob });
     } else {
       baseDeletedFiles.push(basePath);
     }
@@ -1353,22 +1357,9 @@ export async function syncBranchWithBase(
       Array.from(expectedPathsSet).every((p) => returnedPathsSet.has(p));
 
     if (!hasExact1To1Coverage) {
-      const diag = `LLM conflict resolution path mismatch: expected [${Array.from(expectedPathsSet).join(", ")}], received [${returnedNormalizedPaths.join(", ")}].`;
-      if (input.escalateToNeedsHuman) {
-        await input.escalateToNeedsHuman({
-          reason: "merge_conflict_unresolved",
-          ticketNumber: input.issueNumber,
-          branch: input.targetBranch,
-          diagnosticExcerpt: diag
-        });
-      }
-      return {
-        status: "escalated",
-        headSha: "",
-        conflictsResolved: [],
-        escalationReason: "merge_conflict_unresolved",
-        diagnosticExcerpt: diag
-      };
+      return await escalateConflict(
+        `LLM conflict resolution path mismatch: expected [${Array.from(expectedPathsSet).join(", ")}], received [${returnedNormalizedPaths.join(", ")}].`
+      );
     }
 
     const resolvedPathGuard = validateWorkspaceFileOperations({
@@ -1379,44 +1370,20 @@ export async function syncBranchWithBase(
       reviewersDir: input.reviewersDir
     });
     if (!resolvedPathGuard.allowed) {
-      const diag = `LLM conflict resolution returned forbidden paths: ${[...resolvedPathGuard.sensitivePaths, ...resolvedPathGuard.traversalPaths].join(", ")}`;
-      if (input.escalateToNeedsHuman) {
-        await input.escalateToNeedsHuman({
-          reason: "merge_conflict_unresolved",
-          ticketNumber: input.issueNumber,
-          branch: input.targetBranch,
+      return await escalateConflict(
+        `LLM conflict resolution returned forbidden paths: ${[...resolvedPathGuard.sensitivePaths, ...resolvedPathGuard.traversalPaths].join(", ")}`,
+        {
           sensitivePaths: resolvedPathGuard.sensitivePaths,
-          traversalPaths: resolvedPathGuard.traversalPaths,
-          diagnosticExcerpt: diag
-        });
-      }
-      return {
-        status: "escalated",
-        headSha: "",
-        conflictsResolved: [],
-        escalationReason: "merge_conflict_unresolved",
-        diagnosticExcerpt: diag
-      };
+          traversalPaths: resolvedPathGuard.traversalPaths
+        }
+      );
     }
 
     for (const rf of resolutionData.resolved_files) {
       if (containsGitConflictMarkers(rf.content)) {
-        const diag = `LLM conflict resolution for '${rf.path}' still contained Git conflict markers.`;
-        if (input.escalateToNeedsHuman) {
-          await input.escalateToNeedsHuman({
-            reason: "merge_conflict_unresolved",
-            ticketNumber: input.issueNumber,
-            branch: input.targetBranch,
-            diagnosticExcerpt: diag
-          });
-        }
-        return {
-          status: "escalated",
-          headSha: "",
-          conflictsResolved: [],
-          escalationReason: "merge_conflict_unresolved",
-          diagnosticExcerpt: diag
-        };
+        return await escalateConflict(
+          `LLM conflict resolution for '${rf.path}' still contained Git conflict markers.`
+        );
       }
       resolvedFiles.push({
         path: rf.path.trim().replace(/^\/+/, ""),
@@ -1425,10 +1392,15 @@ export async function syncBranchWithBase(
     }
   }
 
-  const allFilesToCommit = [...baseNonConflictingFiles, ...resolvedFiles];
-
   // Stage 1 Sandbox verification before committing resolved conflicts
-  if (input.sandboxRunner && allFilesToCommit.length > 0) {
+  if (input.sandboxRunner && resolvedFiles.length + baseOnlyBlobs.length > 0) {
+    const baseOnlyFiles = await Promise.all(
+      baseOnlyBlobs.map(async (b) => ({
+        path: b.path,
+        content: await readPinnedFile(baseHeadSha, b.path)
+      }))
+    );
+    const allFilesToCommit = [...baseOnlyFiles, ...resolvedFiles];
     const workspaceFiles = await input.gh.readBranchWorkspaceFiles(
       input.targetBranch,
       allFilesToCommit.map((f) => f.path).join(" "),
@@ -1477,7 +1449,8 @@ export async function syncBranchWithBase(
   const headSha = await input.gh.commitFilesToBranch({
     branch: input.targetBranch,
     commitMessage: `chore(sync): resolve merge conflicts from ${input.baseBranch} into ${input.targetBranch}`,
-    files: allFilesToCommit,
+    files: resolvedFiles,
+    blobs: baseOnlyBlobs,
     ...(baseDeletedFiles.length > 0 ? { deletedFiles: baseDeletedFiles } : {}),
     // Without the base as second parent the merge base never moves: the PR stays `dirty` and GitHub runs no `pull_request` CI.
     mergeParentSha: baseHeadSha

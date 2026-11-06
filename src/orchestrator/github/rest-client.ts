@@ -30,6 +30,12 @@ const COLLABORATOR_PERMISSIONS: ReadonlySet<string> = new Set<CollaboratorPermis
   "none"
 ]);
 
+function isCollaboratorPermission(
+  value: string | undefined
+): value is CollaboratorPermission {
+  return value !== undefined && COLLABORATOR_PERMISSIONS.has(value);
+}
+
 export function verifyPublisherMergeBoundary(params: {
   readonly headBranch: string;
   readonly baseBranch: string;
@@ -71,10 +77,13 @@ export class BranchUpdateConflictError extends Error {
 
   constructor(
     readonly branch: string,
-    readonly attempts: number
+    readonly attempts: number,
+    readonly overlappingPaths: readonly string[] = []
   ) {
     super(
-      `Branch '${branch}' moved during ${attempts} commit attempt(s); its update was not a fast-forward and EPURE did not force it.`
+      overlappingPaths.length > 0
+        ? `Branch '${branch}' moved and its new head also changed ${overlappingPaths.map((p) => `'${p}'`).join(", ")}: EPURE did not overlay its stale version of these files.`
+        : `Branch '${branch}' moved during ${attempts} commit attempt(s); its update was not a fast-forward and EPURE did not force it.`
     );
   }
 }
@@ -82,8 +91,56 @@ export class BranchUpdateConflictError extends Error {
 export class PullRequestNotMergeableError extends Error {
   override readonly name = "PullRequestNotMergeableError";
 
-  constructor(readonly prNumber: number) {
-    super(`GitHub refused to merge PR #${prNumber} (HTTP 405: not mergeable).`);
+  constructor(
+    readonly prNumber: number,
+    readonly githubMessage = ""
+  ) {
+    super(
+      `GitHub refused to merge PR #${prNumber} (HTTP 405: not mergeable)${githubMessage ? `: ${githubMessage}` : "."}`
+    );
+  }
+}
+
+// GitHub answers 405 both for conflicts and for refusals a re-sync cannot fix (merge method disabled, rulesets, required reviews).
+export function isConflictRefusal(
+  refusal: PullRequestNotMergeableError,
+  mergeableState: string
+): boolean {
+  return (
+    mergeableState === "dirty" ||
+    mergeableState === "behind" ||
+    /not mergeable/i.test(refusal.githubMessage)
+  );
+}
+
+export function describeMergeRefusal(
+  refusal: PullRequestNotMergeableError,
+  mergeableState: string
+): string {
+  return `${refusal.message} (mergeable_state: \`${mergeableState}\`)`;
+}
+
+// HTTP 409 on a merge pinned to `sha`: the PR head is no longer the reviewed commit.
+export class PullRequestHeadMovedError extends Error {
+  override readonly name = "PullRequestHeadMovedError";
+
+  constructor(
+    readonly prNumber: number,
+    readonly expectedHeadSha: string
+  ) {
+    super(
+      `PR #${prNumber} head moved after \`${expectedHeadSha}\` was reviewed (HTTP 409): not merged.`
+    );
+  }
+}
+
+export class TruncatedGitTreeError extends Error {
+  override readonly name = "TruncatedGitTreeError";
+
+  constructor(readonly commitSha: string) {
+    super(
+      `The recursive tree listing of ${commitSha} is truncated by GitHub: EPURE cannot tell which files exist and does not infer deletions from it.`
+    );
   }
 }
 
@@ -125,7 +182,7 @@ export function createGitHubRestHelper(params: {
     body?: unknown,
     allow404 = false,
     expectedErrorStatuses: readonly number[] = []
-  ): Promise<{ status: number; data: T | null }> {
+  ): Promise<{ status: number; data: T | null; errorMessage?: string }> {
     let resp: Response | undefined;
     let lastErr: unknown;
     for (let attempt = 0; attempt <= 3; attempt += 1) {
@@ -154,11 +211,18 @@ export function createGitHubRestHelper(params: {
     if (!resp) {
       throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
     }
-    if (
-      (allow404 && resp.status === 404) ||
-      expectedErrorStatuses.includes(resp.status)
-    ) {
+    if (allow404 && resp.status === 404) {
       return { status: resp.status, data: null };
+    }
+    if (expectedErrorStatuses.includes(resp.status)) {
+      const errText = await resp.text();
+      let errorMessage = errText;
+      try {
+        errorMessage = (JSON.parse(errText) as { message?: string }).message ?? errText;
+      } catch {
+        // Not JSON: keep the raw body.
+      }
+      return { status: resp.status, data: null, errorMessage };
     }
     if (!resp.ok) {
       const errText = await resp.text();
@@ -202,28 +266,45 @@ export function createGitHubRestHelper(params: {
     return data?.object?.sha ?? null;
   }
 
-  const treesByCommitSha = new Map<string, Promise<readonly GitTreeEntry[]>>();
+  interface CommitTree {
+    readonly entries: readonly GitTreeEntry[];
+    readonly truncated: boolean;
+  }
+  const treesByCommitSha = new Map<string, Promise<CommitTree>>();
 
   // A commit's tree never changes, so the recursive listing is fetched once per commit SHA per run.
-  async function readBranchTree(
-    branchOrSha: string
-  ): Promise<readonly GitTreeEntry[]> {
-    const sha = await resolveCommitSha(branchOrSha);
-    if (!sha) {
-      return [];
-    }
+  async function readCommitTree(sha: string): Promise<CommitTree> {
     let pending = treesByCommitSha.get(sha);
     if (!pending) {
-      pending = apiRequest<{ tree?: GitTreeEntry[] }>(
+      pending = apiRequest<{ tree?: GitTreeEntry[]; truncated?: boolean }>(
         "GET",
         `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(sha)}?recursive=1`,
         undefined,
         true
-      ).then((res) => res.data?.tree ?? []);
+      ).then((res) => ({
+        entries: res.data?.tree ?? [],
+        truncated: res.data?.truncated === true
+      }));
       treesByCommitSha.set(sha, pending);
       pending.catch(() => treesByCommitSha.delete(sha));
     }
     return await pending;
+  }
+
+  async function readBranchTree(branchOrSha: string): Promise<CommitTree> {
+    const sha = await resolveCommitSha(branchOrSha);
+    return sha ? await readCommitTree(sha) : { entries: [], truncated: false };
+  }
+
+  // Files missing from a truncated listing would read as deleted: callers that compare file sets need the full tree.
+  async function readCompleteTree(
+    branchOrSha: string
+  ): Promise<readonly GitTreeEntry[]> {
+    const tree = await readBranchTree(branchOrSha);
+    if (tree.truncated) {
+      throw new TruncatedGitTreeError(branchOrSha);
+    }
+    return tree.entries;
   }
 
   return {
@@ -268,10 +349,11 @@ export function createGitHubRestHelper(params: {
         undefined,
         true
       );
-      const level = data?.role_name || data?.permission || "none";
-      return COLLABORATOR_PERMISSIONS.has(level)
-        ? (level as CollaboratorPermission)
-        : "none";
+      // A custom repository role has its own `role_name`; `permission` is the base role it inherits.
+      const level = isCollaboratorPermission(data?.role_name)
+        ? data.role_name
+        : data?.permission;
+      return isCollaboratorPermission(level) ? level : "none";
     },
 
     async postIssueComment(issueNumber: number, body: string): Promise<string> {
@@ -439,16 +521,16 @@ export function createGitHubRestHelper(params: {
     },
 
     async listBranchPaths(branch: string): Promise<string[]> {
-      return (await readBranchTree(branch))
-        .filter((e) => e.type === "blob" && typeof e.path === "string")
-        .map((e) => e.path!);
+      return (await readBranchTree(branch)).entries.flatMap((e) =>
+        e.type === "blob" && typeof e.path === "string" ? [e.path] : []
+      );
     },
 
     async listBranchBlobs(
       branchOrSha: string
     ): Promise<ReadonlyMap<string, GitBlobRef>> {
       const blobs = new Map<string, GitBlobRef>();
-      for (const e of await readBranchTree(branchOrSha)) {
+      for (const e of await readCompleteTree(branchOrSha)) {
         if (e.type === "blob" && e.path && e.sha) {
           blobs.set(e.path, { sha: e.sha, mode: e.mode ?? "100644" });
         }
@@ -487,21 +569,8 @@ export function createGitHubRestHelper(params: {
       reviewersDir: string = DEFAULT_REVIEWERS_DIR
     ): Promise<Map<string, string>> {
       const filesMap = new Map<string, string>();
-      try {
-        const treeRes = await apiRequest<{
-          tree?: Array<{
-            path?: string;
-            type?: string;
-            sha?: string;
-            size?: number;
-          }>;
-        }>(
-          "GET",
-          `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
-          undefined,
-          true
-        );
-        const entries = treeRes.data?.tree ?? [];
+      {
+        const { entries } = await readBranchTree(branch);
         const candidates = entries.filter((entry) => {
           if (entry.type !== "blob" || !entry.path || !entry.sha) {
             return false;
@@ -666,26 +735,11 @@ export function createGitHubRestHelper(params: {
         }
 
         for (const entry of selectedEntries) {
-          const p = entry.path!;
-          const blobRes = await apiRequest<{
-            content?: string;
-            encoding?: string;
-          }>(
-            "GET",
-            `/repos/${owner}/${repo}/git/blobs/${entry.sha!}`,
-            undefined,
-            true
-          );
-          if (blobRes.data?.content && blobRes.data.encoding === "base64") {
-            const decoded = Buffer.from(
-              blobRes.data.content.replace(/\s+/g, ""),
-              "base64"
-            ).toString("utf8");
-            filesMap.set(p, decoded);
+          const content = entry.sha ? await readBlob(entry.sha) : null;
+          if (entry.path && content !== null) {
+            filesMap.set(entry.path, content);
           }
         }
-      } catch {
-        // Non-fatal if branch tree is unavailable or mocked in tests
       }
       return filesMap;
     },
@@ -696,53 +750,28 @@ export function createGitHubRestHelper(params: {
     ): Promise<Map<string, string>> {
       const filesMap = new Map<string, string>();
       const dirPrefix = `${reviewersDir.toLowerCase()}/`;
-      try {
-        const treeRes = await apiRequest<{
-          tree?: Array<{ path?: string; type?: string; sha?: string }>;
-        }>(
-          "GET",
-          `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
-          undefined,
-          true
-        );
-        const entries = treeRes.data?.tree ?? [];
-        for (const entry of entries) {
-          if (entry.type !== "blob" || !entry.path || !entry.sha) {
-            continue;
-          }
-          const p = entry.path;
-          const isRosterFile =
-            p.toLowerCase().startsWith(dirPrefix) &&
-            /^[a-z0-9-]+\.md$/i.test(p.slice(dirPrefix.length));
-          if (!isRosterFile && p !== "DESIGN.md") {
-            continue;
-          }
-          const blobRes = await apiRequest<{
-            content?: string;
-            encoding?: string;
-          }>(
-            "GET",
-            `/repos/${owner}/${repo}/git/blobs/${entry.sha}`,
-            undefined,
-            true
-          );
-          if (blobRes.data?.content && blobRes.data.encoding === "base64") {
-            const decoded = Buffer.from(
-              blobRes.data.content.replace(/\s+/g, ""),
-              "base64"
-            ).toString("utf8");
-            filesMap.set(p, decoded);
-          }
+      for (const entry of (await readBranchTree(branch)).entries) {
+        if (entry.type !== "blob" || !entry.path || !entry.sha) {
+          continue;
         }
-      } catch {
-        // Non-fatal if branch tree is unavailable or mocked in tests
+        const p = entry.path;
+        const isRosterFile =
+          p.toLowerCase().startsWith(dirPrefix) &&
+          /^[a-z0-9-]+\.md$/i.test(p.slice(dirPrefix.length));
+        if (!isRosterFile && p !== "DESIGN.md") {
+          continue;
+        }
+        const content = await readBlob(entry.sha);
+        if (content !== null) {
+          filesMap.set(p, content);
+        }
       }
       return filesMap;
     },
 
     async readDevWorkflowsMap(branch: string): Promise<Map<string, string>> {
       const workflowsMap = new Map<string, string>();
-      for (const entry of await readBranchTree(branch)) {
+      for (const entry of (await readBranchTree(branch)).entries) {
         if (
           entry.type !== "blob" ||
           !entry.path ||
@@ -800,7 +829,7 @@ export function createGitHubRestHelper(params: {
 
       const treeEntries: Array<{
         path: string;
-        mode: "100644";
+        mode: string;
         type: "blob";
         sha: string | null;
       }> = [];
@@ -824,6 +853,20 @@ export function createGitHubRestHelper(params: {
           sha: blobRes.data!.sha
         });
       }
+      // Existing blobs keep their SHA and mode: binaries, executables and symlinks are not re-encoded.
+      for (const blob of input.blobs ?? []) {
+        const cleanPath = blob.path.trim().replace(/^\/+/, "");
+        if (seenTreePaths.has(cleanPath)) {
+          continue;
+        }
+        seenTreePaths.add(cleanPath);
+        treeEntries.push({
+          path: cleanPath,
+          mode: blob.mode,
+          type: "blob",
+          sha: blob.sha
+        });
+      }
 
       const pendingDeletedPaths: string[] = [];
       for (const delPath of input.deletedFiles ?? []) {
@@ -835,7 +878,29 @@ export function createGitHubRestHelper(params: {
         pendingDeletedPaths.push(cleanPath);
       }
 
-      // A rejected fast-forward means someone pushed meanwhile: rebuild the same changes on the new head, never force.
+      const touchedPaths = [...seenTreePaths];
+      // Paths this commit writes or deletes that `toSha` changed since `fromSha` (all of them when a listing is truncated).
+      const touchedPathsChanged = async (
+        fromSha: string,
+        toSha: string
+      ): Promise<readonly string[]> => {
+        const [before, after] = await Promise.all([
+          readCommitTree(fromSha),
+          readCommitTree(toSha)
+        ]);
+        if (before.truncated || after.truncated) {
+          return touchedPaths;
+        }
+        const blobAt = (tree: CommitTree) =>
+          new Map(tree.entries.map((e) => [e.path, e.sha]));
+        const [beforeBlobs, afterBlobs] = [blobAt(before), blobAt(after)];
+        return touchedPaths.filter(
+          (p) => beforeBlobs.get(p) !== afterBlobs.get(p)
+        );
+      };
+
+      // A rejected fast-forward means someone pushed meanwhile: the same changes are rebuilt on the new head
+      // only when it left every touched path alone, never forced.
       for (let attempt = 1; ; attempt += 1) {
         const parentCommit = await apiRequest<{ tree: { sha: string } }>(
           "GET",
@@ -845,26 +910,14 @@ export function createGitHubRestHelper(params: {
 
         const attemptEntries = [...treeEntries];
         if (pendingDeletedPaths.length > 0) {
-          let existingTreePaths: Set<string> | null = null;
-          try {
-            const baseTreeListing = await apiRequest<{
-              tree?: Array<{ path?: string; type?: string }>;
-            }>(
-              "GET",
-              `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(baseTreeSha)}?recursive=1`,
-              undefined,
-              true
-            );
-            if (Array.isArray(baseTreeListing.data?.tree)) {
-              existingTreePaths = new Set(
-                baseTreeListing.data.tree
-                  .filter((e) => e.type === "blob" && typeof e.path === "string")
-                  .map((e) => e.path!.trim().replace(/^\/+/, ""))
+          const parentTree = await readCommitTree(parentCommitSha);
+          const existingTreePaths = parentTree.truncated
+            ? null
+            : new Set(
+                parentTree.entries.flatMap((e) =>
+                  e.type === "blob" && e.path ? [e.path] : []
+                )
               );
-            }
-          } catch {
-            existingTreePaths = null;
-          }
 
           for (const cleanPath of pendingDeletedPaths) {
             if (existingTreePaths && !existingTreePaths.has(cleanPath)) {
@@ -931,6 +984,10 @@ export function createGitHubRestHelper(params: {
         if (!movedHead || attempt >= BRANCH_COMMIT_MAX_ATTEMPTS) {
           throw new BranchUpdateConflictError(input.branch, attempt);
         }
+        const overlapping = await touchedPathsChanged(parentCommitSha, movedHead);
+        if (overlapping.length > 0) {
+          throw new BranchUpdateConflictError(input.branch, attempt, overlapping);
+        }
         parentCommitSha = movedHead;
       }
     },
@@ -992,41 +1049,33 @@ export function createGitHubRestHelper(params: {
       title: string;
       body: string;
     } | null> {
-      try {
-        const existing = await apiRequest<
-          Array<{
-            number: number;
-            html_url: string;
-            title?: string;
-            body?: string | null;
-            head?: { sha?: string };
-          }>
-        >(
-          "GET",
-          `/repos/${owner}/${repo}/pulls?state=open&head=${encodeURIComponent(
-            `${owner}:${headBranch}`
-          )}&base=${encodeURIComponent(baseBranch)}`,
-          undefined,
-          true
-        );
-        if (
-          Array.isArray(existing.data) &&
-          existing.data.length > 0 &&
-          existing.data[0]?.head?.sha
-        ) {
-          const first = existing.data[0]!;
-          return {
+      const existing = await apiRequest<
+        Array<{
+          number: number;
+          html_url: string;
+          title?: string;
+          body?: string | null;
+          head?: { sha?: string };
+        }>
+      >(
+        "GET",
+        `/repos/${owner}/${repo}/pulls?state=open&head=${encodeURIComponent(
+          `${owner}:${headBranch}`
+        )}&base=${encodeURIComponent(baseBranch)}`,
+        undefined,
+        true
+      );
+      const first = existing.data?.[0];
+      const headSha = first?.head?.sha;
+      return first && headSha
+        ? {
             number: first.number,
             html_url: first.html_url,
-            head_sha: first.head!.sha!,
+            head_sha: headSha,
             title: first.title ?? "",
             body: first.body ?? ""
-          };
-        }
-      } catch {
-        // Non-fatal in mock tests
-      }
-      return null;
+          }
+        : null;
     },
 
     async findMergedPullRequestByHead(
@@ -1186,12 +1235,15 @@ export function createGitHubRestHelper(params: {
         undefined,
         true
       );
-      const mergeBaseSha = res.data?.merge_base_commit?.sha ?? base;
-      const changedFiles = Array.isArray(res.data?.files)
-        ? res.data!.files
-            .map((f) => f.filename?.trim().replace(/^\/+/, "") ?? "")
-            .filter((p) => p.length > 0)
-        : [];
+      const mergeBaseSha = res.data?.merge_base_commit?.sha;
+      if (!mergeBaseSha) {
+        throw new Error(
+          `GitHub compare ${base}...${head} returned no merge base (HTTP ${res.status}): the branches cannot be compared.`
+        );
+      }
+      const changedFiles = (res.data?.files ?? [])
+        .map((f) => f.filename?.trim().replace(/^\/+/, "") ?? "")
+        .filter((p) => p.length > 0);
       return { mergeBaseSha, changedFiles, aheadBy: res.data?.ahead_by ?? 0 };
     },
 
@@ -1230,15 +1282,7 @@ export function createGitHubRestHelper(params: {
       return data?.mergeable_state ?? "unknown";
     },
 
-    async mergePullRequest(
-      prNumber: number,
-      input: {
-        headBranch: string;
-        baseBranch: string;
-        commitTitle: string;
-        commitMessage?: string | undefined;
-      }
-    ): Promise<void> {
+    async mergePullRequest(prNumber, input): Promise<void> {
       verifyPublisherMergeBoundary({
         headBranch: input.headBranch,
         baseBranch: input.baseBranch
@@ -1250,13 +1294,17 @@ export function createGitHubRestHelper(params: {
         {
           commit_title: input.commitTitle,
           commit_message: input.commitMessage ?? "",
-          merge_method: "squash"
+          merge_method: "squash",
+          sha: input.expectedHeadSha
         },
         false,
-        [405]
+        [405, 409]
       );
+      if (merged.status === 409) {
+        throw new PullRequestHeadMovedError(prNumber, input.expectedHeadSha);
+      }
       if (merged.status === 405) {
-        throw new PullRequestNotMergeableError(prNumber);
+        throw new PullRequestNotMergeableError(prNumber, merged.errorMessage);
       }
 
       const cleanHead = input.headBranch.trim().replace(/^refs\/heads\//, "");

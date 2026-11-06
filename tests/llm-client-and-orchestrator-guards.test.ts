@@ -2861,7 +2861,7 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
           .on("GET", `${git}/commits/parent_sha_1`, json({ tree: { sha: "base_tree_sha_1" } }))
           .on(
             "GET",
-            `${git}/trees/base_tree_sha_1?recursive=1`,
+            `${git}/trees/parent_sha_1?recursive=1`,
             json({
               tree: baseTreeBlobs.map((p) => ({ path: p, type: "blob", sha: "blob_existing" }))
             })

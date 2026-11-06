@@ -8,6 +8,7 @@ import {
   discoverExpectedExternalWorkflows,
   resolveLlmEscalationReason,
   waitForExternalCiChecks,
+  type NeedsHumanEscalationReason,
   type WaitForExternalCiChecksResult
 } from "../../execution/external-ci-gate.js";
 import { reconcileProvenTicketDependencies } from "../../execution/proven-dependency-unblocker.js";
@@ -49,7 +50,10 @@ import {
   type BaseSyncGuard
 } from "../github/branch-sync.js";
 import {
+  describeMergeRefusal,
+  isConflictRefusal,
   loadOrchestratorStateFromGitRef,
+  PullRequestHeadMovedError,
   PullRequestNotMergeableError
 } from "../github/rest-client.js";
 import { EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT } from "../prompts/code-discipline.js";
@@ -1323,6 +1327,7 @@ export async function runTicketExecutionLoop(
 
         currentPrHeadSha = taskPr.head_sha;
       }
+      const openTaskPr = taskPr;
 
       let reviewedCommitShas: readonly string[] = [];
 
@@ -1330,8 +1335,8 @@ export async function runTicketExecutionLoop(
       const resyncTaskPrIfConflicting = async (): Promise<
         OrchestrateIssueResult | undefined
       > => {
-        const mergeableState = await params.gh.getPullRequestMergeableState?.(
-          taskPr!.number
+        const mergeableState = await params.gh.getPullRequestMergeableState(
+          openTaskPr.number
         );
         if (mergeableState !== "dirty") {
           return undefined;
@@ -1342,8 +1347,8 @@ export async function runTicketExecutionLoop(
             reason: resync.escalationReason ?? "merge_conflict_unresolved",
             ticketNumber: ticket.ticketIssueNumber,
             branch: taskBranch,
-            prNumber: taskPr!.number,
-            prUrl: taskPr!.html_url,
+            prNumber: openTaskPr.number,
+            prUrl: openTaskPr.html_url,
             diagnosticExcerpt: resync.diagnosticExcerpt
           });
         }
@@ -1387,7 +1392,7 @@ export async function runTicketExecutionLoop(
 
         const reviewRes = await runMultiAgentPrReviewPass({
           repository: params.repository,
-          prNumber: taskPr!.number,
+          prNumber: openTaskPr.number,
           headBranch: taskBranch,
           baseBranch: params.featureBranch,
           ticketNumber: ticket.ticketIssueNumber,
@@ -1414,7 +1419,7 @@ export async function runTicketExecutionLoop(
           fetchImpl: params.fetchImpl
         });
 
-        await params.gh.postPullRequestReview(taskPr!.number, {
+        await params.gh.postPullRequestReview(openTaskPr.number, {
           commitId: passParams.headSha,
           body: reviewRes.review_body_markdown
         });
@@ -1461,7 +1466,7 @@ export async function runTicketExecutionLoop(
               subphase: "waiting_ticket_ci",
               active_ticket_number: ticket.ticketIssueNumber,
               active_task_branch: taskBranch,
-              active_pr_number: taskPr!.number,
+              active_pr_number: openTaskPr.number,
               active_head_sha: passParams.headSha
             })
           });
@@ -1469,7 +1474,7 @@ export async function runTicketExecutionLoop(
             `<!-- epure-state:${JSON.stringify(updatedWaiting.state)} -->`,
             updatedWaiting.issue_mirror_markdown,
             "",
-            `### ⏳ Attente événementielle CI externe (\`waiting_ticket_ci\`) — Ticket #${ticket.ticketIssueNumber} (PR #${taskPr!.number})`,
+            `### ⏳ Attente événementielle CI externe (\`waiting_ticket_ci\`) — Ticket #${ticket.ticketIssueNumber} (PR #${openTaskPr.number})`,
             `- **Branche du ticket** : \`${taskBranch}\` -> \`${params.featureBranch}\``,
             `- **HEAD SHA** : \`${passParams.headSha}\``,
             `- **Revue Multi-Agents (\`ai-review\`)** : \`${reviewRes.conclusion}\``,
@@ -2038,74 +2043,130 @@ export async function runTicketExecutionLoop(
       });
 
       const mergeTaskPr = () =>
-        params.gh.mergePullRequest(taskPr!.number, {
+        params.gh.mergePullRequest(openTaskPr.number, {
           headBranch: taskBranch,
           baseBranch: params.featureBranch,
+          expectedHeadSha: currentPrHeadSha,
           commitTitle: squashCommit.commit_title,
           commitMessage: squashCommit.commit_message
         });
-      // A refused merge gets one re-sync and re-verification, then a typed escalation.
-      const resyncAndRetryTaskPrMerge = async (
-        refusal: PullRequestNotMergeableError
-      ): Promise<OrchestrateIssueResult | undefined> => {
-        const resync = await syncTaskBranchWithFeature();
-        if (resync.status === "merged" || resync.status === "resolved") {
-          currentPrHeadSha = resync.headSha;
-          const pass = await runStage2AndStage3ForTaskPr({
-            headSha: currentPrHeadSha,
-            isReReviewPass: true,
-            reviewFixAttemptsUsed: reviewFixAttempt
-          });
-          if (pass.releasedForAsyncCi) {
-            return pass.releasedForAsyncCi;
-          }
-          if (
-            pass.reviewResult.conclusion === "failure" ||
-            !pass.ciGateResult.passed
-          ) {
-            return await params.escalateToNeedsHuman({
-              reason: "remediation_exhausted",
-              ticketNumber: ticket.ticketIssueNumber,
-              branch: taskBranch,
-              prNumber: taskPr!.number,
-              prUrl: taskPr!.html_url,
-              codeFixAttemptsUsed: reviewFixAttempt,
-              failedChecks: pass.ciGateResult.failedChecks,
-              mustFixFindings: pass.reviewResult.must_fix_findings,
-              diagnosticExcerpt: pass.ciGateResult.formattedDiagnostics
-            });
-          }
-          await params.gh.publishCheckRun({
-            name: "PR title",
-            headSha: currentPrHeadSha,
-            conclusion: "success",
-            summary: `Conventional Commit title verified: '${squashCommit.pr_title}'`
-          });
-          try {
-            await mergeTaskPr();
-            return undefined;
-          } catch (retryErr) {
-            if (!(retryErr instanceof PullRequestNotMergeableError)) {
-              throw retryErr;
-            }
-          }
-        }
-        return await params.escalateToNeedsHuman({
-          reason: resync.escalationReason ?? "merge_conflict_unresolved",
+      const escalateRefusedMerge = (
+        reason: NeedsHumanEscalationReason,
+        diagnosticExcerpt: string | undefined
+      ) =>
+        params.escalateToNeedsHuman({
+          reason,
           ticketNumber: ticket.ticketIssueNumber,
           branch: taskBranch,
-          prNumber: taskPr!.number,
-          prUrl: taskPr!.html_url,
-          diagnosticExcerpt: resync.diagnosticExcerpt ?? refusal.message
+          prNumber: openTaskPr.number,
+          prUrl: openTaskPr.html_url,
+          diagnosticExcerpt
         });
+      // A refused merge gets one re-verification of the new head (re-synced on a conflict, pushed by someone on a 409), then a typed escalation.
+      const reverifyAndRetryTaskPrMerge = async (
+        refusal: PullRequestNotMergeableError | PullRequestHeadMovedError
+      ): Promise<OrchestrateIssueResult | undefined> => {
+        if (refusal instanceof PullRequestHeadMovedError) {
+          const movedPr = await params.gh.findOpenPullRequestByHead(
+            taskBranch,
+            params.featureBranch
+          );
+          if (!movedPr) {
+            return await escalateRefusedMerge(
+              "pr_not_mergeable",
+              `${refusal.message} The pull request is no longer open.`
+            );
+          }
+          currentPrHeadSha = movedPr.head_sha;
+        } else {
+          const mergeableState = await params.gh.getPullRequestMergeableState(
+            openTaskPr.number
+          );
+          if (!isConflictRefusal(refusal, mergeableState)) {
+            return await escalateRefusedMerge(
+              "pr_not_mergeable",
+              describeMergeRefusal(refusal, mergeableState)
+            );
+          }
+          const resync = await syncTaskBranchWithFeature();
+          if (resync.status === "escalated") {
+            return await escalateRefusedMerge(
+              resync.escalationReason ?? "merge_conflict_unresolved",
+              resync.diagnosticExcerpt ?? refusal.message
+            );
+          }
+          if (resync.status === "up_to_date") {
+            return await escalateRefusedMerge(
+              "pr_not_mergeable",
+              describeMergeRefusal(refusal, mergeableState)
+            );
+          }
+          currentPrHeadSha = resync.headSha;
+        }
+        const pass = await runStage2AndStage3ForTaskPr({
+          headSha: currentPrHeadSha,
+          isReReviewPass: true,
+          reviewFixAttemptsUsed: reviewFixAttempt
+        });
+        if (pass.releasedForAsyncCi) {
+          return pass.releasedForAsyncCi;
+        }
+        if (
+          pass.reviewResult.conclusion === "failure" ||
+          !pass.ciGateResult.passed
+        ) {
+          return await params.escalateToNeedsHuman({
+            reason: "resync_verification_failed",
+            ticketNumber: ticket.ticketIssueNumber,
+            branch: taskBranch,
+            prNumber: openTaskPr.number,
+            prUrl: openTaskPr.html_url,
+            codeFixAttemptsUsed: reviewFixAttempt,
+            failedChecks: pass.ciGateResult.failedChecks,
+            mustFixFindings: pass.reviewResult.must_fix_findings,
+            diagnosticExcerpt: pass.ciGateResult.formattedDiagnostics
+          });
+        }
+        await params.gh.publishCheckRun({
+          name: "PR title",
+          headSha: currentPrHeadSha,
+          conclusion: "success",
+          summary: `Conventional Commit title verified: '${squashCommit.pr_title}'`
+        });
+        try {
+          await mergeTaskPr();
+          return undefined;
+        } catch (retryErr) {
+          if (retryErr instanceof PullRequestHeadMovedError) {
+            return await escalateRefusedMerge(
+              "branch_update_conflict",
+              retryErr.message
+            );
+          }
+          if (!(retryErr instanceof PullRequestNotMergeableError)) {
+            throw retryErr;
+          }
+          const mergeableState = await params.gh.getPullRequestMergeableState(
+            openTaskPr.number
+          );
+          return await escalateRefusedMerge(
+            isConflictRefusal(retryErr, mergeableState)
+              ? "merge_conflict_unresolved"
+              : "pr_not_mergeable",
+            describeMergeRefusal(retryErr, mergeableState)
+          );
+        }
       };
       try {
         await mergeTaskPr();
       } catch (err) {
-        if (!(err instanceof PullRequestNotMergeableError)) {
+        if (
+          !(err instanceof PullRequestNotMergeableError) &&
+          !(err instanceof PullRequestHeadMovedError)
+        ) {
           throw err;
         }
-        const refusedMergeResult = await resyncAndRetryTaskPrMerge(err);
+        const refusedMergeResult = await reverifyAndRetryTaskPrMerge(err);
         if (refusedMergeResult) {
           return {
             halted: true,

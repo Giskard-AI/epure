@@ -15,6 +15,7 @@ import { syncBranchWithBase } from "../../src/orchestrator/github/branch-sync.js
 import { createGitHubRateLimitedFetch } from "../../src/orchestrator/github/rate-limit.js";
 import {
   createGitHubRestHelper,
+  PullRequestHeadMovedError,
   PullRequestNotMergeableError
 } from "../../src/orchestrator/github/rest-client.js";
 import {
@@ -484,6 +485,14 @@ describeLive(
         prNumber = pr.data.number;
       }, HOOK_TIMEOUT_MS);
 
+      it("rest client merge pinned to a stale sha throws PullRequestHeadMovedError and does not merge", async () => {
+        const gh = createGitHubRestHelper({ repository: cfg.repository, token });
+        await expect(
+          gh.mergePullRequest(prNumber, { headBranch, baseBranch: `${NS}/merge-base`, expectedHeadSha: baseSha, commitTitle: "stale" })
+        ).rejects.toBeInstanceOf(PullRequestHeadMovedError);
+        expect(await gh.findMergedPullRequestByHead(headBranch, `${NS}/merge-base`)).toBeNull();
+      });
+
       it("PUT pulls/:n/merge with a stale sha is 409, then with the head sha merges 200", async () => {
         const stale = await api<{ message: string }>("PUT", `${R}/pulls/${prNumber}/merge`, { sha: baseSha, merge_method: "squash" });
         const merged = await api<{ merged: boolean; message: string; sha: string }>("PUT", `${R}/pulls/${prNumber}/merge`, { sha: headSha, merge_method: "squash" });
@@ -504,7 +513,7 @@ describeLive(
       it("rest client merge is idempotent on an already-merged PR", async () => {
         const gh = createGitHubRestHelper({ repository: cfg.repository, token });
         await expect(
-          gh.mergePullRequest(prNumber, { headBranch, baseBranch: `${NS}/merge-base`, commitTitle: "again" })
+          gh.mergePullRequest(prNumber, { headBranch, baseBranch: `${NS}/merge-base`, expectedHeadSha: headSha, commitTitle: "again" })
         ).resolves.toBeUndefined();
       });
 
@@ -550,7 +559,7 @@ describeLive(
         const gh = createGitHubRestHelper({ repository: cfg.repository, token });
         expect(await gh.findMergedPullRequestByHead(headBranch, base)).toBeNull();
         expect((await gh.listOpenPullRequestsByBase(base)).map((pr) => pr.number)).toEqual([prNumber]);
-        expect((await gh.compareCommits?.(base, headBranch))?.aheadBy).toBe(1);
+        expect((await gh.compareCommits(base, headBranch)).aheadBy).toBe(1);
       });
 
       it("a closer without repository access reads as permission none with the App token", async () => {
@@ -610,9 +619,9 @@ describeLive(
       it("a conflicting PR is dirty and its merge is refused with PullRequestNotMergeableError", async () => {
         const gh = createGitHubRestHelper({ repository: cfg.repository, token });
         expect(await settledMergeable(false)).toMatchObject({ mergeable: false, mergeable_state: "dirty" });
-        expect(await gh.getPullRequestMergeableState?.(prNumber)).toBe("dirty");
+        expect(await gh.getPullRequestMergeableState(prNumber)).toBe("dirty");
         await expect(
-          gh.mergePullRequest(prNumber, { headBranch: target, baseBranch: base, commitTitle: "refused" })
+          gh.mergePullRequest(prNumber, { headBranch: target, baseBranch: base, expectedHeadSha: targetHead, commitTitle: "refused" })
         ).rejects.toBeInstanceOf(PullRequestNotMergeableError);
       });
 

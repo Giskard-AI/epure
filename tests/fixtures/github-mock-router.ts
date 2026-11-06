@@ -254,6 +254,10 @@ export interface FakeGitDataApi {
   getCommit(sha: string): FakeCommit | undefined;
   isAncestor(ancestorSha: string, descendantSha: string): boolean;
   onBeforeNextRefWrite(ref: string, hook: () => void): void;
+  // Tree listings report `mode` for `path` in every commit (default `100644`).
+  setMode(path: string, mode: string): void;
+  // Recursive tree listings answer `truncated: true`, as GitHub does past 100,000 entries.
+  truncateTreeListings(): void;
 }
 
 function gitSha(type: string, payload: string): string {
@@ -275,6 +279,8 @@ export function installFakeGitDataApi(
   const objects = new Map<string, GitObject>();
   const refs = new Map<string, string>();
   const refWriteHooks = new Map<string, () => void>();
+  const modes = new Map<string, string>();
+  let treeListingsTruncated = false;
   const repoPath = `/repos/${escapeRegExp(repository)}`;
   const prefix = `${repoPath}/git`;
 
@@ -411,6 +417,12 @@ export function installFakeGitDataApi(
     isAncestor,
     onBeforeNextRefWrite: (ref, hook) => {
       refWriteHooks.set(ref, hook);
+    },
+    setMode: (path, mode) => {
+      modes.set(path, mode);
+    },
+    truncateTreeListings: () => {
+      treeListingsTruncated = true;
     }
   };
 
@@ -568,10 +580,10 @@ export function installFakeGitDataApi(
       }
       return json({
         sha: treeSha,
-        truncated: false,
+        truncated: treeListingsTruncated,
         tree: [...treeEntries(treeSha).entries()].map(([path, sha]) => ({
           path,
-          mode: "100644",
+          mode: modes.get(path) ?? "100644",
           type: "blob",
           sha,
           size: Buffer.byteLength(api.readBlob(sha) ?? "", "utf8")

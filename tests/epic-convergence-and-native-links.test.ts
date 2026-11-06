@@ -612,6 +612,7 @@ describe("EPURE Graphe GitHub Natif, Garde-fous d'Intégrité Inter-Tickets et C
             ? ["docs/adr/0031-first.md"]
             : ["docs/adr/0031-first.md", "docs/adr/0032-second.md"],
         listBranchBlobs: async () => new Map(),
+        compareCommits: async () => ({ aheadBy: 1, mergeBaseSha: "sha-dev", changedFiles: [] }),
         readSingleBranchFile: async (_branch: string, path: string) =>
           path.includes("0031")
             ? "# ADR-0031 : First\n"
@@ -719,7 +720,10 @@ describe("EPURE Graphe GitHub Natif, Garde-fous d'Intégrité Inter-Tickets et C
     ])("$id", async ({ pinnedPaths, expectedPaths }) => {
       const mockFetch: typeof fetch = async (input) => {
         const url = String(input);
-        if (url.includes("/git/trees/")) {
+        if (url.includes("/git/ref/heads/")) {
+          return new Response(JSON.stringify({ object: { sha: "sha-feature-head" } }), { status: 200 });
+        }
+        if (url.includes("/git/trees/sha-feature-head")) {
           return new Response(
             JSON.stringify({
               tree: [

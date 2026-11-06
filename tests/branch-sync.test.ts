@@ -164,7 +164,7 @@ describe("syncBranchWithBase — the sensitive-path guard covers only files chan
   });
 });
 
-describe("syncBranchWithBase — a resolution is rejected only for real Git conflict blocks (#104)", () => {
+describe("syncBranchWithBase — a resolution is rejected for any Git conflict marker line, a lone ======= line is kept (#104)", () => {
   it.each([
     {
       id: "rust-doc-comment-banner-is-kept",
@@ -206,6 +206,18 @@ describe("syncBranchWithBase — a resolution is rejected only for real Git conf
     {
       id: "crlf-conflict-block-escalates",
       resolved: "<<<<<<< ours\r\nexport const v = 'ours';\r\n=======\r\nexport const v = 'theirs';\r\n>>>>>>> theirs\r\n"
+    },
+    {
+      id: "stray-opening-marker-without-separator-escalates",
+      resolved: "<<<<<<< ours\nexport const v = 'both';\n"
+    },
+    {
+      id: "stray-closing-marker-escalates",
+      resolved: "export const v = 'both';\n>>>>>>>\n"
+    },
+    {
+      id: "stray-diff3-base-marker-escalates",
+      resolved: "export const v = 'both';\n||||||| base\n"
     }
   ])("$id", async ({ resolved }) => {
     const ctx = setup(CONFLICTING_SERVICE);
@@ -324,23 +336,92 @@ describe("GitHub REST helper — branch reads return null or empty only on 404 (
       await expect(gh.readDevWorkflowsMap("dev")).rejects.toThrow(/HTTP 403/);
     }
   });
+
+  type Gh = ReturnType<typeof createGitHubRestHelper>;
+  it.each([
+    { id: "open-pr-lookup-403-throws", read: (gh: Gh) => gh.findOpenPullRequestByHead("task/1-x", "feature/1-x") },
+    { id: "workspace-file-blob-403-throws", read: (gh: Gh) => gh.readBranchWorkspaceFiles("dev", "src/a.ts") },
+    { id: "trusted-roster-blob-403-throws", read: (gh: Gh) => gh.readTrustedBaseRosterFiles("dev") }
+  ])("$id", async ({ read }) => {
+    const router = createGitHubMockRouter()
+      .on("GET", `${R}/git/ref/heads/dev`, json({ object: { sha: "c".repeat(40) } }))
+      .on(
+        "GET",
+        new RegExp(`/git/trees/c{40}\\?recursive=1$`),
+        json({
+          tree: [
+            { path: "src/a.ts", type: "blob", sha: "b".repeat(40), size: 10 },
+            { path: ".agents/reviewers/standards-reviewer.md", type: "blob", sha: "d".repeat(40), size: 10 }
+          ]
+        })
+      )
+      .on("GET", /\/git\/blobs\//, json({ message: "Forbidden" }, 403))
+      .on("GET", /\/pulls\?state=open/, json({ message: "Forbidden" }, 403));
+    const gh = createGitHubRestHelper({ repository: REPO, token: "ghs_test", fetchImpl: router.fetch });
+
+    await expect(read(gh)).rejects.toThrow(/HTTP 403/);
+  });
+
+  it("a-branch-tree-is-fetched-once-per-commit-across-reads", async () => {
+    const router = createGitHubMockRouter()
+      .on("GET", `${R}/git/ref/heads/dev`, json({ object: { sha: "c".repeat(40) } }))
+      .on("GET", new RegExp(`/git/trees/c{40}\\?recursive=1$`), json({ tree: [{ path: "src/a.ts", type: "blob", sha: "b".repeat(40), size: 10 }] }))
+      .on("GET", /\/git\/blobs\//, json({ encoding: "base64", content: Buffer.from("a").toString("base64") }));
+    const gh = createGitHubRestHelper({ repository: REPO, token: "ghs_test", fetchImpl: router.fetch });
+
+    await gh.listBranchPaths("dev");
+    await gh.readBranchWorkspaceFiles("dev", "src/a.ts");
+    await gh.readTrustedBaseRosterFiles("dev");
+
+    expect(router.calls("GET", /\/git\/trees\//)).toBe(1);
+  });
 });
 
-describe("syncBranchWithBase — conflict reads stay bounded and a failed read never deletes a file (#110)", () => {
-  it("a-base-only-file-whose-read-fails-aborts-the-sync-and-stays-on-the-target", async () => {
+describe("syncBranchWithBase — conflict reads stay bounded and incomplete data never deletes a file (#110)", () => {
+  it("base-only-files-are-carried-as-their-blob-with-their-mode-without-being-read-or-re-uploaded", async () => {
+    const ctx = setup({
+      shared: { ...CONFLICTING_SERVICE.shared, "src/util.ts": "export const u = 1;\n", "bin/run.sh": "#!/bin/sh\necho 1\n" },
+      ours: CONFLICTING_SERVICE.ours,
+      theirs: { ...CONFLICTING_SERVICE.theirs, "src/util.ts": "export const u = 2;\n", "bin/run.sh": "#!/bin/sh\necho 2\n" }
+    });
+    ctx.git.setMode("bin/run.sh", "100755");
+    ctx.router.on("GET", /\/contents\/(src\/util\.ts|bin\/run\.sh)\?ref=/, json({ message: "Forbidden" }, 403));
+    answerConflictResolution(ctx.router, [{ path: "src/service.ts", content: RESOLVED_SERVICE }]);
+
+    const { result } = await sync(ctx);
+
+    const treeEntries = ctx.router.requests
+      .filter((r) => r.method === "POST" && r.path === `${R}/git/trees`)
+      .flatMap((r) => (r.body as { tree: Array<{ path: string; mode: string; sha: string | null }> }).tree);
+    const uploaded = ctx.router.requests
+      .filter((r) => r.method === "POST" && r.path === `${R}/git/blobs`)
+      .map((r) => (r.body as { content: string }).content);
+    expect(result.status).toBe("resolved");
+    expect(treeEntries.filter((e) => e.path !== "src/service.ts").sort((a, b) => a.path.localeCompare(b.path))).toEqual([
+      { path: "bin/run.sh", mode: "100755", type: "blob", sha: ctx.git.putBlob("#!/bin/sh\necho 2\n") },
+      { path: "src/util.ts", mode: "100644", type: "blob", sha: ctx.git.putBlob("export const u = 2;\n") }
+    ]);
+    expect(uploaded).toEqual([RESOLVED_SERVICE]);
+    expect(ctx.git.readFile(FEATURE, "src/util.ts")).toBe("export const u = 2;\n");
+  });
+
+  it("a-truncated-tree-listing-escalates-instead-of-inferring-deletions", async () => {
     const ctx = setup({
       shared: { ...CONFLICTING_SERVICE.shared, "src/util.ts": "export const u = 1;\n" },
       ours: CONFLICTING_SERVICE.ours,
-      theirs: { ...CONFLICTING_SERVICE.theirs, "src/util.ts": "export const u = 2;\n" }
+      theirs: CONFLICTING_SERVICE.theirs
     });
-    ctx.router.on("GET", /\/contents\/src\/util\.ts\?ref=/, json({ message: "Forbidden" }, 403));
+    ctx.git.truncateTreeListings();
     const headBefore = featureHead(ctx.git);
     answerConflictResolution(ctx.router, [{ path: "src/service.ts", content: RESOLVED_SERVICE }]);
 
-    await expect(sync(ctx)).rejects.toThrow(/HTTP 403/);
+    const { result, escalations } = await sync(ctx);
 
+    expect(result.status).toBe("escalated");
+    expect(escalations.map((e) => e.reason)).toEqual(["merge_conflict_unresolved"]);
+    expect(escalations[0]?.diagnosticExcerpt).toContain("truncated");
     expect(featureHead(ctx.git)).toBe(headBefore);
-    expect(ctx.git.readFile(FEATURE, "src/util.ts")).toBe("export const u = 1;\n");
+    expect(ctx.router.calls("POST", "/v1/chat/completions", "api.openai.com")).toBe(0);
   });
 
   it("a-representative-conflict-fetches-each-tree-once-and-reads-only-the-files-it-needs", async () => {
@@ -361,7 +442,7 @@ describe("syncBranchWithBase — conflict reads stay bounded and a failed read n
     expect(ctx.router.calls("GET", /\/git\/blobs\//)).toBe(0);
     expect(
       ctx.router.requests.filter((r) => r.path.includes("/contents/")).map((r) => r.path.split("?")[0]!.replace(`${R}/contents/`, ""))
-    ).toEqual(["src/util.ts", "src/service.ts", "src/service.ts", "src/service.ts"]);
+    ).toEqual(["src/service.ts", "src/service.ts", "src/service.ts"]);
     expect(ctx.git.readFile(FEATURE, "src/util.ts")).toBe("export const u = 2;\n");
     expect(ctx.git.readFile(FEATURE, "src/mod1.ts")).toBe("export const m1 = 'ours';\n");
   });
@@ -508,6 +589,29 @@ describe("commitFilesToBranch — branch writes never force over a concurrent pu
     expect(ctx.git.readFile(FEATURE, "src/epure.ts")).toBeUndefined();
   });
 
+  it.each([
+    { id: "concurrent-push-editing-a-written-path-raises-branch_update_conflict-without-overlaying-it", humanEdit: { "src/epure.ts": "export const e = 'human';\n" }, deletedFiles: [] },
+    { id: "concurrent-push-editing-a-deleted-path-raises-branch_update_conflict", humanEdit: { "README.md": "readme by a human\n" }, deletedFiles: ["README.md"] }
+  ])("$id", async ({ humanEdit, deletedFiles }) => {
+    const ctx = setupRepo();
+    ctx.git.commitFiles(FEATURE, { "src/epure.ts": "export const e = 0;\n" });
+    let humanCommit = "";
+    ctx.git.onBeforeNextRefWrite(`refs/heads/${FEATURE}`, () => {
+      humanCommit = ctx.git.commitFiles(FEATURE, humanEdit, "human push");
+    });
+
+    const commit = ctx.gh.commitFilesToBranch({
+      branch: FEATURE,
+      commitMessage: "feat: epure change",
+      files: [{ path: "src/epure.ts", content: "export const e = 1;\n" }],
+      deletedFiles
+    });
+
+    await expect(commit).rejects.toBeInstanceOf(BranchUpdateConflictError);
+    await expect(commit).rejects.toMatchObject({ overlappingPaths: Object.keys(humanEdit) });
+    expect(ctx.git.getRef(`refs/heads/${FEATURE}`)).toBe(humanCommit);
+  });
+
   it("ruleset-refusal-on-an-unmoved-branch-fails-once-with-the-ruleset-cause-(#108)", async () => {
     const ctx = setupRepo();
     const headBefore = ctx.git.getRef(`refs/heads/${FEATURE}`);
@@ -593,16 +697,27 @@ describe("/epure sync — a branch that keeps moving escalates branch_update_con
 describe("continue on green ticket CI — a task PR merge refused with 405 re-syncs once, then escalates typed (#105)", () => {
   const TASK = "task/42-sync";
 
-  async function runGreenTicketContinue(arrange: { taskChange: string; featureChange?: string; resolution: string }) {
+  interface GreenTicketArrange {
+    readonly taskChange: string;
+    readonly featureFiles?: Readonly<Record<string, string>>;
+    readonly resolution: string;
+    readonly mergeRefusal?: { readonly status: 405 | 409; readonly message: string };
+    readonly mergeableState?: string;
+    // A human pushes to the task branch between the review and the first merge attempt.
+    readonly movedHead?: boolean;
+  }
+
+  async function runGreenTicketContinue(arrange: GreenTicketArrange) {
     const router = createGitHubMockRouter();
     const git = installFakeGitDataApi(router, REPO);
     const base = git.commitFiles("dev", CONFLICTING_SERVICE.shared, "shared history");
     git.setRef(`refs/heads/${FEATURE}`, base);
     git.setRef(`refs/heads/${TASK}`, base);
     git.commitFiles(TASK, { "src/service.ts": arrange.taskChange }, "ticket work");
-    if (arrange.featureChange) {
-      git.commitFiles(FEATURE, { "src/service.ts": arrange.featureChange }, "other ticket merged");
+    if (arrange.featureFiles) {
+      git.commitFiles(FEATURE, arrange.featureFiles, "other ticket merged");
     }
+    const refusal = arrange.mergeRefusal ?? { status: 405, message: "Pull Request is not mergeable" };
     const taskHead = git.getRef(`refs/heads/${TASK}`)!;
     const store = createInMemoryGitRefStateStore();
     await updateIssueStateWithCas({
@@ -628,11 +743,31 @@ describe("continue on green ticket CI — a task PR merge refused with 405 re-sy
       .on("POST", `${R}/issues/${ISSUE}/comments`, json({ html_url: "c" }, 201))
       .on("GET", /\/actions\/runs\?head_sha=/, json({ workflow_runs: [{ id: 1, name: "CI", path: ".github/workflows/ci.yml", status: "completed", conclusion: "success" }] }))
       .on("GET", /\/commits\/[^/]+\/check-runs\?/, json({ check_runs: [{ id: 1, name: "CI", status: "completed", conclusion: "success" }, { id: 2, name: "ai-review", status: "completed", conclusion: "success" }] }))
-      .on("GET", /\/pulls\?state=open&head=/, json([{ number: 106, html_url: "pr106", title: "feat: x", head: { sha: taskHead } }]))
+      .on("GET", /\/pulls\?state=open&head=/, () =>
+        json(
+          router.calls("PUT", `${R}/pulls/106/merge`) > 1
+            ? []
+            : [{ number: 106, html_url: "pr106", title: "feat: x", head: { sha: git.getRef(`refs/heads/${TASK}`) } }]
+        )
+      )
+      .on("GET", /\/pulls\?state=closed&head=/, json([]))
+      .on("POST", `${R}/pulls/106/reviews`, json({}, 200))
+      .on("POST", `${R}/issues/106/comments`, json({ html_url: "c106" }, 201))
       .on("GET", `${R}/pulls/106/files`, json([{ filename: "src/service.ts", status: "modified", patch: "@@ -1 +1 @@" }]))
       .on("PATCH", `${R}/pulls/106`, json({ head: { sha: taskHead } }))
+      .on("GET", `${R}/pulls/106`, () =>
+        json({ number: 106, mergeable_state: router.calls("GET", `${R}/pulls/106`) === 1 ? (arrange.mergeableState ?? "dirty") : "clean" })
+      )
       .on("POST", `${R}/check-runs`, json({}, 201))
-      .on("PUT", `${R}/pulls/106/merge`, json({ message: "Pull Request is not mergeable" }, 405))
+      .on("PUT", `${R}/pulls/106/merge`, () => {
+        if (router.calls("PUT", `${R}/pulls/106/merge`) > 1) {
+          return json({ merged: true, sha: "squash-sha" });
+        }
+        if (arrange.movedHead) {
+          git.commitFiles(TASK, { "src/service.ts": "export const v = 'human';\n" }, "human push after review");
+        }
+        return json({ message: refusal.message }, refusal.status);
+      })
       .onHost("api.openai.com", "POST", "/v1/chat/completions", (req) => {
         const schema = (req.body as { response_format?: { json_schema?: { name?: string } } }).response_format?.json_schema?.name;
         const payload =
@@ -654,36 +789,74 @@ describe("continue on green ticket CI — a task PR merge refused with 405 re-sy
       model: "openai/gpt-test",
       asyncCiContinuation: true,
       stateStore: store,
-      fetchImpl: router.fetch
+      fetchImpl: router.fetch,
+      sandboxRunner: sandboxExitingWith(0)
     });
     const checkRuns = router.requests
       .filter((r) => r.method === "POST" && r.path === `${R}/check-runs`)
-      .map((r) => r.body as { name: string; head_sha: string });
+      .map((r) => r.body as { name: string; head_sha: string; output?: { summary?: string } });
+    const mergeShas = router.requests
+      .filter((r) => r.method === "PUT" && r.path === `${R}/pulls/106/merge`)
+      .map((r) => (r.body as { sha?: string }).sha);
     return {
       router,
       git,
       taskHead,
       result,
       checkRuns,
+      mergeShas,
       state: (await store.readRef(`refs/epure/state/${ISSUE}`)).state!
     };
   }
 
-  it("conflicting-task-branch-is-re-synced-as-a-merge-commit-and-ci-is-awaited-on-it", async () => {
+  it("task-branch-behind-is-re-synced-by-a-plain-merge-and-the-review-carries-over-while-ci-is-awaited", async () => {
     const run = await runGreenTicketContinue({
       taskChange: CONFLICTING_SERVICE.ours["src/service.ts"]!,
-      featureChange: CONFLICTING_SERVICE.theirs["src/service.ts"]!,
-      resolution: RESOLVED_SERVICE
+      featureFiles: { "src/other.ts": "export const o = 1;\n" },
+      resolution: RESOLVED_SERVICE,
+      mergeableState: "behind"
     });
     const newHead = run.git.getRef(`refs/heads/${TASK}`)!;
 
     expect(run.router.unmatched).toEqual([]);
+    expect(run.mergeShas).toEqual([run.taskHead]);
     expect(run.git.getCommit(newHead)!.parents).toEqual([run.taskHead, run.git.getRef(`refs/heads/${FEATURE}`)]);
-    expect(run.git.readFile(newHead, "src/service.ts")).toBe(RESOLVED_SERVICE);
     expect(run.state).toMatchObject({ status: "active", subphase: "waiting_ticket_ci", active_head_sha: newHead });
     expect(run.state.last_escalation).toBeUndefined();
     expect(run.checkRuns.filter((c) => c.name === "ai-review").map((c) => c.head_sha)).toEqual([newHead]);
-    expect(run.router.calls("PUT", `${R}/pulls/106/merge`)).toBe(1);
+  });
+
+  it.each([
+    {
+      id: "llm-resolved-conflict-is-reviewed-on-the-new-head-before-it-is-merged",
+      arrange: {
+        taskChange: CONFLICTING_SERVICE.ours["src/service.ts"]!,
+        featureFiles: { "src/service.ts": CONFLICTING_SERVICE.theirs["src/service.ts"]! },
+        resolution: RESOLVED_SERVICE
+      }
+    },
+    {
+      id: "head-moved-after-the-review-is-re-reviewed-before-it-is-merged",
+      arrange: {
+        taskChange: CONFLICTING_SERVICE.ours["src/service.ts"]!,
+        resolution: RESOLVED_SERVICE,
+        mergeRefusal: { status: 409, message: "Head branch was modified. Review and try the merge again." } as const,
+        movedHead: true
+      }
+    }
+  ])("$id", async ({ arrange }) => {
+    const run = await runGreenTicketContinue(arrange);
+    const mergedHead = run.mergeShas[1];
+
+    expect(run.router.unmatched).toEqual([]);
+    expect(run.mergeShas).toEqual([run.taskHead, expect.any(String)]);
+    expect(mergedHead).not.toBe(run.taskHead);
+    const aiReviews = run.checkRuns.filter((c) => c.name === "ai-review");
+    expect(aiReviews.length).toBeGreaterThan(0);
+    for (const check of aiReviews) {
+      expect([check.head_sha, check.output?.summary?.split(" (")[0]]).toEqual([mergedHead, "Conclusion: **success**"]);
+    }
+    expect(run.state.status).not.toBe("suspended");
   });
 
   it.each([
@@ -691,21 +864,34 @@ describe("continue on green ticket CI — a task PR merge refused with 405 re-sy
       id: "unresolvable-conflict-escalates-merge_conflict_unresolved",
       arrange: {
         taskChange: CONFLICTING_SERVICE.ours["src/service.ts"]!,
-        featureChange: CONFLICTING_SERVICE.theirs["src/service.ts"]!,
+        featureFiles: { "src/service.ts": CONFLICTING_SERVICE.theirs["src/service.ts"]! },
         resolution: "<<<<<<< ours\na\n=======\nb\n>>>>>>> theirs\n"
-      }
+      },
+      expected: { reason: "merge_conflict_unresolved", summary: "`MERGE_CONFLICT_UNRESOLVED`" }
     },
     {
-      id: "task-branch-already-up-to-date-escalates-merge_conflict_unresolved",
-      arrange: { taskChange: CONFLICTING_SERVICE.ours["src/service.ts"]!, resolution: RESOLVED_SERVICE }
+      id: "refusal-on-an-up-to-date-task-branch-escalates-pr_not_mergeable",
+      arrange: { taskChange: CONFLICTING_SERVICE.ours["src/service.ts"]!, resolution: RESOLVED_SERVICE, mergeableState: "clean" },
+      expected: { reason: "pr_not_mergeable", summary: "mergeable_state: `clean`" }
+    },
+    {
+      id: "refusal-by-a-ruleset-escalates-pr_not_mergeable-without-re-syncing",
+      arrange: {
+        taskChange: CONFLICTING_SERVICE.ours["src/service.ts"]!,
+        featureFiles: { "src/other.ts": "export const o = 1;\n" },
+        resolution: RESOLVED_SERVICE,
+        mergeRefusal: { status: 405, message: "Repository rule violations found" } as const,
+        mergeableState: "blocked"
+      },
+      expected: { reason: "pr_not_mergeable", summary: "Repository rule violations found (mergeable_state: `blocked`)" }
     }
-  ])("$id", async ({ arrange }) => {
+  ])("$id", async ({ arrange, expected }) => {
     const run = await runGreenTicketContinue(arrange);
 
     expect(run.router.unmatched).toEqual([]);
-    expect(run.state).toMatchObject({ status: "suspended", last_escalation: { reason: "merge_conflict_unresolved" } });
+    expect(run.state).toMatchObject({ status: "suspended", last_escalation: { reason: expected.reason } });
     expect(run.git.getRef(`refs/heads/${TASK}`)).toBe(run.taskHead);
-    expect(run.result.summary_markdown).toContain("`MERGE_CONFLICT_UNRESOLVED`");
+    expect(run.result.summary_markdown).toContain(expected.summary);
     expect(run.result.summary_markdown).not.toContain("Internal orchestrator error");
   });
 });

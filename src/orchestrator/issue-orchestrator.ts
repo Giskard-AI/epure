@@ -12,7 +12,8 @@ import {
   discoverExpectedExternalWorkflows,
   evaluateSingleExternalCiSnapshot,
   formatNeedsHumanEscalationComment,
-  resolveLlmEscalationReason
+  resolveLlmEscalationReason,
+  type NeedsHumanEscalationReason
 } from "../execution/external-ci-gate.js";
 import { LLMError } from "../llm/errors.js";
 import {
@@ -56,7 +57,10 @@ import {
 import {
   BranchUpdateConflictError,
   createGitHubRestHelper,
+  describeMergeRefusal,
+  isConflictRefusal,
   loadRepoAgentsConfig,
+  PullRequestHeadMovedError,
   PullRequestNotMergeableError,
   slugifyTitle,
   verifyPublisherMergeBoundary
@@ -1059,6 +1063,7 @@ export async function orchestrateIssueCommand(
                 taskBranchToMerge,
                 targetFeatureBranch
               )) !== null;
+            let ticketPrNeedsReview = false;
             if (prNumberToMerge > 0 && !mergedByHuman) {
               const prFiles = await gh.listPullRequestFiles(prNumberToMerge);
               const changedFilesForSquash = await Promise.all(
@@ -1106,16 +1111,45 @@ export async function orchestrateIssueCommand(
                 conclusion: "success",
                 summary: `Conventional Commit title verified: '${squashCommit.pr_title}'`
               });
+              let refusal: PullRequestNotMergeableError | undefined;
               try {
                 await gh.mergePullRequest(prNumberToMerge, {
                   headBranch: taskBranchToMerge,
                   baseBranch: targetFeatureBranch,
+                  expectedHeadSha: activeHeadSha,
                   commitTitle: squashCommit.commit_title,
                   commitMessage: squashCommit.commit_message
                 });
               } catch (err) {
-                if (!(err instanceof PullRequestNotMergeableError)) {
+                if (err instanceof PullRequestHeadMovedError) {
+                  ticketPrNeedsReview = true;
+                } else if (err instanceof PullRequestNotMergeableError) {
+                  refusal = err;
+                } else {
                   throw err;
+                }
+              }
+              if (refusal) {
+                const mergeableState = await gh.getPullRequestMergeableState(
+                  prNumberToMerge
+                );
+                const escalateRefusedMerge = (
+                  reason: NeedsHumanEscalationReason,
+                  diagnosticExcerpt: string
+                ) =>
+                  escalateSuspension({
+                    reason,
+                    ticketNumber: ticketNum,
+                    branch: taskBranchToMerge,
+                    prNumber: prNumberToMerge,
+                    prUrl: openTaskPr?.html_url,
+                    diagnosticExcerpt
+                  });
+                if (!isConflictRefusal(refusal, mergeableState)) {
+                  return await escalateRefusedMerge(
+                    "pr_not_mergeable",
+                    describeMergeRefusal(refusal, mergeableState)
+                  );
                 }
                 // A refused merge gets one re-sync; external CI then re-verifies the new head before the next merge.
                 const resync = await syncBranchWithBase({
@@ -1134,61 +1168,72 @@ export async function orchestrateIssueCommand(
                   sandboxRunner: effectiveInput.sandboxRunner,
                   reviewersDir
                 });
-                if (resync.status !== "merged" && resync.status !== "resolved") {
-                  return await escalateSuspension({
-                    reason: resync.escalationReason ?? "merge_conflict_unresolved",
-                    ticketNumber: ticketNum,
-                    branch: taskBranchToMerge,
-                    prNumber: prNumberToMerge,
-                    prUrl: openTaskPr?.html_url,
-                    diagnosticExcerpt: resync.diagnosticExcerpt ?? err.message
-                  });
+                if (resync.status === "escalated") {
+                  return await escalateRefusedMerge(
+                    resync.escalationReason ?? "merge_conflict_unresolved",
+                    resync.diagnosticExcerpt ?? refusal.message
+                  );
                 }
-                await gh.publishCheckRun({
-                  name: "ai-review",
-                  headSha: resync.headSha,
-                  conclusion: "success",
-                  summary: `Review of \`${activeHeadSha}\` carried over: \`${resync.headSha}\` only merges \`${targetFeatureBranch}\` into \`${taskBranchToMerge}\`.`
-                });
-                const updatedResynced = await updateIssueStateWithCas({
-                  issueNumber: effectiveInput.issueNumber,
-                  store,
-                  mutator: (prev) => ({
-                    ...prev,
-                    subphase: "waiting_ticket_ci",
-                    active_head_sha: resync.headSha
-                  })
-                });
-                return {
-                  executed: true,
-                  phase: updatedResynced.state.phase,
-                  status: updatedResynced.state.status,
-                  active_branch: updatedResynced.state.active_branch,
-                  summary_markdown: `PR #${prNumberToMerge} was not mergeable; \`${taskBranchToMerge}\` re-synced with \`${targetFeatureBranch}\` at \`${resync.headSha}\`. Waiting for external CI on the new head.`,
-                  created_ticket_numbers: [],
-                  feature_pr_url: ""
-                };
+                if (resync.status === "up_to_date") {
+                  return await escalateRefusedMerge(
+                    "pr_not_mergeable",
+                    describeMergeRefusal(refusal, mergeableState)
+                  );
+                }
+                if (resync.status === "resolved") {
+                  // The LLM-written conflict resolution is reviewed by the ticket loop below before any merge.
+                  ticketPrNeedsReview = true;
+                } else {
+                  await gh.publishCheckRun({
+                    name: "ai-review",
+                    headSha: resync.headSha,
+                    conclusion: "success",
+                    summary: `Review of \`${activeHeadSha}\` carried over: \`${resync.headSha}\` only merges \`${targetFeatureBranch}\` into \`${taskBranchToMerge}\`.`
+                  });
+                  const updatedResynced = await updateIssueStateWithCas({
+                    issueNumber: effectiveInput.issueNumber,
+                    store,
+                    mutator: (prev) => ({
+                      ...prev,
+                      subphase: "waiting_ticket_ci",
+                      active_head_sha: resync.headSha
+                    })
+                  });
+                  return {
+                    executed: true,
+                    phase: updatedResynced.state.phase,
+                    status: updatedResynced.state.status,
+                    active_branch: updatedResynced.state.active_branch,
+                    summary_markdown: `PR #${prNumberToMerge} was not mergeable; \`${taskBranchToMerge}\` re-synced with \`${targetFeatureBranch}\` at \`${resync.headSha}\`. Waiting for external CI on the new head.`,
+                    created_ticket_numbers: [],
+                    feature_pr_url: ""
+                  };
+                }
               }
             }
 
-            if (ticketNum !== effectiveInput.issueNumber) {
-              await gh.closeIssue(ticketNum);
-            }
+            if (ticketPrNeedsReview) {
+              forceOneRemediationRoundOnOpenPr = true;
+            } else {
+              if (ticketNum !== effectiveInput.issueNumber) {
+                await gh.closeIssue(ticketNum);
+              }
 
-            const updatedAfterTicketMerge = await updateIssueStateWithCas({
-              issueNumber: effectiveInput.issueNumber,
-              store,
-              mutator: (prev) => ({
-                ...prev,
-                subphase: "idle",
-                active_ticket_number: undefined,
-                active_task_branch: undefined,
-                active_pr_number: undefined,
-                active_head_sha: undefined,
-                code_fix_attempts_used: 0
-              })
-            });
-            currentState = updatedAfterTicketMerge.state;
+              const updatedAfterTicketMerge = await updateIssueStateWithCas({
+                issueNumber: effectiveInput.issueNumber,
+                store,
+                mutator: (prev) => ({
+                  ...prev,
+                  subphase: "idle",
+                  active_ticket_number: undefined,
+                  active_task_branch: undefined,
+                  active_pr_number: undefined,
+                  active_head_sha: undefined,
+                  code_fix_attempts_used: 0
+                })
+              });
+              currentState = updatedAfterTicketMerge.state;
+            }
           } else {
             const attemptsUsed = readActiveCodeFixAttempts(currentState);
             if (attemptsUsed >= maxCodeFixAttempts) {

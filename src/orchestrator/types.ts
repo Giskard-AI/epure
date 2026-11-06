@@ -226,6 +226,8 @@ export interface GitHubRestHelper {
     fromBranch?: string;
     commitMessage: string;
     files: ReadonlyArray<{ path: string; content: string }>;
+    // Files committed as the existing blob (SHA and mode kept), e.g. base-only files carried by a sync merge.
+    readonly blobs?: ReadonlyArray<{ readonly path: string } & GitBlobRef> | undefined;
     readonly deletedFiles?: readonly string[] | undefined;
     // Second parent: the commit is then a merge commit, so Git records `mergeParentSha` as merged.
     readonly mergeParentSha?: string | undefined;
@@ -278,7 +280,8 @@ export interface GitHubRestHelper {
     status: "merged" | "up_to_date" | "conflict";
     sha: string;
   }>;
-  compareCommits?(
+  // Throws when GitHub returns no merge base (unknown ref or unrelated histories).
+  compareCommits(
     base: string,
     head: string
   ): Promise<{
@@ -291,13 +294,15 @@ export interface GitHubRestHelper {
     params: { commitId: string; body: string }
   ): Promise<void>;
   // GitHub `mergeable_state` (`dirty` = merge conflicts; `unknown` while GitHub computes it).
-  getPullRequestMergeableState?(prNumber: number): Promise<string>;
-  // Throws `PullRequestNotMergeableError` when GitHub refuses the merge (HTTP 405).
+  getPullRequestMergeableState(prNumber: number): Promise<string>;
+  // Squash-merges only if the head is still `expectedHeadSha`: throws `PullRequestHeadMovedError` (HTTP 409)
+  // otherwise, and `PullRequestNotMergeableError` when GitHub refuses the merge (HTTP 405).
   mergePullRequest(
     prNumber: number,
     params: {
       headBranch: string;
       baseBranch: string;
+      expectedHeadSha: string;
       commitTitle: string;
       commitMessage?: string | undefined;
     }

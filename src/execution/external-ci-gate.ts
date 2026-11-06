@@ -162,6 +162,8 @@ export type NeedsHumanEscalationReason =
   | "sensitive_path_violation"
   | "merge_conflict_unresolved"
   | "merge_conflict_stage1_failed"
+  | "pr_not_mergeable"
+  | "resync_verification_failed"
   | "wall_clock_budget_exhausted"
   | "transient_llm_api_exhausted"
   | "llm_quota_or_auth_failure"
@@ -1240,6 +1242,12 @@ export function formatNeedsHumanEscalationComment(
   } else if (input.reason === "merge_conflict_stage1_failed") {
     reasonHeadline =
       "Automated 3-way conflict resolution failed Stage 1 Sandbox verification (`MERGE_CONFLICT_STAGE1_FAILED`)";
+  } else if (input.reason === "pr_not_mergeable") {
+    reasonHeadline =
+      "GitHub refused the merge for a reason a re-sync cannot fix (merge method, ruleset or required review/check) (`pr_not_mergeable`) — code-fix budget preserved";
+  } else if (input.reason === "resync_verification_failed") {
+    reasonHeadline =
+      "Review or CI failed on the re-synced head after GitHub refused the merge (`resync_verification_failed`) — code-fix budget preserved";
   } else if (input.reason === "transient_llm_api_exhausted") {
     reasonHeadline =
       "Transient LLM API retries or unitary request timeout exhausted (`max_transient_api_retries`) — code-fix budget preserved";
