@@ -601,7 +601,9 @@ export async function orchestrateIssueCommand(
       if (
         !isAutomaticEntry &&
         (effectiveInput.command === "continue" ||
-          effectiveInput.command === "approve") &&
+          effectiveInput.command === "approve" ||
+          effectiveInput.command === "sync" ||
+          effectiveInput.command === "rebase") &&
         heldLease &&
         !heldLease.stale &&
         heldLease.runId !== runId

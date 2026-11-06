@@ -1520,7 +1520,9 @@ describe("A run lease keeps a second run off a plan until the first one finishes
 
   it.each([
     { id: "manual-continue-while-a-fresh-lease-is-held-is-refused-with-an-explanation", command: "continue" },
-    { id: "manual-approve-while-a-fresh-lease-is-held-is-refused-with-an-explanation", command: "approve" }
+    { id: "manual-approve-while-a-fresh-lease-is-held-is-refused-with-an-explanation", command: "approve" },
+    { id: "sync-while-a-fresh-lease-is-held-is-refused-with-an-explanation", command: "sync" },
+    { id: "rebase-while-a-fresh-lease-is-held-is-refused-with-an-explanation", command: "rebase" }
   ] as const)("$id", async ({ command }) => {
     const store = await seedState(claimedBy(FUTURE, "implementing_ticket"));
     const before = await readState(store);
