@@ -4,6 +4,7 @@ import type { CustomDomainReviewerSpec } from "../review/reviewer-roster.js";
 import {
   applyGitHubRepositoryGovernance,
   planAndApplyRepoSetup,
+  planGitHubRulesetChanges,
   type AgentsConfigOverrides
 } from "./setup-repo.js";
 
@@ -174,26 +175,49 @@ async function main(): Promise<void> {
     dryRun: args.dryRun
   });
 
-  if (result.status !== "error" && !args.dryRun && args.applyGithubSettings) {
+  let githubRulesetsPlan:
+    | Awaited<ReturnType<typeof planGitHubRulesetChanges>>
+    | undefined;
+  if (result.status !== "error" && args.applyGithubSettings) {
     const token = resolveGitHubToken(args.githubToken);
     if (!token) {
       throw new Error(
         "Missing GitHub token for --apply-github-settings. Authenticate via 'gh auth login' or set GITHUB_TOKEN."
       );
     }
-    await applyGitHubRepositoryGovernance({
+    const governanceInput = {
       repository: args.repository,
       githubToken: token,
       governanceRulesets: result.governance_rulesets,
       agentAppIntegrationId: args.agentAppIntegrationId,
       releaseAppIntegrationId: args.releaseAppIntegrationId
-    });
+    };
+    if (args.dryRun) {
+      githubRulesetsPlan = await planGitHubRulesetChanges(governanceInput);
+    } else {
+      await applyGitHubRepositoryGovernance(governanceInput);
+    }
   }
 
   if (args.json) {
-    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    process.stdout.write(
+      `${JSON.stringify(
+        githubRulesetsPlan
+          ? { ...result, github_rulesets_plan: githubRulesetsPlan }
+          : result,
+        null,
+        2
+      )}\n`
+    );
   } else {
     process.stdout.write(`${result.summary_markdown}\n`);
+    if (githubRulesetsPlan) {
+      process.stdout.write(
+        `\n#### GitHub Rulesets (dry-run against ${args.repository})\n${githubRulesetsPlan
+          .map((p) => `- \`${p.name}\`: \`${p.action}\``)
+          .join("\n")}\n`
+      );
+    }
   }
 
   if (result.status === "error") {

@@ -65,7 +65,8 @@ export {
   type UserAdvocatePayload
 } from "./prompts/schemas.js";
 
-export type OrchestratorCommand = EpureCommandName;
+/** `closed` is the internal command for an `issues: closed` event, never a `/epure` comment. */
+export type OrchestratorCommand = EpureCommandName | "closed";
 
 export interface IssueCommentRecord {
   readonly id: number;
@@ -75,9 +76,24 @@ export interface IssueCommentRecord {
     readonly type?: string | undefined;
   };
   readonly created_at: string;
+  readonly author_association?: string | undefined;
+  readonly performed_via_github_app?: GitHubAppRef | null | undefined;
+}
+
+export interface GitHubAppRef {
+  readonly id?: number | undefined;
+  readonly slug?: string | undefined;
 }
 
 export type IssueCommentSummary = IssueCommentRecord;
+
+export type CollaboratorPermission =
+  | "admin"
+  | "maintain"
+  | "write"
+  | "triage"
+  | "read"
+  | "none";
 
 export interface IssueMetadata {
   readonly id?: number | undefined;
@@ -91,6 +107,9 @@ export interface IssueMetadata {
     | "reopened"
     | null
     | undefined;
+  readonly user?: { readonly login: string } | undefined;
+  readonly performed_via_github_app?: GitHubAppRef | null | undefined;
+  readonly is_pull_request?: boolean | undefined;
 }
 
 export interface TrackedTicketCommentMetadata {
@@ -119,7 +138,7 @@ export interface ExecutedTicketRecord {
 export interface OrchestrateIssueInput {
   readonly repository: string;
   readonly issueNumber: number;
-  readonly command: EpureCommandName;
+  readonly command: OrchestratorCommand;
   readonly commandArgs: string;
   readonly commentId?: number | undefined;
   readonly actor: string;
@@ -137,7 +156,16 @@ export interface OrchestrateIssueInput {
     | undefined;
   readonly asyncCiContinuation?: boolean | undefined;
   readonly triggerHeadSha?: string | undefined;
-  readonly triggerBranch?: string | undefined;
+  // Identifies this run in the plan's lease (`claimed_by_run_id`); a random id when absent.
+  readonly runId?: string | undefined;
+  // The Actions job running this command: the lease lasts the `timeout-minutes` GitHub enforces on it.
+  readonly workflowJob?: WorkflowJobRef | undefined;
+}
+
+export interface WorkflowJobRef {
+  readonly path: string;
+  readonly ref: string;
+  readonly jobId: string;
 }
 
 export type IssueOrchestratorInput = OrchestrateIssueInput;
@@ -150,14 +178,22 @@ export interface OrchestrateIssueResult {
   readonly summary_markdown: string;
   readonly created_ticket_numbers: readonly number[];
   readonly feature_pr_url: string;
+  /** Set when the run stopped in a waiting_* sub-phase for external CI on this head. */
+  readonly waiting_ci_head_sha?: string | undefined;
 }
 
 export type IssueOrchestratorResult = OrchestrateIssueResult;
+
+export interface GitBlobRef {
+  readonly sha: string;
+  readonly mode: string;
+}
 
 export interface GitHubRestHelper {
   readonly token: string;
   getIssue(issueNumber: number): Promise<IssueMetadata>;
   listIssueComments(issueNumber: number): Promise<IssueCommentRecord[]>;
+  getCollaboratorPermission(username: string): Promise<CollaboratorPermission>;
   postIssueComment(issueNumber: number, body: string): Promise<string>;
   ensureLabel(name: string, color: string, description: string): Promise<void>;
   addIssueLabels(issueNumber: number, labels: readonly string[]): Promise<void>;
@@ -179,13 +215,24 @@ export interface GitHubRestHelper {
     parentIssueNumber: number,
     subIssueDatabaseId: number
   ): Promise<void>;
+  listSubIssueNumbers?(parentIssueNumber: number): Promise<number[]>;
   addIssueBlockedByDependency?(
     issueNumber: number,
     blockerDatabaseId: number
   ): Promise<void>;
-  closeIssue(issueNumber: number): Promise<void>;
+  closeIssue(
+    issueNumber: number,
+    stateReason?: "completed" | "not_planned"
+  ): Promise<void>;
   getDefaultBranchSha(branch: string): Promise<string | null>;
-  listBranchPaths(branch: string): Promise<string[]>;
+  // Files directly in `dirPath` (empty when it does not exist); throws when GitHub caps the listing.
+  listDirectoryPaths(branch: string, dirPath: string): Promise<string[]>;
+  // Partial (with a warning) when GitHub truncates the tree: hints and prompt context only, never absence checks.
+  listBranchPathHints(branch: string): Promise<string[]>;
+  // Path -> blob of every file at a branch or commit SHA (empty when the ref does not exist).
+  listBranchBlobs(
+    branchOrSha: string
+  ): Promise<ReadonlyMap<string, GitBlobRef>>;
   readSingleBranchFile(
     branch: string,
     filePath: string
@@ -207,7 +254,11 @@ export interface GitHubRestHelper {
     fromBranch?: string;
     commitMessage: string;
     files: ReadonlyArray<{ path: string; content: string }>;
+    // Files committed as the existing blob (SHA and mode kept), e.g. base-only files carried by a sync merge.
+    readonly blobs?: ReadonlyArray<{ readonly path: string } & GitBlobRef> | undefined;
     readonly deletedFiles?: readonly string[] | undefined;
+    // Second parent: the commit is then a merge commit, so Git records `mergeParentSha` as merged.
+    readonly mergeParentSha?: string | undefined;
   }): Promise<string>;
   listPullRequestFiles(
     prNumber: number
@@ -228,6 +279,14 @@ export interface GitHubRestHelper {
     title: string;
     body: string;
   } | null>;
+  findMergedPullRequestByHead(
+    headBranch: string,
+    baseBranch: string
+  ): Promise<{ number: number; html_url: string } | null>;
+  listOpenPullRequestsByBase(
+    baseBranch: string
+  ): Promise<ReadonlyArray<{ number: number; html_url: string }>>;
+  listBranchesByPrefix(prefix: string): Promise<string[]>;
   openPullRequest(params: {
     head: string;
     base: string;
@@ -250,22 +309,29 @@ export interface GitHubRestHelper {
     status: "merged" | "up_to_date" | "conflict";
     sha: string;
   }>;
-  compareCommits?(
+  // Throws when GitHub returns no merge base (unknown ref or unrelated histories).
+  compareCommits(
     base: string,
     head: string
   ): Promise<{
     mergeBaseSha: string;
     changedFiles: readonly string[];
+    aheadBy: number;
   }>;
   postPullRequestReview(
     prNumber: number,
     params: { commitId: string; body: string }
   ): Promise<void>;
+  // GitHub `mergeable_state` (`dirty` = merge conflicts; `unknown` while GitHub computes it).
+  getPullRequestMergeableState(prNumber: number): Promise<string>;
+  // Squash-merges only if the head is still `expectedHeadSha`: throws `PullRequestHeadMovedError` (HTTP 409)
+  // otherwise, and `PullRequestNotMergeableError` when GitHub refuses the merge (HTTP 405).
   mergePullRequest(
     prNumber: number,
     params: {
       headBranch: string;
       baseBranch: string;
+      expectedHeadSha: string;
       commitTitle: string;
       commitMessage?: string | undefined;
     }
@@ -298,6 +364,7 @@ export interface EscalateToNeedsHumanParams {
   prUrl?: string | undefined;
   featurePrUrl?: string | undefined;
   codeFixAttemptsUsed?: number | undefined;
+  budgetScope?: "ticket" | "feature" | undefined;
   failedChecks?: WaitForExternalCiChecksResult["failedChecks"] | undefined;
   mustFixFindings?: ReadonlyArray<ReviewerFinding> | undefined;
   sensitivePaths?: ReadonlyArray<string> | undefined;

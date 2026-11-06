@@ -2,12 +2,22 @@ import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   mintRepositoryInstallationToken,
   revokeGitHubInstallationToken
 } from "../../src/auth/github-app-jwt.js";
-import { createGitHubRestHelper } from "../../src/orchestrator/github/rest-client.js";
+import {
+  buildGitHubRulesetApiPayload,
+  buildGovernanceRulesets
+} from "../../src/bootstrap/setup-repo.js";
+import { syncBranchWithBase } from "../../src/orchestrator/github/branch-sync.js";
+import { createGitHubRateLimitedFetch } from "../../src/orchestrator/github/rate-limit.js";
+import {
+  createGitHubRestHelper,
+  PullRequestHeadMovedError,
+  PullRequestNotMergeableError
+} from "../../src/orchestrator/github/rest-client.js";
 import {
   createGitHubApiRefStateStore,
   updateIssueStateWithCas,
@@ -100,11 +110,11 @@ describeLive(
     let baseSha = "";
     const R = `/repos/${cfg.repository}`;
 
-    async function api<T>(method: string, path: string, body?: unknown): Promise<ApiResult<T>> {
+    async function api<T>(method: string, path: string, body?: unknown, auth: string = token): Promise<ApiResult<T>> {
       const resp = await fetch(`https://api.github.com${path}`, {
         method,
         headers: {
-          Authorization: `Bearer ${token}`,
+          Authorization: `Bearer ${auth}`,
           Accept: "application/vnd.github+json",
           "X-GitHub-Api-Version": "2022-11-28"
         },
@@ -118,24 +128,24 @@ describeLive(
       };
     }
 
-    async function commitOnTop(parents: readonly string[], path: string, content: string): Promise<string> {
-      const parent = await api<{ tree: { sha: string } }>("GET", `${R}/git/commits/${parents[0]}`);
-      const blob = await api<{ sha: string }>("POST", `${R}/git/blobs`, { content, encoding: "utf-8" });
+    async function commitOnTop(parents: readonly string[], path: string, content: string, auth: string = token): Promise<string> {
+      const parent = await api<{ tree: { sha: string } }>("GET", `${R}/git/commits/${parents[0]}`, undefined, auth);
+      const blob = await api<{ sha: string }>("POST", `${R}/git/blobs`, { content, encoding: "utf-8" }, auth);
       const tree = await api<{ sha: string }>("POST", `${R}/git/trees`, {
         base_tree: parent.data.tree.sha,
         tree: [{ path, mode: "100644", type: "blob", sha: blob.data.sha }]
-      });
+      }, auth);
       const commit = await api<{ sha: string }>("POST", `${R}/git/commits`, {
         message: `test(${NS}): ${path}`,
         tree: tree.data.sha,
         parents
-      });
+      }, auth);
       return commit.data.sha;
     }
 
-    async function createBranch(name: string, sha: string): Promise<string> {
+    async function createBranch(name: string, sha: string, auth: string = token): Promise<string> {
       const ref = `refs/heads/${NS}/${name}`;
-      const res = await api("POST", `${R}/git/refs`, { ref, sha });
+      const res = await api("POST", `${R}/git/refs`, { ref, sha }, auth);
       expect(res.status).toBe(201);
       return `${NS}/${name}`;
     }
@@ -148,10 +158,10 @@ describeLive(
       };
     }
 
-    function fetchWithConcurrentWriterBeforeStatePatch(writer: () => Promise<void>): typeof fetch {
+    function fetchWithConcurrentWriterBeforeStateUpdate(writer: () => Promise<void>): typeof fetch {
       let armed = true;
       return async (input, init) => {
-        if (armed && init?.method === "PATCH" && String(input).includes("/git/refs/epure/state/")) {
+        if (armed && init?.method === "POST" && String(input).endsWith("/graphql")) {
           armed = false;
           await writer();
         }
@@ -342,6 +352,39 @@ describeLive(
         expect(res.data).toMatchObject({ ref, object: { sha: blobB.data.sha, type: "blob" } });
         expect(after.data.object.sha).toBe(blobB.data.sha);
       });
+
+      it.each([
+        { id: "commit-ref-matching-beforeOid-moves-the-ref", stale: false, from: "commit", accepted: true },
+        { id: "commit-ref-stale-beforeOid-is-rejected-with-an-error-payload", stale: true, from: "commit", accepted: false },
+        { id: "legacy-blob-ref-is-rejected-even-with-a-matching-beforeOid", stale: false, from: "blob", accepted: false }
+      ] as const)("GraphQL updateRefs precondition on refs/epure/state/* [$id]", async ({ id, stale, from, accepted }) => {
+        const object = async (type: "blob" | "commit", content: string) =>
+          type === "blob"
+            ? (await api<{ sha: string }>("POST", `${R}/git/blobs`, { content, encoding: "utf-8" })).data.sha
+            : (await api<{ sha: string }>("POST", `${R}/git/commits`, { message: content, tree: "4b825dc642cb6eb9a060e54bf8d69288fbee4904", parents: [] })).data.sha;
+        const shas = {
+          current: await object(from, `{"v":1,"id":"${id}"}`),
+          next: await object("commit", `{"v":2,"id":"${id}"}`),
+          other: await object(from, `{"v":0,"id":"${id}"}`)
+        };
+        const ref = `refs/epure/state/${NS}/graphql-${id}`;
+        expect((await api("POST", `${R}/git/refs`, { ref, sha: shas.current })).status).toBe(201);
+        const repo = await api<{ node_id: string }>("GET", R);
+
+        const res = await api<{ data?: { updateRefs?: unknown }; errors?: unknown[] }>("POST", "/graphql", {
+          query: "mutation($repositoryId: ID!, $refUpdates: [RefUpdate!]!) { updateRefs(input: {repositoryId: $repositoryId, refUpdates: $refUpdates}) { clientMutationId } }",
+          variables: {
+            repositoryId: repo.data.node_id,
+            refUpdates: [{ name: ref, beforeOid: stale ? shas.other : shas.current, afterOid: shas.next, force: true }]
+          }
+        });
+        const after = await api<{ object: { sha: string } }>("GET", `${R}/git/${ref.replace(/^refs\//, "ref/")}`);
+
+        expect(res.status).toBe(200);
+        expect(Boolean(res.data.data?.updateRefs)).toBe(accepted);
+        expect(Boolean(res.data.errors?.length)).toBe(!accepted);
+        expect(after.data.object.sha).toBe(accepted ? shas.next : shas.current);
+      });
     });
 
     describe("concurrent CAS on refs/epure/state/* (createGitHubApiRefStateStore)", () => {
@@ -353,19 +396,20 @@ describeLive(
         );
         const writer = async () => {
           const current = await plainStore.readRef(stateRef);
-          const blob = await api<{ sha: string }>("POST", `${R}/git/blobs`, {
-            content: JSON.stringify({ ...current.state, status: "cancelled" }),
-            encoding: "utf-8"
+          const competing = await plainStore.compareAndSwapRef(stateRef, current.sha, {
+            ...current.state!,
+            version: current.state!.version + 1,
+            status: "cancelled"
           });
-          await api("PATCH", `${R}/git/refs/epure/state/${NS}/${issueNumber}`, { sha: blob.data.sha, force: true });
-          competingWrites.push(blob.data.sha);
+          expect(competing.swapped).toBe(true);
+          competingWrites.push(competing.newSha);
         };
         await updateIssueStateWithCas({ issueNumber, store: plainStore, mutator: (prev) => ({ ...prev, phase: "implementation" }) });
         const racingStore = namespacedStore(
           createGitHubApiRefStateStore({
             repository: cfg.repository,
             githubToken: token,
-            fetchImpl: fetchWithConcurrentWriterBeforeStatePatch(writer)
+            fetchImpl: fetchWithConcurrentWriterBeforeStateUpdate(writer)
           })
         );
         const result = await updateIssueStateWithCas({
@@ -380,42 +424,46 @@ describeLive(
         return { result, final, competingWrites };
       }
 
-      it("current: force-true PATCH silently overwrites the concurrent write", async () => {
-        const { result, final, competingWrites } = await seedAndRaceOnce(1);
+      it("concurrent write between the CAS read and the ref update is detected and retried without a lost update", async () => {
+        const { result, final, competingWrites } = await seedAndRaceOnce(2);
         expect(competingWrites).toHaveLength(1);
-        expect(result.cas_conflicts_recovered).toBe(0);
-        expect(final.status).not.toBe("cancelled");
-      });
-
-      it.fails("target: concurrent write is detected and retried without a lost update", async () => {
-        const { result, final } = await seedAndRaceOnce(2);
         expect(result.cas_conflicts_recovered).toBe(1);
         expect(final.status).toBe("cancelled");
         expect(final.last_processed_comment_id).toBe(42);
       });
     });
 
-    describe("legacy state format (ref -> JSON blob)", () => {
-      it("current: reader reads blob-backed state written by the current writer", async () => {
+    describe("state format (ref -> state commit; legacy ref -> JSON blob)", () => {
+      it("the writer stores state as an empty-tree commit chained on the previous state commit", async () => {
         const issueNumber = 3;
         const store = namespacedStore(createGitHubApiRefStateStore({ repository: cfg.repository, githubToken: token }));
         await updateIssueStateWithCas({ issueNumber, store, mutator: (prev) => ({ ...prev, phase: "spec" }) });
-
-        const ref = await api<{ object: { type: string } }>("GET", `${R}/git/ref/epure/state/${NS}/${issueNumber}`);
-        const snapshot = await store.readRef(`refs/epure/state/${issueNumber}`);
-        expect(ref.data.object.type).toBe("blob");
-        expect(snapshot.state?.phase).toBe("spec");
-      });
-
-      it.fails("target: a write on a legacy blob ref migrates it to a fast-forwardable commit", async () => {
-        const issueNumber = 4;
-        const store = namespacedStore(createGitHubApiRefStateStore({ repository: cfg.repository, githubToken: token }));
-        await updateIssueStateWithCas({ issueNumber, store, mutator: (prev) => ({ ...prev, phase: "spec" }) });
+        const first = await store.readRef(`refs/epure/state/${issueNumber}`);
         await updateIssueStateWithCas({ issueNumber, store, mutator: (prev) => ({ ...prev, phase: "tickets" }) });
 
-        const ref = await api<{ object: { type: string } }>("GET", `${R}/git/ref/epure/state/${NS}/${issueNumber}`);
+        const ref = await api<{ object: { type: string; sha: string } }>("GET", `${R}/git/ref/epure/state/${NS}/${issueNumber}`);
+        const commit = await api<{ parents: Array<{ sha: string }> }>("GET", `${R}/git/commits/${ref.data.object.sha}`);
         expect(ref.data.object.type).toBe("commit");
-        expect((await store.readRef(`refs/epure/state/${issueNumber}`)).state?.phase).toBe("tickets");
+        expect(commit.data.parents.map((p) => p.sha)).toEqual([first.sha]);
+        expect((await store.readRef(`refs/epure/state/${issueNumber}`)).state).toMatchObject({ phase: "tickets", version: 2 });
+      });
+
+      it("a write on a legacy JSON-blob ref reads it then migrates it to a state commit", async () => {
+        const issueNumber = 4;
+        const ref = `refs/epure/state/${NS}/${issueNumber}`;
+        const store = namespacedStore(createGitHubApiRefStateStore({ repository: cfg.repository, githubToken: token }));
+        const legacy = await api<{ sha: string }>("POST", `${R}/git/blobs`, {
+          content: JSON.stringify({ issue_number: issueNumber, version: 3, phase: "spec", status: "active", active_branch: "", last_processed_comment_id: 7, code_fix_attempts_used: 0, transient_retries_used: 0, updated_at: new Date().toISOString() }, null, 2),
+          encoding: "utf-8"
+        });
+        expect((await api("POST", `${R}/git/refs`, { ref, sha: legacy.data.sha })).status).toBe(201);
+        expect((await store.readRef(`refs/epure/state/${issueNumber}`)).state?.phase).toBe("spec");
+
+        await updateIssueStateWithCas({ issueNumber, store, mutator: (prev) => ({ ...prev, phase: "tickets" }) });
+
+        const after = await api<{ object: { type: string } }>("GET", `${R}/git/${ref.replace(/^refs\//, "ref/")}`);
+        expect(after.data.object.type).toBe("commit");
+        expect((await store.readRef(`refs/epure/state/${issueNumber}`)).state).toMatchObject({ phase: "tickets", version: 4, last_processed_comment_id: 7 });
       });
     });
 
@@ -437,6 +485,14 @@ describeLive(
         prNumber = pr.data.number;
       }, HOOK_TIMEOUT_MS);
 
+      it("rest client merge pinned to a stale sha throws PullRequestHeadMovedError and does not merge", async () => {
+        const gh = createGitHubRestHelper({ repository: cfg.repository, token });
+        await expect(
+          gh.mergePullRequest(prNumber, { headBranch, baseBranch: `${NS}/merge-base`, expectedHeadSha: baseSha, commitTitle: "stale" })
+        ).rejects.toBeInstanceOf(PullRequestHeadMovedError);
+        expect(await gh.findMergedPullRequestByHead(headBranch, `${NS}/merge-base`)).toBeNull();
+      });
+
       it("PUT pulls/:n/merge with a stale sha is 409, then with the head sha merges 200", async () => {
         const stale = await api<{ message: string }>("PUT", `${R}/pulls/${prNumber}/merge`, { sha: baseSha, merge_method: "squash" });
         const merged = await api<{ merged: boolean; message: string; sha: string }>("PUT", `${R}/pulls/${prNumber}/merge`, { sha: headSha, merge_method: "squash" });
@@ -457,7 +513,7 @@ describeLive(
       it("rest client merge is idempotent on an already-merged PR", async () => {
         const gh = createGitHubRestHelper({ repository: cfg.repository, token });
         await expect(
-          gh.mergePullRequest(prNumber, { headBranch, baseBranch: `${NS}/merge-base`, commitTitle: "again" })
+          gh.mergePullRequest(prNumber, { headBranch, baseBranch: `${NS}/merge-base`, expectedHeadSha: headSha, commitTitle: "again" })
         ).resolves.toBeUndefined();
       });
 
@@ -472,6 +528,77 @@ describeLive(
         expect(all.data.map((p) => p.number)).toContain(prNumber);
         expect(all.data.find((p) => p.number === prNumber)?.merged_at).toBeTruthy();
         expect(await gh.findOpenPullRequestByHead(headBranch, `${NS}/merge-base`)).toBeNull();
+      });
+
+      it("duplicate guard finds the merged PR by head branch after the branch is deleted", async () => {
+        const gh = createGitHubRestHelper({ repository: cfg.repository, token });
+        expect(await gh.findMergedPullRequestByHead(headBranch, `${NS}/merge-base`)).toEqual({
+          number: prNumber,
+          html_url: expect.stringContaining(`/pull/${prNumber}`)
+        });
+      });
+    });
+
+    describe("epic closure reads on an open, unmerged PR", () => {
+      let prNumber = 0;
+      let base = "";
+      let headBranch = "";
+
+      beforeAll(async () => {
+        base = await createBranch("closure-base", baseSha);
+        headBranch = await createBranch("closure-head", await commitOnTop([baseSha], `${NS}/closure.txt`, "unmerged"));
+        const pr = await api<{ number: number }>("POST", `${R}/pulls`, {
+          title: `test(${NS}): closure`,
+          head: headBranch,
+          base
+        });
+        prNumber = pr.data.number;
+      }, HOOK_TIMEOUT_MS);
+
+      it("the open PR is listed by base, its commit counted as unmerged, and it is never reported as merged", async () => {
+        const gh = createGitHubRestHelper({ repository: cfg.repository, token });
+        expect(await gh.findMergedPullRequestByHead(headBranch, base)).toBeNull();
+        expect((await gh.listOpenPullRequestsByBase(base)).map((pr) => pr.number)).toEqual([prNumber]);
+        expect((await gh.compareCommits(base, headBranch)).aheadBy).toBe(1);
+      });
+
+      it("a closer without repository access reads as permission none with the App token", async () => {
+        const gh = createGitHubRestHelper({ repository: cfg.repository, token });
+        expect(await gh.getCollaboratorPermission("octocat")).toBe("none");
+      });
+    });
+
+    describe("roster and workflow reads list only their own directory (contents API)", () => {
+      const DIR = `${NS}/reviewers`;
+      let branch = "";
+
+      beforeAll(async () => {
+        let head = await commitOnTop([baseSha], `${DIR}/security-reviewer.md`, "# security\n");
+        head = await commitOnTop([head], `${DIR}/notes.txt`, "not a reviewer\n");
+        head = await commitOnTop([head], `${DIR}/nested/deep-reviewer.md`, "# nested\n");
+        branch = await createBranch("scoped-reads", head);
+      }, HOOK_TIMEOUT_MS);
+
+      it.each([
+        { id: "reviewer-directory-yields-only-its-direct-markdown-children", dir: DIR, expected: { [`${DIR}/security-reviewer.md`]: "# security\n" } },
+        { id: "missing-reviewer-directory-yields-no-roster-file", dir: `${NS}/missing`, expected: {} }
+      ])("$id", async ({ dir, expected }) => {
+        const gh = createGitHubRestHelper({ repository: cfg.repository, token });
+
+        const roster = await gh.readTrustedBaseRosterFiles(branch, dir);
+        roster.delete("DESIGN.md");
+
+        expect(Object.fromEntries(roster)).toEqual(expected);
+      });
+
+      it("workflow map holds only top-level workflow files and path hints include the committed files", async () => {
+        const gh = createGitHubRestHelper({ repository: cfg.repository, token });
+
+        const workflows = [...(await gh.readDevWorkflowsMap(branch)).keys()];
+        const hints = await gh.listBranchPathHints(branch);
+
+        expect(workflows.filter((p) => !/^\.github\/workflows\/[^/]+\.ya?ml$/.test(p))).toEqual([]);
+        expect(hints).toEqual(expect.arrayContaining([`${DIR}/security-reviewer.md`, `${DIR}/notes.txt`, `${DIR}/nested/deep-reviewer.md`]));
       });
     });
 
@@ -494,6 +621,321 @@ describeLive(
       });
     });
 
+    describe("commitFilesToBranch on a branch moved by a concurrent push (#109)", () => {
+      function fetchWithConcurrentPushBeforeRefUpdate(branch: string, push: () => Promise<string>): typeof fetch {
+        let armed = true;
+        return async (input, init) => {
+          if (armed && init?.method === "PATCH" && String(input).endsWith(`/git/refs/heads/${encodeURIComponent(branch)}`)) {
+            armed = false;
+            await push();
+          }
+          return await fetch(input, init);
+        };
+      }
+
+      async function writeDuringConcurrentPush(slug: string, concurrentFile: string) {
+        const branch = await createBranch(`concurrent-${slug}`, baseSha);
+        const epurePath = `${NS}/${slug}/epure.txt`;
+        const humanPath = `${NS}/${slug}/${concurrentFile}`;
+        let humanSha = "";
+        const gh = createGitHubRestHelper({
+          repository: cfg.repository,
+          token,
+          fetchImpl: fetchWithConcurrentPushBeforeRefUpdate(branch, async () => {
+            humanSha = await commitOnTop([baseSha], humanPath, "human push\n");
+            expect((await api("PATCH", `${R}/git/refs/heads/${branch}`, { sha: humanSha, force: false })).status).toBe(200);
+            return humanSha;
+          })
+        });
+        const commit = gh.commitFilesToBranch({
+          branch,
+          commitMessage: `test(${NS}): epure write`,
+          files: [{ path: epurePath, content: "epure write\n" }]
+        });
+        return { branch, epurePath, humanPath, commit, humanSha: () => humanSha };
+      }
+
+      it("disjoint-concurrent-push-is-kept-and-the-commit-is-rebuilt-on-it", async () => {
+        const { epurePath, humanPath, commit, humanSha } = await writeDuringConcurrentPush("disjoint", "other.txt");
+
+        const headSha = await commit;
+        const head = await api<{ parents: Array<{ sha: string }> }>("GET", `${R}/git/commits/${headSha}`);
+        const tree = await api<{ tree: Array<{ path: string }> }>("GET", `${R}/git/trees/${headSha}?recursive=1`);
+
+        expect(head.data.parents.map((p) => p.sha)).toEqual([humanSha()]);
+        expect(tree.data.tree.map((e) => e.path)).toEqual(expect.arrayContaining([epurePath, humanPath]));
+      });
+
+      it("concurrent-push-on-a-written-path-throws-BranchUpdateConflictError-without-overwriting-it", async () => {
+        const { branch, epurePath, commit, humanSha } = await writeDuringConcurrentPush("overlap", "epure.txt");
+
+        await expect(commit).rejects.toMatchObject({ name: "BranchUpdateConflictError", overlappingPaths: [epurePath] });
+        const head = await api<{ object: { sha: string } }>("GET", `${R}/git/ref/heads/${branch}`);
+
+        expect(head.data.object.sha).toBe(humanSha());
+      });
+    });
+
+    describe("3-way conflict resolution makes a conflicting PR mergeable (#105)", () => {
+      const FILE = `${NS}/conflict.txt`;
+      let base = "";
+      let target = "";
+      let targetHead = "";
+      let baseHead = "";
+      let prNumber = 0;
+
+      // GitHub recomputes mergeability asynchronously and keeps serving the previous value meanwhile.
+      async function settledMergeable(expected: boolean): Promise<{ mergeable: boolean | null; mergeable_state: string }> {
+        for (let attempt = 0; ; attempt += 1) {
+          const pr = await api<{ mergeable: boolean | null; mergeable_state: string }>("GET", `${R}/pulls/${prNumber}`);
+          if (pr.data.mergeable === expected || attempt >= 20) {
+            return pr.data;
+          }
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+      }
+
+      beforeAll(async () => {
+        const shared = await commitOnTop([baseSha], FILE, "shared\n");
+        baseHead = await commitOnTop([shared], FILE, "base side\n");
+        targetHead = await commitOnTop([shared], FILE, "target side\n");
+        base = await createBranch("conflict-base", baseHead);
+        target = await createBranch("conflict-target", targetHead);
+        const pr = await api<{ number: number }>("POST", `${R}/pulls`, { title: `test(${NS}): conflict`, head: target, base });
+        prNumber = pr.data.number;
+      }, HOOK_TIMEOUT_MS);
+
+      it("a conflicting PR is dirty and its merge is refused with PullRequestNotMergeableError", async () => {
+        const gh = createGitHubRestHelper({ repository: cfg.repository, token });
+        expect(await settledMergeable(false)).toMatchObject({ mergeable: false, mergeable_state: "dirty" });
+        expect(await gh.getPullRequestMergeableState(prNumber)).toBe("dirty");
+        await expect(
+          gh.mergePullRequest(prNumber, { headBranch: target, baseBranch: base, expectedHeadSha: targetHead, commitTitle: "refused" })
+        ).rejects.toBeInstanceOf(PullRequestNotMergeableError);
+      });
+
+      it("the resolution is a two-parent merge commit and the PR becomes mergeable", async () => {
+        const gh = createGitHubRestHelper({ repository: cfg.repository, token });
+        const llmFetch: typeof fetch = async (input, init) =>
+          new URL(String(input)).hostname === "api.openai.com"
+            ? new Response(
+                JSON.stringify({
+                  choices: [{ message: { content: JSON.stringify({ summary: "both", resolved_files: [{ path: FILE, content: "both sides\n" }] }) } }]
+                }),
+                { status: 200 }
+              )
+            : await fetch(input, init);
+
+        const result = await syncBranchWithBase({
+          gh,
+          targetBranch: target,
+          baseBranch: base,
+          issueNumber: 1,
+          llmApiKey: "unused",
+          model: "openai/gpt-test",
+          fetchImpl: llmFetch
+        });
+        const commit = await api<{ parents: Array<{ sha: string }> }>("GET", `${R}/git/commits/${result.headSha}`);
+
+        expect(result).toMatchObject({ status: "resolved", conflictsResolved: [FILE] });
+        expect(commit.data.parents.map((p) => p.sha)).toEqual([targetHead, baseHead]);
+        expect(await settledMergeable(true)).toMatchObject({ mergeable: true });
+        expect((await gh.mergeBranches?.({ base: target, head: base }))?.status).toBe("up_to_date");
+      });
+    });
+
+    // Committing a workflow file needs `workflows: write`, reading runs `actions: read`; the sandbox App may not have them yet.
+    describe("3-way conflict resolution triggers the PR checks on the new head (#105e)", () => {
+      const FILE = `${NS}/conflict-checks.txt`;
+      const WORKFLOW_PATH = `.github/workflows/live-${RUN_ID}.yml`;
+      const RUN_TIMEOUT_MS = 120_000;
+      let checksToken = "";
+      let missingPermission = "";
+
+      beforeAll(async () => {
+        try {
+          checksToken = (
+            await mintRepositoryInstallationToken({
+              appId: cfg.appId,
+              privateKeyPem: cfg.privateKey,
+              repository: cfg.repository,
+              permissions: { contents: "write", pull_requests: "write", workflows: "write", actions: "read" }
+            })
+          ).token;
+        } catch (err: unknown) {
+          if (!(err instanceof Error && /HTTP 422/.test(err.message))) {
+            throw err;
+          }
+          missingPermission = "the sandbox App lacks workflows: write or actions: read; grant them and rerun";
+        }
+      }, HOOK_TIMEOUT_MS);
+
+      afterAll(async () => {
+        if (checksToken) {
+          await revokeGitHubInstallationToken({ token: checksToken });
+        }
+      }, HOOK_TIMEOUT_MS);
+
+      it("a pull_request workflow run registers on the two-parent resolution head", { timeout: RUN_TIMEOUT_MS + 60_000 }, async (ctx) => {
+        if (missingPermission) {
+          ctx.skip(missingPermission);
+        }
+        // `if: false` registers the run without spending runner minutes.
+        const workflow = [
+          `name: live-${RUN_ID}`,
+          "on:",
+          "  pull_request:",
+          `    branches: ["${NS}/**"]`,
+          "jobs:",
+          "  noop:",
+          "    if: false",
+          "    runs-on: ubuntu-latest",
+          "    steps:",
+          "      - run: true",
+          ""
+        ].join("\n");
+        const withWorkflow = await commitOnTop([baseSha], WORKFLOW_PATH, workflow, checksToken);
+        const shared = await commitOnTop([withWorkflow], FILE, "shared\n", checksToken);
+        const baseHead = await commitOnTop([shared], FILE, "base side\n", checksToken);
+        const targetHead = await commitOnTop([shared], FILE, "target side\n", checksToken);
+        const base = await createBranch("checks-base", baseHead, checksToken);
+        const target = await createBranch("checks-target", targetHead, checksToken);
+        const pr = await api<{ number: number }>("POST", `${R}/pulls`, { title: `test(${NS}): checks`, head: target, base }, checksToken);
+        expect(pr.status).toBe(201);
+
+        const gh = createGitHubRestHelper({ repository: cfg.repository, token: checksToken });
+        const llmFetch: typeof fetch = async (input, init) =>
+          new URL(String(input)).hostname === "api.openai.com"
+            ? new Response(
+                JSON.stringify({
+                  choices: [{ message: { content: JSON.stringify({ summary: "both", resolved_files: [{ path: FILE, content: "both sides\n" }] }) } }]
+                }),
+                { status: 200 }
+              )
+            : await fetch(input, init);
+        const result = await syncBranchWithBase({
+          gh,
+          targetBranch: target,
+          baseBranch: base,
+          issueNumber: 1,
+          llmApiKey: "unused",
+          model: "openai/gpt-test",
+          fetchImpl: llmFetch
+        });
+        expect(result).toMatchObject({ status: "resolved", conflictsResolved: [FILE] });
+
+        type Run = { event: string; head_sha: string; path: string };
+        let runs: Run[] = [];
+        for (const deadline = Date.now() + RUN_TIMEOUT_MS; runs.length === 0 && Date.now() < deadline; ) {
+          await new Promise((r) => setTimeout(r, 5000));
+          const listed = await api<{ workflow_runs: Run[] }>(
+            "GET",
+            `${R}/actions/runs?event=pull_request&head_sha=${result.headSha}`,
+            undefined,
+            checksToken
+          );
+          runs = listed.data.workflow_runs.filter((run) => run.path === WORKFLOW_PATH);
+        }
+
+        expect(runs).toContainEqual(expect.objectContaining({ event: "pull_request", head_sha: result.headSha }));
+      });
+    });
+
+    // The sandbox App has no `administration` permission: an admin token only creates and deletes rulesets scoped to this run.
+    const ADMIN_TOKEN = process.env.EPURE_LIVE_GITHUB_ADMIN_TOKEN?.trim() ?? "";
+    (ADMIN_TOKEN ? describe : describe.skip)("setup-repo feature/* rulesets vs EPURE direct writes (#108)", () => {
+      const rulesetIds: number[] = [];
+
+      async function adminApi<T>(method: string, path: string, body?: unknown): Promise<ApiResult<T>> {
+        const resp = await fetch(`https://api.github.com${path}`, {
+          method,
+          headers: { Authorization: `Bearer ${ADMIN_TOKEN}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" },
+          ...(body !== undefined ? { body: JSON.stringify(body) } : {})
+        });
+        const text = await resp.text();
+        return { status: resp.status, headers: resp.headers, data: (text ? JSON.parse(text) : null) as T };
+      }
+
+      async function installFeatureRulesets(slug: string, legacy: boolean): Promise<void> {
+        const generated = buildGovernanceRulesets({ agentAppName: "agent", releaseAppName: "release" });
+        const specs = legacy
+          ? [
+              {
+                ...generated.featureGovernance,
+                blockForcePushes: true,
+                blockDeletions: true,
+                requiredLinearHistory: true,
+                bypassActors: generated.featureGovernance.bypassActors.map((a) => ({ ...a, mode: "pull_request" as const }))
+              }
+            ]
+          : [generated.featureIntegrity, generated.featureGovernance];
+        for (const spec of specs) {
+          const created = await adminApi<{ id: number }>(
+            "POST",
+            `${R}/rulesets`,
+            buildGitHubRulesetApiPayload(
+              { ...spec, name: `${spec.name}-${RUN_ID}-${slug}`, targetRefs: [`refs/heads/${NS}/feature/*`] },
+              { agentAppIntegrationId: Number(cfg.appId) }
+            )
+          );
+          expect(created.status).toBe(201);
+          rulesetIds.push(created.data.id);
+        }
+      }
+
+      afterEach(async () => {
+        for (const id of rulesetIds.splice(0)) {
+          await adminApi("DELETE", `${R}/rulesets/${id}`);
+        }
+      });
+
+      it("integrity-ruleset-refuses-a-force-push-and-a-deletion-of-a-feature-branch-by-the-agent-app", async () => {
+        const feature = await createBranch("feature/integrity", await commitOnTop([baseSha], `${NS}/integrity.txt`, "feature work\n"));
+        await installFeatureRulesets("integrity", false);
+
+        const forcePush = await api("PATCH", `${R}/git/refs/heads/${feature}`, { sha: baseSha, force: true });
+        const deletion = await api("DELETE", `${R}/git/refs/heads/${feature}`);
+
+        expect(forcePush.status).toBe(422);
+        expect(deletion.status).toBe(422);
+        expect((await api("GET", `${R}/git/ref/heads/${feature}`)).status).toBe(200);
+      });
+
+      it.each([
+        { id: "generated-rulesets-let-plan-integration-and-a-dev-merge-sync-through", legacy: false },
+        { id: "previous-pull-request-bypass-ruleset-rejects-the-plan-integration-with-422", legacy: true }
+      ])("$id", async ({ legacy }) => {
+        const slug = legacy ? "legacy" : "generated";
+        const feature = await createBranch(`feature/${slug}`, baseSha);
+        const dev = await createBranch(`dev-${slug}`, await commitOnTop([baseSha], `${NS}/${slug}-dev.txt`, "dev moved\n"));
+        await installFeatureRulesets(slug, legacy);
+
+        const gh = createGitHubRestHelper({ repository: cfg.repository, token });
+        const planIntegration = gh.commitFilesToBranch({
+          branch: feature,
+          commitMessage: "docs(plan): integrate approved plan artifacts",
+          files: [{ path: `${NS}/${slug}-spec.md`, content: "# Spec\n" }]
+        });
+        if (legacy) {
+          await expect(planIntegration).rejects.toThrow(/422/);
+          return;
+        }
+        await planIntegration;
+        const sync = await syncBranchWithBase({
+          gh,
+          targetBranch: feature,
+          baseBranch: dev,
+          issueNumber: 1,
+          llmApiKey: "unused",
+          model: "openai/gpt-test"
+        });
+        const merge = await api<{ parents: unknown[] }>("GET", `${R}/git/commits/${sync.headSha}`);
+
+        expect(sync.status).toBe("merged");
+        expect(merge.data.parents).toHaveLength(2);
+      });
+    });
+
     describe("rate limit headers", () => {
       it("every response carries numeric x-ratelimit-* headers", async () => {
         const res = await api("GET", R);
@@ -501,6 +943,24 @@ describeLive(
           expect(res.headers.get(name)).toMatch(/^\d+$/);
         }
         expect(res.headers.get("x-ratelimit-resource")).toBe("core");
+      });
+
+      it.each([
+        { id: "200-repository-read", path: R, expectedStatus: 200 },
+        { id: "403-permission-denied-is-not-a-rate-limit", path: `${R}/actions/secrets`, expectedStatus: 403 }
+      ])("rate-limited fetch passes a real $id response through without waiting", async ({ path, expectedStatus }) => {
+        const waits: number[] = [];
+        const githubFetch = createGitHubRateLimitedFetch({
+          fetchImpl: fetch,
+          sleepFn: async (ms) => {
+            waits.push(ms);
+          }
+        });
+        const resp = await githubFetch(`https://api.github.com${path}`, {
+          headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" }
+        });
+        expect(resp.status).toBe(expectedStatus);
+        expect(waits).toEqual([]);
       });
     });
   }

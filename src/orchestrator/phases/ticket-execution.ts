@@ -8,6 +8,7 @@ import {
   discoverExpectedExternalWorkflows,
   resolveLlmEscalationReason,
   waitForExternalCiChecks,
+  type NeedsHumanEscalationReason,
   type WaitForExternalCiChecksResult
 } from "../../execution/external-ci-gate.js";
 import { reconcileProvenTicketDependencies } from "../../execution/proven-dependency-unblocker.js";
@@ -37,14 +38,28 @@ import {
 } from "../../security/prompt-injection-guard.js";
 import { processPendingIssueCommentsBatch } from "../../state/comment-batch-cursor.js";
 import {
+  advanceCommentCursor,
+  formatIssueStateMarker,
+  toTerminalState,
   updateIssueStateWithCas,
+  withTicketCodeFixAttempts,
   type GitRefStateStore
 } from "../../state/git-ref-state.js";
 import { appendEpureCommandsSpoiler } from "../formatting/comments.js";
 import { callLlmJson } from "../llm-helper.js";
-import { syncBranchWithBase } from "../github/branch-sync.js";
-import { loadOrchestratorStateFromGitRef } from "../github/rest-client.js";
+import {
+  syncBranchWithBase,
+  type BaseSyncGuard
+} from "../github/branch-sync.js";
+import {
+  describeMergeRefusal,
+  isConflictRefusal,
+  loadOrchestratorStateFromGitRef,
+  PullRequestHeadMovedError,
+  PullRequestNotMergeableError
+} from "../github/rest-client.js";
 import { EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT } from "../prompts/code-discipline.js";
+import { formatResumeContextPromptLines } from "../prompts/resume-context.js";
 import {
   createGeneratedTicketImplementationSchema,
   type EscalateToNeedsHumanFn,
@@ -105,7 +120,11 @@ export interface RunTicketExecutionLoopParams {
     | undefined;
   readonly asyncCiContinuation?: boolean | undefined;
   readonly forceOneRemediationRoundOnOpenPr?: boolean | undefined;
-  readonly initialCodeFixAttemptsUsed?: number | undefined;
+  readonly initialCodeFixAttemptsByTicket: Readonly<Record<string, number>>;
+  readonly baseSyncGuard: BaseSyncGuard;
+  readonly resumeContextMarkdown?: string | undefined;
+  // Moves the epic to `done` and returns its result when a human merged the feature PR meanwhile.
+  readonly stopIfFeaturePrMerged: () => Promise<OrchestrateIssueResult | null>;
 }
 
 export interface RunTicketExecutionLoopOutcome {
@@ -130,7 +149,7 @@ async function checkMidLoopCancellation(params: {
   if (snapshot.state?.status === "cancelled") {
     const cancelMarkdown = appendEpureCommandsSpoiler(
       [
-        `<!-- epure-state:${JSON.stringify(snapshot.state)} -->`,
+        formatIssueStateMarker(snapshot.state),
         "",
         `🛑 Plan #${params.issueNumber} execution halted because status is **cancelled**.`
       ].join("\n"),
@@ -182,7 +201,7 @@ async function checkMidLoopCancellation(params: {
   if (batchResult.cancelled) {
     const cancelMarkdown = appendEpureCommandsSpoiler(
       [
-        `<!-- epure-state:${JSON.stringify(batchResult.state)} -->`,
+        formatIssueStateMarker(batchResult.state),
         "",
         `🛑 Plan #${params.issueNumber} has been **cancelled** mid-run via \`/epure cancel\`. Halting remaining ticket executions.`
       ].join("\n"),
@@ -449,6 +468,9 @@ export async function runTicketExecutionLoop(
   let verificationProfile = params.initialVerificationProfile;
   let verificationGuideMarkdown = params.initialVerificationGuideMarkdown;
   const completedTicketNumbers = new Set<number>();
+  const resumeContextPromptLines = formatResumeContextPromptLines(
+    params.resumeContextMarkdown
+  );
 
   for (const ticket of params.skipTicketLoopForExistingFeaturePr
     ? []
@@ -462,10 +484,12 @@ export async function runTicketExecutionLoop(
       gh: params.gh,
       store: params.store
     });
-    if (cancelledBeforeTicket) {
+    const haltBeforeTicket =
+      cancelledBeforeTicket ?? (await params.stopIfFeaturePrMerged());
+    if (haltBeforeTicket) {
       return {
         halted: true,
-        result: cancelledBeforeTicket,
+        result: haltBeforeTicket,
         verificationProfile,
         verificationGuideMarkdown
       };
@@ -543,14 +567,14 @@ export async function runTicketExecutionLoop(
         const updatedSuspended = await updateIssueStateWithCas({
           issueNumber: params.issueNumber,
           store: params.store,
-          mutator: (prev) => ({
-            ...prev,
-            phase: "implementation",
-            status: "suspended",
-            active_branch: params.featureBranch,
-            last_processed_comment_id:
-              params.commentId ?? prev.last_processed_comment_id
-          })
+          mutator: (prev) =>
+            toTerminalState(prev, {
+              phase: "implementation",
+              status: "suspended",
+              active_branch: params.featureBranch,
+              last_processed_comment_id:
+                advanceCommentCursor(prev, params.commentId)
+            })
         });
 
         const unprovenList =
@@ -620,6 +644,20 @@ export async function runTicketExecutionLoop(
     }
 
     const taskBranch = `task/${ticket.ticketIssueNumber}-${ticket.slug}`;
+    const mergedTaskPr = await params.gh.findMergedPullRequestByHead(
+      taskBranch,
+      params.featureBranch
+    );
+    if (mergedTaskPr) {
+      if (ticket.ticketIssueNumber !== params.issueNumber) {
+        await params.gh.closeIssue(ticket.ticketIssueNumber);
+      }
+      completedTicketNumbers.add(ticket.ticketIssueNumber);
+      params.completedTicketsSummary.push(
+        `- **#${ticket.ticketIssueNumber}** (${ticket.title}) — PR [#${mergedTaskPr.number}](${mergedTaskPr.html_url}) already merged into \`${params.featureBranch}\``
+      );
+      continue;
+    }
     if (ticket.ticketIssueNumber !== params.issueNumber) {
       await params.gh.removeIssueLabel?.(ticket.ticketIssueNumber, "needs-human");
     }
@@ -628,68 +666,77 @@ export async function runTicketExecutionLoop(
         `::group::[EPURE][Ticket #${ticket.ticketIssueNumber}] Initial TDD Implementation (${taskBranch})\n`
       );
     }
-    const featureSync = await syncBranchWithBase({
-      gh: params.gh,
-      targetBranch: params.featureBranch,
-      baseBranch: "dev",
-      issueNumber: params.issueNumber,
-      llmApiKey: params.llmApiKey,
-      fetchImpl: params.fetchImpl,
-      model: params.phaseModels.implementationModel,
-      providers: params.phaseModels.providers,
-      maxTransientRetries: params.phaseModels.maxTransientRetries,
-      transientRetryBackoffSeconds:
-        params.phaseModels.transientRetryBackoffSeconds,
-      requestTimeoutMs: params.phaseModels.requestTimeoutMs,
-      sandboxRunner: params.sandboxRunner,
-      reviewersDir
-    });
-    if (featureSync.status === "escalated") {
-      const escalated = await params.escalateToNeedsHuman({
-        reason: featureSync.escalationReason ?? "merge_conflict_unresolved",
-        ticketNumber: ticket.ticketIssueNumber,
-        branch: params.featureBranch,
-        diagnosticExcerpt: featureSync.diagnosticExcerpt
+    const syncWithBase = await params.baseSyncGuard.needsSync();
+    if (syncWithBase) {
+      const featureSync = await syncBranchWithBase({
+        gh: params.gh,
+        targetBranch: params.featureBranch,
+        baseBranch: "dev",
+        issueNumber: params.issueNumber,
+        llmApiKey: params.llmApiKey,
+        fetchImpl: params.fetchImpl,
+        model: params.phaseModels.implementationModel,
+        providers: params.phaseModels.providers,
+        maxTransientRetries: params.phaseModels.maxTransientRetries,
+        transientRetryBackoffSeconds:
+          params.phaseModels.transientRetryBackoffSeconds,
+        requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+        sandboxRunner: params.sandboxRunner,
+        reviewersDir
       });
-      return {
-        halted: true,
-        result: escalated,
-        verificationProfile,
-        verificationGuideMarkdown
-      };
+      if (featureSync.status === "escalated") {
+        const escalated = await params.escalateToNeedsHuman({
+          reason: featureSync.escalationReason ?? "merge_conflict_unresolved",
+          ticketNumber: ticket.ticketIssueNumber,
+          branch: params.featureBranch,
+          diagnosticExcerpt: featureSync.diagnosticExcerpt
+        });
+        return {
+          halted: true,
+          result: escalated,
+          verificationProfile,
+          verificationGuideMarkdown
+        };
+      }
     }
 
     await params.gh.ensureBranch(taskBranch, params.featureBranch);
 
-    const taskSync = await syncBranchWithBase({
-      gh: params.gh,
-      targetBranch: taskBranch,
-      baseBranch: params.featureBranch,
-      issueNumber: ticket.ticketIssueNumber,
-      llmApiKey: params.llmApiKey,
-      fetchImpl: params.fetchImpl,
-      model: params.phaseModels.implementationModel,
-      providers: params.phaseModels.providers,
-      maxTransientRetries: params.phaseModels.maxTransientRetries,
-      transientRetryBackoffSeconds:
-        params.phaseModels.transientRetryBackoffSeconds,
-      requestTimeoutMs: params.phaseModels.requestTimeoutMs,
-      sandboxRunner: params.sandboxRunner,
-      reviewersDir
-    });
-    if (taskSync.status === "escalated") {
-      const escalated = await params.escalateToNeedsHuman({
-        reason: taskSync.escalationReason ?? "merge_conflict_unresolved",
-        ticketNumber: ticket.ticketIssueNumber,
-        branch: taskBranch,
-        diagnosticExcerpt: taskSync.diagnosticExcerpt
+    const syncTaskBranchWithFeature = () =>
+      syncBranchWithBase({
+        gh: params.gh,
+        targetBranch: taskBranch,
+        baseBranch: params.featureBranch,
+        issueNumber: ticket.ticketIssueNumber,
+        llmApiKey: params.llmApiKey,
+        fetchImpl: params.fetchImpl,
+        model: params.phaseModels.implementationModel,
+        providers: params.phaseModels.providers,
+        maxTransientRetries: params.phaseModels.maxTransientRetries,
+        transientRetryBackoffSeconds:
+          params.phaseModels.transientRetryBackoffSeconds,
+        requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+        sandboxRunner: params.sandboxRunner,
+        reviewersDir
       });
-      return {
-        halted: true,
-        result: escalated,
-        verificationProfile,
-        verificationGuideMarkdown
-      };
+
+    if (syncWithBase) {
+      const taskSync = await syncTaskBranchWithFeature();
+      if (taskSync.status === "escalated") {
+        const escalated = await params.escalateToNeedsHuman({
+          reason: taskSync.escalationReason ?? "merge_conflict_unresolved",
+          ticketNumber: ticket.ticketIssueNumber,
+          branch: taskBranch,
+          diagnosticExcerpt: taskSync.diagnosticExcerpt
+        });
+        return {
+          halted: true,
+          result: escalated,
+          verificationProfile,
+          verificationGuideMarkdown
+        };
+      }
+      await params.baseSyncGuard.markSynced();
     }
 
     const sandboxWorkspace = prepareRepositorySandboxWorkspace({
@@ -732,8 +779,25 @@ export async function runTicketExecutionLoop(
     const bootstrappedTargets = new Set<string>();
 
     let taskPr: { number: number; html_url: string; head_sha: string } | undefined;
-    let fixAttempt = 0;
-    let reviewFixAttempt = 0;
+    const initialTicketFixAttempts =
+      params.initialCodeFixAttemptsByTicket[String(ticket.ticketIssueNumber)] ??
+      0;
+    let reviewFixAttempt = initialTicketFixAttempts;
+    const consumeTicketFixAttempt = async (): Promise<void> => {
+      reviewFixAttempt += 1;
+      await updateIssueStateWithCas({
+        issueNumber: params.issueNumber,
+        store: params.store,
+        mutator: (prev) => ({
+          ...withTicketCodeFixAttempts(
+            prev,
+            ticket.ticketIssueNumber,
+            reviewFixAttempt
+          ),
+          transient_retries_used: params.getTotalTransientRetriesUsed()
+        })
+      });
+    };
 
     try {
       const ticketChangedFilesMap = new Map<string, string>();
@@ -988,6 +1052,7 @@ export async function runTicketExecutionLoop(
             ].join("\n")
           ),
           "",
+          ...resumeContextPromptLines,
           verificationGuideMarkdown,
           "",
           existingFilesContext
@@ -1073,8 +1138,11 @@ export async function runTicketExecutionLoop(
             `Ticket #${ticket.ticketIssueNumber} initial TDD suite`
           );
 
-        while (!testCheck.passed && fixAttempt < params.maxCodeFixAttempts) {
-          fixAttempt += 1;
+        while (
+          !testCheck.passed &&
+          reviewFixAttempt < params.maxCodeFixAttempts
+        ) {
+          await consumeTicketFixAttempt();
           restoreViolatedBaselineFiles(integrityCheck);
           const currentFilesContext = buildCompactWorkspaceFilesContext({
             reviewersDir,
@@ -1130,7 +1198,7 @@ export async function runTicketExecutionLoop(
             featureBranch: params.featureBranch,
             systemInstruction: fixSystemInstruction,
             prompt: fixPrompt,
-            logLabel: `stage1-fix:#${ticket.ticketIssueNumber}/iter-${fixAttempt}`,
+            logLabel: `stage1-fix:#${ticket.ticketIssueNumber}/iter-${reviewFixAttempt}`,
             accumulatedFiles: params.accumulatedFiles,
             deletedFilesSet: ticketDeletedFilesSet,
             devBranchPaths: params.devBranchPaths,
@@ -1159,7 +1227,7 @@ export async function runTicketExecutionLoop(
               reason: "sensitive_path_violation",
               ticketNumber: ticket.ticketIssueNumber,
               branch: taskBranch,
-              codeFixAttemptsUsed: fixAttempt,
+              codeFixAttemptsUsed: reviewFixAttempt,
               sensitivePaths: fixPreCheck.sensitivePaths,
               traversalPaths: fixPreCheck.traversalPaths
             });
@@ -1194,7 +1262,7 @@ export async function runTicketExecutionLoop(
           };
 
           const nextEval = await evaluateIntegrityAndStage1Suite(
-            `Ticket #${ticket.ticketIssueNumber} TDD auto-fix attempt ${fixAttempt}/${params.maxCodeFixAttempts}`
+            `Ticket #${ticket.ticketIssueNumber} TDD auto-fix attempt ${reviewFixAttempt}/${params.maxCodeFixAttempts}`
           );
           integrityCheck = nextEval.integrityCheck;
           testCheck = nextEval.testCheck;
@@ -1205,7 +1273,7 @@ export async function runTicketExecutionLoop(
             reason: "remediation_exhausted",
             ticketNumber: ticket.ticketIssueNumber,
             branch: taskBranch,
-            codeFixAttemptsUsed: fixAttempt,
+            codeFixAttemptsUsed: reviewFixAttempt,
             diagnosticExcerpt: testCheck.output.slice(-2000)
           });
           return {
@@ -1216,6 +1284,15 @@ export async function runTicketExecutionLoop(
           };
         }
 
+        const featureMergedBeforeTaskPr = await params.stopIfFeaturePrMerged();
+        if (featureMergedBeforeTaskPr) {
+          return {
+            halted: true,
+            result: featureMergedBeforeTaskPr,
+            verificationProfile,
+            verificationGuideMarkdown
+          };
+        }
         await params.gh.commitFilesToBranch({
           branch: taskBranch,
           fromBranch: params.featureBranch,
@@ -1252,8 +1329,34 @@ export async function runTicketExecutionLoop(
 
         currentPrHeadSha = taskPr.head_sha;
       }
+      const openTaskPr = taskPr;
 
       let reviewedCommitShas: readonly string[] = [];
+
+      // GitHub runs no `pull_request` workflow on a conflicting PR: re-sync it before waiting for external CI.
+      const resyncTaskPrIfConflicting = async (): Promise<
+        OrchestrateIssueResult | undefined
+      > => {
+        const mergeableState = await params.gh.getPullRequestMergeableState(
+          openTaskPr.number
+        );
+        if (mergeableState !== "dirty") {
+          return undefined;
+        }
+        const resync = await syncTaskBranchWithFeature();
+        if (resync.status === "escalated") {
+          return await params.escalateToNeedsHuman({
+            reason: resync.escalationReason ?? "merge_conflict_unresolved",
+            ticketNumber: ticket.ticketIssueNumber,
+            branch: taskBranch,
+            prNumber: openTaskPr.number,
+            prUrl: openTaskPr.html_url,
+            diagnosticExcerpt: resync.diagnosticExcerpt
+          });
+        }
+        currentPrHeadSha = resync.headSha || currentPrHeadSha;
+        return undefined;
+      };
 
       const runStage2AndStage3ForTaskPr = async (passParams: {
         headSha: string;
@@ -1291,7 +1394,7 @@ export async function runTicketExecutionLoop(
 
         const reviewRes = await runMultiAgentPrReviewPass({
           repository: params.repository,
-          prNumber: taskPr!.number,
+          prNumber: openTaskPr.number,
           headBranch: taskBranch,
           baseBranch: params.featureBranch,
           ticketNumber: ticket.ticketIssueNumber,
@@ -1318,7 +1421,7 @@ export async function runTicketExecutionLoop(
           fetchImpl: params.fetchImpl
         });
 
-        await params.gh.postPullRequestReview(taskPr!.number, {
+        await params.gh.postPullRequestReview(openTaskPr.number, {
           commitId: passParams.headSha,
           body: reviewRes.review_body_markdown
         });
@@ -1347,35 +1450,37 @@ export async function runTicketExecutionLoop(
           verificationProfile.wait_for_external_ci !== false &&
           expectedWorkflows.length > 0 &&
           (!params.forceOneRemediationRoundOnOpenPr ||
-            passParams.reviewFixAttemptsUsed >
-              (params.initialCodeFixAttemptsUsed ?? 0));
+            passParams.reviewFixAttemptsUsed > initialTicketFixAttempts);
 
         if (shouldReleaseRunnerForAsyncCi) {
           const updatedWaiting = await updateIssueStateWithCas({
             issueNumber: params.issueNumber,
             store: params.store,
             mutator: (prev) => ({
-              ...prev,
+              ...withTicketCodeFixAttempts(
+                prev,
+                ticket.ticketIssueNumber,
+                passParams.reviewFixAttemptsUsed
+              ),
               phase: "implementation",
               status: "active",
               active_branch: params.featureBranch,
               subphase: "waiting_ticket_ci",
               active_ticket_number: ticket.ticketIssueNumber,
               active_task_branch: taskBranch,
-              active_pr_number: taskPr!.number,
-              active_head_sha: passParams.headSha,
-              code_fix_attempts_used: passParams.reviewFixAttemptsUsed
+              active_pr_number: openTaskPr.number,
+              active_head_sha: passParams.headSha
             })
           });
           const asyncSummary = [
-            `<!-- epure-state:${JSON.stringify(updatedWaiting.state)} -->`,
+            formatIssueStateMarker(updatedWaiting.state),
             updatedWaiting.issue_mirror_markdown,
             "",
-            `### ⏳ Attente événementielle CI externe (\`waiting_ticket_ci\`) — Ticket #${ticket.ticketIssueNumber} (PR #${taskPr!.number})`,
+            `### ⏳ Attente événementielle CI externe (\`waiting_ticket_ci\`) — Ticket #${ticket.ticketIssueNumber} (PR #${openTaskPr.number})`,
             `- **Branche du ticket** : \`${taskBranch}\` -> \`${params.featureBranch}\``,
             `- **HEAD SHA** : \`${passParams.headSha}\``,
             `- **Revue Multi-Agents (\`ai-review\`)** : \`${reviewRes.conclusion}\``,
-            "- **Action** : Runner GitHub Actions libéré (`exit 0`). Reprise automatique sur `check_suite` / `workflow_run: completed` ou `/epure continue`."
+            "- **Action** : Runner GitHub Actions libéré (`exit 0`). Reprise automatique sur `workflow_run: completed` ou `/epure continue`."
           ].join("\n");
           return {
             reviewResult: reviewRes,
@@ -1398,7 +1503,8 @@ export async function runTicketExecutionLoop(
               created_ticket_numbers: params.ticketsManifest.map(
                 (t) => t.ticketIssueNumber
               ),
-              feature_pr_url: ""
+              feature_pr_url: "",
+              waiting_ci_head_sha: passParams.headSha
             }
           };
         }
@@ -1441,8 +1547,15 @@ export async function runTicketExecutionLoop(
         };
       };
 
-      reviewFixAttempt = params.initialCodeFixAttemptsUsed ?? 0;
-
+      const initialConflictEscalation = await resyncTaskPrIfConflicting();
+      if (initialConflictEscalation) {
+        return {
+          halted: true,
+          result: initialConflictEscalation,
+          verificationProfile,
+          verificationGuideMarkdown
+        };
+      }
       const initialPass = await runStage2AndStage3ForTaskPr({
         headSha: currentPrHeadSha,
         isReReviewPass: false,
@@ -1469,7 +1582,6 @@ export async function runTicketExecutionLoop(
           branch: taskBranch,
           prNumber: taskPr.number,
           prUrl: taskPr.html_url,
-          codeFixAttemptsUsed: 0,
           failedChecks: ciGateResult.failedChecks,
           mustFixFindings: reviewResult.must_fix_findings,
           diagnosticExcerpt: ciGateResult.formattedDiagnostics
@@ -1493,7 +1605,6 @@ export async function runTicketExecutionLoop(
           branch: taskBranch,
           prNumber: taskPr.number,
           prUrl: taskPr.html_url,
-          codeFixAttemptsUsed: 0,
           failedChecks: ciGateResult.failedChecks,
           mustFixFindings: reviewResult.must_fix_findings,
           diagnosticExcerpt: ciGateResult.formattedDiagnostics
@@ -1510,18 +1621,7 @@ export async function runTicketExecutionLoop(
         (reviewResult.conclusion === "failure" || !ciGateResult.passed) &&
         reviewFixAttempt < params.maxCodeFixAttempts
       ) {
-        reviewFixAttempt += 1;
-        await updateIssueStateWithCas({
-          issueNumber: params.issueNumber,
-          store: params.store,
-          mutator: (prev) => ({
-            ...prev,
-            code_fix_attempts_used: reviewFixAttempt,
-            transient_retries_used:
-              params.getTotalTransientRetriesUsed() ||
-              prev.transient_retries_used
-          })
-        });
+        await consumeTicketFixAttempt();
 
         process.stdout.write(
           `[EPURE][Ticket #${ticket.ticketIssueNumber}][PR #${taskPr.number}] Post-PR remediation round ${reviewFixAttempt}/${params.maxCodeFixAttempts} (${reviewResult.must_fix_findings.length} must_fix finding(s), CI passed=${ciGateResult.passed})\n`
@@ -1569,7 +1669,7 @@ export async function runTicketExecutionLoop(
           EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
         ].join("\n");
 
-        const promptParts: string[] = [];
+        const promptParts: string[] = [...resumeContextPromptLines];
         if (reviewResult.must_fix_findings.length > 0) {
           promptParts.push(
             `Les reviewers multi-agents EPURE ont émis ${reviewResult.must_fix_findings.length} constat(s) bloquant(s) ('must_fix') sur la PR #${taskPr.number} du Ticket #${ticket.ticketIssueNumber} :`,
@@ -1673,9 +1773,11 @@ export async function runTicketExecutionLoop(
         } = await evaluateIntegrityAndStage1Suite(
           `Ticket #${ticket.ticketIssueNumber} review-fix iteration ${reviewFixAttempt}/${params.maxCodeFixAttempts}`
         );
-        let reviewTestRetry = 0;
-        while (!testCheck.passed && reviewTestRetry < 2) {
-          reviewTestRetry += 1;
+        while (
+          !testCheck.passed &&
+          reviewFixAttempt < params.maxCodeFixAttempts
+        ) {
+          await consumeTicketFixAttempt();
           restoreViolatedBaselineFiles(reviewIntegrityCheck);
           const retryFilesContext = buildCompactWorkspaceFilesContext({
             reviewersDir,
@@ -1691,10 +1793,10 @@ export async function runTicketExecutionLoop(
             branch: taskBranch,
             featureBranch: params.featureBranch,
             thinkingLevel: "HIGH",
-            logLabel: `review-fix-retry:#${ticket.ticketIssueNumber}/iter-${reviewFixAttempt}/retry-${reviewTestRetry}`,
+            logLabel: `review-fix-retry:#${ticket.ticketIssueNumber}/iter-${reviewFixAttempt}`,
             systemInstruction: reviewFixSystemInstruction,
             prompt: [
-              `La correction a fait échouer la vérification Stage 1 en sandbox (tentative ${reviewTestRetry}/2) :`,
+              `La correction a fait échouer la vérification Stage 1 en sandbox (tentative ${reviewFixAttempt}/${params.maxCodeFixAttempts}) :`,
               wrapUntrustedContent(
                 "untrusted_test_output",
                 testCheck.output
@@ -1780,10 +1882,19 @@ export async function runTicketExecutionLoop(
             files: updatedRetryFiles
           };
           const retryEval = await evaluateIntegrityAndStage1Suite(
-            `Ticket #${ticket.ticketIssueNumber} review-fix iteration ${reviewFixAttempt} test retry ${reviewTestRetry}/2`
+            `Ticket #${ticket.ticketIssueNumber} review-fix test retry ${reviewFixAttempt}/${params.maxCodeFixAttempts}`
           );
           reviewIntegrityCheck = retryEval.integrityCheck;
           testCheck = retryEval.testCheck;
+        }
+        const featureMergedBeforeReviewFix = await params.stopIfFeaturePrMerged();
+        if (featureMergedBeforeReviewFix) {
+          return {
+            halted: true,
+            result: featureMergedBeforeReviewFix,
+            verificationProfile,
+            verificationGuideMarkdown
+          };
         }
         if (!testCheck.passed) {
           if (!reviewIntegrityCheck.passed) {
@@ -1796,9 +1907,6 @@ export async function runTicketExecutionLoop(
               files: impl.files,
               deletedFiles: Array.from(ticketDeletedFilesSet)
             });
-          }
-          if (reviewFixAttempt < params.maxCodeFixAttempts) {
-            continue;
           }
           const escalated = await params.escalateToNeedsHuman({
             reason: "remediation_exhausted",
@@ -1826,6 +1934,15 @@ export async function runTicketExecutionLoop(
           deletedFiles: Array.from(ticketDeletedFilesSet)
         });
 
+        const nextConflictEscalation = await resyncTaskPrIfConflicting();
+        if (nextConflictEscalation) {
+          return {
+            halted: true,
+            result: nextConflictEscalation,
+            verificationProfile,
+            verificationGuideMarkdown
+          };
+        }
         const nextPass = await runStage2AndStage3ForTaskPr({
           headSha: currentPrHeadSha,
           isReReviewPass: true,
@@ -1926,6 +2043,15 @@ export async function runTicketExecutionLoop(
         fetchImpl: params.fetchImpl
       });
 
+      const featureMergedBeforeTaskMerge = await params.stopIfFeaturePrMerged();
+      if (featureMergedBeforeTaskMerge) {
+        return {
+          halted: true,
+          result: featureMergedBeforeTaskMerge,
+          verificationProfile,
+          verificationGuideMarkdown
+        };
+      }
       await params.gh.updatePullRequest(taskPr.number, {
         title: squashCommit.pr_title
       });
@@ -1937,12 +2063,140 @@ export async function runTicketExecutionLoop(
         summary: `Conventional Commit title verified: '${squashCommit.pr_title}'`
       });
 
-      await params.gh.mergePullRequest(taskPr.number, {
-        headBranch: taskBranch,
-        baseBranch: params.featureBranch,
-        commitTitle: squashCommit.commit_title,
-        commitMessage: squashCommit.commit_message
-      });
+      const mergeTaskPr = () =>
+        params.gh.mergePullRequest(openTaskPr.number, {
+          headBranch: taskBranch,
+          baseBranch: params.featureBranch,
+          expectedHeadSha: currentPrHeadSha,
+          commitTitle: squashCommit.commit_title,
+          commitMessage: squashCommit.commit_message
+        });
+      const escalateRefusedMerge = (
+        reason: NeedsHumanEscalationReason,
+        diagnosticExcerpt: string | undefined
+      ) =>
+        params.escalateToNeedsHuman({
+          reason,
+          ticketNumber: ticket.ticketIssueNumber,
+          branch: taskBranch,
+          prNumber: openTaskPr.number,
+          prUrl: openTaskPr.html_url,
+          diagnosticExcerpt
+        });
+      // A refused merge gets one re-verification of the new head (re-synced on a conflict, pushed by someone on a 409), then a typed escalation.
+      const reverifyAndRetryTaskPrMerge = async (
+        refusal: PullRequestNotMergeableError | PullRequestHeadMovedError
+      ): Promise<OrchestrateIssueResult | undefined> => {
+        if (refusal instanceof PullRequestHeadMovedError) {
+          const movedPr = await params.gh.findOpenPullRequestByHead(
+            taskBranch,
+            params.featureBranch
+          );
+          if (!movedPr) {
+            return await escalateRefusedMerge(
+              "pr_not_mergeable",
+              `${refusal.message} The pull request is no longer open.`
+            );
+          }
+          currentPrHeadSha = movedPr.head_sha;
+        } else {
+          const mergeableState = await params.gh.getPullRequestMergeableState(
+            openTaskPr.number
+          );
+          if (!isConflictRefusal(refusal, mergeableState)) {
+            return await escalateRefusedMerge(
+              "pr_not_mergeable",
+              describeMergeRefusal(refusal, mergeableState)
+            );
+          }
+          const resync = await syncTaskBranchWithFeature();
+          if (resync.status === "escalated") {
+            return await escalateRefusedMerge(
+              resync.escalationReason ?? "merge_conflict_unresolved",
+              resync.diagnosticExcerpt ?? refusal.message
+            );
+          }
+          if (resync.status === "up_to_date") {
+            return await escalateRefusedMerge(
+              "pr_not_mergeable",
+              describeMergeRefusal(refusal, mergeableState)
+            );
+          }
+          currentPrHeadSha = resync.headSha;
+        }
+        const pass = await runStage2AndStage3ForTaskPr({
+          headSha: currentPrHeadSha,
+          isReReviewPass: true,
+          reviewFixAttemptsUsed: reviewFixAttempt
+        });
+        if (pass.releasedForAsyncCi) {
+          return pass.releasedForAsyncCi;
+        }
+        if (
+          pass.reviewResult.conclusion === "failure" ||
+          !pass.ciGateResult.passed
+        ) {
+          return await params.escalateToNeedsHuman({
+            reason: "resync_verification_failed",
+            ticketNumber: ticket.ticketIssueNumber,
+            branch: taskBranch,
+            prNumber: openTaskPr.number,
+            prUrl: openTaskPr.html_url,
+            codeFixAttemptsUsed: reviewFixAttempt,
+            failedChecks: pass.ciGateResult.failedChecks,
+            mustFixFindings: pass.reviewResult.must_fix_findings,
+            diagnosticExcerpt: pass.ciGateResult.formattedDiagnostics
+          });
+        }
+        await params.gh.publishCheckRun({
+          name: "PR title",
+          headSha: currentPrHeadSha,
+          conclusion: "success",
+          summary: `Conventional Commit title verified: '${squashCommit.pr_title}'`
+        });
+        try {
+          await mergeTaskPr();
+          return undefined;
+        } catch (retryErr) {
+          if (retryErr instanceof PullRequestHeadMovedError) {
+            return await escalateRefusedMerge(
+              "branch_update_conflict",
+              retryErr.message
+            );
+          }
+          if (!(retryErr instanceof PullRequestNotMergeableError)) {
+            throw retryErr;
+          }
+          const mergeableState = await params.gh.getPullRequestMergeableState(
+            openTaskPr.number
+          );
+          return await escalateRefusedMerge(
+            isConflictRefusal(retryErr, mergeableState)
+              ? "merge_conflict_unresolved"
+              : "pr_not_mergeable",
+            describeMergeRefusal(retryErr, mergeableState)
+          );
+        }
+      };
+      try {
+        await mergeTaskPr();
+      } catch (err) {
+        if (
+          !(err instanceof PullRequestNotMergeableError) &&
+          !(err instanceof PullRequestHeadMovedError)
+        ) {
+          throw err;
+        }
+        const refusedMergeResult = await reverifyAndRetryTaskPrMerge(err);
+        if (refusedMergeResult) {
+          return {
+            halted: true,
+            result: refusedMergeResult,
+            verificationProfile,
+            verificationGuideMarkdown
+          };
+        }
+      }
 
       if (ticket.ticketIssueNumber !== params.issueNumber) {
         await params.gh.closeIssue(ticket.ticketIssueNumber);
@@ -1961,7 +2215,7 @@ export async function runTicketExecutionLoop(
           phase: "implementation",
           prNumber: taskPr?.number,
           prUrl: taskPr?.html_url,
-          codeFixAttemptsUsed: Math.max(fixAttempt, reviewFixAttempt),
+          codeFixAttemptsUsed: reviewFixAttempt,
           diagnosticExcerpt: redactSecrets(err.message, [
             params.activeToken,
             params.llmApiKey

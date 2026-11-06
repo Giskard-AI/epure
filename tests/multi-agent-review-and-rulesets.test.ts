@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   applyGitHubRepositoryGovernance,
   buildGovernanceRulesets,
-  CONVENTIONAL_COMMIT_PATTERN_REGEX
+  CONVENTIONAL_COMMIT_PATTERN_REGEX,
+  planGitHubRulesetChanges
 } from "../src/bootstrap/setup-repo.js";
 import { verifyPublisherMergeBoundary } from "../src/orchestrator/issue-orchestrator.js";
 import { validateAgentProposal } from "../src/publisher/isolated-publisher.js";
@@ -21,8 +22,8 @@ import {
   normalizeConventionalCommitTitle
 } from "../src/review/squash-commit-generator.js";
 
-describe("EPURE v1.2.0 — 3 Repository Rulesets, Multi-Agent Review Roster & Semantic Squash (Q91–Q96, ADR-0027)", () => {
-  describe("1. Three Governance Rulesets & GitHub API Application (Q91, Q95)", () => {
+describe("EPURE v1.2.0 — Repository Rulesets, Multi-Agent Review Roster & Semantic Squash (Q91–Q96, ADR-0027)", () => {
+  describe("1. Governance Rulesets & GitHub API Application (Q91, Q95)", () => {
     it.each([
       {
         id: "solo-maintainer-default-zero-approvals-on-dev-with-isolated-bypass-actors",
@@ -41,7 +42,9 @@ describe("EPURE v1.2.0 — 3 Repository Rulesets, Multi-Agent Review Roster & Se
         requirePrApprovalsOnDev
       });
 
-      expect(bundle.all).toHaveLength(3);
+      expect(bundle.all).toHaveLength(4);
+      expect(bundle.featureIntegrity.targetRefs).toEqual(["refs/heads/feature/*"]);
+      expect(bundle.featureIntegrity.bypassActors).toEqual([]);
       expect(bundle.featureGovernance.targetRefs).toEqual([
         "refs/heads/feature/*"
       ]);
@@ -49,7 +52,7 @@ describe("EPURE v1.2.0 — 3 Repository Rulesets, Multi-Agent Review Roster & Se
         {
           appRole: "agent",
           appName: "hartorn-inc-epure-agent",
-          mode: "pull_request"
+          mode: "always"
         }
       ]);
       expect(bundle.devGovernance.targetRefs).toEqual(["refs/heads/dev"]);
@@ -70,7 +73,7 @@ describe("EPURE v1.2.0 — 3 Repository Rulesets, Multi-Agent Review Roster & Se
       ]);
     });
 
-    it("applies squash-only repository settings and creates/updates the 3 rulesets idempotently via GitHub REST API", async () => {
+    it("applies squash-only repository settings and creates/updates the 4 rulesets idempotently via GitHub REST API", async () => {
       const calls: Array<{ method: string; url: string; body?: unknown }> = [];
       const mockFetch: typeof fetch = async (input, init) => {
         const url = String(input);
@@ -113,6 +116,7 @@ describe("EPURE v1.2.0 — 3 Repository Rulesets, Multi-Agent Review Roster & Se
       expect(res.applied).toBe(true);
       expect(res.merge_settings_updated).toBe(true);
       expect(res.rulesets_applied).toEqual([
+        { name: "epure-feature-integrity", action: "created", id: 99 },
         { name: "epure-feature-governance", action: "created", id: 99 },
         { name: "epure-dev-governance", action: "updated", id: 42 },
         { name: "epure-release-immutability", action: "created", id: 99 }
@@ -127,6 +131,111 @@ describe("EPURE v1.2.0 — 3 Repository Rulesets, Multi-Agent Review Roster & Se
         squash_merge_commit_title: "PR_TITLE",
         squash_merge_commit_message: "PR_BODY"
       });
+    });
+
+    it.each([
+      {
+        id: "feature-integrity-ruleset-blocks-deletion-and-force-push-for-everyone-including-the-agent-app",
+        ruleset: "epure-feature-integrity",
+        expectedRules: ["deletion", "non_fast_forward"],
+        expectedBypass: []
+      },
+      {
+        id: "feature-governance-ruleset-lets-the-agent-app-push-directly-and-allows-merge-commits",
+        ruleset: "epure-feature-governance",
+        expectedRules: ["pull_request", "commit_message_pattern"],
+        expectedBypass: [{ actor_id: 2888446, actor_type: "Integration", bypass_mode: "always" }]
+      },
+      {
+        id: "dev-ruleset-keeps-linear-history-and-no-bypass",
+        ruleset: "epure-dev-governance",
+        expectedRules: ["deletion", "non_fast_forward", "required_linear_history", "pull_request", "commit_message_pattern"],
+        expectedBypass: []
+      }
+    ])("$id", async ({ ruleset, expectedRules, expectedBypass }) => {
+      const sent: Array<{ method: string; url: string; body?: { name?: string; rules?: Array<{ type: string }>; bypass_actors?: unknown } }> = [];
+      const mockFetch: typeof fetch = async (input, init) => {
+        const method = init?.method ?? "GET";
+        sent.push({ method, url: String(input), body: init?.body ? JSON.parse(String(init.body)) : undefined });
+        return new Response(JSON.stringify(method === "GET" ? [] : { id: 7 }), { status: method === "POST" ? 201 : 200 });
+      };
+
+      await applyGitHubRepositoryGovernance({
+        repository: "Hartorn-Inc/trame",
+        githubToken: "ghs_testToken",
+        governanceRulesets: buildGovernanceRulesets({ agentAppName: "a", releaseAppName: "r" }).all,
+        agentAppIntegrationId: 2888446,
+        releaseAppIntegrationId: 2888449,
+        fetchImpl: mockFetch
+      });
+
+      const payload = sent.find((c) => c.method === "POST" && c.body?.name === ruleset)?.body;
+      expect(payload?.rules?.map((r) => r.type)).toEqual(expectedRules);
+      expect(payload?.bypass_actors).toEqual(expectedBypass);
+    });
+
+    it.each([
+      {
+        id: "outdated-feature-ruleset-with-pull-request-bypass-and-linear-history-is-reported-as-update",
+        existingFeature: {
+          rules: ["deletion", "non_fast_forward", "required_linear_history", "pull_request", "commit_message_pattern"],
+          bypassMode: "pull_request"
+        },
+        expected: { "epure-feature-integrity": "create", "epure-feature-governance": "update", "epure-dev-governance": "noop", "epure-release-immutability": "create" }
+      },
+      {
+        id: "previous-single-feature-ruleset-letting-the-agent-app-delete-and-force-push-is-reported-as-update",
+        existingFeature: {
+          rules: ["commit_message_pattern", "deletion", "non_fast_forward", "pull_request"],
+          bypassMode: "always"
+        },
+        expected: { "epure-feature-integrity": "create", "epure-feature-governance": "update", "epure-dev-governance": "noop", "epure-release-immutability": "create" }
+      },
+      {
+        id: "feature-governance-ruleset-already-generated-by-this-version-is-noop",
+        existingFeature: {
+          rules: ["commit_message_pattern", "pull_request"],
+          bypassMode: "always"
+        },
+        expected: { "epure-feature-integrity": "create", "epure-feature-governance": "noop", "epure-dev-governance": "noop", "epure-release-immutability": "create" }
+      }
+    ])("$id", async ({ existingFeature, expected }) => {
+      const rulesets = buildGovernanceRulesets({ agentAppName: "a", releaseAppName: "r" });
+      const devRules = ["deletion", "non_fast_forward", "required_linear_history", "pull_request", "commit_message_pattern"];
+      const remote: Record<string, unknown> = {
+        "/rulesets": [
+          { id: 1, name: "epure-feature-governance" },
+          { id: 2, name: "epure-dev-governance" }
+        ],
+        "/rulesets/1": {
+          conditions: { ref_name: { include: ["refs/heads/feature/*"], exclude: [] } },
+          rules: existingFeature.rules.map((type) => ({ type, parameters: { extra_github_default: true } })),
+          bypass_actors: [{ actor_id: 2888446, actor_type: "Integration", bypass_mode: existingFeature.bypassMode }]
+        },
+        "/rulesets/2": {
+          conditions: { ref_name: { include: ["refs/heads/dev"], exclude: [] } },
+          rules: devRules.map((type) => ({ type })),
+          bypass_actors: []
+        }
+      };
+      const methods: string[] = [];
+      const mockFetch: typeof fetch = async (input, init) => {
+        methods.push(init?.method ?? "GET");
+        const path = new URL(String(input)).pathname.replace("/repos/Hartorn-Inc/trame", "");
+        return path in remote ? new Response(JSON.stringify(remote[path]), { status: 200 }) : new Response("Not Found", { status: 404 });
+      };
+
+      const plan = await planGitHubRulesetChanges({
+        repository: "Hartorn-Inc/trame",
+        githubToken: "ghs_testToken",
+        governanceRulesets: rulesets.all,
+        agentAppIntegrationId: 2888446,
+        releaseAppIntegrationId: 2888449,
+        fetchImpl: mockFetch
+      });
+
+      expect(Object.fromEntries(plan.map((p) => [p.name, p.action]))).toEqual(expected);
+      expect(new Set(methods)).toEqual(new Set(["GET"]));
     });
 
     it.each([

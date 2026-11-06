@@ -43,3 +43,11 @@ Le test pilote de bout en bout d'`EPURE v1.1.0` sur un dépôt consommateur rée
 - Immunité de la chaîne de review face aux modifications du répertoire du roster (`reviewers_dir`) sur une branche de tâche.
 - Roster indépendant de tout IDE par défaut, tout en restant chargeable par un IDE particulier via `--reviewers-dir`.
 - Historique Git linéaire sur `feature/*` et `dev` composé uniquement de commits sémantiques résumant le diff réel.
+
+## Amendement (v3.0.0, #108)
+
+EPURE écrit directement sur `feature/*` (intégration du plan, synchronisation depuis `dev` par commit de merge, résolution de conflits à deux parents). Le bypass `pull_request` de la décision 1.1 rejetait ces écritures (`422 Changes must be made through a pull request`) et `required_linear_history` interdisait les commits de merge. `epure-feature-governance` donne donc à l'`Agent App` un bypass `always` et ne pose plus `required_linear_history` ; les humains restent soumis aux PRs. `dev` garde un historique linéaire.
+
+Un bypass `always` couvrirait aussi la suppression et le force-push d'une branche `feature/*`. Ces deux règles passent dans un quatrième Ruleset, `epure-feature-integrity` (`deletion`, `non_fast_forward`), sans aucun Bypass Actor : ni l'`Agent App` ni un humain ne peut réécrire ou supprimer une branche de fonctionnalité. `epure-feature-governance` garde la PR, les checks et le motif de commit.
+
+Conséquence opérationnelle, à reporter dans les notes de migration v3.0.0 : les branches `feature/*` fusionnées dans `dev` ne sont plus supprimées. `delete_branch_on_merge` ne les supprime pas et un administrateur reçoit lui aussi un refus. Le Ruleset n'est pas affaibli pour autant : pour élaguer, un administrateur désactive temporairement `epure-feature-integrity`, supprime les branches fusionnées, puis le réactive.

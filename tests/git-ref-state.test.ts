@@ -9,8 +9,12 @@ import {
 } from "../src/state/git-ref-state.js";
 import {
   createGitHubMockRouter,
-  installFakeGitDataApi
+  installFakeGitDataApi,
+  json,
+  serverError
 } from "./fixtures/github-mock-router.js";
+
+type ApiStore = ReturnType<typeof createGitHubApiRefStateStore>;
 
 describe("Ticket 09 (#10) — Atomic Git ref state (refs/epure/state/*) & concurrent CAS", () => {
   it.each([
@@ -101,11 +105,13 @@ describe("Ticket 09 (#10) — Atomic Git ref state (refs/epure/state/*) & concur
     }
   );
 
-  it.fails.each([
-    { id: "concurrent-writer-between-read-and-patch-is-not-overwritten-by-force-true" }
+  it.each([
+    { id: "concurrent-writer-between-read-and-update-is-rejected-by-the-graphql-beforeOid-precondition", seeded: true, expectedUpdateRefsCalls: 2 },
+    { id: "concurrent-creator-of-a-missing-ref-is-rejected-as-already-existing", seeded: false, expectedUpdateRefsCalls: 1 }
   ])(
-    "createGitHubApiRefStateStore CAS [$id]: a concurrent ref update between the CAS read and the PATCH is detected and retried",
-    async () => {
+    "createGitHubApiRefStateStore CAS [$id]: a concurrent ref update before the write is detected and retried without a lost update",
+    async ({ seeded, expectedUpdateRefsCalls }) => {
+      const ref = "refs/epure/state/10";
       const router = createGitHubMockRouter();
       const git = installFakeGitDataApi(router, "acme/demo");
       const store = createGitHubApiRefStateStore({
@@ -113,18 +119,22 @@ describe("Ticket 09 (#10) — Atomic Git ref state (refs/epure/state/*) & concur
         githubToken: "ghs_test",
         fetchImpl: router.fetch
       });
-      await updateIssueStateWithCas({
-        issueNumber: 10,
-        store,
-        mutator: (prev) => ({ ...prev, phase: "implementation" })
-      });
-      git.onBeforeNextRefWrite("refs/epure/state/10", () => {
-        const current = JSON.parse(
-          git.readBlob(git.getRef("refs/epure/state/10")!)!
-        ) as EpureIssueState;
+      if (seeded) {
+        await updateIssueStateWithCas({
+          issueNumber: 10,
+          store,
+          mutator: (prev) => ({ ...prev, phase: "implementation" })
+        });
+      }
+      const snapshot = await store.readRef(ref);
+      const before = snapshot.state ?? { ...WAITING_TICKET_STATE, version: 0 };
+      git.onBeforeNextRefWrite(ref, () => {
         git.setRef(
-          "refs/epure/state/10",
-          git.putBlob(JSON.stringify({ ...current, version: 2, status: "cancelled" }))
+          ref,
+          git.putCommit({
+            parents: snapshot.sha ? [snapshot.sha] : [],
+            message: JSON.stringify({ ...before, version: before.version + 1, status: "cancelled" })
+          })
         );
       });
 
@@ -134,12 +144,119 @@ describe("Ticket 09 (#10) — Atomic Git ref state (refs/epure/state/*) & concur
         mutator: (prev) => ({ ...prev, last_processed_comment_id: 42 })
       });
 
+      expect(router.unmatched).toEqual([]);
       expect(result.cas_conflicts_recovered).toBe(1);
-      const final = await store.readRef("refs/epure/state/10");
-      expect(final.state?.status).toBe("cancelled");
-      expect(final.state?.last_processed_comment_id).toBe(42);
+      expect(router.calls("POST", "/graphql")).toBe(expectedUpdateRefsCalls);
+      expect(router.calls("PATCH", /\/git\/refs\//)).toBe(0);
+      const final = await store.readRef(ref);
+      expect(final.state).toMatchObject({ status: "cancelled", last_processed_comment_id: 42, version: before.version + 2 });
     }
   );
+
+  it.each([
+    { id: "state-commit-ref-moves-through-graphql-updateRefs-on-a-child-commit", legacyBlob: false, expected: { parents: 1, updateRefs: 1, patches: 0 } },
+    { id: "legacy-json-blob-ref-is-read-then-migrated-to-a-state-commit-by-rest-patch", legacyBlob: true, expected: { parents: 0, updateRefs: 0, patches: 1 } }
+  ])("createGitHubApiRefStateStore write [$id]", async ({ legacyBlob, expected }) => {
+    const ref = "refs/epure/state/10";
+    const router = createGitHubMockRouter();
+    const git = installFakeGitDataApi(router, "acme/demo");
+    const store = createGitHubApiRefStateStore({ repository: "acme/demo", githubToken: "ghs_test", fetchImpl: router.fetch });
+    if (legacyBlob) {
+      git.setRef(ref, git.putBlob(JSON.stringify({ ...WAITING_TICKET_STATE, phase: "spec" }, null, 2)));
+    } else {
+      await updateIssueStateWithCas({ issueNumber: 10, store, mutator: (prev) => ({ ...prev, phase: "spec" }) });
+    }
+    const before = await store.readRef(ref);
+    const writesBefore = router.requests.length;
+
+    await updateIssueStateWithCas({ issueNumber: 10, store, mutator: (prev) => ({ ...prev, phase: "tickets" }) });
+
+    const writes = router.requests.slice(writesBefore);
+    const commit = writes.find((r) => r.method === "POST" && r.path.endsWith("/git/commits"))!.body as { parents: string[] };
+    expect(router.unmatched).toEqual([]);
+    expect(before.state?.phase).toBe("spec");
+    expect(commit.parents).toHaveLength(expected.parents);
+    expect(writes.filter((r) => r.path === "/graphql")).toHaveLength(expected.updateRefs);
+    expect(writes.filter((r) => r.method === "PATCH")).toHaveLength(expected.patches);
+    expect((await store.readRef(ref)).state).toMatchObject({ phase: "tickets", version: before.state!.version + 1 });
+  });
+
+  it.each([
+    {
+      id: "502-on-the-state-commit-read-rejects-instead-of-reading-an-empty-state",
+      failing: { method: "GET", path: /\/git\/commits\/[0-9a-f]+$/, reply: serverError() },
+      act: (store: ApiStore) => store.readRef("refs/epure/state/10"),
+      expectedError: /state object .* \(HTTP 502\)/
+    },
+    {
+      id: "502-on-the-state-ref-listing-rejects-instead-of-listing-no-state",
+      failing: { method: "GET", path: /\/git\/matching-refs\//, reply: serverError() },
+      act: (store: ApiStore) => store.listIssueStates(),
+      expectedError: /list EPURE state refs \(HTTP 502\)/
+    },
+    {
+      id: "502-on-the-state-commit-creation-rejects-instead-of-retrying-as-a-cas-conflict",
+      failing: { method: "POST", path: "/repos/acme/demo/git/commits", reply: serverError() },
+      act: (store: ApiStore) => updateIssueStateWithCas({ issueNumber: 10, store, mutator: (prev) => prev }),
+      expectedError: /state commit .* \(HTTP 502\)/
+    },
+    {
+      id: "graphql-error-while-the-ref-did-not-move-rejects-instead-of-retrying-as-a-cas-conflict",
+      failing: { method: "POST", path: "/graphql", reply: json({ errors: [{ type: "FORBIDDEN", message: "Resource not accessible by integration" }] }) },
+      act: (store: ApiStore) => updateIssueStateWithCas({ issueNumber: 10, store, mutator: (prev) => prev }),
+      expectedError: /Failed to update Git ref 'refs\/epure\/state\/10' \(HTTP 200\): .*Resource not accessible/
+    }
+  ] as const)("createGitHubApiRefStateStore fails closed [$id]", async ({ failing, act, expectedError }) => {
+    const router = createGitHubMockRouter();
+    installFakeGitDataApi(router, "acme/demo");
+    const store = createGitHubApiRefStateStore({ repository: "acme/demo", githubToken: "ghs_test", fetchImpl: router.fetch });
+    await updateIssueStateWithCas({ issueNumber: 10, store, mutator: (prev) => ({ ...prev, phase: "spec" }) });
+    const callsBefore = router.calls(failing.method, failing.path);
+    router.on(failing.method, failing.path, failing.reply);
+
+    await expect(act(store)).rejects.toThrow(expectedError);
+    expect(router.unmatched).toEqual([]);
+    expect(router.calls(failing.method, failing.path) - callsBefore).toBe(1);
+  });
+
+  it.each([
+    { id: "graphql-update-that-landed-but-answered-502-is-not-retried", seeded: true, method: "POST", path: "/graphql" },
+    { id: "ref-creation-that-landed-but-answered-502-is-not-retried", seeded: false, method: "POST", path: "/repos/acme/demo/git/refs" }
+  ] as const)("createGitHubApiRefStateStore write [$id]", async ({ seeded, method, path }) => {
+    const ref = "refs/epure/state/10";
+    const router = createGitHubMockRouter();
+    installFakeGitDataApi(router, "acme/demo");
+    let armed = true;
+    const store = createGitHubApiRefStateStore({
+      repository: "acme/demo",
+      githubToken: "ghs_test",
+      fetchImpl: async (input, init) => {
+        const resp = await router.fetch(input, init);
+        if (armed && init?.method === method && new URL(String(input)).pathname === path) {
+          armed = false;
+          return new Response("Bad Gateway", { status: 502 });
+        }
+        return resp;
+      }
+    });
+    if (seeded) {
+      await updateIssueStateWithCas({ issueNumber: 10, store, mutator: (prev) => ({ ...prev, phase: "spec" }) });
+      armed = true;
+    }
+    const versionBefore = (await store.readRef(ref)).state?.version ?? 0;
+    const writesBefore = router.calls(method, path);
+
+    const result = await updateIssueStateWithCas({
+      issueNumber: 10,
+      store,
+      mutator: (prev) => ({ ...prev, code_fix_attempts_used: prev.code_fix_attempts_used + 1 })
+    });
+
+    expect(router.unmatched).toEqual([]);
+    expect(result.cas_conflicts_recovered).toBe(0);
+    expect(router.calls(method, path) - writesBefore).toBe(1);
+    expect((await store.readRef(ref)).state).toMatchObject({ version: versionBefore + 1, code_fix_attempts_used: 1 });
+  });
 
   it("formatIssueStateMirrorMarkdown renders deterministic human-readable state summary", () => {
     const state: EpureIssueState = {
@@ -161,3 +278,20 @@ describe("Ticket 09 (#10) — Atomic Git ref state (refs/epure/state/*) & concur
     expect(md).toContain("`plan/10-auth`");
   });
 });
+
+const WAITING_TICKET_STATE: EpureIssueState = {
+  issue_number: 10,
+  version: 4,
+  phase: "implementation",
+  status: "active",
+  active_branch: "feature/10-auth",
+  last_processed_comment_id: 0,
+  code_fix_attempts_used: 2,
+  transient_retries_used: 0,
+  updated_at: "2026-11-02T09:00:00.000Z",
+  subphase: "waiting_ticket_ci",
+  active_ticket_number: 11,
+  active_task_branch: "task/11-login",
+  active_pr_number: 21,
+  active_head_sha: "sha-21"
+};

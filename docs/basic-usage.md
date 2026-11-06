@@ -129,7 +129,7 @@ EPURE now executes the ticket DAG in topological order (`#25`, then `#26`, then 
    - Opens **PR #28** (`task/25-markov-solver -> feature/16-markov-craft-calculator`).
 2. **Stage 2 Event-Driven External CI (`waiting_ticket_ci`)**:
    - Persists `subphase: "waiting_ticket_ci"` in `refs/epure/state/16` and exits `0` immediately so no runner sits idle while GitHub Actions runs external CI on PR #28.
-   - Automatically wakes up when `check_suite.completed` / `workflow_run.completed` fires on `task/25-markov-solver`.
+   - Automatically wakes up when `workflow_run.completed` fires on `task/25-markov-solver`.
 3. **Stage 3 Multi-Agent Review (from trusted `dev`) & AI Semantic Squash**:
    - Loads the reviewer prompts (`<reviewers_dir>/*.md`, default `.agents/reviewers/*.md`) strictly from `dev` (never from `task/25-*`).
    - Selects up to 4 relevant reviewers (e.g., `domain-backend-reviewer`, `standards-reviewer`, `security-reviewer`) plus `spec-parity-reviewer`.

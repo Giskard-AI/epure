@@ -2,8 +2,10 @@ import {
   PROMPT_INJECTION_IMMUNITY_CLAUSE,
   wrapUntrustedContent
 } from "../../security/prompt-injection-guard.js";
+import type { PlanManifestRecord } from "../../state/git-ref-state.js";
 import { appendEpureCommandsSpoiler } from "../formatting/comments.js";
 import { callLlmJson } from "../llm-helper.js";
+import { embedManifestJson } from "../plan-manifest.js";
 import { EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT } from "../prompts/code-discipline.js";
 import {
   EPIC_CONVERGENCE_AUDIT_SCHEMA,
@@ -34,7 +36,7 @@ export interface RunEpicConvergenceAuditParams {
   readonly stage1Summary?: string | undefined;
   readonly gh: Pick<
     GitHubRestHelper,
-    "readSingleBranchFile" | "listBranchPaths"
+    "readSingleBranchFile" | "listBranchPathHints"
   >;
   readonly llmApiKey: string;
   readonly phaseModels: ResolvedPhaseModels;
@@ -180,7 +182,8 @@ export interface SpawnPhase2ConvergenceTicketsParams {
   readonly nextEpicPhase: number;
   readonly existingTickets: readonly TrackedTicketCommentMetadata[];
   readonly auditResult: EpicConvergenceAuditPayload;
-  readonly stateMirrorMarkdown: string;
+  // Records the manifest in the state ref and returns the state mirror markdown.
+  readonly recordPlanManifest: (manifest: PlanManifestRecord) => Promise<string>;
 }
 
 export async function spawnPhase2ConvergenceTickets(
@@ -264,9 +267,17 @@ export async function spawnPhase2ConvergenceTickets(
     tickets: combinedTickets
   });
 
+  const planManifest: PlanManifestRecord = {
+    planBranch: params.planBranch,
+    specPath: params.specPath,
+    epicGoalContract: params.epicGoalContract,
+    tickets: combinedTickets
+  };
+  const stateMirrorMarkdown = await params.recordPlanManifest(planManifest);
+
   const phaseComment = appendEpureCommandsSpoiler(
     [
-      params.stateMirrorMarkdown,
+      stateMirrorMarkdown,
       "",
       `### 🔄 Audit de Convergence Goldfish (\`INCOMPLETE\`) — Lancement automatique de la Phase ${params.nextEpicPhase}`,
       "",
@@ -292,12 +303,7 @@ export async function spawnPhase2ConvergenceTickets(
         (t) => `- **#${t.ticketIssueNumber}** — ${t.title}`
       ),
       "",
-      `<!-- epure-plan-manifest:${JSON.stringify({
-        planBranch: params.planBranch,
-        specPath: params.specPath,
-        epicGoalContract: params.epicGoalContract,
-        tickets: combinedTickets
-      })} -->`
+      `<!-- epure-plan-manifest:${embedManifestJson(planManifest)} -->`
     ].join("\n"),
     {
       phase: "implementation",

@@ -1292,7 +1292,8 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
               {
                 id: 499,
                 body: `<!-- epure-plan-manifest:${JSON.stringify(manifestPayload)} -->`,
-                user: { login: "epure-agent[bot]", type: "Bot" },
+                user: { login: "github-actions[bot]", type: "Bot" },
+                performed_via_github_app: { id: 15368 },
                 created_at: "2026-10-26T10:00:00Z"
               },
               ...(mode === "mid_run_cancel"
@@ -2598,7 +2599,7 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
 
       const postedComments: string[] = [];
       const addedLabels: string[][] = [];
-      const treeBranchesRead: string[] = [];
+      const configBranchesRead: string[] = [];
       let llmCalls = 0;
 
       const mockFetch: typeof fetch = async (inputUrl, init) => {
@@ -2609,20 +2610,25 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
           llmCalls += 1;
           return new Response(JSON.stringify({}), { status: 500 });
         }
-        const treeMatch = url.match(/\/git\/trees\/([^?]+)\?recursive=1/);
-        if (treeMatch && method === "GET") {
-          const branch = decodeURIComponent(treeMatch[1]!);
-          treeBranchesRead.push(branch);
-          const tree =
-            branch === "dev" && params.devAgentsYaml !== undefined
-              ? [{ path: ".github/agents.yml", type: "blob", sha: "agentsdev" }]
-              : [];
-          return new Response(JSON.stringify({ tree }), { status: 200 });
-        }
-        if (url.endsWith("/git/blobs/agentsdev") && method === "GET") {
+        const configMatch = url.match(
+          /\/contents\/\.github\/(agents\.ya?ml)\?ref=([^&]+)$/
+        );
+        if (configMatch && method === "GET") {
+          const branch = decodeURIComponent(configMatch[2]!);
+          configBranchesRead.push(branch);
+          if (
+            branch !== "dev" ||
+            configMatch[1] !== "agents.yml" ||
+            params.devAgentsYaml === undefined
+          ) {
+            return new Response(JSON.stringify({ message: "Not Found" }), {
+              status: 404
+            });
+          }
           return new Response(
             JSON.stringify({
-              content: Buffer.from(params.devAgentsYaml ?? "", "utf8").toString(
+              type: "file",
+              content: Buffer.from(params.devAgentsYaml, "utf8").toString(
                 "base64"
               ),
               encoding: "base64"
@@ -2657,6 +2663,9 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
           addedLabels.push(parsed.labels ?? []);
           return new Response(JSON.stringify([]), { status: 200 });
         }
+        if (url.includes("/git/matching-refs/") || url.includes("/pulls?")) {
+          return new Response(JSON.stringify([]), { status: 200 });
+        }
         return new Response(JSON.stringify({}), { status: 200 });
       };
 
@@ -2681,7 +2690,7 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
         stateAfter,
         postedComments,
         addedLabels,
-        treeBranchesRead,
+        configBranchesRead,
         llmCalls
       };
     }
@@ -2828,11 +2837,30 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
         expect(out.postedComments.at(-1)).toContain(expectedCommentSubstring);
         expect(out.stateAfter.state?.status).toBe("suspended");
         expect(out.llmCalls).toBe(0);
-        expect(out.treeBranchesRead.includes("main")).toBe(
+        expect(out.configBranchesRead.includes("main")).toBe(
           expectMainBranchConfigRead
         );
       }
     );
+
+    it("approve-on-a-ticket-graph-without-an-implementation-model-suspends-in-implementation-and-advertises-approve", async () => {
+      const out = await runModelGatedCommand({
+        command: "approve",
+        commentId: 950,
+        initialState: { phase: "tickets", status: "awaiting_human_approval", active_branch: "plan/123-links" },
+        devAgentsYaml: "models:\n  planning: anthropic/claude-haiku-5-5\n  review: anthropic/claude-haiku-5-5\n"
+      });
+
+      expect(out.stateAfter.state).toMatchObject({
+        phase: "implementation",
+        status: "suspended",
+        last_escalation: { reason: "model_config_missing" }
+      });
+      expect(out.postedComments.at(-1)).toContain("`models.implementation`");
+      expect(out.postedComments.at(-1)).toContain("Postez `/epure continue` (ou `/epure approve`)");
+      expect(out.postedComments.at(-1)).not.toContain("Republiez `/epure to-tickets`");
+      expect(out.llmCalls).toBe(0);
+    });
 
     it.each([
       {
@@ -2856,7 +2884,7 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
           .on("GET", `${git}/commits/parent_sha_1`, json({ tree: { sha: "base_tree_sha_1" } }))
           .on(
             "GET",
-            `${git}/trees/base_tree_sha_1?recursive=1`,
+            `${git}/trees/parent_sha_1?recursive=1`,
             json({
               tree: baseTreeBlobs.map((p) => ({ path: p, type: "blob", sha: "blob_existing" }))
             })
@@ -3105,7 +3133,7 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
           devBranchPaths: Array.from(initialAccumulated.keys()),
           gh: {
             readSingleBranchFile: async () => null,
-            listBranchPaths: async () => Array.from(initialAccumulated.keys())
+            listBranchPathHints: async () => Array.from(initialAccumulated.keys())
           }
         });
 
@@ -3654,7 +3682,8 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
                 {
                   id: 701,
                   body: `<!-- epure-plan-manifest:${JSON.stringify(manifestPayload)} -->`,
-                  user: { login: "epure-agent[bot]", type: "Bot" },
+                  user: { login: "github-actions[bot]", type: "Bot" },
+                  performed_via_github_app: { id: 15368 },
                   created_at: "2026-10-31T10:00:00Z"
                 }
               ]),

@@ -120,9 +120,14 @@ git push origin dev
      - **Socle transverse permanent** : `architecture-reviewer`, `security-reviewer`, `spec-parity-reviewer`, `standards-reviewer` (adapté au langage détecté : TypeScript, Python, Rust ou Go) et `user-advocate`.
      - **Spécialistes conçus sur mesure selon les éléments du projet** : `domain-backend-reviewer`, `infra-reviewer`, tout reviewer métier créé par l'agent pour vos sous-systèmes (ex. `realtime-reviewer.md`, `combat-engine-reviewer.md`, `sql-migration-reviewer.md` avec routage par `paths:` dans le frontmatter YAML), et — uniquement si le projet comporte une UI — les reviewers frontend/Impeccable (`frontend-reviewer`, `accessibility-reviewer`, `design-reviewer`).
      - *Exemple illustratif sur `craft-calculator` (application web TypeScript + React)* : l'agent assemble un roster de 10 reviewers combinant le socle transverse, `domain-backend-reviewer`, `infra-reviewer` et les 3 reviewers UI/Impeccable.
-5. **Politique Squash-Only & 3 Repository Rulesets** :
+5. **Politique Squash-Only & 4 Repository Rulesets** :
    - Configure le dépôt en **Squash merge exclusif** (`allow_squash_merge: true`, `allow_merge_commit: false`, `allow_rebase_merge: false`, `delete_branch_on_merge: true`).
-   - Installe les 3 Rulesets GitHub :
-     - `epure-feature-governance` (`refs/heads/feature/*`) : `Agent App` en bypass PR pour le squash-merge autonome des PRs `task/* -> feature/*`.
+   - Installe les 4 Rulesets GitHub :
+     - `epure-feature-integrity` (`refs/heads/feature/*`) : interdit suppression et force-push sans aucun Bypass Actor, si bien que même l'`Agent App` ne peut ni réécrire ni supprimer une branche de fonctionnalité. Conséquence : les branches `feature/*` fusionnées restent sur GitHub. `delete_branch_on_merge` ne peut pas les supprimer, un administrateur non plus ; pour les élaguer, désactivez temporairement ce Ruleset (Settings → Rules → Rulesets), supprimez les branches fusionnées, puis réactivez-le.
+     - `epure-feature-governance` (`refs/heads/feature/*`) : `Agent App` en bypass `always` pour le squash-merge autonome des PRs `task/* -> feature/*` et les écritures directes d'EPURE (intégration du plan, synchronisations depuis `dev` en commits de merge, résolutions de conflits) ; les humains passent toujours par une PR.
      - `epure-dev-governance` (`refs/heads/dev`) : aucun bypass pour l'`Agent App` (`required_approving_review_count: 0` par défaut pour permettre à un mainteneur solo de merger ses PRs ; configurable via `--require-pr-approvals <N>`).
      - `epure-release-immutability` (`refs/heads/main`, `refs/tags/v*`) : `Release App` comme unique Bypass Actor.
+
+## Compromis Fail-Closed
+
+- **Consignes de reprise des mainteneurs à l'appartenance privée** : quand `/epure continue` ou `/epure approve` reprend une implémentation, EPURE transmet à la session reprise les commentaires récents des contributeurs `write` ou supérieur. Pour qu'un visiteur ne puisse pas épuiser les vérifications de permission, seuls les auteurs d'`author_association` `OWNER`, `MEMBER` ou `COLLABORATOR` sont vérifiés. GitHub présente un membre d'organisation dont l'appartenance est privée comme `CONTRIBUTOR` ou `NONE` : ses commentaires sont donc écartés du contexte de reprise alors qu'il détient `write`. Les commandes ne sont pas concernées : chaque commande `/epure` reste autorisée par la permission effective. Rendez l'appartenance publique (organisation → People) ou ajoutez le mainteneur comme collaborateur direct pour que ses consignes soient transmises.

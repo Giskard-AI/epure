@@ -1,6 +1,6 @@
 ---
 name: setup-repo
-description: Bootstrap or reconfigure an EPURE consumer repository with --dry-run simulation, .github/agents.yml defaults (Q78), squash-only merge governance, 3 Repository Rulesets (Q91/Q95), and a dynamically composed multi-agent reviewer roster in reviewers_dir (default .agents/reviewers/, Q92).
+description: Bootstrap or reconfigure an EPURE consumer repository with --dry-run simulation, .github/agents.yml defaults (Q78), squash-only merge governance, 4 Repository Rulesets (Q91/Q95), and a dynamically composed multi-agent reviewer roster in reviewers_dir (default .agents/reviewers/, Q92).
 ---
 
 # `setup-repo` — Consumer Repository Bootstrap & Dynamic Roster Setup
@@ -32,10 +32,10 @@ Running `setup-repo` scaffolds **18 files** on a standard full-stack repository 
 | :--- | :--- |
 | `--repo <owner/repo>` | **(Required)** Target GitHub repository slug (e.g., `acme-org/payments`). |
 | `--dir <path>` / `--target-dir <path>` | Target repository checkout directory where the 18 files are planned/written (alias: `--repo-root <path>`). |
-| `--dry-run` | Default mode; previews all planned files, discovered `verification.targets`, and 3 Repository Rulesets without mutating disk or calling write APIs. |
+| `--dry-run` | Default mode; previews all planned files, discovered `verification.targets`, and 4 Repository Rulesets without mutating disk or calling write APIs. |
 | `--apply` | Writes `.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`, the 5 caller workflows, and `<reviewers_dir>/*.md` to disk (idempotent `noop` on unchanged files). |
-| `--apply-github-settings` | Applies squash-only merge settings (`allow_squash_merge: true`, `allow_merge_commit: false`, `allow_rebase_merge: false`, `delete_branch_on_merge: true`) and creates/updates the 3 Repository Rulesets (`epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`) via the GitHub REST API. |
-| `--agent-app-id <id>` | Numeric GitHub App ID of `<owner>-epure-agent`, wired as PR Bypass Actor on `epure-feature-governance` (`refs/heads/feature/*`). |
+| `--apply-github-settings` | Applies squash-only merge settings (`allow_squash_merge: true`, `allow_merge_commit: false`, `allow_rebase_merge: false`, `delete_branch_on_merge: true`) and creates/updates the 4 Repository Rulesets (`epure-feature-integrity`, `epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`) via the GitHub REST API. |
+| `--agent-app-id <id>` | Numeric GitHub App ID of `<owner>-epure-agent`, wired as Bypass Actor (`always`) on `epure-feature-governance` (`refs/heads/feature/*`) so EPURE can push plan integrations, `dev` syncs and conflict resolutions directly. `epure-feature-integrity` (deletion, force-push) has no bypass actor, the App included: merged `feature/*` branches are never deleted (not by `delete_branch_on_merge`, not by an admin); pruning them requires temporarily disabling that ruleset. |
 | `--release-app-id <id>` | Numeric GitHub App ID of `<owner>-epure-release`, wired as sole `always` Bypass Actor on `epure-release-immutability` (`refs/heads/main`, `refs/tags/v*`). |
 | `--pinned-sha <40-char-sha>` | Overrides the 40-character commit SHA of `Giskard-AI/epure` used to pin reusable workflows and actions. |
 | `--require-pr-approvals <count>` | Number of required human PR approvals on `epure-dev-governance` (`0` by default for solo-maintainer compatibility; set `>=1` for teams). |
@@ -62,7 +62,7 @@ Running `setup-repo` scaffolds **18 files** on a standard full-stack repository 
      - Inspect `models` (`planning`, `implementation`, `review`) and optional `providers` aliases in `.github/agents.yml`. API keys in `providers.<alias>.api_key` must use `os.environ/<SECRET_NAME>` references (never literal secrets) resolved by the runner-local LLM proxy sidecar.
 
 2. **Dry-Run Simulation (First Step)**
-   Run the pre-bundled CLI in `--dry-run` mode to preview caller workflows pinned by 40-char SHA (including `.github/workflows/pr-title.yml`, `.github/workflows/ci.yml`, `.github/zizmor.yml`, and `renovate.json`), `.github/agents.yml` defaults, the dynamically composed `<reviewers_dir>/*.md` reviewer roster, squash-only merge settings, and the 3 Repository Rulesets (`epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`):
+   Run the pre-bundled CLI in `--dry-run` mode to preview caller workflows pinned by 40-char SHA (including `.github/workflows/pr-title.yml`, `.github/workflows/ci.yml`, `.github/zizmor.yml`, and `renovate.json`), `.github/agents.yml` defaults, the dynamically composed `<reviewers_dir>/*.md` reviewer roster, squash-only merge settings, and the 4 Repository Rulesets (`epure-feature-integrity`, `epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`):
    ```bash
    node dist/cli/setup-repo.mjs --repo <owner>/<repo> --target-dir . --dry-run
    ```
@@ -71,7 +71,7 @@ Running `setup-repo` scaffolds **18 files** on a standard full-stack repository 
    - Pass `--reviewers-dir <path>` only if the team wants the roster outside `.agents/reviewers` (e.g. `.cursor/agents`), `--llm-env <name>` if the agent GitHub Environment is not `epure-agent`, and `--model` / `--planning-model` / `--implementation-model` / `--review-model` to pick the team's LLM provider.
 
 3. **Guided Application (Disk + GitHub API Governance + Dynamic Prompt Tailoring)**
-   Write `.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`, caller workflows (`.github/workflows/epure-issue-command.yml`, `.github/workflows/epure-check.yml`, `.github/workflows/pr-title.yml`, `.github/workflows/ci.yml`, `.github/workflows/release.yml`), and `<reviewers_dir>/*.md` while applying squash-only repository settings and the 3 Repository Rulesets via the GitHub REST API:
+   Write `.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`, caller workflows (`.github/workflows/epure-issue-command.yml`, `.github/workflows/epure-check.yml`, `.github/workflows/pr-title.yml`, `.github/workflows/ci.yml`, `.github/workflows/release.yml`), and `<reviewers_dir>/*.md` while applying squash-only repository settings and the 4 Repository Rulesets via the GitHub REST API:
    ```bash
    node dist/cli/setup-repo.mjs --repo <owner>/<repo> --target-dir . --agent-app-id <agent-id> --release-app-id <release-id> --apply --apply-github-settings
    ```

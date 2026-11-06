@@ -74,6 +74,25 @@ function buildAgentsYamlForTarget(target: LiveLLMTargetConfig): string {
   return `${lines.join("\n")}\n`;
 }
 
+// Tool declarations per provider wire format: OpenAI `function.name`, Anthropic `name`, Gemini `functionDeclarations[].name`.
+interface ToolDeclaration {
+  readonly name?: string;
+  readonly function?: { readonly name?: string };
+  readonly functionDeclarations?: ReadonlyArray<{ readonly name?: string }>;
+}
+
+function declaredToolNames(requestBody: string): string[] {
+  if (!requestBody) {
+    return [];
+  }
+  const { tools } = JSON.parse(requestBody) as { tools?: readonly ToolDeclaration[] };
+  return (tools ?? []).flatMap((tool) => [
+    ...(tool.name ? [tool.name] : []),
+    ...(tool.function?.name ? [tool.function.name] : []),
+    ...(tool.functionDeclarations ?? []).flatMap((d) => (d.name ? [d.name] : []))
+  ]);
+}
+
 function createHybridLiveFetch(params: {
   readonly target: LiveLLMTargetConfig;
   readonly issueTitle: string;
@@ -92,6 +111,7 @@ function createHybridLiveFetch(params: {
     labels: string[];
   }> = [];
 
+  const llmRequestBodies: string[] = [];
   const branchFiles = new Map<string, Map<string, string>>();
   const blobStore = new Map<string, string>();
   let blobSeq = 1;
@@ -141,6 +161,7 @@ function createHybridLiveFetch(params: {
 
     // Pass all non-GitHub requests directly to the real LLM provider over the network
     if (!urlStr.includes("api.github.com")) {
+      llmRequestBodies.push(typeof init?.body === "string" ? init.body : "");
       return await fetch(url, init);
     }
 
@@ -212,7 +233,23 @@ function createHybridLiveFetch(params: {
       );
     }
 
-    // 4. Git trees & blobs for readSingleBranchFile / readBranchWorkspaceFiles / commitFilesToBranch
+    // 4. Contents API for readSingleBranchFile; git trees & blobs for readBranchWorkspaceFiles / commitFilesToBranch
+    if (pathname.includes("/contents/") && method === "GET") {
+      const filePath = decodeURIComponent(pathname.split("/contents/")[1] ?? "");
+      const content = getBranchMap(parsedUrl.searchParams.get("ref") ?? "dev").get(filePath);
+      return content === undefined
+        ? new Response(JSON.stringify({ message: "Not Found" }), { status: 404 })
+        : new Response(
+            JSON.stringify({
+              type: "file",
+              sha: `blob_${blobSeq++}`,
+              encoding: "base64",
+              content: Buffer.from(content, "utf8").toString("base64")
+            }),
+            { status: 200 }
+          );
+    }
+
     if (pathname.includes("/git/trees/") && method === "GET") {
       const encodedBranch = pathname.split("/git/trees/")[1] ?? "dev";
       const branch = decodeURIComponent(encodedBranch);
@@ -330,6 +367,7 @@ function createHybridLiveFetch(params: {
     hybridFetch,
     comments,
     createdSubIssues,
+    llmRequestBodies,
     getBranchFile: (branch: string, path: string) =>
       branchFiles.get(branch)?.get(path) ?? null
   };
@@ -428,6 +466,9 @@ describeLive(
         expect(planRes.phase).toBe("grilling");
         expect(planRes.status).toBe("active");
         expect(planRes.created_ticket_numbers).toEqual([]);
+        expect(ghState.llmRequestBodies.flatMap(declaredToolNames)).toEqual(
+          expect.arrayContaining([expect.stringMatching(/^(read_repo_file|list_repo_files)$/)])
+        );
 
         // Stage 2: Human reply answering all questions and confirming everything is decided
         ghState.comments.push({

@@ -321,7 +321,6 @@ describe("EPURE v1.2 Chantier 3 & 4 — Ponytail 5, Goldfish EGM & Anti-SSRF Web
       };
 
       const ghMock = {
-        listBranchPaths: async () => ["src/index.ts"],
         readSingleBranchFile: async () => "export {};"
       } as unknown as GitHubRestHelper;
 

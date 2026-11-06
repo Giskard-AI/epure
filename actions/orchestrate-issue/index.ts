@@ -1,7 +1,10 @@
 import { appendFileSync } from "node:fs";
-import type { EpureCommandName } from "../../src/auth/issue-command-gate.js";
 import { redactSecrets } from "../../src/auth/issue-command-gate.js";
-import { orchestrateIssueCommand } from "../../src/orchestrator/issue-orchestrator.js";
+import {
+  EscalationNotRecordedError,
+  orchestrateIssueCommand
+} from "../../src/orchestrator/issue-orchestrator.js";
+import type { OrchestratorCommand } from "../../src/orchestrator/types.js";
 
 function writeGitHubOutputs(
   outputs: Record<string, string>,
@@ -33,7 +36,7 @@ async function run(): Promise<void> {
     process.env.INPUT_REPOSITORY ?? process.env.GITHUB_REPOSITORY ?? "";
   const issueNumber =
     Number.parseInt(process.env.INPUT_ISSUE_NUMBER ?? "0", 10) || 0;
-  const command = (process.env.INPUT_COMMAND ?? "status").trim() as EpureCommandName;
+  const command = (process.env.INPUT_COMMAND ?? "status").trim() as OrchestratorCommand;
   const commandArgs = process.env.INPUT_COMMAND_ARGS ?? "";
   const commentId =
     Number.parseInt(process.env.INPUT_COMMENT_ID ?? "0", 10) || 0;
@@ -60,10 +63,25 @@ async function run(): Promise<void> {
   ).trim();
   const model = (process.env.INPUT_MODEL ?? "").trim();
   const triggerHeadSha = (process.env.INPUT_TRIGGER_HEAD_SHA ?? "").trim();
-  const triggerBranch = (process.env.INPUT_TRIGGER_BRANCH ?? "").trim();
   const asyncCiContinuation =
     (process.env.INPUT_ASYNC_CI_CONTINUATION ?? "").trim().toLowerCase() ===
     "true";
+  // A re-run keeps GITHUB_RUN_ID, so the attempt makes each lease holder distinct.
+  const runId = process.env.GITHUB_RUN_ID
+    ? `${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT ?? "1"}`
+    : undefined;
+  // GITHUB_WORKFLOW_REF is `<owner>/<repo>/<workflow path>@<ref>`.
+  const workflowPath = /^[^/]+\/[^/]+\/(.+)@/.exec(
+    process.env.GITHUB_WORKFLOW_REF ?? ""
+  )?.[1];
+  const workflowJob =
+    workflowPath && process.env.GITHUB_WORKFLOW_SHA && process.env.GITHUB_JOB
+      ? {
+          path: workflowPath,
+          ref: process.env.GITHUB_WORKFLOW_SHA,
+          jobId: process.env.GITHUB_JOB
+        }
+      : undefined;
 
   const secrets = [agentAppPrivateKey, fallbackGithubToken, llmApiKey].filter(
     (s) => s.length >= 4
@@ -83,8 +101,9 @@ async function run(): Promise<void> {
       llmApiKey,
       model: model || undefined,
       ...(triggerHeadSha ? { triggerHeadSha } : {}),
-      ...(triggerBranch ? { triggerBranch } : {}),
-      ...(asyncCiContinuation ? { asyncCiContinuation } : {})
+      ...(asyncCiContinuation ? { asyncCiContinuation } : {}),
+      runId,
+      workflowJob
     });
 
     writeGitHubOutputs(
@@ -102,6 +121,9 @@ async function run(): Promise<void> {
       writeStepSummary(redactSecrets(result.summary_markdown, secrets));
     }
   } catch (err: unknown) {
+    if (err instanceof EscalationNotRecordedError) {
+      writeStepSummary(redactSecrets(err.escalationMarkdown, secrets));
+    }
     const msg = err instanceof Error ? err.message : String(err);
     const safeMsg = redactSecrets(msg, secrets);
     process.stderr.write(`::error title=EPURE Orchestration Failed::${safeMsg}\n`);
