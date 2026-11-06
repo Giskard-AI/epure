@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { orchestrateIssueCommand } from "../src/orchestrator/issue-orchestrator.js";
+import { EscalationNotRecordedError, orchestrateIssueCommand } from "../src/orchestrator/issue-orchestrator.js";
 import type { OrchestrateIssueInput } from "../src/orchestrator/types.js";
 import {
   createInMemoryGitRefStateStore,
@@ -15,7 +15,8 @@ import {
   primaryRateLimit,
   secondaryRateLimit,
   tooManyRequests,
-  type GitHubMockRouter
+  type GitHubMockRouter,
+  type RouteStep
 } from "./fixtures/github-mock-router.js";
 
 const REPO = "acme/demo";
@@ -997,6 +998,60 @@ describe("Lot 1 — GitHub API rate limits are waited out within 5 minutes, then
     expect(posted).toHaveLength(1);
     expect(body).toContain("`github_rate_limited`");
     expect(body).toContain("Postez `/epure continue` (ou `/epure approve`)");
+  });
+
+  it.each([
+    {
+      id: "escalation-comment-throttled-once-after-the-run-budget-is-spent-is-still-posted-within-its-own-budget",
+      commentReplies: (): [RouteStep, ...RouteStep[]] => [secondaryRateLimit(120), json({ html_url: "c" }, 201)],
+      expectedWaitsSeconds: [120, 120, 120],
+      expectsPosted: true
+    },
+    {
+      id: "escalation-comment-still-throttled-past-its-own-budget-rejects-with-the-escalation-for-the-action-summary",
+      commentReplies: (): [RouteStep, ...RouteStep[]] => [primaryRateLimit(nowSeconds() + 3600)],
+      expectedWaitsSeconds: [120, 120],
+      expectsPosted: false
+    }
+  ])("$id", async ({ commentReplies, expectedWaitsSeconds, expectsPosted }) => {
+    const store = await seedWaitingTicket();
+    const waits: number[] = [];
+    const router = declareIssueWrites(createGitHubMockRouter())
+      .on("GET", `${R}/issues/${ISSUE}`, secondaryRateLimit(120))
+      .on("POST", `${R}/issues/${ISSUE}/comments`, ...commentReplies());
+
+    const outcome = await orchestrateIssueCommand({
+      repository: REPO,
+      commandArgs: "",
+      fallbackGithubToken: "ghs_test",
+      llmApiKey: "key_test",
+      model: "openai/gpt-test",
+      stateStore: store,
+      fetchImpl: router.fetch,
+      sleepFn: async (ms) => {
+        waits.push(ms);
+      },
+      command: "continue",
+      actor: "github-actions[bot]",
+      ...TRIGGERS.continueWithoutComment
+    }).then(
+      () => null,
+      (err: unknown) => err
+    );
+    const posted = router.requests.filter((r) => r.method === "POST" && r.path === `${R}/issues/${ISSUE}/comments`);
+
+    expect(router.unmatched).toEqual([]);
+    expect(waits.map((ms) => Math.ceil(ms / 1000))).toEqual(expectedWaitsSeconds);
+    expect(await readState(store)).toMatchObject({ status: "suspended", last_escalation: { reason: "github_rate_limited" } });
+    if (expectsPosted) {
+      expect(outcome).toBeNull();
+      expect((posted.at(-1)?.body as { body: string }).body).toContain("`github_rate_limited`");
+    } else {
+      expect(outcome).toBeInstanceOf(EscalationNotRecordedError);
+      expect((outcome as EscalationNotRecordedError).message).toContain(`/epure continue\` on #${ISSUE}`);
+      expect((outcome as EscalationNotRecordedError).escalationMarkdown).toContain("`github_rate_limited`");
+      expect((outcome as EscalationNotRecordedError).escalationMarkdown).toContain("Postez `/epure continue`");
+    }
   });
 });
 

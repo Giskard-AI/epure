@@ -1,6 +1,9 @@
 import { appendFileSync } from "node:fs";
 import { redactSecrets } from "../../src/auth/issue-command-gate.js";
-import { orchestrateIssueCommand } from "../../src/orchestrator/issue-orchestrator.js";
+import {
+  EscalationNotRecordedError,
+  orchestrateIssueCommand
+} from "../../src/orchestrator/issue-orchestrator.js";
 import type { OrchestratorCommand } from "../../src/orchestrator/types.js";
 
 function writeGitHubOutputs(
@@ -102,6 +105,9 @@ async function run(): Promise<void> {
       writeStepSummary(redactSecrets(result.summary_markdown, secrets));
     }
   } catch (err: unknown) {
+    if (err instanceof EscalationNotRecordedError) {
+      writeStepSummary(redactSecrets(err.escalationMarkdown, secrets));
+    }
     const msg = err instanceof Error ? err.message : String(err);
     const safeMsg = redactSecrets(msg, secrets);
     process.stderr.write(`::error title=EPURE Orchestration Failed::${safeMsg}\n`);
