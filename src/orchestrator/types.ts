@@ -178,6 +178,8 @@ export interface OrchestrateIssueResult {
   readonly summary_markdown: string;
   readonly created_ticket_numbers: readonly number[];
   readonly feature_pr_url: string;
+  /** Set when the run stopped in a waiting_* sub-phase for external CI on this head. */
+  readonly waiting_ci_head_sha?: string | undefined;
 }
 
 export type IssueOrchestratorResult = OrchestrateIssueResult;

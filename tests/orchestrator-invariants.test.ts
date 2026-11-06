@@ -300,6 +300,40 @@ describe("feature PR integration — a conflicting feature PR is re-synced with 
   });
 });
 
+describe("a CI run that completes while EPURE holds the lease is not missed when the plan enters waiting_feature_ci", () => {
+  const CI_WORKFLOW = "name: CI\non:\n  pull_request:\n    branches: [dev]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n";
+
+  it.each([
+    { id: "feature-ci-already-green-moves-to-review-without-a-new-event", ci: "success", expected: { phase: "review", status: "awaiting_human_approval", subphase: "idle" } },
+    { id: "feature-ci-still-running-stays-in-waiting_feature_ci", ci: "pending", expected: { phase: "review", status: "active", subphase: "waiting_feature_ci", active_head_sha: HEAD_SHA } }
+  ] as const)("$id", async ({ ci, expected }) => {
+    const store = await seedState(FEATURE_INTEGRATION_PENDING_STATE);
+    const router = declareImplementationFlow(createGitHubMockRouter(), ci, { taskPr: false, featurePr: true })
+      .on("GET", `${R}/contents/.github/workflows?ref=dev`, json([{ type: "file", path: ".github/workflows/ci.yml", sha: "wf-ci" }]))
+      .on("GET", `${R}/git/blobs/wf-ci`, json({ encoding: "base64", content: Buffer.from(CI_WORKFLOW).toString("base64") }))
+      .on("GET", new RegExp(`^${R_RX}/labels/[^/]+$`), json({}));
+
+    const res = await orchestrateIssueCommand({
+      repository: REPO,
+      issueNumber: ISSUE,
+      command: "approve",
+      commandArgs: "",
+      actor: "maintainer",
+      commentId: 900,
+      fallbackGithubToken: "ghs_test",
+      llmApiKey: "key_test",
+      model: "openai/gpt-test",
+      asyncCiContinuation: true,
+      stateStore: store,
+      fetchImpl: router.fetch
+    });
+
+    expect(router.unmatched).toEqual([]);
+    expect(res.executed).toBe(true);
+    expect(await readState(store)).toMatchObject(expected);
+  });
+});
+
 describe("Invariant 3 — only an explicit human command gets an issue out of cancelled or done", () => {
   it.each([
     { id: "cancelled-in-spec-phase-not-reopened-by-plain-human-reply", status: "cancelled", phase: "spec" },

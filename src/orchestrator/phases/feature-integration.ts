@@ -462,7 +462,8 @@ export async function runFeatureIntegrationPhase(
           active_branch: params.featureBranch,
           summary_markdown: asyncFeatureSummary,
           created_ticket_numbers: allTicketNumbers,
-          feature_pr_url: featurePr.html_url
+          feature_pr_url: featurePr.html_url,
+          waiting_ci_head_sha: passParams.headSha
         }
       };
     }

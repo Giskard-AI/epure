@@ -310,6 +310,31 @@ type EscalationRecordInput = Omit<
 export async function orchestrateIssueCommand(
   input: OrchestrateIssueInput
 ): Promise<OrchestrateIssueResult> {
+  let result = await runIssueCommand(input);
+  // A CI completion that landed while this run held the lease was ignored: re-check each head this run left waiting.
+  const checkedHeads = new Set<string>();
+  while (
+    result.waiting_ci_head_sha &&
+    !checkedHeads.has(result.waiting_ci_head_sha)
+  ) {
+    checkedHeads.add(result.waiting_ci_head_sha);
+    const resumed = await runIssueCommand({
+      ...input,
+      command: "continue",
+      commentId: 0,
+      triggerHeadSha: result.waiting_ci_head_sha
+    });
+    if (!resumed.executed) {
+      break;
+    }
+    result = resumed;
+  }
+  return result;
+}
+
+async function runIssueCommand(
+  input: OrchestrateIssueInput
+): Promise<OrchestrateIssueResult> {
   let mintedAppToken: string | null = null;
   let githubRequestCount = 0;
 
@@ -1450,7 +1475,8 @@ export async function orchestrateIssueCommand(
                     active_branch: updatedResynced.state.active_branch,
                     summary_markdown: `PR #${prNumberToMerge} was not mergeable; \`${taskBranchToMerge}\` re-synced with \`${targetFeatureBranch}\` at \`${resync.headSha}\`. Waiting for external CI on the new head.`,
                     created_ticket_numbers: [],
-                    feature_pr_url: ""
+                    feature_pr_url: "",
+                    waiting_ci_head_sha: resync.headSha
                   };
                 }
               }

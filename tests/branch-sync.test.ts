@@ -778,6 +778,7 @@ describe("continue on green ticket CI — a task PR merge refused with 405 re-sy
     readonly mergeableState?: string;
     // A human pushes to the task branch between the review and the first merge attempt.
     readonly movedHead?: boolean;
+    readonly ciRunningOnNewHead?: boolean;
   }
 
   async function runGreenTicketContinue(arrange: GreenTicketArrange) {
@@ -814,7 +815,15 @@ describe("continue on green ticket CI — a task PR merge refused with 405 re-sy
       .on("GET", /\/labels\/[^/]+$/, json({}))
       .on("POST", `${R}/issues/${ISSUE}/labels`, json([]))
       .on("POST", `${R}/issues/${ISSUE}/comments`, json({ html_url: "c" }, 201))
-      .on("GET", /\/actions\/runs\?head_sha=/, json({ workflow_runs: [{ id: 1, name: "CI", path: ".github/workflows/ci.yml", status: "completed", conclusion: "success" }] }))
+      .on("GET", /\/actions\/runs\?head_sha=/, (req) =>
+        json({
+          workflow_runs: [
+            !arrange.ciRunningOnNewHead || req.path.includes(taskHead)
+              ? { id: 1, name: "CI", path: ".github/workflows/ci.yml", status: "completed", conclusion: "success" }
+              : { id: 1, name: "CI", path: ".github/workflows/ci.yml", status: "in_progress", conclusion: null }
+          ]
+        })
+      )
       .on("GET", /\/commits\/[^/]+\/check-runs\?/, json({ check_runs: [{ id: 1, name: "CI", status: "completed", conclusion: "success" }, { id: 2, name: "ai-review", status: "completed", conclusion: "success" }] }))
       .on("GET", /\/pulls\?state=open&head=/, () =>
         json(
@@ -883,21 +892,34 @@ describe("continue on green ticket CI — a task PR merge refused with 405 re-sy
     };
   }
 
-  it("task-branch-behind-is-re-synced-by-a-plain-merge-and-the-review-carries-over-while-ci-is-awaited", async () => {
+  it.each([
+    { id: "task-branch-behind-is-re-synced-by-a-plain-merge-and-the-review-carries-over-while-ci-is-awaited", ciDoneOnNewHead: false },
+    { id: "ci-already-finished-on-the-re-synced-head-merges-the-ticket-without-a-new-event", ciDoneOnNewHead: true }
+  ])("$id", async ({ ciDoneOnNewHead }) => {
     const run = await runGreenTicketContinue({
       taskChange: CONFLICTING_SERVICE.ours["src/service.ts"]!,
       featureFiles: { "src/other.ts": "export const o = 1;\n" },
       resolution: RESOLVED_SERVICE,
-      mergeableState: "behind"
+      mergeableState: "behind",
+      ciRunningOnNewHead: !ciDoneOnNewHead
     });
-    const newHead = run.git.getRef(`refs/heads/${TASK}`)!;
+    const aiReviewHeads = run.checkRuns.filter((c) => c.name === "ai-review").map((c) => c.head_sha);
+    const resyncedHead = aiReviewHeads[0]!;
 
     expect(run.router.unmatched).toEqual([]);
-    expect(run.mergeShas).toEqual([run.taskHead]);
-    expect(run.git.getCommit(newHead)!.parents).toEqual([run.taskHead, run.git.getRef(`refs/heads/${FEATURE}`)]);
-    expect(run.state).toMatchObject({ status: "active", subphase: "waiting_ticket_ci", active_head_sha: newHead });
-    expect(run.state.last_escalation).toBeUndefined();
-    expect(run.checkRuns.filter((c) => c.name === "ai-review").map((c) => c.head_sha)).toEqual([newHead]);
+    expect(aiReviewHeads).toEqual([resyncedHead]);
+    expect(run.git.getCommit(resyncedHead)!.parents).toEqual([run.taskHead, expect.any(String)]);
+    if (ciDoneOnNewHead) {
+      // The run goes on past the merged ticket; this harness's LLM stub only answers the merge prompts.
+      expect(run.mergeShas).toEqual([run.taskHead, resyncedHead]);
+      expect(run.state.subphase).not.toBe("waiting_ticket_ci");
+    } else {
+      expect(run.state.last_escalation).toBeUndefined();
+      expect(resyncedHead).toBe(run.git.getRef(`refs/heads/${TASK}`));
+      expect(run.git.getCommit(resyncedHead)!.parents[1]).toBe(run.git.getRef(`refs/heads/${FEATURE}`));
+      expect(run.mergeShas).toEqual([run.taskHead]);
+      expect(run.state).toMatchObject({ status: "active", subphase: "waiting_ticket_ci", active_head_sha: resyncedHead });
+    }
   });
 
   it.each([

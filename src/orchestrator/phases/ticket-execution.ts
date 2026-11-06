@@ -1503,7 +1503,8 @@ export async function runTicketExecutionLoop(
               created_ticket_numbers: params.ticketsManifest.map(
                 (t) => t.ticketIssueNumber
               ),
-              feature_pr_url: ""
+              feature_pr_url: "",
+              waiting_ci_head_sha: passParams.headSha
             }
           };
         }
