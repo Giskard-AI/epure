@@ -2126,11 +2126,11 @@ function serializeAgentsConfigYaml(config, taskAutoMergeEnabled = false) {
     pricingLines.push("pricing:");
     for (const [model, price] of Object.entries(config.pricing)) {
       pricingLines.push(`  ${escapeYamlDoubleQuoted(model)}:`);
-      pricingLines.push(`    inputPerMTok: ${price.inputPerMTok}`);
-      if (price.cachedInputPerMTok !== void 0) {
-        pricingLines.push(`    cachedInputPerMTok: ${price.cachedInputPerMTok}`);
+      pricingLines.push(`    input_per_mtok: ${price.input_per_mtok}`);
+      if (price.cached_input_per_mtok !== void 0) {
+        pricingLines.push(`    cached_input_per_mtok: ${price.cached_input_per_mtok}`);
       }
-      pricingLines.push(`    outputPerMTok: ${price.outputPerMTok}`);
+      pricingLines.push(`    output_per_mtok: ${price.output_per_mtok}`);
       pricingLines.push(`    source: ${escapeYamlDoubleQuoted(price.source)}`);
       pricingLines.push(`    read_on: ${escapeYamlDoubleQuoted(price.read_on)}`);
     }
@@ -2250,9 +2250,9 @@ function parsePricingEntry(model, fields) {
     return value;
   };
   return {
-    inputPerMTok: dollars("inputPerMTok"),
-    ...fields.cachedInputPerMTok !== void 0 ? { cachedInputPerMTok: dollars("cachedInputPerMTok") } : {},
-    outputPerMTok: dollars("outputPerMTok"),
+    input_per_mtok: dollars("input_per_mtok"),
+    ...fields.cached_input_per_mtok !== void 0 ? { cached_input_per_mtok: dollars("cached_input_per_mtok") } : {},
+    output_per_mtok: dollars("output_per_mtok"),
     source: text("source"),
     read_on: text("read_on")
   };
@@ -2673,12 +2673,17 @@ function parseAgentsYaml(yamlContent) {
     ...t.build_command ? { build_command: t.build_command } : {}
   }));
   const hasVerificationOverrides = wait_for_external_ci !== void 0 || external_ci_timeout_minutes !== void 0 || grace_window_seconds !== void 0 || deferred_external_workflows !== void 0 || hasTargetsKey || parsedTargets.length > 0;
-  const pricing = Object.fromEntries(
-    Object.entries(pricingFields).map(([model, fields]) => [
-      model,
-      parsePricingEntry(model, fields)
-    ])
-  );
+  const pricing = {};
+  for (const [model, fields] of Object.entries(pricingFields)) {
+    try {
+      pricing[model] = parsePricingEntry(model, fields);
+    } catch (err) {
+      process.stdout.write(
+        `::warning title=EPURE pricing::${err.message} This price is ignored: costs of ${model} are not shown.
+`
+      );
+    }
+  }
   if (reviewers_dir !== void 0 && reviewers_dir.split(/[\\/]/).some((s) => s === "." || s === "..")) {
     throw new Error(
       `reviewers_dir '${reviewers_dir}' must not contain '.' or '..' path segments.`

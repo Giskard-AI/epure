@@ -205,6 +205,14 @@ function resolveProviderUpstream(provider, providerConfig, env = process.env) {
 
 // src/usage/token-usage.ts
 import { AsyncLocalStorage } from "node:async_hooks";
+var usageContext = new AsyncLocalStorage();
+function recordTokenUsage(usage) {
+  const context = usageContext.getStore();
+  context?.ledger.record(context.attribution, usage);
+}
+function bindToUsageContext() {
+  return AsyncLocalStorage.snapshot();
+}
 
 // src/llm/usage.ts
 var LLM_USAGE_LOG_PREFIX = "epure-llm-usage";
@@ -269,56 +277,15 @@ function extractLLMTokenUsage(provider, model, body) {
 function formatLLMUsageLogLine(usage) {
   return `${LLM_USAGE_LOG_PREFIX} ${JSON.stringify(usage)}`;
 }
-
-// src/usage/token-usage.ts
-var NO_TOKENS = {
-  requests: 0,
-  input_tokens: 0,
-  cached_input_tokens: 0,
-  output_tokens: 0,
-  thinking_tokens: 0
-};
-function addTokenCounts(a, b) {
-  const unavailable = (a.usage_unavailable ?? 0) + (b.usage_unavailable ?? 0);
-  return {
-    requests: a.requests + b.requests,
-    input_tokens: a.input_tokens + b.input_tokens,
-    cached_input_tokens: a.cached_input_tokens + b.cached_input_tokens,
-    output_tokens: a.output_tokens + b.output_tokens,
-    thinking_tokens: a.thinking_tokens + b.thinking_tokens,
-    ...unavailable > 0 ? { usage_unavailable: unavailable } : {}
-  };
-}
-function countsOf(usage) {
-  if ("unavailable" in usage) {
-    return { ...NO_TOKENS, requests: 1, usage_unavailable: 1 };
-  }
-  return {
-    requests: 1,
-    input_tokens: usage.input_tokens,
-    cached_input_tokens: usage.cached_input_tokens,
-    output_tokens: usage.output_tokens,
-    thinking_tokens: usage.thinking_tokens
-  };
-}
-function addToModel(models, usage) {
-  const model = `${usage.provider}/${usage.model}`;
-  return { ...models, [model]: addTokenCounts(models[model] ?? NO_TOKENS, countsOf(usage)) };
-}
-function tokensByModel(usages) {
-  return usages.reduce(addToModel, {});
-}
-var usageContext = new AsyncLocalStorage();
 function reportLLMUsage(usage) {
   if (!("unavailable" in usage)) {
     process.stdout.write(`${formatLLMUsageLogLine(usage)}
 `);
   }
-  const context = usageContext.getStore();
-  context?.ledger.record(context.attribution, usage);
+  recordTokenUsage(usage);
 }
 function usageReporter() {
-  const inCallerContext = AsyncLocalStorage.snapshot();
+  const inCallerContext = bindToUsageContext();
   return (usage) => inCallerContext(() => reportLLMUsage(usage));
 }
 
@@ -974,9 +941,9 @@ function parsePricingEntry(model, fields) {
     return value;
   };
   return {
-    inputPerMTok: dollars("inputPerMTok"),
-    ...fields.cachedInputPerMTok !== void 0 ? { cachedInputPerMTok: dollars("cachedInputPerMTok") } : {},
-    outputPerMTok: dollars("outputPerMTok"),
+    input_per_mtok: dollars("input_per_mtok"),
+    ...fields.cached_input_per_mtok !== void 0 ? { cached_input_per_mtok: dollars("cached_input_per_mtok") } : {},
+    output_per_mtok: dollars("output_per_mtok"),
     source: text("source"),
     read_on: text("read_on")
   };
@@ -1397,12 +1364,17 @@ function parseAgentsYaml(yamlContent) {
     ...t.build_command ? { build_command: t.build_command } : {}
   }));
   const hasVerificationOverrides = wait_for_external_ci !== void 0 || external_ci_timeout_minutes !== void 0 || grace_window_seconds !== void 0 || deferred_external_workflows !== void 0 || hasTargetsKey || parsedTargets.length > 0;
-  const pricing = Object.fromEntries(
-    Object.entries(pricingFields).map(([model, fields]) => [
-      model,
-      parsePricingEntry(model, fields)
-    ])
-  );
+  const pricing = {};
+  for (const [model, fields] of Object.entries(pricingFields)) {
+    try {
+      pricing[model] = parsePricingEntry(model, fields);
+    } catch (err) {
+      process.stdout.write(
+        `::warning title=EPURE pricing::${err.message} This price is ignored: costs of ${model} are not shown.
+`
+      );
+    }
+  }
   if (reviewers_dir !== void 0 && reviewers_dir.split(/[\\/]/).some((s) => s === "." || s === "..")) {
     throw new Error(
       `reviewers_dir '${reviewers_dir}' must not contain '.' or '..' path segments.`
@@ -2676,10 +2648,12 @@ function parseJson(text) {
   }
 }
 var OPENAI_COMPATIBLE = /* @__PURE__ */ new Set(["openai", "openrouter", "azure", "azure_ai"]);
+var MODEL_LABEL = /^[\w.@:/-]{1,128}$/;
+var UNKNOWN_MODEL = "unknown";
 function meterRequest(provider, path, body, contentEncoding) {
   const json = contentEncoding ? void 0 : asObject(parseJson(body.toString("utf8")));
-  const fromPath = /\/(?:models|deployments)\/([^/:]+)/.exec(path)?.[1];
-  const model = typeof json?.model === "string" && json.model || fromPath || "unknown";
+  const label = /\/(?:models|deployments)\/([^/:]+)/.exec(path)?.[1] ?? json?.model;
+  const model = typeof label === "string" && MODEL_LABEL.test(label) ? label : UNKNOWN_MODEL;
   if (!json || !OPENAI_COMPATIBLE.has(provider) || !path.endsWith("/chat/completions") || json.stream !== true) {
     return { body, model };
   }
@@ -2692,6 +2666,21 @@ function meterRequest(provider, path, body, contentEncoding) {
     model
   };
 }
+function mergeCounts(into, from) {
+  const merged = { ...into };
+  for (const [key, value] of Object.entries(from)) {
+    const details = asObject(value);
+    if (typeof value === "number") {
+      merged[key] = value;
+    } else if (details) {
+      merged[key] = {
+        ...asObject(merged[key]),
+        ...Object.fromEntries(Object.entries(details).filter(([, v]) => typeof v === "number"))
+      };
+    }
+  }
+  return merged;
+}
 function meterResponse(provider, model, contentType, contentEncoding) {
   const sse = contentType.includes("text/event-stream");
   const json = contentType.includes("json");
@@ -2700,20 +2689,19 @@ function meterResponse(provider, model, contentType, contentEncoding) {
   const decoder = new TextDecoder();
   let partialLine = "";
   const found = {};
-  const absorb = (value) => {
-    if (Array.isArray(value)) {
-      value.forEach(absorb);
-      return;
-    }
+  const absorbEvent = (value) => {
     const event = asObject(value);
     const usage = asObject(event?.usage) ?? asObject(asObject(event?.message)?.usage) ?? asObject(asObject(event?.response)?.usage);
     if (usage) {
-      found.usage = { ...found.usage, ...usage };
+      found.usage = mergeCounts(found.usage, usage);
     }
     const metadata = asObject(event?.usageMetadata);
     if (metadata) {
       found.usageMetadata = metadata;
     }
+  };
+  const absorb = (value) => {
+    (Array.isArray(value) ? value : [value]).forEach(absorbEvent);
   };
   const readLines = (text) => {
     const lines = (partialLine + text).split(/\r?\n/);
@@ -2782,6 +2770,7 @@ var DROPPED_REQUEST_HEADERS = /* @__PURE__ */ new Set([
 ]);
 var DROPPED_RESPONSE_HEADERS = new Set(HOP_BY_HOP_HEADERS);
 var MAX_PROXY_REQUEST_BYTES = 20 * 1024 * 1024;
+var MAX_PROXY_IN_FLIGHT_REQUESTS = 4;
 function buildSanitizedSandboxEnv(runnerEnv, proxy) {
   const sanitized = {};
   for (const [key, value] of Object.entries(runnerEnv)) {
@@ -3058,11 +3047,6 @@ async function createLlmSandboxProxy(options) {
   const proxyNonce = randomBytes(24).toString("hex");
   const nonceBytes = Buffer.from(proxyNonce);
   const reportUsage = usageReporter();
-  const relayedUsage = [];
-  const recordUsage = (usage) => {
-    relayedUsage.push(usage);
-    reportUsage(usage);
-  };
   const relay = (req, res) => {
     const rawUrl = req.url ?? "/";
     if (!rawUrl.startsWith("/")) {
@@ -3169,7 +3153,11 @@ async function createLlmSandboxProxy(options) {
     });
     pipeline(req, collect, (err) => {
       if (!err) {
-        forward(meterRequest(upstream.provider, url.pathname, Buffer.concat(chunks), req.headers["content-encoding"]));
+        try {
+          forward(meterRequest(upstream.provider, url.pathname, Buffer.concat(chunks), req.headers["content-encoding"]));
+        } catch {
+          fail(400, "PROXY_REQUEST_UNREADABLE", "Sandbox LLM proxy could not read the request body.");
+        }
       } else if (err instanceof ProxyRequestTooLargeError) {
         fail(
           413,
@@ -3224,25 +3212,45 @@ async function createLlmSandboxProxy(options) {
       });
       pipeline(upstreamRes, tap, res, () => {
         observer.end();
-        recordUsage(meter.onEnd());
+        reportUsage(meter.onEnd());
       });
     };
   };
+  let inFlight = 0;
+  const waiting = [];
   const server = createServer((req, res) => {
-    try {
-      relay(req, res);
-    } catch {
-      if (res.headersSent) {
-        res.destroy();
-      } else {
-        sendProxyError(
-          res,
-          502,
-          "PROXY_UPSTREAM_UNREACHABLE",
-          `Sandbox LLM proxy could not build the request to ${upstreamHost}.`
-        );
+    const start = () => {
+      inFlight += 1;
+      res.once("close", () => {
+        inFlight -= 1;
+        waiting.shift()?.();
+      });
+      try {
+        relay(req, res);
+      } catch {
+        if (res.headersSent) {
+          res.destroy();
+        } else {
+          sendProxyError(
+            res,
+            502,
+            "PROXY_UPSTREAM_UNREACHABLE",
+            `Sandbox LLM proxy could not build the request to ${upstreamHost}.`
+          );
+        }
       }
+    };
+    if (inFlight < MAX_PROXY_IN_FLIGHT_REQUESTS) {
+      start();
+      return;
     }
+    waiting.push(start);
+    res.once("close", () => {
+      const index = waiting.indexOf(start);
+      if (index >= 0) {
+        waiting.splice(index, 1);
+      }
+    });
   });
   await new Promise((resolve2, reject) => {
     server.once("error", reject);
@@ -3253,7 +3261,6 @@ async function createLlmSandboxProxy(options) {
   return {
     proxyUrl,
     proxyNonce,
-    usage: () => tokensByModel(relayedUsage),
     close: () => new Promise((resolve2) => {
       agent.destroy();
       server.closeAllConnections();
@@ -3450,8 +3457,7 @@ async function runInUntrustedCodeSandbox(input) {
       proxy_url: proxy?.proxyUrl ?? "",
       kernel_backend: selectKernelBackend(networkPolicy, capabilities),
       confined: selectKernelBackend(networkPolicy, capabilities) !== "none",
-      network_policy: networkPolicy,
-      ...proxy ? { llm_usage: proxy.usage() } : {}
+      network_policy: networkPolicy
     };
   } finally {
     await proxy?.close();
