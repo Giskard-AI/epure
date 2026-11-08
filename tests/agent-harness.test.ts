@@ -18,6 +18,7 @@ describe("Ticket 07 (#8) — Pi agent harness execution & isolated PR publicatio
       id: "pi-implements-approved-ticket-and-opens-pr-on-feature-branch",
       input: {
         harness: "pi",
+        model: "openai/gpt-5.4",
         repository: "Giskard-AI/consumer-app",
         repositoryId: 7001,
         planIssueNumber: 1,
@@ -43,6 +44,7 @@ describe("Ticket 07 (#8) — Pi agent harness execution & isolated PR publicatio
       id: "pi-rejects-unapproved-ticket-before-running-llm",
       input: {
         harness: "pi",
+        model: "openai/gpt-5.4",
         repository: "Giskard-AI/consumer-app",
         repositoryId: 7001,
         planIssueNumber: 1,
@@ -65,6 +67,7 @@ describe("Ticket 07 (#8) — Pi agent harness execution & isolated PR publicatio
       id: "pi-rejects-direct-target-to-protected-dev-or-main",
       input: {
         harness: "pi",
+        model: "openai/gpt-5.4",
         repository: "Giskard-AI/consumer-app",
         repositoryId: 7001,
         planIssueNumber: 1,
@@ -87,6 +90,7 @@ describe("Ticket 07 (#8) — Pi agent harness execution & isolated PR publicatio
       id: "pi-fails-closed-when-sandbox-isolation-unavailable",
       input: {
         harness: "pi",
+        model: "openai/gpt-5.4",
         repository: "Giskard-AI/consumer-app",
         repositoryId: 7001,
         planIssueNumber: 1,
@@ -182,6 +186,7 @@ describe("Ticket 07 (#8) — Pi agent harness execution & isolated PR publicatio
 
       const baseTicket: TicketExecutionInput = {
         harness: resolvedHarness,
+        model: "openai/gpt-5.4",
         repository: "Giskard-AI/consumer-app",
         repositoryId: 7001,
         planIssueNumber: 1,

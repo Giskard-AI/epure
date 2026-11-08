@@ -7338,19 +7338,136 @@ import { tmpdir } from "node:os";
 import { dirname as dirname2, join as join2, resolve as resolve2, sep } from "node:path";
 
 // src/sandbox/llm-sandbox.ts
-import { randomBytes } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
+import { once } from "node:events";
 import { mkdirSync } from "node:fs";
 import { createServer } from "node:http";
 import { spawn, spawnSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
-var SECRET_ENV_NAME_PATTERN = /^(?:OPENAI_API_KEY|ANTHROPIC_API_KEY|GOOGLE_API_KEY|GEMINI_API_KEY|LLM_API_KEY|GITHUB_TOKEN|GH_TOKEN|GITHUB_PAT|EPURE_.*(?:KEY|TOKEN|SECRET)|AWS_.*|AZURE_.*|GCP_.*|NPM_TOKEN|NODE_AUTH_TOKEN|ACTIONS_RUNTIME_TOKEN|ACTIONS_ID_TOKEN_REQUEST_TOKEN)$/i;
-var ALLOWED_PROXY_PATHS = /* @__PURE__ */ new Set([
-  "/v1/chat/completions",
-  "/v1/responses",
-  "/v1/messages",
-  "/chat/completions",
-  "/responses",
-  "/messages"
+
+// src/llm/upstream.ts
+var MODEL = String.raw`[\w.@-]+`;
+var GENERATE = String.raw`:(?:generateContent|streamGenerateContent)`;
+var OPENAI_PATHS = [/^\/chat\/completions$/, /^\/responses$/];
+function trimBase(raw) {
+  return raw.trim().replace(/\/+$/, "");
+}
+function requireEndpoint(provider, value, hint) {
+  if (!value?.trim()) {
+    throw new BadRequestError(`Provider '${provider}' requires base_url (or ${hint}).`, {
+      provider,
+      status: 400
+    });
+  }
+  return trimBase(value);
+}
+function resolveProviderUpstream(provider, providerConfig, env = process.env) {
+  const configured = providerConfig?.baseUrl ?? providerConfig?.base_url;
+  switch (provider) {
+    case "openai":
+    case "openrouter":
+      return {
+        provider,
+        baseUrl: trimBase(
+          configured ?? (provider === "openrouter" ? "https://openrouter.ai/api/v1" : env.OPENAI_BASE_URL ?? "https://api.openai.com/v1")
+        ).replace(/\/chat\/completions$/, ""),
+        authHeader: "authorization",
+        allowedPaths: OPENAI_PATHS
+      };
+    case "azure":
+      return {
+        provider,
+        baseUrl: requireEndpoint(
+          provider,
+          configured ?? env.AZURE_OPENAI_ENDPOINT ?? env.AZURE_API_BASE,
+          "AZURE_OPENAI_ENDPOINT / AZURE_API_BASE"
+        ),
+        authHeader: "api-key",
+        allowedPaths: [
+          new RegExp(`^/openai/deployments/${MODEL}/chat/completions$`),
+          /^\/openai\/v1\/(?:chat\/completions|responses)$/
+        ]
+      };
+    case "azure_ai": {
+      const root = requireEndpoint(
+        provider,
+        configured ?? env.AZURE_AI_ENDPOINT ?? env.AZURE_AI_BASE_URL,
+        "AZURE_AI_ENDPOINT / AZURE_AI_BASE_URL"
+      ).replace(/\/models$/i, "").replace(/\/chat\/completions$/, "");
+      return {
+        provider,
+        baseUrl: /\/v1$/.test(root) ? root : `${root}/openai/v1`,
+        authHeader: "api-key",
+        allowedPaths: OPENAI_PATHS
+      };
+    }
+    case "anthropic":
+      return {
+        provider,
+        baseUrl: trimBase(configured ?? "https://api.anthropic.com").replace(
+          /(?:\/v1)?(?:\/messages)?$/,
+          ""
+        ),
+        authHeader: "x-api-key",
+        allowedPaths: [/^\/v1\/messages$/]
+      };
+    case "google":
+      return {
+        provider,
+        baseUrl: trimBase(
+          configured ?? "https://generativelanguage.googleapis.com"
+        ).replace(/\/v1(?:beta)?$/, ""),
+        authHeader: "x-goog-api-key",
+        allowedPaths: [new RegExp(`^/v1(?:beta)?/models/${MODEL}${GENERATE}$`)]
+      };
+    case "vertex":
+      return {
+        provider,
+        baseUrl: trimBase(configured ?? "https://aiplatform.googleapis.com").replace(
+          /\/v1(?:beta1)?$/,
+          ""
+        ),
+        authHeader: "x-goog-api-key",
+        allowedPaths: [
+          new RegExp(
+            `^/v1(?:beta1)?/(?:projects/[\\w-]+/locations/[\\w-]+/)?publishers/google/models/${MODEL}${GENERATE}$`
+          )
+        ]
+      };
+  }
+}
+
+// src/sandbox/llm-sandbox.ts
+var SECRET_ENV_NAME_PATTERN = /^(?:.*API_KEY|LLM_API_KEY|GITHUB_TOKEN|GH_TOKEN|GITHUB_PAT|EPURE_.*(?:KEY|TOKEN|SECRET)|AWS_.*|AZURE_.*|GCP_.*|NPM_TOKEN|NODE_AUTH_TOKEN|ACTIONS_RUNTIME_TOKEN|ACTIONS_ID_TOKEN_REQUEST_TOKEN)$/i;
+var NONCE_HEADER = "x-epure-proxy-nonce";
+var CREDENTIAL_HEADERS = [
+  NONCE_HEADER,
+  "authorization",
+  "x-api-key",
+  "api-key",
+  "x-goog-api-key"
+];
+var HOP_BY_HOP_HEADERS = [
+  "connection",
+  "keep-alive",
+  "proxy-authorization",
+  "proxy-connection",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade"
+];
+var DROPPED_REQUEST_HEADERS = /* @__PURE__ */ new Set([
+  ...CREDENTIAL_HEADERS,
+  ...HOP_BY_HOP_HEADERS,
+  "host",
+  "content-length",
+  "accept-encoding"
+]);
+var DROPPED_RESPONSE_HEADERS = /* @__PURE__ */ new Set([
+  ...HOP_BY_HOP_HEADERS,
+  "content-length",
+  "content-encoding"
 ]);
 function buildSanitizedSandboxEnv(runnerEnv, proxy) {
   const sanitized = {};
@@ -7367,8 +7484,10 @@ function buildSanitizedSandboxEnv(runnerEnv, proxy) {
     sanitized[key] = value;
   }
   sanitized.EPURE_SANDBOX_ACTIVE = "true";
-  sanitized.EPURE_LLM_PROXY_URL = proxy.proxyUrl;
-  sanitized.EPURE_LLM_PROXY_NONCE = proxy.proxyNonce;
+  if (proxy) {
+    sanitized.EPURE_LLM_PROXY_URL = proxy.proxyUrl;
+    sanitized.EPURE_LLM_PROXY_NONCE = proxy.proxyNonce;
+  }
   sanitized.GITHUB_TOKEN_PERMISSIONS = "none";
   sanitized.RTK_TELEMETRY_DISABLED = "1";
   sanitized.RTK_RECALL = "0";
@@ -7549,64 +7668,143 @@ function readRequestBody(req) {
   return new Promise((resolve3, reject) => {
     const chunks = [];
     req.on("data", (chunk) => chunks.push(chunk));
-    req.on("end", () => resolve3(Buffer.concat(chunks).toString("utf8")));
+    req.on("end", () => resolve3(Buffer.concat(chunks)));
     req.on("error", reject);
   });
 }
-async function createLlmSandboxProxy(options) {
-  const realKey = options.llmApiKey.trim();
-  const proxyNonce = randomBytes(24).toString("hex");
-  const defaultUpstream = async (req) => ({
-    status: 200,
-    body: JSON.stringify({
-      id: "chatcmpl-epure-proxy",
-      object: "chat.completion",
-      path: req.path,
-      choices: [{ index: 0, message: { role: "assistant", content: "ok" } }]
-    })
-  });
-  const handler = options.upstreamHandler ?? defaultUpstream;
-  const server = createServer(
-    async (req, res) => {
-      const providedNonce = req.headers["x-epure-proxy-nonce"];
-      if (providedNonce !== proxyNonce) {
-        res.statusCode = 401;
-        res.setHeader("content-type", "application/json");
-        res.end(
-          JSON.stringify({
-            error_code: "PROXY_UNAUTHORIZED_NONCE",
-            error_message: "Missing or invalid x-epure-proxy-nonce header for local sandbox LLM proxy."
-          })
-        );
-        return;
-      }
-      const rawUrl = req.url ?? "/";
-      const normalizedPath = rawUrl.split("?")[0] ?? "/";
-      if (!ALLOWED_PROXY_PATHS.has(normalizedPath)) {
-        res.statusCode = 403;
-        res.setHeader("content-type", "application/json");
-        res.end(
-          JSON.stringify({
-            error_code: "PROXY_FORBIDDEN_ENDPOINT",
-            error_message: `Sandbox LLM proxy forbids access to '${normalizedPath}'.`
-          })
-        );
-        return;
-      }
-      const body = await readRequestBody(req);
-      const upstreamResp = await handler(
-        {
-          method: req.method ?? "POST",
-          path: normalizedPath,
-          body
-        },
-        realKey
-      );
-      res.statusCode = upstreamResp.status;
-      res.setHeader("content-type", "application/json");
-      res.end(redactSecrets(upstreamResp.body, [realKey]));
+function sendProxyError(res, status, errorCode, errorMessage) {
+  res.statusCode = status;
+  res.setHeader("content-type", "application/json");
+  res.end(JSON.stringify({ error_code: errorCode, error_message: errorMessage }));
+}
+function presentedCredentials(req, url) {
+  const values = [];
+  for (const name of CREDENTIAL_HEADERS) {
+    const value = req.headers[name];
+    if (typeof value === "string") {
+      values.push(name === "authorization" ? value.replace(/^Bearer\s+/i, "") : value);
     }
-  );
+  }
+  const queryKey = url.searchParams.get("key");
+  if (queryKey) {
+    values.push(queryKey);
+  }
+  return values;
+}
+function isNonce(candidate, nonce) {
+  const value = Buffer.from(candidate.trim());
+  return value.length === nonce.length && timingSafeEqual(value, nonce);
+}
+async function createLlmSandboxProxy(options) {
+  const { upstream } = options;
+  const apiKey = options.apiKey.trim();
+  const upstreamHost = new URL(upstream.baseUrl).host;
+  const proxyNonce = randomBytes(24).toString("hex");
+  const nonceBytes = Buffer.from(proxyNonce);
+  const relay = async (req, res) => {
+    const rawUrl = req.url ?? "/";
+    if (!rawUrl.startsWith("/")) {
+      sendProxyError(
+        res,
+        403,
+        "PROXY_FORBIDDEN_ENDPOINT",
+        `Sandbox LLM proxy only forwards to ${upstreamHost}.`
+      );
+      return;
+    }
+    const url = new URL(rawUrl, "http://127.0.0.1");
+    if (!presentedCredentials(req, url).some((value) => isNonce(value, nonceBytes))) {
+      sendProxyError(
+        res,
+        401,
+        "PROXY_UNAUTHORIZED_NONCE",
+        `Missing or invalid sandbox nonce: send EPURE_LLM_PROXY_NONCE as the API key or in ${NONCE_HEADER}.`
+      );
+      return;
+    }
+    if (req.method !== "POST" || !upstream.allowedPaths.some((p) => p.test(url.pathname))) {
+      sendProxyError(
+        res,
+        403,
+        "PROXY_FORBIDDEN_ENDPOINT",
+        `Sandbox LLM proxy forbids ${req.method ?? "?"} '${url.pathname}' on ${upstreamHost}.`
+      );
+      return;
+    }
+    url.searchParams.delete("key");
+    const headers = new Headers();
+    for (const [name, value] of Object.entries(req.headers)) {
+      if (value !== void 0 && !DROPPED_REQUEST_HEADERS.has(name)) {
+        headers.set(name, Array.isArray(value) ? value.join(", ") : value);
+      }
+    }
+    headers.set(
+      upstream.authHeader,
+      upstream.authHeader === "authorization" ? `Bearer ${apiKey}` : apiKey
+    );
+    const body = await readRequestBody(req);
+    const abort = new AbortController();
+    res.on("close", () => abort.abort());
+    let upstreamRes;
+    try {
+      upstreamRes = await fetch(`${upstream.baseUrl}${url.pathname}${url.search}`, {
+        method: "POST",
+        headers,
+        body,
+        signal: abort.signal
+      });
+    } catch {
+      sendProxyError(
+        res,
+        502,
+        "PROXY_UPSTREAM_UNREACHABLE",
+        `Sandbox LLM proxy could not reach ${upstreamHost}.`
+      );
+      return;
+    }
+    res.statusCode = upstreamRes.status;
+    upstreamRes.headers.forEach((value, name) => {
+      if (!DROPPED_RESPONSE_HEADERS.has(name)) {
+        res.setHeader(name, value);
+      }
+    });
+    const observer = options.observeResponse?.({
+      method: "POST",
+      path: url.pathname,
+      status: upstreamRes.status,
+      contentType: upstreamRes.headers.get("content-type") ?? ""
+    });
+    if (!upstreamRes.ok || !upstreamRes.body) {
+      const errorBody = Buffer.from(redactSecrets(await upstreamRes.text(), [apiKey]));
+      observer?.onChunk(errorBody);
+      observer?.onEnd();
+      res.end(errorBody);
+      return;
+    }
+    res.flushHeaders();
+    for await (const chunk of upstreamRes.body) {
+      observer?.onChunk(chunk);
+      if (!res.write(chunk)) {
+        await once(res, "drain", { signal: abort.signal });
+      }
+    }
+    observer?.onEnd();
+    res.end();
+  };
+  const server = createServer((req, res) => {
+    relay(req, res).catch(() => {
+      if (res.headersSent) {
+        res.destroy();
+      } else {
+        sendProxyError(
+          res,
+          502,
+          "PROXY_UPSTREAM_UNREACHABLE",
+          `Sandbox LLM proxy lost the response from ${upstreamHost}.`
+        );
+      }
+    });
+  });
   await new Promise((resolve3, reject) => {
     server.once("error", reject);
     server.listen(0, "127.0.0.1", () => resolve3());
@@ -7617,9 +7815,22 @@ async function createLlmSandboxProxy(options) {
     proxyUrl,
     proxyNonce,
     close: () => new Promise((resolve3) => {
+      server.closeAllConnections();
       server.close(() => resolve3());
     })
   };
+}
+function resolveLlmProxyTarget(llm, runnerEnv) {
+  const { provider, providerConfig } = parseModelIdentifier(
+    llm.model,
+    llm.providers,
+    runnerEnv
+  );
+  const apiKey = resolveProviderApiKey({ provider, providerConfig, env: runnerEnv });
+  if (!apiKey) {
+    return { missingKeyFor: provider };
+  }
+  return { upstream: resolveProviderUpstream(provider, providerConfig, runnerEnv), apiKey };
 }
 function collectRunnerSecretValues(runnerEnv) {
   const values = [];
@@ -7657,12 +7868,12 @@ async function runInUntrustedCodeSandbox(input) {
       network_policy: networkPolicy
     };
   }
-  const llmApiKey = (input.runnerEnv.OPENAI_API_KEY ?? input.runnerEnv.ANTHROPIC_API_KEY ?? input.runnerEnv.GOOGLE_API_KEY ?? input.runnerEnv.GEMINI_API_KEY ?? input.runnerEnv.LLM_API_KEY ?? "").trim();
-  if (!llmApiKey) {
+  const llmTarget = input.llm ? resolveLlmProxyTarget(input.llm, input.runnerEnv) : void 0;
+  if (llmTarget && "missingKeyFor" in llmTarget) {
     return {
       isolated: false,
       error_code: "LLM_API_KEY_MISSING",
-      error_message: "Fail-closed: runner is missing LLM API key (OPENAI_API_KEY, ANTHROPIC_API_KEY, or LLM_API_KEY) for the local proxy sidecar.",
+      error_message: `Fail-closed: runner has no API key for LLM provider '${llmTarget.missingKeyFor}' (model '${input.llm?.model ?? ""}') to hold in the sandbox proxy.`,
       exit_code: 1,
       stdout: "",
       stderr: "",
@@ -7673,20 +7884,17 @@ async function runInUntrustedCodeSandbox(input) {
     };
   }
   const enforceKernelSandbox = input.enforceKernelSandbox === true || input.runnerEnv.EPURE_ENFORCE_KERNEL_SANDBOX === "true";
-  const secretValues = collectRunnerSecretValues(input.runnerEnv);
-  const proxy = await createLlmSandboxProxy({
-    llmApiKey,
-    upstreamHandler: input.upstreamHandler
-  });
+  const secretValues = [
+    ...collectRunnerSecretValues(input.runnerEnv),
+    ...llmTarget ? [llmTarget.apiKey] : []
+  ];
+  const proxy = llmTarget ? await createLlmSandboxProxy({ upstream: llmTarget.upstream, apiKey: llmTarget.apiKey }) : void 0;
   try {
-    const sanitizedEnv = buildSanitizedSandboxEnv(input.runnerEnv, {
-      proxyUrl: proxy.proxyUrl,
-      proxyNonce: proxy.proxyNonce
-    });
+    const sanitizedEnv = buildSanitizedSandboxEnv(input.runnerEnv, proxy);
     const args = input.args ? [...input.args] : [];
     const cwd = input.cwd ?? process.cwd();
     const timeoutMs = input.timeoutMs ?? 60 * 60 * 1e3;
-    const proxyPort = parsePortFromProxyUrl(proxy.proxyUrl);
+    const proxyPort = proxy ? parsePortFromProxyUrl(proxy.proxyUrl) : void 0;
     const capabilities = input.kernelCapabilities ?? probeKernelSandboxCapabilities(input.runnerEnv);
     if (networkPolicy === "https_only") {
       const home = sanitizedEnv.HOME?.trim() ?? "";
@@ -7766,12 +7974,12 @@ async function runInUntrustedCodeSandbox(input) {
       stdout: cleanStdout,
       stderr: cleanStderr,
       duration_ms: Date.now() - startMs,
-      proxy_url: proxy.proxyUrl,
+      proxy_url: proxy?.proxyUrl ?? "",
       kernel_backend: kernelBackend,
       network_policy: networkPolicy
     };
   } finally {
-    await proxy.close();
+    await proxy?.close();
   }
 }
 

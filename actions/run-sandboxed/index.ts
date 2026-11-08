@@ -36,11 +36,13 @@ async function main(): Promise<void> {
     args = [];
   }
 
+  const model = process.env.INPUT_MODEL?.trim() ?? "";
   const result = await runInUntrustedCodeSandbox({
     isolationAvailable,
     runnerEnv: process.env,
     command,
-    args
+    args,
+    ...(model ? { llm: { model } } : {})
   });
 
   writeActionOutputs({

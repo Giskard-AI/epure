@@ -38,6 +38,7 @@ async function main(): Promise<void> {
 
   const result = await runTicketWithHarness({
     harness,
+    model: process.env.INPUT_MODEL ?? "",
     repository,
     repositoryId,
     planIssueNumber,

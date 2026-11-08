@@ -9,6 +9,10 @@ inputs:
     description: "JSON array of command arguments"
     required: false
     default: "[]"
+  model:
+    description: "Model the command may call through the sandbox LLM proxy ('<provider>/<model>'); empty starts no proxy"
+    required: false
+    default: ""
   isolation_available:
     description: "Whether container/process sandbox isolation is available on the runner"
     required: false

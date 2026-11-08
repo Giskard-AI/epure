@@ -142,6 +142,7 @@ export function resolveHarnessFromAgentsConfig(
 
 export interface TicketExecutionInput {
   readonly harness: string;
+  readonly model: string;
   readonly repository: string;
   readonly repositoryId: number;
   readonly planIssueNumber: number;
@@ -230,7 +231,8 @@ export async function runTicketWithHarness(
     isolationAvailable: input.isolationAvailable,
     runnerEnv: input.runnerEnv,
     command: invocation.command,
-    args: invocation.args
+    args: invocation.args,
+    llm: { model: input.model }
   });
 
   if (!sandboxResult.isolated || sandboxResult.exit_code !== 0) {

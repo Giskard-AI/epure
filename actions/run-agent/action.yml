@@ -6,6 +6,9 @@ inputs:
     description: "Agent harness name ('pi')"
     required: false
     default: "pi"
+  model:
+    description: "Model the agent calls through the sandbox LLM proxy ('<provider>/<model>'); its API key is read from the runner environment"
+    required: true
   repository:
     description: "Target repository '<owner>/<repo>'"
     required: true
