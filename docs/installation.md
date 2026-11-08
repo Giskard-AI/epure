@@ -120,9 +120,14 @@ git push origin dev
      - **Always-On Core (Cross-Cutting & Persona)**: `architecture-reviewer`, `security-reviewer`, `spec-parity-reviewer`, `standards-reviewer` (adapted to the detected language: TypeScript, Python, Rust, or Go), and `user-advocate`.
      - **Agent-Designed Stack, Domain & UI Specialists**: `domain-backend-reviewer`, `infra-reviewer`, any custom domain specialists designed by the agent for your subsystems (e.g. `realtime-reviewer.md`, `combat-engine-reviewer.md`, `sql-migration-reviewer.md` with YAML frontmatter `paths:` routing), and — only when the project includes a UI — the frontend/Impeccable trio (`frontend-reviewer`, `accessibility-reviewer`, `design-reviewer`).
      - *Illustrative example on `craft-calculator` (TypeScript + React web app)*: the agent composes a 10-reviewer roster combining the always-on core, `domain-backend-reviewer`, `infra-reviewer`, and the 3 UI/Impeccable reviewers.
-5. **Squash-Only Merge Governance & 3 Repository Rulesets**:
+5. **Squash-Only Merge Governance & 4 Repository Rulesets**:
    - Configures the repository to allow **Squash merge only** (`allow_squash_merge: true`, `allow_merge_commit: false`, `allow_rebase_merge: false`, `delete_branch_on_merge: true`).
-   - Installs the 3 GitHub Repository Rulesets:
-     - `epure-feature-governance` (`refs/heads/feature/*`): `Agent App` in PR bypass for autonomous `task/* -> feature/*` squash-merges once checks pass.
+   - Installs the 4 GitHub Repository Rulesets:
+     - `epure-feature-integrity` (`refs/heads/feature/*`): blocks deletion and force-push with no bypass actor, so not even the `Agent App` can rewrite or delete a feature branch. Consequence: merged `feature/*` branches stay on GitHub. `delete_branch_on_merge` cannot remove them and neither can an admin; to prune them, temporarily disable this ruleset (Settings → Rules → Rulesets), delete the merged branches, then re-enable it.
+     - `epure-feature-governance` (`refs/heads/feature/*`): `Agent App` in `always` bypass for autonomous `task/* -> feature/*` squash-merges once checks pass and for EPURE's direct writes (plan integration, `dev` merge syncs, conflict resolutions); humans still go through PRs.
      - `epure-dev-governance` (`refs/heads/dev`): No `Agent App` bypass (`required_approving_review_count: 0` by default for solo-maintainer compatibility; configurable via `--require-pr-approvals <N>`).
      - `epure-release-immutability` (`refs/heads/main`, `refs/tags/v*`): `Release App` as sole Bypass Actor.
+
+## Fail-Closed Trade-Offs
+
+- **Resume guidance from maintainers with private organization membership**: when `/epure continue` or `/epure approve` resumes an implementation, EPURE forwards recent comments from `write`-or-higher contributors to the resumed session. To keep visitors from spending the permission lookups, it only looks up authors whose `author_association` is `OWNER`, `MEMBER` or `COLLABORATOR`. GitHub reports an organization member whose membership is private as `CONTRIBUTOR` or `NONE`, so that maintainer's comments are dropped from the resume context even though they hold `write`. Commands are not affected: every `/epure` command is still authorized by the effective permission. Make the membership public (organization → People), or add the maintainer as a direct collaborator, to have their guidance forwarded.

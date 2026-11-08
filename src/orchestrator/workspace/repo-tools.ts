@@ -17,11 +17,8 @@ import type {
   LlmToolHandler
 } from "../llm-helper.js";
 import type {
-  EpicGoalContract,
   GeneratedTicketImplementation,
-  GitHubRestHelper,
-  IssueCommentRecord,
-  TrackedTicketCommentMetadata
+  GitHubRestHelper
 } from "../types.js";
 import {
   buildWebExplorationToolsAndHandlers,
@@ -520,55 +517,6 @@ export async function applyTicketImplementationPayload(params: {
   );
 }
 
-export interface ParsedPlanManifestFromComments {
-  readonly planBranch?: string | undefined;
-  readonly specPath?: string | undefined;
-  readonly epicGoalContract?: EpicGoalContract | undefined;
-  readonly tickets: TrackedTicketCommentMetadata[];
-}
-
-export function parsePlanManifestFromComments(
-  comments: readonly IssueCommentRecord[]
-): ParsedPlanManifestFromComments | null {
-  for (let i = comments.length - 1; i >= 0; i -= 1) {
-    const body = comments[i]?.body ?? "";
-    const match = /<!-- epure-plan-manifest:([\s\S]*?)-->/.exec(body);
-    if (match?.[1]) {
-      try {
-        const parsed = JSON.parse(match[1].trim()) as {
-          planBranch?: string;
-          specPath?: string;
-          epicGoalContract?: EpicGoalContract;
-          tickets?: TrackedTicketCommentMetadata[];
-        };
-        if (Array.isArray(parsed.tickets) && parsed.tickets.length > 0) {
-          return {
-            ...(typeof parsed.planBranch === "string"
-              ? { planBranch: parsed.planBranch }
-              : {}),
-            ...(typeof parsed.specPath === "string"
-              ? { specPath: parsed.specPath }
-              : {}),
-            ...(parsed.epicGoalContract
-              ? { epicGoalContract: parsed.epicGoalContract }
-              : {}),
-            tickets: parsed.tickets
-          };
-        }
-      } catch {
-        // continue
-      }
-    }
-  }
-  return null;
-}
-
-export function parseTrackedTicketsFromComments(
-  comments: readonly IssueCommentRecord[]
-): TrackedTicketCommentMetadata[] {
-  return parsePlanManifestFromComments(comments)?.tickets ?? [];
-}
-
 export async function runTestsInIsolatedWorkspace(params: {
   readonly files: ReadonlyArray<{ path: string; content: string }>;
   readonly deleted_files?: readonly string[] | undefined;
@@ -839,7 +787,7 @@ export function buildRepoExplorationToolsAndHandlers(params: {
   readonly devBranchPaths: readonly string[];
   readonly gh: Pick<
     GitHubRestHelper,
-    "readSingleBranchFile" | "listBranchPaths"
+    "readSingleBranchFile" | "listBranchPathHints"
   >;
   readonly phase?: WebToolsPhase | undefined;
   readonly webToolsConfig?: WebToolsConfig | undefined;
@@ -1272,9 +1220,9 @@ export function buildRepoExplorationToolsAndHandlers(params: {
             ? ""
             : rawQuery;
         const queryTokens = q.split("*").filter(Boolean);
-        let allPaths = await params.gh.listBranchPaths(params.branch);
+        let allPaths = await params.gh.listBranchPathHints(params.branch);
         if (allPaths.length === 0 && params.branch !== params.featureBranch) {
-          allPaths = await params.gh.listBranchPaths(params.featureBranch);
+          allPaths = await params.gh.listBranchPathHints(params.featureBranch);
         }
         const pathSet = new Set<string>(
           allPaths.map((p) => p.trim().replace(/^\/+/, "")).filter(Boolean)

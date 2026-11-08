@@ -25,12 +25,15 @@ import type {
   ResolvedPhaseModels,
   TrackedTicketCommentMetadata
 } from "../src/orchestrator/types.js";
+import { validateTicketIntegrityGuard } from "../src/orchestrator/workspace/repo-tools.js";
 import {
-  parsePlanManifestFromComments,
-  validateTicketIntegrityGuard
-} from "../src/orchestrator/workspace/repo-tools.js";
+  GITHUB_ACTIONS_APP_ID,
+  embedManifestJson,
+  parsePlanManifestFromComments
+} from "../src/orchestrator/plan-manifest.js";
 import {
   buildIssueStateRefName,
+  type PlanManifestRecord,
   createInMemoryGitRefStateStore,
   updateIssueStateWithCas
 } from "../src/state/git-ref-state.js";
@@ -607,10 +610,14 @@ describe("EPURE Graphe GitHub Natif, Garde-fous d'Intégrité Inter-Tickets et C
           status: "merged" as const,
           sha: "sha-merged"
         }),
-        listBranchPaths: async (branch: string) =>
-          branch === "dev"
-            ? ["docs/adr/0031-first.md"]
-            : ["docs/adr/0031-first.md", "docs/adr/0032-second.md"],
+        listDirectoryPaths: async (branch: string, dir: string) =>
+          dir !== "docs/adr"
+            ? []
+            : branch === "dev"
+              ? ["docs/adr/0031-first.md"]
+              : ["docs/adr/0031-first.md", "docs/adr/0032-second.md"],
+        listBranchBlobs: async () => new Map(),
+        compareCommits: async () => ({ aheadBy: 1, mergeBaseSha: "sha-dev", changedFiles: [] }),
         readSingleBranchFile: async (_branch: string, path: string) =>
           path.includes("0031")
             ? "# ADR-0031 : First\n"
@@ -718,7 +725,10 @@ describe("EPURE Graphe GitHub Natif, Garde-fous d'Intégrité Inter-Tickets et C
     ])("$id", async ({ pinnedPaths, expectedPaths }) => {
       const mockFetch: typeof fetch = async (input) => {
         const url = String(input);
-        if (url.includes("/git/trees/")) {
+        if (url.includes("/git/ref/heads/")) {
+          return new Response(JSON.stringify({ object: { sha: "sha-feature-head" } }), { status: 200 });
+        }
+        if (url.includes("/git/trees/sha-feature-head")) {
           return new Response(
             JSON.stringify({
               tree: [
@@ -827,21 +837,25 @@ describe("EPURE Graphe GitHub Natif, Garde-fous d'Intégrité Inter-Tickets et C
       const parsed = parseOptionalEpicGoalContract(sampleContract);
       expect(parsed).toEqual(sampleContract);
 
-      const commentBody = `### Plan\n<!-- epure-plan-manifest:${JSON.stringify({
+      const manifestJson = JSON.stringify({
         planBranch,
         specPath,
         epicGoalContract: sampleContract,
         tickets: [sampleTicket]
-      })} -->`;
+      });
+      const commentBody = `### Plan\n<!-- epure-plan-manifest:${manifestJson} -->`;
 
       const commentRecord: IssueCommentRecord = {
         id: 1,
         body: commentBody,
-        user: { login: "epure-bot" },
-        created_at: "2026-10-31T00:00:00Z"
+        user: { login: "github-actions[bot]" },
+        created_at: "2026-10-31T00:00:00Z",
+        performed_via_github_app: { id: GITHUB_ACTIONS_APP_ID }
       };
 
-      const manifest = parsePlanManifestFromComments([commentRecord]);
+      const manifest = parsePlanManifestFromComments([commentRecord], {
+        appId: GITHUB_ACTIONS_APP_ID
+      });
       expect(manifest?.epicGoalContract).toEqual(sampleContract);
       expect(manifest?.tickets).toHaveLength(1);
     });
@@ -910,7 +924,7 @@ describe("EPURE Graphe GitHub Natif, Garde-fous d'Intégrité Inter-Tickets et C
           (_, idx) => `export const line_${idx + 1} = "${"x".repeat(40)}";`
         ).join("\n");
         const mockGh = {
-          listBranchPaths: async () => ["src/cli.ts", "src/large.ts"],
+          listBranchPathHints: async () => ["src/cli.ts", "src/large.ts"],
           readSingleBranchFile: async (_branch: string, path: string) =>
             path === "src/large.ts"
               ? longLineFile
@@ -961,6 +975,7 @@ describe("EPURE Graphe GitHub Natif, Garde-fous d'Intégrité Inter-Tickets et C
       const subIssues: Array<{ parent: number; childId: number }> = [];
       const blockedByDeps: Array<{ issue: number; blockerId: number }> = [];
       const postedComments: string[] = [];
+      const recordedManifests: PlanManifestRecord[] = [];
       let updatedParentIssueBody = "";
 
       let nextIssueNum = 52;
@@ -1044,9 +1059,18 @@ describe("EPURE Graphe GitHub Natif, Garde-fous d'Intégrité Inter-Tickets et C
           remediation_tickets: phase2Tickets
         },
         nextEpicPhase,
-        stateMirrorMarkdown: "<!-- state -->",
+        recordPlanManifest: async (manifest) => {
+          recordedManifests.push(manifest);
+          return "<!-- state -->";
+        },
         gh: mockGh
       });
+
+      expect(recordedManifests).toHaveLength(1);
+      expect(recordedManifests[0]?.tickets).toEqual(combined);
+      expect(postedComments[0]).toContain(
+        `<!-- epure-plan-manifest:${embedManifestJson(recordedManifests[0])} -->`
+      );
 
       expect(combined.map((t) => t.ticketIssueNumber)).toEqual(
         expectedTicketNumbers
@@ -1274,7 +1298,8 @@ describe("EPURE Graphe GitHub Natif, Garde-fous d'Intégrité Inter-Tickets et C
               {
                 id: 1,
                 body: manifestComment,
-                user: { login: "epure-bot" },
+                user: { login: "github-actions[bot]", type: "Bot" },
+                performed_via_github_app: { id: GITHUB_ACTIONS_APP_ID },
                 created_at: "2026-10-31T00:00:00Z"
               }
             ]),

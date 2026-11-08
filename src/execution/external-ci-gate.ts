@@ -9,6 +9,10 @@ import {
 } from "../llm/errors.js";
 import { matchesPathPattern } from "../sandbox/polyglot-workspace-runner.js";
 import { wrapUntrustedContent } from "../security/prompt-injection-guard.js";
+import {
+  RESUME_CONTEXT_MAX_CHARS,
+  RESUME_CONTEXT_MAX_COMMENTS
+} from "../contract/resume-context.js";
 
 export interface ExpectedExternalWorkflow {
   readonly path: string;
@@ -158,12 +162,18 @@ export type NeedsHumanEscalationReason =
   | "sensitive_path_violation"
   | "merge_conflict_unresolved"
   | "merge_conflict_stage1_failed"
+  | "pr_not_mergeable"
+  | "resync_verification_failed"
   | "wall_clock_budget_exhausted"
   | "transient_llm_api_exhausted"
   | "llm_quota_or_auth_failure"
   | "llm_request_invalid"
   | "llm_refusal"
   | "model_config_missing"
+  | "github_rate_limited"
+  | "branch_update_conflict"
+  | "ambiguous_feature_branch"
+  | "plan_manifest_missing"
   | "internal_error";
 
 /**
@@ -204,6 +214,8 @@ export interface FormatNeedsHumanEscalationInput {
   readonly reason: NeedsHumanEscalationReason;
   readonly codeFixAttemptsUsed?: number | undefined;
   readonly maxCodeFixAttempts?: number | undefined;
+  readonly humanBudgetGrants?: number | undefined;
+  readonly resumeCommand?: string | undefined;
   readonly graceWindowSeconds?: number | undefined;
   readonly expectedWorkflows?: readonly string[] | undefined;
   readonly sensitivePaths?: readonly string[] | undefined;
@@ -1232,6 +1244,12 @@ export function formatNeedsHumanEscalationComment(
   } else if (input.reason === "merge_conflict_stage1_failed") {
     reasonHeadline =
       "Automated 3-way conflict resolution failed Stage 1 Sandbox verification (`MERGE_CONFLICT_STAGE1_FAILED`)";
+  } else if (input.reason === "pr_not_mergeable") {
+    reasonHeadline =
+      "GitHub refused the merge for a reason a re-sync cannot fix (merge method, ruleset or required review/check) (`pr_not_mergeable`) — code-fix budget preserved";
+  } else if (input.reason === "resync_verification_failed") {
+    reasonHeadline =
+      "Review or CI failed on the re-synced head after GitHub refused the merge (`resync_verification_failed`) — code-fix budget preserved";
   } else if (input.reason === "transient_llm_api_exhausted") {
     reasonHeadline =
       "Transient LLM API retries or unitary request timeout exhausted (`max_transient_api_retries`) — code-fix budget preserved";
@@ -1251,6 +1269,18 @@ export function formatNeedsHumanEscalationComment(
     reasonHeadline =
       `LLM model configuration missing — set ${keys} in \`.github/agents.yml\` ` +
       "(or the action `model` input); no fallback model";
+  } else if (input.reason === "github_rate_limited") {
+    reasonHeadline =
+      "GitHub API rate limit still exceeded after waiting up to 5 minutes (`github_rate_limited`) — code-fix budget preserved";
+  } else if (input.reason === "branch_update_conflict") {
+    reasonHeadline =
+      "Branch kept moving under EPURE: its commit could not be fast-forwarded after re-basing on the new head (`branch_update_conflict`) — no commit overwritten, code-fix budget preserved";
+  } else if (input.reason === "ambiguous_feature_branch") {
+    reasonHeadline =
+      "Several `feature/<N>-*` branches match this plan and no single one has an open or merged PR to `dev` (`ambiguous_feature_branch`) — EPURE does not guess; code-fix budget preserved";
+  } else if (input.reason === "plan_manifest_missing") {
+    reasonHeadline =
+      "The ticket graph EPURE generated for this plan cannot be read (`plan_manifest_missing`) — EPURE does not implement the issue body in its place. Before implementation, `/epure to-tickets` regenerates the graph; once implementation has started, close the plan and open a new one";
   } else if (input.reason === "internal_error") {
     reasonHeadline =
       "Internal orchestrator error — code-fix budget preserved";
@@ -1270,6 +1300,12 @@ export function formatNeedsHumanEscalationComment(
     `- **Statut d'orchestration** : \`suspended\` (label \`needs-human\` appliqué)`,
     `- **Cause de l'escalade** : ${reasonHeadline}`
   );
+
+  if (input.humanBudgetGrants !== undefined) {
+    lines.push(
+      `- **Budgets de correction accordés par un humain** : \`${input.humanBudgetGrants}\` (\`human_budget_grant_log\`)`
+    );
+  }
 
   if (input.reason === "model_config_missing") {
     lines.push(
@@ -1361,13 +1397,21 @@ export function formatNeedsHumanEscalationComment(
     );
   }
 
+  const resumeCommand = input.resumeCommand ?? "/epure continue";
   lines.push(
     "",
-    "#### 🛠️ Playbook de reprise (`/epure approve`)",
+    `#### 🛠️ Playbook de reprise (\`${resumeCommand}\`)`,
     "1. Inspectez les checks ou fichiers signalés ci-dessus (ou ajustez `verification.targets` dans `.github/agents.yml` sur `dev` si nécessaire).",
     `2. Poussez un correctif sur \`${input.branch}\` ou mettez à jour la configuration sur \`dev\`.`,
-    `3. Postez \`/epure approve\` sur cette issue (#${input.issueNumber}) : l'orchestrateur réconciliera automatiquement la PR existante et reprendra la validation sans dupliquer le travail (ADR-0028, Q110).`
+    input.resumeCommand
+      ? `3. Republiez \`${resumeCommand}\` sur cette issue (#${input.issueNumber}) pour reprendre (une réponse libre suffit pendant le grill et la revue de spécification).`
+      : `3. Postez \`/epure continue\` (ou \`/epure approve\`) sur cette issue (#${input.issueNumber}) : l'orchestrateur réconciliera automatiquement la PR existante et reprendra la validation sans dupliquer le travail (ADR-0028, Q110). Une réponse libre ne reprend pas l'exécution ; les commentaires publiés d'ici là par un contributeur \`write\` ou supérieur (hors commandes \`/epure\` et bots, ${RESUME_CONTEXT_MAX_COMMENTS} derniers, ${RESUME_CONTEXT_MAX_CHARS} caractères au plus) sont transmis à la session reprise.`
   );
+  if (input.reason === "remediation_exhausted" && !input.resumeCommand) {
+    lines.push(
+      "4. La reprise remet à zéro le budget de remédiation de l'élément bloqué et l'enregistre dans `human_budget_grant_log`."
+    );
+  }
 
   return appendEpureCommandsSpoiler(lines.join("\n"), {
     phase: "suspended",

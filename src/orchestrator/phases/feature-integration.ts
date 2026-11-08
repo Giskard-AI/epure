@@ -32,13 +32,21 @@ import {
   wrapUntrustedContent
 } from "../../security/prompt-injection-guard.js";
 import {
+  advanceCommentCursor,
+  formatIssueStateMarker,
+  toTerminalState,
   updateIssueStateWithCas,
+  withFeatureCodeFixAttempts,
   type GitRefStateStore
 } from "../../state/git-ref-state.js";
 import { appendEpureCommandsSpoiler } from "../formatting/comments.js";
 import { callLlmJson } from "../llm-helper.js";
-import { syncBranchWithBase } from "../github/branch-sync.js";
+import {
+  syncBranchWithBase,
+  type BaseSyncGuard
+} from "../github/branch-sync.js";
 import { EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT } from "../prompts/code-discipline.js";
+import { formatResumeContextPromptLines } from "../prompts/resume-context.js";
 import {
   GENERATED_TICKET_IMPLEMENTATION_SCHEMA,
   type EscalateToNeedsHumanFn,
@@ -101,7 +109,10 @@ export interface RunFeatureIntegrationPhaseParams {
     | undefined;
   readonly asyncCiContinuation?: boolean | undefined;
   readonly forceOneRemediationRoundOnOpenPr?: boolean | undefined;
-  readonly initialCodeFixAttemptsUsed?: number | undefined;
+  readonly initialFeatureCodeFixAttemptsUsed: number;
+  readonly baseSyncGuard: BaseSyncGuard;
+  readonly resumeContextMarkdown?: string | undefined;
+  readonly stopIfFeaturePrMerged: () => Promise<OrchestrateIssueResult | null>;
 }
 
 export async function runFeatureIntegrationPhase(
@@ -111,6 +122,8 @@ export async function runFeatureIntegrationPhase(
     params.parsedDevAgentsConfig?.reviewers_dir ?? DEFAULT_REVIEWERS_DIR;
   let verificationProfile = params.initialVerificationProfile;
   let verificationGuideMarkdown = params.initialVerificationGuideMarkdown;
+  const escalate: EscalateToNeedsHumanFn = (escalation) =>
+    params.escalateToNeedsHuman({ ...escalation, budgetScope: "feature" });
 
   // Bucket A Guard: prepareFeatureToDevPullRequest check
   const featurePrGate = prepareFeatureToDevPullRequest({
@@ -132,7 +145,7 @@ export async function runFeatureIntegrationPhase(
     attemptAutoMergeToDev: false
   });
   if (!featurePrGate.ready_to_open) {
-    return await params.escalateToNeedsHuman({
+    return await escalate({
       reason: "remediation_exhausted",
       ticketNumber: params.issueNumber,
       branch: params.featureBranch,
@@ -140,29 +153,36 @@ export async function runFeatureIntegrationPhase(
     });
   }
 
-  const featureSync = await syncBranchWithBase({
-    gh: params.gh,
-    targetBranch: params.featureBranch,
-    baseBranch: "dev",
-    issueNumber: params.issueNumber,
-    llmApiKey: params.llmApiKey,
-    fetchImpl: params.fetchImpl,
-    model: params.phaseModels.implementationModel,
-    providers: params.phaseModels.providers,
-    maxTransientRetries: params.phaseModels.maxTransientRetries,
-    transientRetryBackoffSeconds:
-      params.phaseModels.transientRetryBackoffSeconds,
-    requestTimeoutMs: params.phaseModels.requestTimeoutMs,
-    sandboxRunner: params.sandboxRunner,
-    reviewersDir
-  });
-  if (featureSync.status === "escalated") {
-    return await params.escalateToNeedsHuman({
-      reason: featureSync.escalationReason ?? "merge_conflict_unresolved",
-      ticketNumber: params.issueNumber,
-      branch: params.featureBranch,
-      diagnosticExcerpt: featureSync.diagnosticExcerpt
+  if (await params.baseSyncGuard.needsSync()) {
+    const mergedBeforeSync = await params.stopIfFeaturePrMerged();
+    if (mergedBeforeSync) {
+      return mergedBeforeSync;
+    }
+    const featureSync = await syncBranchWithBase({
+      gh: params.gh,
+      targetBranch: params.featureBranch,
+      baseBranch: "dev",
+      issueNumber: params.issueNumber,
+      llmApiKey: params.llmApiKey,
+      fetchImpl: params.fetchImpl,
+      model: params.phaseModels.implementationModel,
+      providers: params.phaseModels.providers,
+      maxTransientRetries: params.phaseModels.maxTransientRetries,
+      transientRetryBackoffSeconds:
+        params.phaseModels.transientRetryBackoffSeconds,
+      requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+      sandboxRunner: params.sandboxRunner,
+      reviewersDir
     });
+    if (featureSync.status === "escalated") {
+      return await escalate({
+        reason: featureSync.escalationReason ?? "merge_conflict_unresolved",
+        ticketNumber: params.issueNumber,
+        branch: params.featureBranch,
+        diagnosticExcerpt: featureSync.diagnosticExcerpt
+      });
+    }
+    await params.baseSyncGuard.markSynced();
   }
 
   const effectiveFeatureEntries =
@@ -230,6 +250,12 @@ export async function runFeatureIntegrationPhase(
     }
   );
 
+  const mergedBeforeOpening = existingFeaturePr
+    ? null
+    : await params.stopIfFeaturePrMerged();
+  if (mergedBeforeOpening) {
+    return mergedBeforeOpening;
+  }
   const featurePr = existingFeaturePr
     ? existingFeaturePr
     : await params.gh.openPullRequest({
@@ -264,6 +290,44 @@ export async function runFeatureIntegrationPhase(
   }
 
   let currentFeaturePrHeadSha = featurePr.head_sha;
+  // GitHub runs no `pull_request` workflow on a conflicting PR: re-sync `dev` into the feature branch first.
+  if (
+    (await params.gh.getPullRequestMergeableState(featurePr.number)) === "dirty"
+  ) {
+    const mergedBeforeResync = await params.stopIfFeaturePrMerged();
+    if (mergedBeforeResync) {
+      return mergedBeforeResync;
+    }
+    const resync = await syncBranchWithBase({
+      gh: params.gh,
+      targetBranch: params.featureBranch,
+      baseBranch: "dev",
+      issueNumber: params.issueNumber,
+      llmApiKey: params.llmApiKey,
+      fetchImpl: params.fetchImpl,
+      model: params.phaseModels.implementationModel,
+      providers: params.phaseModels.providers,
+      maxTransientRetries: params.phaseModels.maxTransientRetries,
+      transientRetryBackoffSeconds:
+        params.phaseModels.transientRetryBackoffSeconds,
+      requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+      sandboxRunner: params.sandboxRunner,
+      reviewersDir
+    });
+    if (resync.status === "escalated") {
+      return await escalate({
+        reason: resync.escalationReason ?? "merge_conflict_unresolved",
+        ticketNumber: params.issueNumber,
+        branch: params.featureBranch,
+        prNumber: featurePr.number,
+        prUrl: featurePr.html_url,
+        featurePrUrl: featurePr.html_url,
+        diagnosticExcerpt: resync.diagnosticExcerpt
+      });
+    }
+    await params.baseSyncGuard.markSynced();
+    currentFeaturePrHeadSha = resync.headSha || currentFeaturePrHeadSha;
+  }
   const runStage2AndStage3ForFeaturePr = async (passParams: {
     headSha: string;
     isReReviewPass: boolean;
@@ -346,21 +410,20 @@ export async function runFeatureIntegrationPhase(
 
     const currentAttempts =
       passParams.reviewFixAttemptsUsed ??
-      params.initialCodeFixAttemptsUsed ??
-      0;
+      params.initialFeatureCodeFixAttemptsUsed;
     const shouldReleaseRunnerForAsyncFeatureCi =
       Boolean(params.asyncCiContinuation) &&
       verificationProfile.wait_for_external_ci !== false &&
       expectedFeatureWorkflows.length > 0 &&
       (!params.forceOneRemediationRoundOnOpenPr ||
-        currentAttempts > (params.initialCodeFixAttemptsUsed ?? 0));
+        currentAttempts > params.initialFeatureCodeFixAttemptsUsed);
 
     if (shouldReleaseRunnerForAsyncFeatureCi) {
       const updatedWaitingFeature = await updateIssueStateWithCas({
         issueNumber: params.issueNumber,
         store: params.store,
         mutator: (prev) => ({
-          ...prev,
+          ...withFeatureCodeFixAttempts(prev, currentAttempts),
           phase: "review",
           status: "active",
           active_branch: params.featureBranch,
@@ -368,19 +431,18 @@ export async function runFeatureIntegrationPhase(
           active_ticket_number: params.issueNumber,
           active_task_branch: undefined,
           active_pr_number: featurePr.number,
-          active_head_sha: passParams.headSha,
-          code_fix_attempts_used: currentAttempts
+          active_head_sha: passParams.headSha
         })
       });
       const asyncFeatureSummary = [
-        `<!-- epure-state:${JSON.stringify(updatedWaitingFeature.state)} -->`,
+        formatIssueStateMarker(updatedWaitingFeature.state),
         updatedWaitingFeature.issue_mirror_markdown,
         "",
         `### ⏳ Attente événementielle CI externe (\`waiting_feature_ci\`) — Feature PR #${featurePr.number}`,
         `- **Pull Request** : ${featurePr.html_url} (\`${params.featureBranch}\` -> \`dev\`)`,
         `- **HEAD SHA** : \`${passParams.headSha}\``,
         `- **Revue Multi-Agents (\`ai-review\`)** : \`${reviewRes.conclusion}\``,
-        "- **Action** : Runner GitHub Actions libéré (`exit 0`). Reprise automatique sur `check_suite` / `workflow_run: completed` ou `/epure continue`."
+        "- **Action** : Runner GitHub Actions libéré (`exit 0`). Reprise automatique sur `workflow_run: completed` ou `/epure continue`."
       ].join("\n");
       return {
         reviewResult: reviewRes,
@@ -400,7 +462,8 @@ export async function runFeatureIntegrationPhase(
           active_branch: params.featureBranch,
           summary_markdown: asyncFeatureSummary,
           created_ticket_numbers: allTicketNumbers,
-          feature_pr_url: featurePr.html_url
+          feature_pr_url: featurePr.html_url,
+          waiting_ci_head_sha: passParams.headSha
         }
       };
     }
@@ -437,7 +500,18 @@ export async function runFeatureIntegrationPhase(
     return { reviewResult: reviewRes, ciGateResult: ciRes };
   };
 
-  let featureReviewFixAttempt = params.initialCodeFixAttemptsUsed ?? 0;
+  let featureReviewFixAttempt = params.initialFeatureCodeFixAttemptsUsed;
+  const consumeFeatureFixAttempt = async (): Promise<void> => {
+    featureReviewFixAttempt += 1;
+    await updateIssueStateWithCas({
+      issueNumber: params.issueNumber,
+      store: params.store,
+      mutator: (prev) => ({
+        ...withFeatureCodeFixAttempts(prev, featureReviewFixAttempt),
+        transient_retries_used: params.getTotalTransientRetriesUsed()
+      })
+    });
+  };
 
   const initialFeaturePass = await runStage2AndStage3ForFeaturePr({
     headSha: currentFeaturePrHeadSha,
@@ -457,14 +531,13 @@ export async function runFeatureIntegrationPhase(
     (finalFeatureCiGate.reason === "grace_window_timeout" ||
       finalFeatureCiGate.reason === "wall_clock_budget_exhausted")
   ) {
-    return await params.escalateToNeedsHuman({
+    return await escalate({
       reason: finalFeatureCiGate.reason,
       ticketNumber: params.issueNumber,
       branch: params.featureBranch,
       prNumber: featurePr.number,
       prUrl: featurePr.html_url,
       featurePrUrl: featurePr.html_url,
-      codeFixAttemptsUsed: 0,
       failedChecks: finalFeatureCiGate.failedChecks,
       mustFixFindings: finalFeatureReview.must_fix_findings,
       diagnosticExcerpt: finalFeatureCiGate.formattedDiagnostics
@@ -477,17 +550,7 @@ export async function runFeatureIntegrationPhase(
       !finalFeatureCiGate.passed) &&
     featureReviewFixAttempt < maxFeatureReviewFixAttempts
   ) {
-    featureReviewFixAttempt += 1;
-    await updateIssueStateWithCas({
-      issueNumber: params.issueNumber,
-      store: params.store,
-      mutator: (prev) => ({
-        ...prev,
-        code_fix_attempts_used: featureReviewFixAttempt,
-        transient_retries_used:
-          params.getTotalTransientRetriesUsed() || prev.transient_retries_used
-      })
-    });
+    await consumeFeatureFixAttempt();
 
     process.stdout.write(
       `[EPURE][Feature PR #${featurePr.number}] Multi-agent synthesis review + CI fix iteration ${featureReviewFixAttempt}/${maxFeatureReviewFixAttempts} (${finalFeatureReview.must_fix_findings.length} must_fix finding(s), CI passed=${finalFeatureCiGate.passed})\n`
@@ -568,7 +631,9 @@ export async function runFeatureIntegrationPhase(
         EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
       ].join("\n");
 
-      const featureFixPromptParts: string[] = [];
+      const featureFixPromptParts: string[] = formatResumeContextPromptLines(
+        params.resumeContextMarkdown
+      );
       if (finalFeatureReview.must_fix_findings.length > 0) {
         featureFixPromptParts.push(
           `Les reviewers multi-agents EPURE ont émis ${finalFeatureReview.must_fix_findings.length} constat(s) bloquant(s) ('must_fix') sur la PR finale #${featurePr.number} (\`${params.featureBranch} -> dev\`) :`,
@@ -636,7 +701,7 @@ export async function runFeatureIntegrationPhase(
         reviewersDir
       });
       if (!featureFixPreCheck.allowed) {
-        return await params.escalateToNeedsHuman({
+        return await escalate({
           reason: "sensitive_path_violation",
           ticketNumber: params.issueNumber,
           branch: params.featureBranch,
@@ -683,9 +748,11 @@ export async function runFeatureIntegrationPhase(
         label: `Feature PR #${featurePr.number} review-fix iteration ${featureReviewFixAttempt}/${maxFeatureReviewFixAttempts}`
       });
 
-      let featureTestRetry = 0;
-      while (!featureTestCheck.passed && featureTestRetry < 2) {
-        featureTestRetry += 1;
+      while (
+        !featureTestCheck.passed &&
+        featureReviewFixAttempt < maxFeatureReviewFixAttempts
+      ) {
+        await consumeFeatureFixAttempt();
         const retryFilesContext = Array.from(
           params.accumulatedFiles.entries()
         )
@@ -703,10 +770,10 @@ export async function runFeatureIntegrationPhase(
             onTransientRetriesUsed: (used) =>
               params.addTransientRetriesUsed(used),
             thinkingLevel: "HIGH",
-            logLabel: `feature-review-test-retry:#PR${featurePr.number}/iter-${featureReviewFixAttempt}-retry-${featureTestRetry}`,
+            logLabel: `feature-review-test-retry:#PR${featurePr.number}/iter-${featureReviewFixAttempt}`,
             systemInstruction: featureFixSystemInstruction,
             prompt: [
-              `La correction de review finale a échoué à la vérification Stage 1 (tentative ${featureTestRetry}/2) :`,
+              `La correction de review finale a échoué à la vérification Stage 1 (tentative ${featureReviewFixAttempt}/${maxFeatureReviewFixAttempts}) :`,
               wrapUntrustedContent(
                 "untrusted_test_output",
                 featureTestCheck.output
@@ -754,7 +821,7 @@ export async function runFeatureIntegrationPhase(
           reviewersDir
         });
         if (!retryPreCheck.allowed) {
-          return await params.escalateToNeedsHuman({
+          return await escalate({
             reason: "sensitive_path_violation",
             ticketNumber: params.issueNumber,
             branch: params.featureBranch,
@@ -795,15 +862,12 @@ export async function runFeatureIntegrationPhase(
           verificationProfile,
           sandboxRunner: params.sandboxRunner,
           llmApiKey: params.llmApiKey,
-          label: `Feature PR #${featurePr.number} review-fix iteration ${featureReviewFixAttempt} test retry ${featureTestRetry}/2`
+          label: `Feature PR #${featurePr.number} review-fix test retry ${featureReviewFixAttempt}/${maxFeatureReviewFixAttempts}`
         });
       }
 
       if (!featureTestCheck.passed) {
-        if (featureReviewFixAttempt < maxFeatureReviewFixAttempts) {
-          continue;
-        }
-        return await params.escalateToNeedsHuman({
+        return await escalate({
           reason: "remediation_exhausted",
           ticketNumber: params.issueNumber,
           branch: params.featureBranch,
@@ -829,6 +893,10 @@ export async function runFeatureIntegrationPhase(
           ? parsedFeatureFix.commit_message
           : `fix(review): address final feature review findings on #${params.issueNumber}`;
 
+      const mergedBeforeReviewFix = await params.stopIfFeaturePrMerged();
+      if (mergedBeforeReviewFix) {
+        return mergedBeforeReviewFix;
+      }
       await params.gh.commitFilesToBranch({
         branch: fixTaskBranch,
         fromBranch: params.featureBranch,
@@ -873,9 +941,14 @@ export async function runFeatureIntegrationPhase(
         summary: "Impeccable gate verified in synthesis loop."
       });
 
+      const mergedBeforeFixMerge = await params.stopIfFeaturePrMerged();
+      if (mergedBeforeFixMerge) {
+        return mergedBeforeFixMerge;
+      }
       await params.gh.mergePullRequest(fixPr.number, {
         headBranch: fixTaskBranch,
         baseBranch: params.featureBranch,
+        expectedHeadSha: fixPr.head_sha,
         commitTitle: `${fixCommitTitle} (#${fixPr.number})`,
         commitMessage: `Automated remediation of synthesis review findings.\n\nRefs #${params.issueNumber}`
       });
@@ -901,7 +974,7 @@ export async function runFeatureIntegrationPhase(
         (finalFeatureCiGate.reason === "grace_window_timeout" ||
           finalFeatureCiGate.reason === "wall_clock_budget_exhausted")
       ) {
-        return await params.escalateToNeedsHuman({
+        return await escalate({
           reason: finalFeatureCiGate.reason,
           ticketNumber: params.issueNumber,
           branch: params.featureBranch,
@@ -916,7 +989,7 @@ export async function runFeatureIntegrationPhase(
       }
     } catch (err) {
       if (err instanceof LLMError) {
-        return await params.escalateToNeedsHuman({
+        return await escalate({
           reason: resolveLlmEscalationReason(err),
           ticketNumber: params.issueNumber,
           branch: params.featureBranch,
@@ -941,7 +1014,7 @@ export async function runFeatureIntegrationPhase(
     finalFeatureReview.conclusion === "failure" ||
     !finalFeatureCiGate.passed
   ) {
-    return await params.escalateToNeedsHuman({
+    return await escalate({
       reason: "remediation_exhausted",
       ticketNumber: params.issueNumber,
       branch: params.featureBranch,
@@ -958,14 +1031,14 @@ export async function runFeatureIntegrationPhase(
   const updatedDone = await updateIssueStateWithCas({
     issueNumber: params.issueNumber,
     store: params.store,
-    mutator: (prev) => ({
-      ...prev,
-      phase: "completed",
-      status: "done",
-      active_branch: params.featureBranch,
-      last_processed_comment_id:
-        params.commentId ?? prev.last_processed_comment_id
-    })
+    mutator: (prev) =>
+      toTerminalState(prev, {
+        phase: "completed",
+        status: "done",
+        active_branch: params.featureBranch,
+        last_processed_comment_id:
+          advanceCommentCursor(prev, params.commentId)
+      })
   });
 
   const finalComment = appendEpureCommandsSpoiler(

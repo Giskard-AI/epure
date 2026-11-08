@@ -1,5 +1,11 @@
-import { isBotActor } from "../auth/issue-command-gate.js";
+import { isBotActor, parseEpureCommand } from "../auth/issue-command-gate.js";
 import {
+  RESUME_CONTEXT_MAX_CHARS,
+  RESUME_CONTEXT_MAX_COMMENTS,
+  RESUME_CONTEXT_MAX_PERMISSION_LOOKUPS
+} from "../contract/resume-context.js";
+import {
+  toTerminalState,
   updateIssueStateWithCas,
   type EpureIssueState,
   type GitRefStateStore
@@ -42,6 +48,87 @@ function isAuthorizedHumanComment(comment: IncomingIssueComment): boolean {
     comment.effectivePermission === "maintain" ||
     comment.effectivePermission === "write"
   );
+}
+
+// Every comment EPURE posts carries one of its HTML markers (state mirror, manifests, audit trace).
+const EPURE_COMMENT_MARKER = "<!-- epure-";
+
+export interface ResumeContextCandidate {
+  readonly id: number;
+  readonly authorLogin: string;
+  readonly authorType: string;
+  readonly authorAssociation: string;
+  readonly viaGitHubApp: boolean;
+  readonly body: string;
+}
+
+const LOOKUP_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+
+/**
+ * Selects the human guidance injected into a resumed implementation session: comments posted
+ * after `afterCommentId` and before the resume command, by authors with `write` or higher,
+ * excluding `/epure` commands, bots, GitHub App comments and EPURE's own comments. Keeps the
+ * most recent ones within the comment, character and permission-lookup caps, oldest first.
+ * Authors outside OWNER/MEMBER/COLLABORATOR cannot hold `write`, so they never use a lookup;
+ * the association only narrows who is looked up, the lookup still decides.
+ */
+export async function selectResumeContextComments(input: {
+  readonly comments: readonly ResumeContextCandidate[];
+  readonly afterCommentId: number;
+  readonly resumeCommentId: number;
+  readonly resolvePermission: (
+    login: string
+  ) => Promise<IncomingIssueComment["effectivePermission"]>;
+}): Promise<readonly IncomingIssueComment[]> {
+  const candidates = input.comments
+    .filter(
+      (c) =>
+        c.id > input.afterCommentId &&
+        c.id < input.resumeCommentId &&
+        parseEpureCommand(c.body) === null &&
+        !c.viaGitHubApp &&
+        LOOKUP_ASSOCIATIONS.has(c.authorAssociation) &&
+        !c.body.includes(EPURE_COMMENT_MARKER) &&
+        !isBotActor({ login: c.authorLogin, type: c.authorType })
+    )
+    .sort((a, b) => b.id - a.id);
+
+  const permissions = new Map<string, IncomingIssueComment["effectivePermission"]>();
+  const selected: IncomingIssueComment[] = [];
+  let remainingChars = RESUME_CONTEXT_MAX_CHARS;
+  for (const candidate of candidates) {
+    if (selected.length === RESUME_CONTEXT_MAX_COMMENTS || remainingChars <= 0) {
+      break;
+    }
+    let permission = permissions.get(candidate.authorLogin);
+    if (permission === undefined) {
+      if (permissions.size === RESUME_CONTEXT_MAX_PERMISSION_LOOKUPS) {
+        continue;
+      }
+      permission = await input.resolvePermission(candidate.authorLogin);
+      permissions.set(candidate.authorLogin, permission);
+    }
+    const comment: IncomingIssueComment = {
+      id: candidate.id,
+      authorLogin: candidate.authorLogin,
+      authorType: candidate.authorType,
+      effectivePermission: permission,
+      body: candidate.body.trim().slice(0, remainingChars)
+    };
+    if (isAuthorizedHumanComment(comment)) {
+      selected.push(comment);
+      remainingChars -= comment.body.length;
+    }
+  }
+  return selected.reverse();
+}
+
+export function formatResumeContextMarkdown(
+  comments: readonly IncomingIssueComment[]
+): string {
+  return comments
+    .map((c) => `@${c.authorLogin} (commentaire ${c.id}) :\n${c.body}`)
+    .join("\n\n");
 }
 
 export async function processPendingIssueCommentsBatch(
@@ -98,11 +185,11 @@ export async function processPendingIssueCommentsBatch(
       latestStateResult = await updateIssueStateWithCas({
         issueNumber: input.issueNumber,
         store: input.store,
-        mutator: (prev) => ({
-          ...prev,
-          status: "cancelled",
-          last_processed_comment_id: cursor
-        })
+        mutator: (prev) =>
+          toTerminalState(prev, {
+            status: "cancelled",
+            last_processed_comment_id: cursor
+          })
       });
       break;
     }

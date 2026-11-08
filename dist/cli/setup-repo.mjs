@@ -92,6 +92,10 @@ var PROVIDER_EFFORTS = [
   "max"
 ];
 
+// src/orchestrator/github/rate-limit.ts
+var GITHUB_RATE_LIMIT_MAX_WAIT_MS = 5 * 60 * 1e3;
+var SECONDARY_RATE_LIMIT_DEFAULT_WAIT_MS = 60 * 1e3;
+
 // src/orchestrator/prompts/schemas.ts
 function asRecord(value, schemaName) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -2597,6 +2601,11 @@ function parseAgentsYaml(yamlContent) {
     ...t.build_command ? { build_command: t.build_command } : {}
   }));
   const hasVerificationOverrides = wait_for_external_ci !== void 0 || external_ci_timeout_minutes !== void 0 || grace_window_seconds !== void 0 || deferred_external_workflows !== void 0 || hasTargetsKey || parsedTargets.length > 0;
+  if (reviewers_dir !== void 0 && reviewers_dir.split(/[\\/]/).some((s) => s === "." || s === "..")) {
+    throw new Error(
+      `reviewers_dir '${reviewers_dir}' must not contain '.' or '..' path segments.`
+    );
+  }
   const overrides = {
     ...harness ? { harness } : {},
     ...Object.keys(models).length > 0 ? { models } : {},
@@ -2650,13 +2659,13 @@ function buildCallerWorkflows(pinnedSha, stack, jobTimeoutMinutes = DEFAULT_AGEN
         "on:",
         "  issue_comment:",
         "    types: [created]",
-        "  check_suite:",
-        "    types: [completed]",
+        "  issues:",
+        "    types: [closed]",
         "  workflow_run:",
         '    workflows: ["CI"]',
         "    types: [completed]",
         "concurrency:",
-        "  group: epure-issue-gate-${{ github.event.issue.number || github.event.check_suite.head_sha || github.event.workflow_run.head_sha }}-${{ github.event.comment.id || github.run_id }}",
+        "  group: epure-issue-gate-${{ github.event.issue.number || github.event.workflow_run.head_sha }}-${{ github.event.comment.id || github.run_id }}",
         "  cancel-in-progress: false",
         "permissions: {}",
         "jobs:",
@@ -2686,15 +2695,39 @@ function buildCallerWorkflows(pinnedSha, stack, jobTimeoutMinutes = DEFAULT_AGEN
         '          allow_implicit_planning_reply: "true"',
         "          github_token: ${{ secrets.GITHUB_TOKEN }}",
         "",
+        "  authorize-closure:",
+        '    name: "Authorize Issue Closure"',
+        "    if: ${{ github.event_name == 'issues' && github.event.sender.type == 'User' }}",
+        "    runs-on: ubuntu-26.04",
+        "    timeout-minutes: 5",
+        "    permissions:",
+        "      contents: read # read the closer's repository permission level",
+        "    outputs:",
+        "      authorized: ${{ steps.closer.outputs.authorized }}",
+        "    steps:",
+        "      - name: Check that the closer has write access",
+        "        id: closer",
+        "        env:",
+        "          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
+        "          CLOSER: ${{ github.event.sender.login }}",
+        "        run: |",
+        "          # A closer GitHub cannot resolve is not authorized; the job stays green.",
+        '          permission="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${CLOSER}/permission" --jq .permission || echo none)"',
+        '          case "$permission" in',
+        '            admin|write) echo "authorized=true" >> "$GITHUB_OUTPUT" ;;',
+        '            *) echo "authorized=false" >> "$GITHUB_OUTPUT" ;;',
+        "          esac",
+        "",
         "  orchestrate-command:",
         '    name: "Orchestrate Authorized /epure Lifecycle"',
-        "    needs: [authorize-command]",
-        "    if: ${{ always() && (needs.authorize-command.outputs.authorized == 'true' || ((github.event_name == 'check_suite' || github.event_name == 'workflow_run') && (startsWith(github.event.check_suite.head_branch, 'task/') || startsWith(github.event.check_suite.head_branch, 'feature/') || startsWith(github.event.workflow_run.head_branch, 'task/') || startsWith(github.event.workflow_run.head_branch, 'feature/')))) }}",
+        "    needs: [authorize-command, authorize-closure]",
+        "    if: ${{ always() && (needs.authorize-command.outputs.authorized == 'true' || needs.authorize-closure.outputs.authorized == 'true' || (github.event_name == 'workflow_run' && github.event.workflow_run.head_repository.full_name == github.repository && (startsWith(github.event.workflow_run.head_branch, 'task/') || startsWith(github.event.workflow_run.head_branch, 'feature/')))) }}",
         "    runs-on: ubuntu-26.04",
         `    timeout-minutes: ${jobTimeoutMinutes}`,
         `    environment: ${llmEnvironment}`,
+        "    # A closure gets its own group so it never replaces a pending /epure run of the same issue.",
         "    concurrency:",
-        "      group: epure-issue-${{ github.event.issue.number || github.event.check_suite.head_branch || github.event.workflow_run.head_branch || github.run_id }}",
+        "      group: epure-issue-${{ github.event_name == 'issues' && 'closed-' || '' }}${{ github.event.issue.number || github.event.workflow_run.head_branch || github.run_id }}",
         "      cancel-in-progress: false",
         "    permissions:",
         "      contents: write # push task/feature branches and update refs/epure/state/*",
@@ -2709,12 +2742,11 @@ function buildCallerWorkflows(pinnedSha, stack, jobTimeoutMinutes = DEFAULT_AGEN
         "        with:",
         "          repository: ${{ github.repository }}",
         "          issue_number: ${{ github.event.issue.number || 0 }}",
-        "          command: ${{ github.event_name == 'issue_comment' && needs.authorize-command.outputs.command || 'continue' }}",
+        "          command: ${{ github.event_name == 'issues' && 'closed' || github.event_name == 'issue_comment' && needs.authorize-command.outputs.command || 'continue' }}",
         "          command_args: ${{ needs.authorize-command.outputs.command_args || '' }}",
         "          comment_id: ${{ github.event.comment.id || 0 }}",
         "          actor: ${{ github.event.comment.user.login || github.actor }}",
-        "          trigger_head_sha: ${{ github.event.check_suite.head_sha || github.event.workflow_run.head_sha || '' }}",
-        "          trigger_branch: ${{ github.event.check_suite.head_branch || github.event.workflow_run.head_branch || '' }}",
+        "          trigger_head_sha: ${{ github.event.workflow_run.head_sha || '' }}",
         "          async_ci_continuation: 'true'",
         "          agent_app_id: ${{ secrets.EPURE_AGENT_APP_ID }}",
         "          agent_app_private_key: ${{ secrets.EPURE_AGENT_APP_PRIVATE_KEY }}",
@@ -2832,14 +2864,22 @@ function buildGovernanceRulesets(params) {
     "Quality (Format, Lint, Typecheck, Test & Build)",
     "Zizmor"
   ];
+  const featureIntegrity = {
+    name: "epure-feature-integrity",
+    enforcement: "active",
+    targetRefs: ["refs/heads/feature/*"],
+    blockDirectPushes: false,
+    blockForcePushes: true,
+    blockDeletions: true,
+    bypassActors: []
+  };
   const featureGovernance = {
     name: "epure-feature-governance",
     enforcement: "active",
     targetRefs: ["refs/heads/feature/*"],
     blockDirectPushes: true,
-    blockForcePushes: true,
-    blockDeletions: true,
-    requiredLinearHistory: true,
+    blockForcePushes: false,
+    blockDeletions: false,
     allowedMergeMethods: ["squash"],
     requiredApprovingReviewCount: 0,
     requiredStatusChecks: requiredChecks,
@@ -2848,7 +2888,7 @@ function buildGovernanceRulesets(params) {
       {
         appRole: "agent",
         appName: params.agentAppName,
-        mode: "pull_request"
+        mode: "always"
       }
     ]
   };
@@ -2882,10 +2922,11 @@ function buildGovernanceRulesets(params) {
     ]
   };
   return {
+    featureIntegrity,
     featureGovernance,
     devGovernance,
     releaseImmutability,
-    all: [featureGovernance, devGovernance, releaseImmutability]
+    all: [featureIntegrity, featureGovernance, devGovernance, releaseImmutability]
   };
 }
 function planAndApplyRepoSetup(input) {
@@ -3224,8 +3265,8 @@ function planAndApplyRepoSetup(input) {
     },
     {
       id: "apply_branch_protections_and_release_ruleset",
-      title: "Confirm 3 Repository Rulesets (feature/*, dev, main+v*) and squash-only merge settings",
-      details: `Run 'setup-repo --apply --apply-github-settings' to enforce squash-only merges and provision 'epure-feature-governance', 'epure-dev-governance', and '${rulesetSpec.name}'.`
+      title: "Confirm 4 Repository Rulesets (feature/* integrity and governance, dev, main+v*) and squash-only merge settings",
+      details: `Run 'setup-repo --apply --apply-github-settings' to enforce squash-only merges and provision 'epure-feature-integrity', 'epure-feature-governance', 'epure-dev-governance', and '${rulesetSpec.name}'.`
     }
   ];
   const deferredWorkflowsList = effectiveVerification.deferred_external_workflows ?? [];
@@ -3341,6 +3382,47 @@ function buildGitHubRulesetApiPayload(spec, appIntegrationIds) {
     },
     rules
   };
+}
+function rulesetFingerprint(ruleset) {
+  return JSON.stringify({
+    include: [...ruleset.conditions?.ref_name?.include ?? []].sort(),
+    rules: (ruleset.rules ?? []).map((r) => r.type).sort(),
+    bypass: (ruleset.bypass_actors ?? []).map((a) => `${a.actor_type}:${a.actor_id}:${a.bypass_mode}`).sort()
+  });
+}
+async function planGitHubRulesetChanges(input) {
+  const fetchFn = input.fetchImpl ?? fetch;
+  const baseUrl = `https://api.github.com/repos/${input.repository.trim()}`;
+  const headers = {
+    Authorization: `Bearer ${input.githubToken.trim()}`,
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28"
+  };
+  const get = async (path) => {
+    const resp = await fetchFn(`${baseUrl}${path}`, { method: "GET", headers });
+    if (!resp.ok) {
+      throw new Error(
+        `Failed to read ${path} on ${input.repository} (HTTP ${resp.status}): ${await resp.text()}`
+      );
+    }
+    return await resp.json();
+  };
+  const existing = await get("/rulesets");
+  const plan = [];
+  for (const spec of input.governanceRulesets) {
+    const match = existing.find((r) => r.name === spec.name);
+    if (!match) {
+      plan.push({ name: spec.name, action: "create" });
+      continue;
+    }
+    const desired = buildGitHubRulesetApiPayload(spec, input);
+    const current = await get(`/rulesets/${match.id}`);
+    plan.push({
+      name: spec.name,
+      action: rulesetFingerprint(current) === rulesetFingerprint(desired) ? "noop" : "update"
+    });
+  }
+  return plan;
 }
 async function applyGitHubRepositoryGovernance(input) {
   const [owner, repo] = input.repository.trim().split("/");
@@ -3581,27 +3663,47 @@ async function main() {
     agentsOverrides: args.agentsOverrides,
     dryRun: args.dryRun
   });
-  if (result.status !== "error" && !args.dryRun && args.applyGithubSettings) {
+  let githubRulesetsPlan;
+  if (result.status !== "error" && args.applyGithubSettings) {
     const token = resolveGitHubToken(args.githubToken);
     if (!token) {
       throw new Error(
         "Missing GitHub token for --apply-github-settings. Authenticate via 'gh auth login' or set GITHUB_TOKEN."
       );
     }
-    await applyGitHubRepositoryGovernance({
+    const governanceInput = {
       repository: args.repository,
       githubToken: token,
       governanceRulesets: result.governance_rulesets,
       agentAppIntegrationId: args.agentAppIntegrationId,
       releaseAppIntegrationId: args.releaseAppIntegrationId
-    });
+    };
+    if (args.dryRun) {
+      githubRulesetsPlan = await planGitHubRulesetChanges(governanceInput);
+    } else {
+      await applyGitHubRepositoryGovernance(governanceInput);
+    }
   }
   if (args.json) {
-    process.stdout.write(`${JSON.stringify(result, null, 2)}
-`);
+    process.stdout.write(
+      `${JSON.stringify(
+        githubRulesetsPlan ? { ...result, github_rulesets_plan: githubRulesetsPlan } : result,
+        null,
+        2
+      )}
+`
+    );
   } else {
     process.stdout.write(`${result.summary_markdown}
 `);
+    if (githubRulesetsPlan) {
+      process.stdout.write(
+        `
+#### GitHub Rulesets (dry-run against ${args.repository})
+${githubRulesetsPlan.map((p) => `- \`${p.name}\`: \`${p.action}\``).join("\n")}
+`
+      );
+    }
   }
   if (result.status === "error") {
     process.exitCode = 1;

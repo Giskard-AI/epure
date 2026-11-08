@@ -6,6 +6,11 @@ import type {
 } from "../../sandbox/llm-sandbox.js";
 import { validateWorkspaceFileOperations } from "../../sandbox/polyglot-workspace-runner.js";
 import { wrapUntrustedContent } from "../../security/prompt-injection-guard.js";
+import {
+  buildIssueStateRefName,
+  updateIssueStateWithCas,
+  type GitRefStateStore
+} from "../../state/git-ref-state.js";
 import { callLlmJson } from "../llm-helper.js";
 import { EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT } from "../prompts/code-discipline.js";
 import {
@@ -14,8 +19,15 @@ import {
   type AdrCoherenceReconciliationPayload,
   type ConflictResolutionPayload
 } from "../prompts/schemas.js";
-import type { EscalateToNeedsHumanFn, GitHubRestHelper } from "../types.js";
+import type {
+  EscalateToNeedsHumanFn,
+  GitBlobRef,
+  GitHubRestHelper
+} from "../types.js";
 import { runTestsInIsolatedWorkspace } from "../workspace/repo-tools.js";
+import { TruncatedGitTreeError } from "./rest-client.js";
+
+type Escalation = Parameters<EscalateToNeedsHumanFn>[0];
 
 interface ParsedGlossaryTerm {
   readonly key: string;
@@ -119,6 +131,28 @@ export function parseGlossaryTerms(markdown: string): ParsedGlossaryTerm[] {
   return terms;
 }
 
+// Only the plan terms added or reworded since `previousPlanGlossary`, so terms the plan left alone keep their feature/* wording.
+function glossaryTermsChangedSince(
+  planGlossary: string,
+  previousPlanGlossary: string
+): string {
+  const previous = new Map(
+    parseGlossaryTerms(previousPlanGlossary).map((t) => [t.key, t.blockText])
+  );
+  const blocksBySection = new Map<string, string[]>();
+  for (const term of parseGlossaryTerms(planGlossary)) {
+    if (previous.get(term.key) !== term.blockText) {
+      blocksBySection.set(term.sectionHeader, [
+        ...(blocksBySection.get(term.sectionHeader) ?? []),
+        term.blockText
+      ]);
+    }
+  }
+  return [...blocksBySection.entries()]
+    .map(([header, blocks]) => [header, ...blocks].filter(Boolean).join("\n\n"))
+    .join("\n\n");
+}
+
 /**
  * Deterministically merges `planGlossary` into `baseGlossary` (`dev`) additively:
  * - Preserves 100% of terms present in `baseGlossary` (`dev`), including terms added concurrently by other issues.
@@ -219,6 +253,28 @@ export interface RenumberCollidingAdrsResult {
 }
 
 const ADR_PATH_REGEX = /^docs\/adr\/(\d{4})-(.+)\.md$/;
+
+/**
+ * Paths of the planning artifacts on a branch: `GLOSSARY.md` and `extraPaths` plus the files of `docs/adr/` and `docs/specs/`.
+ * `GLOSSARY.md` and `extraPaths` are always listed; a missing one reads as null like an absent path.
+ */
+async function listPlanArtifactPaths(
+  gh: Pick<GitHubRestHelper, "listDirectoryPaths">,
+  branch: string,
+  extraPaths: readonly string[] = []
+): Promise<string[]> {
+  const [adrPaths, specPaths] = await Promise.all([
+    gh.listDirectoryPaths(branch, "docs/adr"),
+    gh.listDirectoryPaths(branch, "docs/specs")
+  ]);
+  return [
+    ...new Set(
+      ["GLOSSARY.md", ...extraPaths, ...adrPaths, ...specPaths].map((p) =>
+        p.trim().replace(/^\/+/, "")
+      )
+    )
+  ];
+}
 
 function normalizeAdrSlug(rawSlug: string): string {
   return rawSlug
@@ -672,7 +728,7 @@ async function applyAdrLlmReconciliation(params: {
  * Integrates approved `plan/<issue>-<slug>` artifacts directly into `feature/<issue>-<slug>`
  * without opening a blocking `plan/* -> dev` PR:
  * - Closes any legacy open `plan/* -> dev` PR if present.
- * - Additively merges `GLOSSARY.md` against `dev`.
+ * - Additively merges `GLOSSARY.md` into the `feature/*` version; other artifacts already changed on `feature/*` are kept.
  * - Automatically renumbers colliding `docs/adr/NNNN-*.md` files against `dev`.
  */
 export async function integratePlanBranchIntoFeature(params: {
@@ -680,6 +736,15 @@ export async function integratePlanBranchIntoFeature(params: {
   readonly planBranch: string;
   readonly featureBranch: string;
   readonly baseBranch?: string | undefined;
+  // `plan/*` head integrated last time: a feature file still equal to it was not edited by a human.
+  readonly previousPlanSha?: string | undefined;
+  // Paths recorded in the manifests: integrated wherever they live, the directory listing only adds to them.
+  readonly manifestPaths?:
+    | {
+        readonly specPaths: readonly string[];
+        readonly adrPaths: readonly string[];
+      }
+    | undefined;
   readonly llmClient?: LLMClient | undefined;
   readonly llmApiKey?: string | undefined;
   readonly model: string;
@@ -723,14 +788,24 @@ export async function integratePlanBranchIntoFeature(params: {
     };
   }
 
-  const [devPaths, planPaths] = await Promise.all([
-    params.gh.listBranchPaths(baseBranch),
-    params.gh.listBranchPaths(params.planBranch)
+  const manifestSpecPaths = new Set(
+    (params.manifestPaths?.specPaths ?? []).map((p) => p.trim().replace(/^\/+/, ""))
+  );
+  const manifestPaths = [
+    ...manifestSpecPaths,
+    ...(params.manifestPaths?.adrPaths ?? [])
+  ];
+  // dev and feature/* get only the non-ADR manifest paths: an unlisted ADR path would count as a number allocated on dev.
+  const manifestNonAdrPaths = manifestPaths.filter(
+    (p) => !ADR_PATH_REGEX.test(p.trim().replace(/^\/+/, ""))
+  );
+  const [devPaths, planPaths, featurePaths] = await Promise.all([
+    listPlanArtifactPaths(params.gh, baseBranch, manifestNonAdrPaths),
+    listPlanArtifactPaths(params.gh, params.planBranch, manifestPaths),
+    listPlanArtifactPaths(params.gh, params.featureBranch, manifestNonAdrPaths)
   ]);
 
-  const candidatePlanArtifactPaths = planPaths
-    .map((p) => p.trim().replace(/^\/+/, ""))
-    .filter((p) => p === "GLOSSARY.md" || p.startsWith("docs/"));
+  const candidatePlanArtifactPaths = planPaths;
 
   if (candidatePlanArtifactPaths.length === 0) {
     return {
@@ -744,6 +819,19 @@ export async function integratePlanBranchIntoFeature(params: {
   }
 
   const devPathSet = new Set(devPaths.map((p) => p.trim().replace(/^\/+/, "")));
+  const featurePathSet = new Set(
+    featurePaths.map((p) => p.trim().replace(/^\/+/, ""))
+  );
+  const adrSlugOf = (path: string) =>
+    normalizeAdrSlug(ADR_PATH_REGEX.exec(path)?.[2] ?? "");
+  // ADRs only on feature/*, incl. plan ADRs an earlier integration renumbered.
+  const featureOnlyAdrPaths = [...featurePathSet].filter(
+    (p) => ADR_PATH_REGEX.test(p) && !devPathSet.has(p)
+  );
+  const featureOnlyAdrPathBySlug = new Map(
+    featureOnlyAdrPaths.map((p) => [adrSlugOf(p), p])
+  );
+  const keptFeatureAdrPaths = new Set<string>();
   const filesToCommit: Array<{ path: string; content: string }> = [];
   const planAdrsToProcess: Array<{ path: string; content: string }> = [];
   const specFilesToProcess: Array<{ path: string; content: string }> = [];
@@ -763,24 +851,62 @@ export async function integratePlanBranchIntoFeature(params: {
     if (devContent !== null && devContent === planContent) {
       continue;
     }
+    const featureContent = featurePathSet.has(artifactPath)
+      ? await params.gh.readSingleBranchFile(params.featureBranch, artifactPath)
+      : null;
+    if (featureContent === planContent) {
+      continue;
+    }
+    const previouslyIntegrated = params.previousPlanSha
+      ? await params.gh.readSingleBranchFile(params.previousPlanSha, artifactPath)
+      : null;
 
     if (artifactPath === "GLOSSARY.md") {
+      const planTerms =
+        previouslyIntegrated === null
+          ? planContent
+          : glossaryTermsChangedSince(planContent, previouslyIntegrated);
       const mergedGlossary = mergeGlossaryMarkdownAdditively(
-        devContent ?? "",
-        planContent
+        featureContent ?? devContent ?? "",
+        planTerms
       );
-      filesToCommit.push({ path: "GLOSSARY.md", content: mergedGlossary });
+      if (planTerms.trim() && mergedGlossary !== featureContent) {
+        filesToCommit.push({ path: "GLOSSARY.md", content: mergedGlossary });
+      }
+    } else if (
+      featureContent !== null &&
+      featureContent !== devContent &&
+      featureContent !== previouslyIntegrated
+    ) {
+      // Edited on feature/* since dev and the last integrated plan: the feature-side version wins.
+      continue;
     } else if (ADR_PATH_REGEX.test(artifactPath)) {
+      const renumberedOnFeature = featureOnlyAdrPathBySlug.get(
+        adrSlugOf(artifactPath)
+      );
+      if (
+        renumberedOnFeature !== undefined &&
+        renumberedOnFeature !== artifactPath &&
+        planContent === previouslyIntegrated
+      ) {
+        // Integrated earlier under its renumbered path and unchanged on plan/* since: the feature/* copy stays,
+        // the ADR still goes through renumbering so spec and glossary references follow it.
+        keptFeatureAdrPaths.add(renumberedOnFeature);
+      }
       planAdrsToProcess.push({ path: artifactPath, content: planContent });
-    } else if (artifactPath.startsWith("docs/specs/")) {
+    } else if (
+      artifactPath.startsWith("docs/specs/") ||
+      manifestSpecPaths.has(artifactPath)
+    ) {
       specFilesToProcess.push({ path: artifactPath, content: planContent });
     } else {
       filesToCommit.push({ path: artifactPath, content: planContent });
     }
   }
 
+  // feature/* ADR paths count as allocated, so a changed plan ADR lands on its renumbered path again.
   const renumberedResult = renumberCollidingAdrs({
-    devPaths,
+    devPaths: [...devPaths, ...featureOnlyAdrPaths],
     planAdrs: planAdrsToProcess,
     specFiles: specFilesToProcess,
     glossaryContent: filesToCommit.find((f) => f.path === "GLOSSARY.md")?.content
@@ -796,7 +922,10 @@ export async function integratePlanBranchIntoFeature(params: {
     }
   }
 
-  for (const adr of renumberedResult.adrs) {
+  const adrsToWrite = renumberedResult.adrs.filter(
+    (a) => !keptFeatureAdrPaths.has(a.path)
+  );
+  for (const adr of adrsToWrite) {
     filesToCommit.push({ path: adr.path, content: adr.content });
   }
   for (const spec of renumberedResult.specFiles) {
@@ -810,8 +939,8 @@ export async function integratePlanBranchIntoFeature(params: {
 
   // Semantic cross-ADR LLM reconciliation when collisions/renumbering or concurrent dev ADRs exist (ADR-0032, Q118)
   if (
-    renumberedResult.adrs.length > 0 &&
-    (renumberedResult.adrs.some((a) => a.renumbered) ||
+    adrsToWrite.length > 0 &&
+    (adrsToWrite.some((a) => a.renumbered) ||
       renumberedResult.deletedAdrPaths.length > 0 ||
       devAdrPaths.length > 0)
   ) {
@@ -819,7 +948,7 @@ export async function integratePlanBranchIntoFeature(params: {
       gh: params.gh,
       baseBranch,
       devAdrPaths,
-      featureAdrs: renumberedResult.adrs,
+      featureAdrs: adrsToWrite,
       specFiles: renumberedResult.specFiles,
       glossaryContent: filesToCommit.find((f) => f.path === "GLOSSARY.md")
         ?.content,
@@ -855,7 +984,7 @@ export async function integratePlanBranchIntoFeature(params: {
   return {
     featureHeadSha,
     committedPaths: filesToCommit.map((f) => f.path),
-    renumberedAdrs: renumberedResult.adrs
+    renumberedAdrs: adrsToWrite
       .filter((a) => a.renumbered)
       .map((a) => ({ oldPath: a.oldPath, newPath: a.path })),
     ...(closedLegacyPlanPrNumber !== undefined
@@ -869,7 +998,8 @@ export interface SyncBranchWithBaseInput extends LlmRequestTuning {
     GitHubRestHelper,
     | "mergeBranches"
     | "getDefaultBranchSha"
-    | "listBranchPaths"
+    | "listDirectoryPaths"
+    | "listBranchBlobs"
     | "readSingleBranchFile"
     | "commitFilesToBranch"
     | "compareCommits"
@@ -902,6 +1032,56 @@ export interface SyncBranchWithBaseResult {
   readonly diagnosticExcerpt?: string | undefined;
 }
 
+// Any `<<<<<<<`, `|||||||` (diff3 base) or `>>>>>>>` marker line, even without the rest of its block.
+// A lone `=======` line is tolerated: it is also a setext heading or a comment banner.
+const GIT_CONFLICT_MARKER_LINE_REGEX = /^(?:<{7}|>{7}|\|{7})(?: |$)/m;
+
+function containsGitConflictMarkers(content: string): boolean {
+  return GIT_CONFLICT_MARKER_LINE_REGEX.test(content.replace(/\r\n/g, "\n"));
+}
+
+export interface BaseSyncGuard {
+  needsSync(): Promise<boolean>;
+  markSynced(): Promise<void>;
+}
+
+/**
+ * Gates the `dev -> feature/* -> task/*` synchronization chain: an automatic resume skips it
+ * unless `baseBranch` moved since the SHA recorded in `last_synced_base_sha`.
+ */
+export function createBaseSyncGuard(input: {
+  readonly gh: Pick<GitHubRestHelper, "getDefaultBranchSha">;
+  readonly store: GitRefStateStore;
+  readonly issueNumber: number;
+  readonly baseBranch: string;
+  readonly automaticResume: boolean;
+}): BaseSyncGuard {
+  let baseSha: string | null = null;
+  return {
+    needsSync: async () => {
+      baseSha = await input.gh.getDefaultBranchSha(input.baseBranch);
+      if (!input.automaticResume || baseSha === null) {
+        return true;
+      }
+      const { state } = await input.store.readRef(
+        buildIssueStateRefName(input.issueNumber)
+      );
+      return state?.last_synced_base_sha !== baseSha;
+    },
+    markSynced: async () => {
+      const syncedSha = baseSha;
+      if (syncedSha === null) {
+        return;
+      }
+      await updateIssueStateWithCas({
+        issueNumber: input.issueNumber,
+        store: input.store,
+        mutator: (prev) => ({ ...prev, last_synced_base_sha: syncedSha })
+      });
+    }
+  };
+}
+
 /**
  * Synchronizes `targetBranch` with `baseBranch` (`dev -> feature/*` or `feature/* -> task/*`).
  * When GitHub REST `/merges` returns `409 Conflict`:
@@ -928,14 +1108,14 @@ export async function syncBranchWithBase(
   if (mergeRes.status === "up_to_date" || mergeRes.status === "merged") {
     if (
       mergeRes.status === "merged" &&
-      typeof input.gh.listBranchPaths === "function" &&
+      typeof input.gh.listDirectoryPaths === "function" &&
       typeof input.gh.readSingleBranchFile === "function" &&
       (input.targetBranch.startsWith("feature/") ||
         input.targetBranch.startsWith("plan/"))
     ) {
       const [basePathsAfterMerge, targetPathsAfterMerge] = await Promise.all([
-        input.gh.listBranchPaths(input.baseBranch),
-        input.gh.listBranchPaths(input.targetBranch)
+        input.gh.listDirectoryPaths(input.baseBranch, "docs/adr"),
+        listPlanArtifactPaths(input.gh, input.targetBranch)
       ]);
       const baseAdrSet = new Set(
         basePathsAfterMerge
@@ -1036,72 +1216,18 @@ export async function syncBranchWithBase(
     };
   }
 
-  // 409 Conflict: identify conflicting files between baseBranch (theirs) and targetBranch (ours)
+  // 409 Conflict: classify every path by comparing blob SHAs at the merge base, the base head and the target head.
   const maxConflicts = input.maxConflictingFiles ?? 8;
-  let mergeBaseSha = input.baseBranch;
-  let candidateFiles: string[] = [];
-  let baseOnlyChangedFiles: string[] = [];
-
-  if (input.gh.compareCommits) {
-    const [baseToTarget, targetToBase] = await Promise.all([
-      input.gh.compareCommits(input.baseBranch, input.targetBranch),
-      input.gh.compareCommits(input.targetBranch, input.baseBranch)
-    ]);
-    mergeBaseSha = baseToTarget.mergeBaseSha || input.baseBranch;
-    const targetChanged = new Set(baseToTarget.changedFiles);
-    const bothChanged = targetToBase.changedFiles.filter((f) =>
-      targetChanged.has(f)
-    );
-    if (bothChanged.length > 0) {
-      candidateFiles = bothChanged;
-      baseOnlyChangedFiles = targetToBase.changedFiles.filter(
-        (f) => !targetChanged.has(f)
-      );
-    } else {
-      candidateFiles = [
-        ...new Set([
-          ...baseToTarget.changedFiles,
-          ...targetToBase.changedFiles
-        ])
-      ];
-    }
-  }
-
-  if (candidateFiles.length === 0) {
-    const [basePaths, targetPaths] = await Promise.all([
-      input.gh.listBranchPaths(input.baseBranch),
-      input.gh.listBranchPaths(input.targetBranch)
-    ]);
-    const commonPaths = targetPaths.filter((p) => basePaths.includes(p));
-    for (const p of commonPaths) {
-      const [oursContent, theirsContent] = await Promise.all([
-        input.gh.readSingleBranchFile(input.targetBranch, p),
-        input.gh.readSingleBranchFile(input.baseBranch, p)
-      ]);
-      if (oursContent !== theirsContent) {
-        candidateFiles.push(p);
-      }
-    }
-  }
-
-  const pathGuard = validateWorkspaceFileOperations({
-    workDir: process.cwd(),
-    files: [...candidateFiles, ...baseOnlyChangedFiles].map((path) => ({
-      path
-    })),
-    targets: [],
-    isTaskBranch: true,
-    reviewersDir: input.reviewersDir
-  });
-  if (!pathGuard.allowed) {
-    const diag = `3-way conflict touched forbidden sensitive or traversal paths: ${[...pathGuard.sensitivePaths, ...pathGuard.traversalPaths].join(", ")}`;
+  const escalateConflict = async (
+    diag: string,
+    paths: Pick<Escalation, "sensitivePaths" | "traversalPaths"> = {}
+  ): Promise<SyncBranchWithBaseResult> => {
     if (input.escalateToNeedsHuman) {
       await input.escalateToNeedsHuman({
         reason: "merge_conflict_unresolved",
         ticketNumber: input.issueNumber,
         branch: input.targetBranch,
-        sensitivePaths: pathGuard.sensitivePaths,
-        traversalPaths: pathGuard.traversalPaths,
+        ...paths,
         diagnosticExcerpt: diag
       });
     }
@@ -1112,6 +1238,85 @@ export async function syncBranchWithBase(
       escalationReason: "merge_conflict_unresolved",
       diagnosticExcerpt: diag
     };
+  };
+  const [targetHeadSha, baseHeadSha] = await Promise.all([
+    input.gh.getDefaultBranchSha(input.targetBranch),
+    input.gh.getDefaultBranchSha(input.baseBranch)
+  ]);
+  if (!targetHeadSha || !baseHeadSha) {
+    throw new Error(
+      `Cannot resolve the merge conflict: '${input.targetBranch}' or '${input.baseBranch}' no longer exists.`
+    );
+  }
+  const { mergeBaseSha } = await input.gh.compareCommits(
+    targetHeadSha,
+    baseHeadSha
+  );
+  let ancestorBlobs: ReadonlyMap<string, GitBlobRef>;
+  let baseBlobs: ReadonlyMap<string, GitBlobRef>;
+  let targetBlobs: ReadonlyMap<string, GitBlobRef>;
+  try {
+    [ancestorBlobs, baseBlobs, targetBlobs] = await Promise.all([
+      input.gh.listBranchBlobs(mergeBaseSha),
+      input.gh.listBranchBlobs(baseHeadSha),
+      input.gh.listBranchBlobs(targetHeadSha)
+    ]);
+  } catch (err) {
+    if (err instanceof TruncatedGitTreeError) {
+      return await escalateConflict(err.message);
+    }
+    throw err;
+  }
+  const candidateFiles: string[] = [];
+  const baseOnlyChangedFiles: string[] = [];
+  for (const path of new Set([
+    ...ancestorBlobs.keys(),
+    ...baseBlobs.keys(),
+    ...targetBlobs.keys()
+  ])) {
+    const ancestor = ancestorBlobs.get(path)?.sha;
+    const theirs = baseBlobs.get(path)?.sha;
+    const ours = targetBlobs.get(path)?.sha;
+    if (theirs === ours || ancestor === theirs) {
+      continue;
+    }
+    if (ancestor === ours) {
+      baseOnlyChangedFiles.push(path);
+    } else {
+      candidateFiles.push(path);
+    }
+  }
+
+  const readPinnedFile = async (sha: string, path: string): Promise<string> => {
+    const content = await input.gh.readSingleBranchFile(sha, path);
+    if (content === null) {
+      throw new Error(`'${path}' exists at ${sha} but could not be read.`);
+    }
+    return content;
+  };
+  const readVersion = async (
+    blobs: ReadonlyMap<string, GitBlobRef>,
+    sha: string,
+    path: string
+  ): Promise<string> => (blobs.has(path) ? await readPinnedFile(sha, path) : "");
+
+  // Base-only changes are carried unchanged: the base is `dev` (human-reviewed merges) or `feature/*` (EPURE-reviewed
+  // ticket merges under the feature rulesets), never content EPURE wrote in this sync. Only files EPURE resolves are guarded.
+  const pathGuard = validateWorkspaceFileOperations({
+    workDir: process.cwd(),
+    files: candidateFiles.map((path) => ({ path })),
+    targets: [],
+    isTaskBranch: true,
+    reviewersDir: input.reviewersDir
+  });
+  if (!pathGuard.allowed) {
+    return await escalateConflict(
+      `3-way conflict touched forbidden sensitive or traversal paths: ${[...pathGuard.sensitivePaths, ...pathGuard.traversalPaths].join(", ")}`,
+      {
+        sensitivePaths: pathGuard.sensitivePaths,
+        traversalPaths: pathGuard.traversalPaths
+      }
+    );
   }
 
   const codeConflictPaths = candidateFiles.filter((p) => p !== "GLOSSARY.md");
@@ -1120,38 +1325,21 @@ export async function syncBranchWithBase(
     codeConflictPaths.length > maxConflicts ||
     (codeConflictPaths.length > 0 && !hasLlmResolver)
   ) {
-    const diag =
+    return await escalateConflict(
       codeConflictPaths.length > maxConflicts
         ? `3-way merge conflict involves ${codeConflictPaths.length} files (exceeds automated limit of ${maxConflicts}).`
-        : `3-way merge conflict on ${codeConflictPaths.join(", ")} requires LLM client for resolution.`;
-    if (input.escalateToNeedsHuman) {
-      await input.escalateToNeedsHuman({
-        reason: "merge_conflict_unresolved",
-        ticketNumber: input.issueNumber,
-        branch: input.targetBranch,
-        diagnosticExcerpt: diag
-      });
-    }
-    return {
-      status: "escalated",
-      headSha: "",
-      conflictsResolved: [],
-      escalationReason: "merge_conflict_unresolved",
-      diagnosticExcerpt: diag
-    };
+        : `3-way merge conflict on ${codeConflictPaths.join(", ")} requires LLM client for resolution.`
+    );
   }
 
   const resolvedFiles: Array<{ path: string; content: string }> = [];
-  const baseNonConflictingFiles: Array<{ path: string; content: string }> = [];
+  const baseOnlyBlobs: Array<{ path: string } & GitBlobRef> = [];
   const baseDeletedFiles: string[] = [];
 
   for (const basePath of baseOnlyChangedFiles) {
-    const baseFileContent = await input.gh.readSingleBranchFile(
-      input.baseBranch,
-      basePath
-    );
-    if (baseFileContent !== null) {
-      baseNonConflictingFiles.push({ path: basePath, content: baseFileContent });
+    const blob = baseBlobs.get(basePath);
+    if (blob) {
+      baseOnlyBlobs.push({ path: basePath, ...blob });
     } else {
       baseDeletedFiles.push(basePath);
     }
@@ -1159,15 +1347,12 @@ export async function syncBranchWithBase(
 
   if (candidateFiles.includes("GLOSSARY.md")) {
     const [theirsGlossary, oursGlossary] = await Promise.all([
-      input.gh.readSingleBranchFile(input.baseBranch, "GLOSSARY.md"),
-      input.gh.readSingleBranchFile(input.targetBranch, "GLOSSARY.md")
+      readVersion(baseBlobs, baseHeadSha, "GLOSSARY.md"),
+      readVersion(targetBlobs, targetHeadSha, "GLOSSARY.md")
     ]);
     resolvedFiles.push({
       path: "GLOSSARY.md",
-      content: mergeGlossaryMarkdownAdditively(
-        theirsGlossary ?? "",
-        oursGlossary ?? ""
-      )
+      content: mergeGlossaryMarkdownAdditively(theirsGlossary, oursGlossary)
     });
   }
 
@@ -1175,28 +1360,19 @@ export async function syncBranchWithBase(
     const fileTriplets: string[] = [];
     for (const filePath of codeConflictPaths) {
       const [baseContent, oursContent, theirsContent] = await Promise.all([
-        input.gh.readSingleBranchFile(mergeBaseSha, filePath),
-        input.gh.readSingleBranchFile(input.targetBranch, filePath),
-        input.gh.readSingleBranchFile(input.baseBranch, filePath)
+        readVersion(ancestorBlobs, mergeBaseSha, filePath),
+        readVersion(targetBlobs, targetHeadSha, filePath),
+        readVersion(baseBlobs, baseHeadSha, filePath)
       ]);
       fileTriplets.push(
         [
           `### File: \`${filePath}\` (untruncated 3-way versions)`,
           "#### `<base_version>` (common ancestor):",
-          wrapUntrustedContent(
-            "untrusted_workspace_files",
-            baseContent ?? ""
-          ),
+          wrapUntrustedContent("untrusted_workspace_files", baseContent),
           `#### \`<ours_target_branch>\` (\`${input.targetBranch}\`):`,
-          wrapUntrustedContent(
-            "untrusted_workspace_files",
-            oursContent ?? ""
-          ),
+          wrapUntrustedContent("untrusted_workspace_files", oursContent),
           `#### \`<theirs_base_branch>\` (\`${input.baseBranch}\`):`,
-          wrapUntrustedContent(
-            "untrusted_workspace_files",
-            theirsContent ?? ""
-          )
+          wrapUntrustedContent("untrusted_workspace_files", theirsContent)
         ].join("\n")
       );
     }
@@ -1248,22 +1424,9 @@ export async function syncBranchWithBase(
       Array.from(expectedPathsSet).every((p) => returnedPathsSet.has(p));
 
     if (!hasExact1To1Coverage) {
-      const diag = `LLM conflict resolution path mismatch: expected [${Array.from(expectedPathsSet).join(", ")}], received [${returnedNormalizedPaths.join(", ")}].`;
-      if (input.escalateToNeedsHuman) {
-        await input.escalateToNeedsHuman({
-          reason: "merge_conflict_unresolved",
-          ticketNumber: input.issueNumber,
-          branch: input.targetBranch,
-          diagnosticExcerpt: diag
-        });
-      }
-      return {
-        status: "escalated",
-        headSha: "",
-        conflictsResolved: [],
-        escalationReason: "merge_conflict_unresolved",
-        diagnosticExcerpt: diag
-      };
+      return await escalateConflict(
+        `LLM conflict resolution path mismatch: expected [${Array.from(expectedPathsSet).join(", ")}], received [${returnedNormalizedPaths.join(", ")}].`
+      );
     }
 
     const resolvedPathGuard = validateWorkspaceFileOperations({
@@ -1274,48 +1437,20 @@ export async function syncBranchWithBase(
       reviewersDir: input.reviewersDir
     });
     if (!resolvedPathGuard.allowed) {
-      const diag = `LLM conflict resolution returned forbidden paths: ${[...resolvedPathGuard.sensitivePaths, ...resolvedPathGuard.traversalPaths].join(", ")}`;
-      if (input.escalateToNeedsHuman) {
-        await input.escalateToNeedsHuman({
-          reason: "merge_conflict_unresolved",
-          ticketNumber: input.issueNumber,
-          branch: input.targetBranch,
+      return await escalateConflict(
+        `LLM conflict resolution returned forbidden paths: ${[...resolvedPathGuard.sensitivePaths, ...resolvedPathGuard.traversalPaths].join(", ")}`,
+        {
           sensitivePaths: resolvedPathGuard.sensitivePaths,
-          traversalPaths: resolvedPathGuard.traversalPaths,
-          diagnosticExcerpt: diag
-        });
-      }
-      return {
-        status: "escalated",
-        headSha: "",
-        conflictsResolved: [],
-        escalationReason: "merge_conflict_unresolved",
-        diagnosticExcerpt: diag
-      };
+          traversalPaths: resolvedPathGuard.traversalPaths
+        }
+      );
     }
 
     for (const rf of resolutionData.resolved_files) {
-      if (
-        rf.content.includes("<<<<<<<") ||
-        rf.content.includes("=======") ||
-        rf.content.includes(">>>>>>>")
-      ) {
-        const diag = `LLM conflict resolution for '${rf.path}' still contained Git conflict markers.`;
-        if (input.escalateToNeedsHuman) {
-          await input.escalateToNeedsHuman({
-            reason: "merge_conflict_unresolved",
-            ticketNumber: input.issueNumber,
-            branch: input.targetBranch,
-            diagnosticExcerpt: diag
-          });
-        }
-        return {
-          status: "escalated",
-          headSha: "",
-          conflictsResolved: [],
-          escalationReason: "merge_conflict_unresolved",
-          diagnosticExcerpt: diag
-        };
+      if (containsGitConflictMarkers(rf.content)) {
+        return await escalateConflict(
+          `LLM conflict resolution for '${rf.path}' still contained Git conflict markers.`
+        );
       }
       resolvedFiles.push({
         path: rf.path.trim().replace(/^\/+/, ""),
@@ -1324,10 +1459,15 @@ export async function syncBranchWithBase(
     }
   }
 
-  const allFilesToCommit = [...baseNonConflictingFiles, ...resolvedFiles];
-
   // Stage 1 Sandbox verification before committing resolved conflicts
-  if (input.sandboxRunner && allFilesToCommit.length > 0) {
+  if (input.sandboxRunner && resolvedFiles.length + baseOnlyBlobs.length > 0) {
+    const baseOnlyFiles = await Promise.all(
+      baseOnlyBlobs.map(async (b) => ({
+        path: b.path,
+        content: await readPinnedFile(baseHeadSha, b.path)
+      }))
+    );
+    const allFilesToCommit = [...baseOnlyFiles, ...resolvedFiles];
     const workspaceFiles = await input.gh.readBranchWorkspaceFiles(
       input.targetBranch,
       allFilesToCommit.map((f) => f.path).join(" "),
@@ -1376,8 +1516,11 @@ export async function syncBranchWithBase(
   const headSha = await input.gh.commitFilesToBranch({
     branch: input.targetBranch,
     commitMessage: `chore(sync): resolve merge conflicts from ${input.baseBranch} into ${input.targetBranch}`,
-    files: allFilesToCommit,
-    ...(baseDeletedFiles.length > 0 ? { deletedFiles: baseDeletedFiles } : {})
+    files: resolvedFiles,
+    blobs: baseOnlyBlobs,
+    ...(baseDeletedFiles.length > 0 ? { deletedFiles: baseDeletedFiles } : {}),
+    // Without the base as second parent the merge base never moves: the PR stays `dirty` and GitHub runs no `pull_request` CI.
+    mergeParentSha: baseHeadSha
   });
 
   return {
