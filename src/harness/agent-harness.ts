@@ -5,6 +5,7 @@ import {
 } from "../publisher/isolated-publisher.js";
 import {
   runInUntrustedCodeSandbox,
+  type SandboxCommand,
   type SandboxErrorCode
 } from "../sandbox/llm-sandbox.js";
 
@@ -155,6 +156,8 @@ export interface TicketExecutionInput {
   readonly changedFiles: readonly string[];
   readonly isolationAvailable: boolean;
   readonly runnerEnv: Readonly<Record<string, string | undefined>>;
+  readonly installCommands?: readonly SandboxCommand[] | undefined;
+  readonly readOnlyPaths?: readonly string[] | undefined;
   readonly publisherClient?: IsolatedPublisherClient | undefined;
 }
 
@@ -232,7 +235,9 @@ export async function runTicketWithHarness(
     runnerEnv: input.runnerEnv,
     command: invocation.command,
     args: invocation.args,
-    llm: { model: input.model }
+    llm: { model: input.model },
+    readOnlyPaths: input.readOnlyPaths,
+    agentSession: { installCommands: input.installCommands }
   });
 
   if (!sandboxResult.isolated || sandboxResult.exit_code !== 0) {

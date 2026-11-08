@@ -1,6 +1,6 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { once } from "node:events";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { spawn, spawnSync } from "node:child_process";
 import type { AddressInfo } from "node:net";
@@ -37,6 +37,8 @@ export interface BuildKernelSandboxedCommandInput {
   readonly networkPolicy: SandboxNetworkPolicy;
   readonly proxyPort?: number | undefined;
   readonly capabilities: KernelSandboxCapabilities;
+  readonly readOnlyPaths?: readonly string[] | undefined;
+  readonly agentDir?: string | undefined;
 }
 
 export interface BuiltKernelSandboxedCommand {
@@ -81,6 +83,17 @@ export interface SandboxLlmRoute {
   readonly providers?: Readonly<Record<string, ProviderConfig>> | undefined;
 }
 
+export interface SandboxCommand {
+  readonly command: string;
+  readonly args?: readonly string[] | undefined;
+}
+
+// An agent session gets a fresh HOME/TMPDIR under /tmp: its only writable place besides cwd.
+export interface SandboxAgentSession {
+  // Run there first under https_only, before the LLM proxy and its nonce exist.
+  readonly installCommands?: readonly SandboxCommand[] | undefined;
+}
+
 export interface SandboxExecutionInput {
   readonly isolationAvailable: boolean;
   readonly runnerEnv: Readonly<Record<string, string | undefined>>;
@@ -92,6 +105,9 @@ export interface SandboxExecutionInput {
   readonly enforceKernelSandbox?: boolean | undefined;
   readonly kernelCapabilities?: KernelSandboxCapabilities | undefined;
   readonly llm?: SandboxLlmRoute | undefined;
+  // Readable and executable inside the sandbox, e.g. a vendored agent engine.
+  readonly readOnlyPaths?: readonly string[] | undefined;
+  readonly agentSession?: SandboxAgentSession | undefined;
 }
 
 export interface SandboxExecutionResult {
@@ -184,6 +200,8 @@ export function buildLandrunInvocation(params: {
   readonly sanitizedEnv: Readonly<Record<string, string>>;
   readonly networkPolicy: SandboxNetworkPolicy;
   readonly proxyPort?: number | undefined;
+  readonly readOnlyPaths?: readonly string[] | undefined;
+  readonly agentDir?: string | undefined;
 }): readonly string[] {
   const sanitizeLandrunPath = (p: string): string => p.replace(/,/g, "");
   const resolvedCwd = sanitizeLandrunPath(resolve(params.cwd));
@@ -199,8 +217,14 @@ export function buildLandrunInvocation(params: {
   if (params.command.startsWith("/")) {
     roxPaths.add(sanitizeLandrunPath(dirname(resolve(params.command))));
   }
+  for (const p of params.readOnlyPaths ?? []) {
+    roxPaths.add(sanitizeLandrunPath(resolve(p)));
+  }
 
-  const rwxPaths = new Set<string>([resolvedCwd, "/tmp"]);
+  const rwxPaths = new Set<string>([
+    resolvedCwd,
+    params.agentDir ? sanitizeLandrunPath(resolve(params.agentDir)) : "/tmp"
+  ]);
   if (params.networkPolicy === "https_only") {
     const home = sanitizeLandrunPath(params.sanitizedEnv.HOME?.trim() ?? "");
     if (home) {
@@ -240,8 +264,17 @@ export function buildBubblewrapInvocation(params: {
   readonly command: string;
   readonly args: readonly string[];
   readonly cwd: string;
+  readonly readOnlyPaths?: readonly string[] | undefined;
+  readonly agentDir?: string | undefined;
 }): readonly string[] {
   const resolvedCwd = resolve(params.cwd);
+  // Mounted after the /tmp tmpfs so paths under /tmp stay visible.
+  const extraBinds = [
+    ...(params.readOnlyPaths ?? []).flatMap((p) => ["--ro-bind", resolve(p), resolve(p)]),
+    ...(params.agentDir
+      ? ["--bind", resolve(params.agentDir), resolve(params.agentDir)]
+      : [])
+  ];
   return [
     "--unshare-net",
     "--unshare-pid",
@@ -256,6 +289,7 @@ export function buildBubblewrapInvocation(params: {
     "/proc",
     "--tmpfs",
     "/tmp",
+    ...extraBinds,
     "--bind",
     resolvedCwd,
     resolvedCwd,
@@ -267,45 +301,37 @@ export function buildBubblewrapInvocation(params: {
   ];
 }
 
+// bubblewrap only isolates offline runs: it cannot allow one TCP port, landrun can.
+export function selectKernelBackend(
+  networkPolicy: SandboxNetworkPolicy,
+  capabilities: KernelSandboxCapabilities
+): KernelSandboxBackend {
+  if (networkPolicy === "offline" && capabilities.bubblewrapAvailable) {
+    return "bubblewrap";
+  }
+  return capabilities.landrunAvailable ? "landrun" : "none";
+}
+
 export function buildKernelSandboxedCommand(
   input: BuildKernelSandboxedCommandInput
 ): BuiltKernelSandboxedCommand {
-  if (input.networkPolicy === "offline") {
-    if (input.capabilities.bubblewrapAvailable) {
-      return {
-        backend: "bubblewrap",
-        command: "bwrap",
-        args: buildBubblewrapInvocation({
-          command: input.command,
-          args: input.args,
-          cwd: input.cwd
-        })
-      };
-    }
-    if (input.capabilities.landrunAvailable) {
-      return {
-        backend: "landrun",
-        command: "landrun",
-        args: buildLandrunInvocation({
-          command: input.command,
-          args: input.args,
-          cwd: input.cwd,
-          sanitizedEnv: input.sanitizedEnv,
-          networkPolicy: "offline",
-          proxyPort: input.proxyPort
-        })
-      };
-    }
+  const backend = selectKernelBackend(input.networkPolicy, input.capabilities);
+  if (backend === "bubblewrap") {
     return {
-      backend: "none",
-      command: input.command,
-      args: input.args
+      backend,
+      command: "bwrap",
+      args: buildBubblewrapInvocation({
+        command: input.command,
+        args: input.args,
+        cwd: input.cwd,
+        readOnlyPaths: input.readOnlyPaths,
+        agentDir: input.agentDir
+      })
     };
   }
-
-  if (input.capabilities.landrunAvailable) {
+  if (backend === "landrun") {
     return {
-      backend: "landrun",
+      backend,
       command: "landrun",
       args: buildLandrunInvocation({
         command: input.command,
@@ -313,13 +339,14 @@ export function buildKernelSandboxedCommand(
         cwd: input.cwd,
         sanitizedEnv: input.sanitizedEnv,
         networkPolicy: input.networkPolicy,
-        proxyPort: input.proxyPort
+        proxyPort: input.proxyPort,
+        readOnlyPaths: input.readOnlyPaths,
+        agentDir: input.agentDir
       })
     };
   }
-
   return {
-    backend: "none",
+    backend,
     command: input.command,
     args: input.args
   };
@@ -647,29 +674,51 @@ export async function runInUntrustedCodeSandbox(
 
   const enforceKernelSandbox =
     input.enforceKernelSandbox === true ||
-    input.runnerEnv.EPURE_ENFORCE_KERNEL_SANDBOX === "true";
+    input.runnerEnv.EPURE_ENFORCE_KERNEL_SANDBOX === "true" ||
+    isCiRunner(input.runnerEnv);
+  const capabilities =
+    input.kernelCapabilities ?? probeKernelSandboxCapabilities(input.runnerEnv);
+  const installCommands = input.agentSession?.installCommands ?? [];
+  const policies: SandboxNetworkPolicy[] = [
+    ...(installCommands.length > 0 ? ["https_only" as const] : []),
+    networkPolicy
+  ];
+  if (
+    enforceKernelSandbox &&
+    policies.some((policy) => selectKernelBackend(policy, capabilities) === "none")
+  ) {
+    return {
+      isolated: false,
+      error_code: "SANDBOX_ISOLATION_UNAVAILABLE",
+      error_message:
+        "Fail-closed: no kernel sandbox backend (landrun/bubblewrap) works on this runner, and kernel confinement is mandatory in CI or with EPURE_ENFORCE_KERNEL_SANDBOX=true (ADR-0030).",
+      exit_code: 1,
+      stdout: "",
+      stderr: "",
+      duration_ms: Date.now() - startMs,
+      proxy_url: "",
+      kernel_backend: "none",
+      network_policy: networkPolicy
+    };
+  }
 
   const secretValues = [
     ...collectRunnerSecretValues(input.runnerEnv),
     ...(llmTarget ? [llmTarget.apiKey] : [])
   ];
-  const proxy = llmTarget
-    ? await createLlmSandboxProxy({ upstream: llmTarget.upstream, apiKey: llmTarget.apiKey })
-    : undefined;
+  const cwd = input.cwd ?? process.cwd();
+  const timeoutMs = input.timeoutMs ?? 60 * 60 * 1000;
+  const agentDir = input.agentSession ? mkdtempSync("/tmp/epure-agent-") : undefined;
+  const agentEnv = agentDir ? { HOME: agentDir, TMPDIR: agentDir } : {};
 
-  try {
-    const sanitizedEnv = buildSanitizedSandboxEnv(input.runnerEnv, proxy);
-
-    const args = input.args ? [...input.args] : [];
-    const cwd = input.cwd ?? process.cwd();
-    const timeoutMs = input.timeoutMs ?? 60 * 60 * 1000;
-    const proxyPort = proxy ? parsePortFromProxyUrl(proxy.proxyUrl) : undefined;
-
-    const capabilities =
-      input.kernelCapabilities ??
-      probeKernelSandboxCapabilities(input.runnerEnv);
-    if (networkPolicy === "https_only") {
-      const home = sanitizedEnv.HOME?.trim() ?? "";
+  const runConfined = (
+    command: SandboxCommand,
+    policy: SandboxNetworkPolicy,
+    env: Record<string, string>,
+    proxyPort?: number | undefined
+  ): Promise<SpawnedOutput> => {
+    if (policy === "https_only") {
+      const home = env.HOME?.trim() ?? "";
       if (home) {
         for (const sub of [".npm", ".cache", ".cargo"]) {
           try {
@@ -681,75 +730,49 @@ export async function runInUntrustedCodeSandbox(
       }
     }
     const wrapped = buildKernelSandboxedCommand({
-      command: input.command,
-      args,
+      command: command.command,
+      args: command.args ?? [],
       cwd,
-      sanitizedEnv,
-      networkPolicy,
+      sanitizedEnv: env,
+      networkPolicy: policy,
       proxyPort,
-      capabilities
+      capabilities,
+      readOnlyPaths: input.readOnlyPaths,
+      agentDir
     });
-    const kernelBackend: KernelSandboxBackend = wrapped.backend;
-    if (wrapped.backend === "none" && enforceKernelSandbox) {
-      return {
-        isolated: false,
-        error_code: "SANDBOX_ISOLATION_UNAVAILABLE",
-        error_message:
-          "Fail-closed: kernel sandbox backend (landrun/bubblewrap) is unavailable while EPURE_ENFORCE_KERNEL_SANDBOX=true (ADR-0030).",
-        exit_code: 1,
-        stdout: "",
-        stderr: "",
-        duration_ms: Date.now() - startMs,
-        proxy_url: "",
-        kernel_backend: "none",
-        network_policy: networkPolicy
-      };
+    return spawnCaptured(wrapped.command, wrapped.args, cwd, env, timeoutMs);
+  };
+
+  let proxy: LlmSandboxProxyHandle | undefined;
+  try {
+    const installEnv = { ...buildSanitizedSandboxEnv(input.runnerEnv), ...agentEnv };
+    for (const install of installCommands) {
+      const installed = await runConfined(install, "https_only", installEnv);
+      if (installed.exitCode !== 0) {
+        return {
+          isolated: true,
+          error_code: "SANDBOX_COMMAND_FAILED",
+          error_message: `Dependency install '${[install.command, ...(install.args ?? [])].join(" ")}' exited with code ${installed.exitCode} before the agent session.`,
+          exit_code: installed.exitCode,
+          stdout: redactSecrets(installed.stdout, secretValues),
+          stderr: redactSecrets(installed.stderr, secretValues),
+          duration_ms: Date.now() - startMs,
+          proxy_url: "",
+          kernel_backend: selectKernelBackend("https_only", capabilities),
+          network_policy: "https_only"
+        };
+      }
     }
-    const spawnCommand = wrapped.command;
-    const spawnArgs = wrapped.args;
 
-    const childResult = await new Promise<{
-      exitCode: number;
-      stdout: string;
-      stderr: string;
-    }>((resolvePromise) => {
-      const child = spawn(spawnCommand, [...spawnArgs], {
-        cwd,
-        env: sanitizedEnv,
-        stdio: ["ignore", "pipe", "pipe"]
-      });
-
-      const stdoutChunks: Buffer[] = [];
-      const stderrChunks: Buffer[] = [];
-
-      const timer = setTimeout(() => {
-        child.kill("SIGKILL");
-      }, timeoutMs);
-
-      child.stdout.on("data", (chunk: Buffer) => stdoutChunks.push(chunk));
-      child.stderr.on("data", (chunk: Buffer) => stderrChunks.push(chunk));
-
-      child.on("error", (err) => {
-        clearTimeout(timer);
-        resolvePromise({
-          exitCode: 1,
-          stdout: Buffer.concat(stdoutChunks).toString("utf8"),
-          stderr: err.message
-        });
-      });
-
-      child.on("close", (code) => {
-        clearTimeout(timer);
-        resolvePromise({
-          exitCode: code ?? 1,
-          stdout: Buffer.concat(stdoutChunks).toString("utf8"),
-          stderr: Buffer.concat(stderrChunks).toString("utf8")
-        });
-      });
-    });
-
-    const cleanStdout = redactSecrets(childResult.stdout, secretValues);
-    const cleanStderr = redactSecrets(childResult.stderr, secretValues);
+    proxy = llmTarget
+      ? await createLlmSandboxProxy({ upstream: llmTarget.upstream, apiKey: llmTarget.apiKey })
+      : undefined;
+    const childResult = await runConfined(
+      { command: input.command, args: input.args },
+      networkPolicy,
+      { ...buildSanitizedSandboxEnv(input.runnerEnv, proxy), ...agentEnv },
+      proxy ? parsePortFromProxyUrl(proxy.proxyUrl) : undefined
+    );
     const ok = childResult.exitCode === 0;
 
     return {
@@ -759,14 +782,71 @@ export async function runInUntrustedCodeSandbox(
         ? ""
         : `Sandboxed command exited with code ${childResult.exitCode}.`,
       exit_code: childResult.exitCode,
-      stdout: cleanStdout,
-      stderr: cleanStderr,
+      stdout: redactSecrets(childResult.stdout, secretValues),
+      stderr: redactSecrets(childResult.stderr, secretValues),
       duration_ms: Date.now() - startMs,
       proxy_url: proxy?.proxyUrl ?? "",
-      kernel_backend: kernelBackend,
+      kernel_backend: selectKernelBackend(networkPolicy, capabilities),
       network_policy: networkPolicy
     };
   } finally {
     await proxy?.close();
+    if (agentDir) {
+      rmSync(agentDir, { recursive: true, force: true });
+    }
   }
+}
+
+function isCiRunner(runnerEnv: Readonly<Record<string, string | undefined>>): boolean {
+  return runnerEnv.GITHUB_ACTIONS === "true" || runnerEnv.CI === "true";
+}
+
+interface SpawnedOutput {
+  readonly exitCode: number;
+  readonly stdout: string;
+  readonly stderr: string;
+}
+
+function spawnCaptured(
+  command: string,
+  args: readonly string[],
+  cwd: string,
+  env: Record<string, string>,
+  timeoutMs: number
+): Promise<SpawnedOutput> {
+  return new Promise((resolvePromise) => {
+    const child = spawn(command, [...args], {
+      cwd,
+      env,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+    }, timeoutMs);
+
+    child.stdout.on("data", (chunk: Buffer) => stdoutChunks.push(chunk));
+    child.stderr.on("data", (chunk: Buffer) => stderrChunks.push(chunk));
+
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      resolvePromise({
+        exitCode: 1,
+        stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+        stderr: err.message
+      });
+    });
+
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolvePromise({
+        exitCode: code ?? 1,
+        stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+        stderr: Buffer.concat(stderrChunks).toString("utf8")
+      });
+    });
+  });
 }

@@ -1,10 +1,14 @@
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { resolveProviderUpstream, type ProviderKind } from "../src/llm/index.js";
 import {
   buildKernelSandboxedCommand,
   buildSanitizedSandboxEnv,
   createLlmSandboxProxy,
+  probeKernelSandboxCapabilities,
   runInUntrustedCodeSandbox,
+  selectKernelBackend,
   type KernelSandboxCapabilities,
   type LlmProxyExchange,
   type SandboxExecutionInput,
@@ -647,46 +651,323 @@ describe("Sandbox LLM proxy & untrusted code credential isolation (#98)", () => 
 
   it.each([
     {
-      id: "fails-closed-when-enforce-kernel-sandbox-is-true-and-backends-are-unavailable",
-      enforceEnv: "true",
-      capabilities: {
-        landrunAvailable: false,
-        bubblewrapAvailable: false
-      } satisfies KernelSandboxCapabilities,
-      expectedIsolated: false,
-      expectedErrorCode: "SANDBOX_ISOLATION_UNAVAILABLE",
-      expectedExitCode: 1
+      id: "landrun-reads-the-vendored-engine-and-writes-only-cwd-and-agent-dir",
+      networkPolicy: "proxy_only" as SandboxNetworkPolicy,
+      capabilities: { landrunAvailable: true, bubblewrapAvailable: true },
+      expectedSequences: [
+        ["--rox", "/usr,/bin,/lib,/lib64,/etc,/opt,/run,/opt/epure/engine"],
+        ["--rwx", "/tmp/epure-work,/tmp/epure-agent-x"]
+      ]
     },
     {
-      id: "falls-back-gracefully-to-unconfined-spawn-when-enforce-kernel-sandbox-is-false-and-backends-are-unavailable",
-      enforceEnv: "false",
-      capabilities: {
-        landrunAvailable: false,
-        bubblewrapAvailable: false
-      } satisfies KernelSandboxCapabilities,
-      expectedIsolated: true,
-      expectedErrorCode: "NONE",
-      expectedExitCode: 0
+      id: "bubblewrap-mounts-the-engine-read-only-and-the-agent-dir-over-the-tmp-tmpfs",
+      networkPolicy: "offline" as SandboxNetworkPolicy,
+      capabilities: { landrunAvailable: true, bubblewrapAvailable: true },
+      expectedSequences: [
+        [
+          "--tmpfs",
+          "/tmp",
+          "--ro-bind",
+          "/opt/epure/engine",
+          "/opt/epure/engine",
+          "--bind",
+          "/tmp/epure-agent-x",
+          "/tmp/epure-agent-x"
+        ]
+      ]
+    }
+  ])(
+    "buildKernelSandboxedCommand [$id]: confines an agent session",
+    ({ networkPolicy, capabilities, expectedSequences }) => {
+      const wrapped = buildKernelSandboxedCommand({
+        command: "pi",
+        args: [],
+        cwd: "/tmp/epure-work",
+        sanitizedEnv: { PATH: "/usr/bin:/bin", HOME: "/tmp/epure-agent-x" },
+        networkPolicy,
+        proxyPort: 43120,
+        capabilities,
+        readOnlyPaths: ["/opt/epure/engine"],
+        agentDir: "/tmp/epure-agent-x"
+      });
+
+      const joined = wrapped.args.join("\u0000");
+      for (const sequence of expectedSequences) {
+        expect(joined).toContain(sequence.join("\u0000"));
+      }
+    }
+  );
+
+  const NO_BACKEND: KernelSandboxCapabilities = {
+    landrunAvailable: false,
+    bubblewrapAvailable: false
+  };
+  it.each([
+    {
+      id: "fails-closed-when-enforce-kernel-sandbox-is-true-and-backends-are-unavailable",
+      env: { EPURE_ENFORCE_KERNEL_SANDBOX: "true" },
+      capabilities: NO_BACKEND,
+      networkPolicy: "offline" as SandboxNetworkPolicy,
+      installCommands: undefined,
+      expectedErrorCode: "SANDBOX_ISOLATION_UNAVAILABLE"
+    },
+    {
+      id: "fails-closed-on-github-actions-even-when-enforcement-is-switched-off",
+      env: { GITHUB_ACTIONS: "true", EPURE_ENFORCE_KERNEL_SANDBOX: "false" },
+      capabilities: NO_BACKEND,
+      networkPolicy: "offline" as SandboxNetworkPolicy,
+      installCommands: undefined,
+      expectedErrorCode: "SANDBOX_ISOLATION_UNAVAILABLE"
+    },
+    {
+      id: "fails-closed-on-any-ci-runner-without-the-enforcement-variable",
+      env: { CI: "true" },
+      capabilities: NO_BACKEND,
+      networkPolicy: "proxy_only" as SandboxNetworkPolicy,
+      installCommands: undefined,
+      expectedErrorCode: "SANDBOX_ISOLATION_UNAVAILABLE"
+    },
+    {
+      id: "fails-closed-in-ci-when-only-bubblewrap-exists-for-a-networked-session",
+      env: { GITHUB_ACTIONS: "true" },
+      capabilities: { landrunAvailable: false, bubblewrapAvailable: true },
+      networkPolicy: "proxy_only" as SandboxNetworkPolicy,
+      installCommands: undefined,
+      expectedErrorCode: "SANDBOX_ISOLATION_UNAVAILABLE"
+    },
+    {
+      id: "fails-closed-in-ci-before-installing-when-the-install-phase-cannot-be-confined",
+      env: { GITHUB_ACTIONS: "true" },
+      capabilities: { landrunAvailable: false, bubblewrapAvailable: true },
+      networkPolicy: "offline" as SandboxNetworkPolicy,
+      installCommands: [
+        { command: process.execPath, args: ["-e", "console.log('sandbox-check')"] }
+      ],
+      expectedErrorCode: "SANDBOX_ISOLATION_UNAVAILABLE"
+    },
+    {
+      id: "falls-back-to-an-unconfined-spawn-outside-ci-when-enforcement-is-off",
+      env: { EPURE_ENFORCE_KERNEL_SANDBOX: "false" },
+      capabilities: NO_BACKEND,
+      networkPolicy: "offline" as SandboxNetworkPolicy,
+      installCommands: undefined,
+      expectedErrorCode: "NONE"
     }
   ])(
     "runInUntrustedCodeSandbox [$id]: kernel sandbox enforcement vs local fallback",
-    async ({ enforceEnv, capabilities, expectedIsolated, expectedErrorCode, expectedExitCode }) => {
+    async ({ env, capabilities, networkPolicy, installCommands, expectedErrorCode }) => {
+      const result = await runInUntrustedCodeSandbox({
+        isolationAvailable: true,
+        runnerEnv: { ...RUNNER_SECRETS_ENV, ...env },
+        command: process.execPath,
+        args: ["-e", "console.log('sandbox-check')"],
+        networkPolicy,
+        kernelCapabilities: capabilities,
+        ...(installCommands ? { agentSession: { installCommands } } : {})
+      });
+
+      expect(result.error_code).toBe(expectedErrorCode);
+      expect(result.isolated).toBe(expectedErrorCode === "NONE");
+      expect(result.stdout).toBe(expectedErrorCode === "NONE" ? "sandbox-check\n" : "");
+    }
+  );
+
+  const AGENT_REPORT = [
+    "const fs = require('node:fs');",
+    "const installed = JSON.parse(fs.readFileSync(process.env.HOME + '/installed.json', 'utf8'));",
+    "console.log(JSON.stringify({ home: process.env.HOME, tmpdir: process.env.TMPDIR, installed, sessionNonce: Boolean(process.env.EPURE_LLM_PROXY_NONCE) }));"
+  ].join("\n");
+  const INSTALL_STEP = {
+    command: process.execPath,
+    args: [
+      "-e",
+      "require('node:fs').writeFileSync(process.env.HOME + '/installed.json', JSON.stringify({ nonce: Boolean(process.env.EPURE_LLM_PROXY_NONCE) }))"
+    ]
+  };
+  it.each([
+    {
+      id: "installs-first-without-the-nonce-then-runs-the-session-in-the-same-tmp-home",
+      installCommands: [INSTALL_STEP],
+      expected: {
+        error_code: "NONE",
+        network_policy: "proxy_only",
+        installed: { nonce: false },
+        sessionNonce: true
+      }
+    },
+    {
+      id: "a-failed-install-stops-before-the-session-starts",
+      installCommands: [
+        { command: process.execPath, args: ["-e", "console.error('lockfile drift'); process.exit(3)"] }
+      ],
+      expected: { error_code: "SANDBOX_COMMAND_FAILED", network_policy: "https_only", exit_code: 3 }
+    }
+  ])(
+    "runInUntrustedCodeSandbox [$id]: dependencies are installed before the agent session",
+    async ({ installCommands, expected }) => {
+      const result = await runInUntrustedCodeSandbox({
+        isolationAvailable: true,
+        runnerEnv: RUNNER_SECRETS_ENV,
+        command: process.execPath,
+        args: ["-e", AGENT_REPORT],
+        llm: { model: "openai/gpt-5.4" },
+        agentSession: { installCommands }
+      });
+
+      expect(result).toMatchObject({
+        error_code: expected.error_code,
+        network_policy: expected.network_policy
+      });
+      if (expected.error_code !== "NONE") {
+        expect(result.exit_code).toBe(expected.exit_code);
+        expect(result.stderr).toContain("lockfile drift");
+        expect(result.stdout).toBe("");
+        return;
+      }
+      const report = JSON.parse(result.stdout) as {
+        home: string;
+        tmpdir: string;
+        installed: unknown;
+        sessionNonce: boolean;
+      };
+      expect(report.home).toMatch(/^\/tmp\/epure-agent-/);
+      expect(report.tmpdir).toBe(report.home);
+      expect(report.installed).toEqual(expected.installed);
+      expect(report.sessionNonce).toBe(expected.sessionNonce);
+      expect(existsSync(report.home)).toBe(false);
+    }
+  );
+});
+
+// Runs only where the backend works (CI provisions both); skipped tests mean "proven only in CI".
+describe("Kernel confinement of sandboxed runs (#98)", () => {
+  const capabilities = probeKernelSandboxCapabilities(process.env);
+  const workDirs: string[] = [];
+  afterEach(() => {
+    for (const dir of workDirs.splice(0)) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  const scratch = (prefix: string): string => {
+    const dir = mkdtempSync(join("/tmp", prefix));
+    workDirs.push(dir);
+    return dir;
+  };
+
+  const PROBE = [
+    "const fs = require('node:fs');",
+    "const r = {};",
+    "const t = (k, f) => { try { f(); r[k] = 'ok'; } catch (e) { r[k] = e.code; } };",
+    "t('writeHome', () => fs.writeFileSync(process.env.HOME + '/state', '1'));",
+    "t('writeOutside', () => fs.writeFileSync(process.env.ESCAPE_FILE, '1'));",
+    "t('readEngine', () => fs.readFileSync(process.env.ENGINE_FILE));",
+    "t('writeEngine', () => fs.writeFileSync(process.env.ENGINE_FILE, 'tampered'));",
+    "console.log(JSON.stringify(r));"
+  ].join("\n");
+
+  it.for([
+    {
+      id: "landrun-session-reads-the-declared-engine-and-writes-only-its-tmp-home",
+      backend: "landrun",
+      networkPolicy: "proxy_only",
+      declareEngine: true,
+      expected: { writeHome: "ok", writeOutside: "EACCES", readEngine: "ok", writeEngine: "EACCES" }
+    },
+    {
+      id: "landrun-session-cannot-read-an-undeclared-engine",
+      backend: "landrun",
+      networkPolicy: "proxy_only",
+      declareEngine: false,
+      expected: { writeHome: "ok", writeOutside: "EACCES", readEngine: "EACCES", writeEngine: "EACCES" }
+    },
+    {
+      id: "bubblewrap-offline-run-sees-the-declared-engine-read-only",
+      backend: "bubblewrap",
+      networkPolicy: "offline",
+      declareEngine: true,
+      expected: { writeHome: "ok", writeOutside: "ENOENT", readEngine: "ok", writeEngine: "EROFS" }
+    },
+    {
+      id: "bubblewrap-offline-run-cannot-see-an-undeclared-engine-under-tmp",
+      backend: "bubblewrap",
+      networkPolicy: "offline",
+      declareEngine: false,
+      expected: { writeHome: "ok", writeOutside: "ENOENT", readEngine: "ENOENT", writeEngine: "ENOENT" }
+    }
+  ] as const)(
+    "runInUntrustedCodeSandbox [$id]",
+    async ({ backend, networkPolicy, declareEngine, expected }, { skip }) => {
+      if (selectKernelBackend(networkPolicy, capabilities) !== backend) {
+        skip(`${backend} is not usable on this host`);
+      }
+      const engineDir = scratch("epure-engine-");
+      const engineFile = join(engineDir, "engine.js");
+      writeFileSync(engineFile, "engine");
+      const escapeFile = join(scratch("epure-outside-"), "escaped");
+
       const result = await runInUntrustedCodeSandbox({
         isolationAvailable: true,
         runnerEnv: {
-          ...RUNNER_SECRETS_ENV,
-          EPURE_ENFORCE_KERNEL_SANDBOX: enforceEnv
+          PATH: process.env.PATH,
+          ENGINE_FILE: engineFile,
+          ESCAPE_FILE: escapeFile
         },
         command: process.execPath,
-        args: ["-e", "console.log('sandbox-check')"],
-        networkPolicy: "offline",
-        kernelCapabilities: capabilities
+        args: ["-e", PROBE],
+        cwd: scratch("epure-work-"),
+        networkPolicy,
+        enforceKernelSandbox: true,
+        readOnlyPaths: declareEngine ? [engineDir] : [],
+        agentSession: {}
       });
 
-      expect(result.isolated).toBe(expectedIsolated);
-      expect(result.error_code).toBe(expectedErrorCode);
-      expect(result.exit_code).toBe(expectedExitCode);
-      expect(result.kernel_backend).toBe("none");
+      expect(result.kernel_backend).toBe(backend);
+      expect(JSON.parse(result.stdout)).toEqual(expected);
+      expect(existsSync(escapeFile)).toBe(false);
+      expect(readFileSync(engineFile, "utf8")).toBe("engine");
     }
   );
+
+  it.for([
+    { id: "landrun-proxy-only-session-reaches-the-proxy-but-not-the-upstream-directly" }
+  ])("runInUntrustedCodeSandbox [$id]", async (_row, { skip }) => {
+    if (selectKernelBackend("proxy_only", capabilities) !== "landrun") {
+      skip("landrun is not usable on this host");
+    }
+    const upstream = await sseUpstream();
+    const script = [
+      "const auth = { authorization: 'Bearer ' + process.env.EPURE_LLM_PROXY_NONCE, 'content-type': 'application/json' };",
+      "const viaProxy = await fetch(process.env.EPURE_LLM_PROXY_URL + '/chat/completions', { method: 'POST', headers: auth, body: '{}' }).then((r) => r.status);",
+      "const direct = await fetch(process.env.DIRECT_URL, { method: 'POST', body: '{}' }).then((r) => r.status, () => 'blocked');",
+      "console.log(JSON.stringify({ viaProxy, direct }));"
+    ].join("\n");
+
+    const result = await runInUntrustedCodeSandbox({
+      isolationAvailable: true,
+      runnerEnv: {
+        PATH: process.env.PATH,
+        CORP_GATEWAY_API_KEY: REAL_KEY,
+        DIRECT_URL: `${upstream.url}/v1/chat/completions`
+      },
+      command: process.execPath,
+      args: ["--input-type=module", "-e", script],
+      cwd: scratch("epure-work-"),
+      enforceKernelSandbox: true,
+      llm: {
+        model: "corp-gateway/qwen-coder",
+        providers: {
+          "corp-gateway": {
+            provider: "openai",
+            base_url: `${upstream.url}/v1`,
+            api_key: "os.environ/CORP_GATEWAY_API_KEY"
+          }
+        }
+      },
+      agentSession: {}
+    });
+
+    expect(result.kernel_backend).toBe("landrun");
+    expect(JSON.parse(result.stdout)).toEqual({ viaProxy: 200, direct: "blocked" });
+    expect(upstream.requests).toHaveLength(1);
+  });
 });

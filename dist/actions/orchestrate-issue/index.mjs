@@ -7327,10 +7327,10 @@ import {
   existsSync as existsSync2,
   lstatSync,
   mkdirSync as mkdirSync2,
-  mkdtempSync,
+  mkdtempSync as mkdtempSync2,
   readFileSync as readFileSync2,
   realpathSync,
-  rmSync,
+  rmSync as rmSync2,
   unlinkSync,
   writeFileSync
 } from "node:fs";
@@ -7340,7 +7340,7 @@ import { dirname as dirname2, join as join2, resolve as resolve2, sep } from "no
 // src/sandbox/llm-sandbox.ts
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { once } from "node:events";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
 import { spawn, spawnSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
@@ -7511,7 +7511,13 @@ function buildLandrunInvocation(params) {
   if (params.command.startsWith("/")) {
     roxPaths.add(sanitizeLandrunPath(dirname(resolve(params.command))));
   }
-  const rwxPaths = /* @__PURE__ */ new Set([resolvedCwd, "/tmp"]);
+  for (const p of params.readOnlyPaths ?? []) {
+    roxPaths.add(sanitizeLandrunPath(resolve(p)));
+  }
+  const rwxPaths = /* @__PURE__ */ new Set([
+    resolvedCwd,
+    params.agentDir ? sanitizeLandrunPath(resolve(params.agentDir)) : "/tmp"
+  ]);
   if (params.networkPolicy === "https_only") {
     const home = sanitizeLandrunPath(params.sanitizedEnv.HOME?.trim() ?? "");
     if (home) {
@@ -7543,6 +7549,10 @@ function buildLandrunInvocation(params) {
 }
 function buildBubblewrapInvocation(params) {
   const resolvedCwd = resolve(params.cwd);
+  const extraBinds = [
+    ...(params.readOnlyPaths ?? []).flatMap((p) => ["--ro-bind", resolve(p), resolve(p)]),
+    ...params.agentDir ? ["--bind", resolve(params.agentDir), resolve(params.agentDir)] : []
+  ];
   return [
     "--unshare-net",
     "--unshare-pid",
@@ -7557,6 +7567,7 @@ function buildBubblewrapInvocation(params) {
     "/proc",
     "--tmpfs",
     "/tmp",
+    ...extraBinds,
     "--bind",
     resolvedCwd,
     resolvedCwd,
@@ -7567,42 +7578,30 @@ function buildBubblewrapInvocation(params) {
     ...params.args
   ];
 }
+function selectKernelBackend(networkPolicy, capabilities) {
+  if (networkPolicy === "offline" && capabilities.bubblewrapAvailable) {
+    return "bubblewrap";
+  }
+  return capabilities.landrunAvailable ? "landrun" : "none";
+}
 function buildKernelSandboxedCommand(input) {
-  if (input.networkPolicy === "offline") {
-    if (input.capabilities.bubblewrapAvailable) {
-      return {
-        backend: "bubblewrap",
-        command: "bwrap",
-        args: buildBubblewrapInvocation({
-          command: input.command,
-          args: input.args,
-          cwd: input.cwd
-        })
-      };
-    }
-    if (input.capabilities.landrunAvailable) {
-      return {
-        backend: "landrun",
-        command: "landrun",
-        args: buildLandrunInvocation({
-          command: input.command,
-          args: input.args,
-          cwd: input.cwd,
-          sanitizedEnv: input.sanitizedEnv,
-          networkPolicy: "offline",
-          proxyPort: input.proxyPort
-        })
-      };
-    }
+  const backend = selectKernelBackend(input.networkPolicy, input.capabilities);
+  if (backend === "bubblewrap") {
     return {
-      backend: "none",
-      command: input.command,
-      args: input.args
+      backend,
+      command: "bwrap",
+      args: buildBubblewrapInvocation({
+        command: input.command,
+        args: input.args,
+        cwd: input.cwd,
+        readOnlyPaths: input.readOnlyPaths,
+        agentDir: input.agentDir
+      })
     };
   }
-  if (input.capabilities.landrunAvailable) {
+  if (backend === "landrun") {
     return {
-      backend: "landrun",
+      backend,
       command: "landrun",
       args: buildLandrunInvocation({
         command: input.command,
@@ -7610,12 +7609,14 @@ function buildKernelSandboxedCommand(input) {
         cwd: input.cwd,
         sanitizedEnv: input.sanitizedEnv,
         networkPolicy: input.networkPolicy,
-        proxyPort: input.proxyPort
+        proxyPort: input.proxyPort,
+        readOnlyPaths: input.readOnlyPaths,
+        agentDir: input.agentDir
       })
     };
   }
   return {
-    backend: "none",
+    backend,
     command: input.command,
     args: input.args
   };
@@ -7883,21 +7884,38 @@ async function runInUntrustedCodeSandbox(input) {
       network_policy: networkPolicy
     };
   }
-  const enforceKernelSandbox = input.enforceKernelSandbox === true || input.runnerEnv.EPURE_ENFORCE_KERNEL_SANDBOX === "true";
+  const enforceKernelSandbox = input.enforceKernelSandbox === true || input.runnerEnv.EPURE_ENFORCE_KERNEL_SANDBOX === "true" || isCiRunner(input.runnerEnv);
+  const capabilities = input.kernelCapabilities ?? probeKernelSandboxCapabilities(input.runnerEnv);
+  const installCommands = input.agentSession?.installCommands ?? [];
+  const policies = [
+    ...installCommands.length > 0 ? ["https_only"] : [],
+    networkPolicy
+  ];
+  if (enforceKernelSandbox && policies.some((policy) => selectKernelBackend(policy, capabilities) === "none")) {
+    return {
+      isolated: false,
+      error_code: "SANDBOX_ISOLATION_UNAVAILABLE",
+      error_message: "Fail-closed: no kernel sandbox backend (landrun/bubblewrap) works on this runner, and kernel confinement is mandatory in CI or with EPURE_ENFORCE_KERNEL_SANDBOX=true (ADR-0030).",
+      exit_code: 1,
+      stdout: "",
+      stderr: "",
+      duration_ms: Date.now() - startMs,
+      proxy_url: "",
+      kernel_backend: "none",
+      network_policy: networkPolicy
+    };
+  }
   const secretValues = [
     ...collectRunnerSecretValues(input.runnerEnv),
     ...llmTarget ? [llmTarget.apiKey] : []
   ];
-  const proxy = llmTarget ? await createLlmSandboxProxy({ upstream: llmTarget.upstream, apiKey: llmTarget.apiKey }) : void 0;
-  try {
-    const sanitizedEnv = buildSanitizedSandboxEnv(input.runnerEnv, proxy);
-    const args = input.args ? [...input.args] : [];
-    const cwd = input.cwd ?? process.cwd();
-    const timeoutMs = input.timeoutMs ?? 60 * 60 * 1e3;
-    const proxyPort = proxy ? parsePortFromProxyUrl(proxy.proxyUrl) : void 0;
-    const capabilities = input.kernelCapabilities ?? probeKernelSandboxCapabilities(input.runnerEnv);
-    if (networkPolicy === "https_only") {
-      const home = sanitizedEnv.HOME?.trim() ?? "";
+  const cwd = input.cwd ?? process.cwd();
+  const timeoutMs = input.timeoutMs ?? 60 * 60 * 1e3;
+  const agentDir = input.agentSession ? mkdtempSync("/tmp/epure-agent-") : void 0;
+  const agentEnv = agentDir ? { HOME: agentDir, TMPDIR: agentDir } : {};
+  const runConfined = (command, policy, env, proxyPort) => {
+    if (policy === "https_only") {
+      const home = env.HOME?.trim() ?? "";
       if (home) {
         for (const sub of [".npm", ".cache", ".cargo"]) {
           try {
@@ -7908,79 +7926,99 @@ async function runInUntrustedCodeSandbox(input) {
       }
     }
     const wrapped = buildKernelSandboxedCommand({
-      command: input.command,
-      args,
+      command: command.command,
+      args: command.args ?? [],
       cwd,
-      sanitizedEnv,
-      networkPolicy,
+      sanitizedEnv: env,
+      networkPolicy: policy,
       proxyPort,
-      capabilities
+      capabilities,
+      readOnlyPaths: input.readOnlyPaths,
+      agentDir
     });
-    const kernelBackend = wrapped.backend;
-    if (wrapped.backend === "none" && enforceKernelSandbox) {
-      return {
-        isolated: false,
-        error_code: "SANDBOX_ISOLATION_UNAVAILABLE",
-        error_message: "Fail-closed: kernel sandbox backend (landrun/bubblewrap) is unavailable while EPURE_ENFORCE_KERNEL_SANDBOX=true (ADR-0030).",
-        exit_code: 1,
-        stdout: "",
-        stderr: "",
-        duration_ms: Date.now() - startMs,
-        proxy_url: "",
-        kernel_backend: "none",
-        network_policy: networkPolicy
-      };
+    return spawnCaptured(wrapped.command, wrapped.args, cwd, env, timeoutMs);
+  };
+  let proxy;
+  try {
+    const installEnv = { ...buildSanitizedSandboxEnv(input.runnerEnv), ...agentEnv };
+    for (const install of installCommands) {
+      const installed = await runConfined(install, "https_only", installEnv);
+      if (installed.exitCode !== 0) {
+        return {
+          isolated: true,
+          error_code: "SANDBOX_COMMAND_FAILED",
+          error_message: `Dependency install '${[install.command, ...install.args ?? []].join(" ")}' exited with code ${installed.exitCode} before the agent session.`,
+          exit_code: installed.exitCode,
+          stdout: redactSecrets(installed.stdout, secretValues),
+          stderr: redactSecrets(installed.stderr, secretValues),
+          duration_ms: Date.now() - startMs,
+          proxy_url: "",
+          kernel_backend: selectKernelBackend("https_only", capabilities),
+          network_policy: "https_only"
+        };
+      }
     }
-    const spawnCommand = wrapped.command;
-    const spawnArgs = wrapped.args;
-    const childResult = await new Promise((resolvePromise) => {
-      const child = spawn(spawnCommand, [...spawnArgs], {
-        cwd,
-        env: sanitizedEnv,
-        stdio: ["ignore", "pipe", "pipe"]
-      });
-      const stdoutChunks = [];
-      const stderrChunks = [];
-      const timer = setTimeout(() => {
-        child.kill("SIGKILL");
-      }, timeoutMs);
-      child.stdout.on("data", (chunk) => stdoutChunks.push(chunk));
-      child.stderr.on("data", (chunk) => stderrChunks.push(chunk));
-      child.on("error", (err) => {
-        clearTimeout(timer);
-        resolvePromise({
-          exitCode: 1,
-          stdout: Buffer.concat(stdoutChunks).toString("utf8"),
-          stderr: err.message
-        });
-      });
-      child.on("close", (code) => {
-        clearTimeout(timer);
-        resolvePromise({
-          exitCode: code ?? 1,
-          stdout: Buffer.concat(stdoutChunks).toString("utf8"),
-          stderr: Buffer.concat(stderrChunks).toString("utf8")
-        });
-      });
-    });
-    const cleanStdout = redactSecrets(childResult.stdout, secretValues);
-    const cleanStderr = redactSecrets(childResult.stderr, secretValues);
+    proxy = llmTarget ? await createLlmSandboxProxy({ upstream: llmTarget.upstream, apiKey: llmTarget.apiKey }) : void 0;
+    const childResult = await runConfined(
+      { command: input.command, args: input.args },
+      networkPolicy,
+      { ...buildSanitizedSandboxEnv(input.runnerEnv, proxy), ...agentEnv },
+      proxy ? parsePortFromProxyUrl(proxy.proxyUrl) : void 0
+    );
     const ok = childResult.exitCode === 0;
     return {
       isolated: true,
       error_code: ok ? "NONE" : "SANDBOX_COMMAND_FAILED",
       error_message: ok ? "" : `Sandboxed command exited with code ${childResult.exitCode}.`,
       exit_code: childResult.exitCode,
-      stdout: cleanStdout,
-      stderr: cleanStderr,
+      stdout: redactSecrets(childResult.stdout, secretValues),
+      stderr: redactSecrets(childResult.stderr, secretValues),
       duration_ms: Date.now() - startMs,
       proxy_url: proxy?.proxyUrl ?? "",
-      kernel_backend: kernelBackend,
+      kernel_backend: selectKernelBackend(networkPolicy, capabilities),
       network_policy: networkPolicy
     };
   } finally {
     await proxy?.close();
+    if (agentDir) {
+      rmSync(agentDir, { recursive: true, force: true });
+    }
   }
+}
+function isCiRunner(runnerEnv) {
+  return runnerEnv.GITHUB_ACTIONS === "true" || runnerEnv.CI === "true";
+}
+function spawnCaptured(command, args, cwd, env, timeoutMs) {
+  return new Promise((resolvePromise) => {
+    const child = spawn(command, [...args], {
+      cwd,
+      env,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    const stdoutChunks = [];
+    const stderrChunks = [];
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+    }, timeoutMs);
+    child.stdout.on("data", (chunk) => stdoutChunks.push(chunk));
+    child.stderr.on("data", (chunk) => stderrChunks.push(chunk));
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      resolvePromise({
+        exitCode: 1,
+        stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+        stderr: err.message
+      });
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolvePromise({
+        exitCode: code ?? 1,
+        stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+        stderr: Buffer.concat(stderrChunks).toString("utf8")
+      });
+    });
+  });
 }
 
 // src/sandbox/polyglot-workspace-runner.ts
@@ -8272,7 +8310,7 @@ function materializeSeedFilesIntoWorkspace(workDir, seedFiles) {
   }
 }
 function prepareRepositorySandboxWorkspace(input) {
-  const workDir = input.workDir ?? mkdtempSync(join2(tmpdir(), "epure-polyglot-sandbox-"));
+  const workDir = input.workDir ?? mkdtempSync2(join2(tmpdir(), "epure-polyglot-sandbox-"));
   mkdirSync2(workDir, { recursive: true });
   const repoSlug = (input.repository ?? "").trim();
   const [owner, repo] = repoSlug.split("/");
@@ -8331,7 +8369,7 @@ function prepareRepositorySandboxWorkspace(input) {
     clonedFromRemote,
     sanitizedGitConfigUrl: cleanRemoteUrl,
     cleanup: () => {
-      rmSync(workDir, { recursive: true, force: true });
+      rmSync2(workDir, { recursive: true, force: true });
     }
   };
 }
@@ -8580,7 +8618,7 @@ function shouldSkipDefaultNodeStepInOfflineTempDir(params) {
 }
 async function runPolyglotStage1Verification(input) {
   const ownsTempWorkDir = !input.workDir;
-  const workDir = input.workDir ?? mkdtempSync(join2(tmpdir(), "epure-stage1-sandbox-"));
+  const workDir = input.workDir ?? mkdtempSync2(join2(tmpdir(), "epure-stage1-sandbox-"));
   mkdirSync2(workDir, { recursive: true });
   const hasCustomSandboxRunner = Boolean(input.sandboxRunner);
   const sandboxRunner = input.sandboxRunner ?? runInUntrustedCodeSandbox;
@@ -8868,7 +8906,7 @@ ${formattedOutput}`;
     };
   } finally {
     if (ownsTempWorkDir) {
-      rmSync(workDir, { recursive: true, force: true });
+      rmSync2(workDir, { recursive: true, force: true });
     }
   }
 }
