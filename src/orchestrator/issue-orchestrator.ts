@@ -56,12 +56,14 @@ import {
   selectResumeContextComments
 } from "../state/comment-batch-cursor.js";
 import {
+  currentTokenUsage,
   meterTokenUsage,
   runWithTokenUsageLedger,
   TokenUsageLedger,
   withUsageAttribution,
   type UsagePhase
 } from "../usage/token-usage.js";
+import { formatStatusUsageLines, formatTicketUsageSuffix } from "../usage/usage-report.js";
 import { appendEpureCommandsSpoiler } from "./formatting/comments.js";
 import {
   createBaseSyncGuard,
@@ -746,6 +748,13 @@ async function runMeteredIssueCommand(
           })
         });
         const lease = readRunLease(updated.state);
+        // A broken agents.yml must not hide the status: it only costs the prices.
+        const pricing = updated.state.token_usage
+          ? await loadRepoAgentsConfig(gh, "dev")
+              .then(async (config) => config ?? (await loadRepoAgentsConfig(gh, "main")))
+              .then((config) => config?.pricing)
+              .catch(() => undefined)
+          : undefined;
         const statusBody = appendEpureCommandsSpoiler(
           [
             updated.issue_mirror_markdown,
@@ -757,7 +766,8 @@ async function runMeteredIssueCommand(
                   ]
                 : [
                     `- **Run Lease**: run \`${lease.runId}\` in progress until ${lease.expiresAt}`
-                  ])
+                  ]),
+            ...formatStatusUsageLines(updated.state.token_usage, pricing)
           ].join("\n"),
           {
             phase: updated.state.phase,
@@ -1956,7 +1966,8 @@ async function runMeteredIssueCommand(
           }
           for (const ticket of ticketsManifest) {
             completedTicketsSummary.push(
-              `- **#${ticket.ticketIssueNumber}** (${ticket.title}) — previously squash-merged into \`${featureBranch}\``
+              `- **#${ticket.ticketIssueNumber}** (${ticket.title}) — previously squash-merged into \`${featureBranch}\`` +
+                formatTicketUsageSuffix(currentTokenUsage(), ticket.ticketIssueNumber, parsedDevAgentsConfig?.pricing)
             );
           }
         }

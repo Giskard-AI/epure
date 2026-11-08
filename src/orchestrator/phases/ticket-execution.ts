@@ -45,7 +45,8 @@ import {
   withTicketCodeFixAttempts,
   type GitRefStateStore
 } from "../../state/git-ref-state.js";
-import { withUsageAttribution } from "../../usage/token-usage.js";
+import { currentTokenUsage, withUsageAttribution } from "../../usage/token-usage.js";
+import { formatTicketUsageSuffix } from "../../usage/usage-report.js";
 import { appendEpureCommandsSpoiler } from "../formatting/comments.js";
 import { callLlmJson } from "../llm-helper.js";
 import {
@@ -649,7 +650,8 @@ export async function runTicketExecutionLoop(
       }
       completedTicketNumbers.add(ticket.ticketIssueNumber);
       params.completedTicketsSummary.push(
-        `- **#${ticket.ticketIssueNumber}** (${ticket.title}) — previously squash-merged into \`${params.featureBranch}\``
+        `- **#${ticket.ticketIssueNumber}** (${ticket.title}) — previously squash-merged into \`${params.featureBranch}\`` +
+          formatTicketUsageSuffix(currentTokenUsage(), ticket.ticketIssueNumber, params.parsedDevAgentsConfig?.pricing)
       );
       continue;
     }
@@ -665,7 +667,8 @@ export async function runTicketExecutionLoop(
       }
       completedTicketNumbers.add(ticket.ticketIssueNumber);
       params.completedTicketsSummary.push(
-        `- **#${ticket.ticketIssueNumber}** (${ticket.title}) — PR [#${mergedTaskPr.number}](${mergedTaskPr.html_url}) already merged into \`${params.featureBranch}\``
+        `- **#${ticket.ticketIssueNumber}** (${ticket.title}) — PR [#${mergedTaskPr.number}](${mergedTaskPr.html_url}) already merged into \`${params.featureBranch}\`` +
+          formatTicketUsageSuffix(currentTokenUsage(), ticket.ticketIssueNumber, params.parsedDevAgentsConfig?.pricing)
       );
       continue;
     }
@@ -2220,7 +2223,8 @@ export async function runTicketExecutionLoop(
 
       completedTicketNumbers.add(ticket.ticketIssueNumber);
       params.completedTicketsSummary.push(
-        `- **#${ticket.ticketIssueNumber}** (${ticket.title}) — PR #${taskPr.number} squash-merged into \`${params.featureBranch}\` as \`${squashCommit.commit_title}\` (Reviewers: ${reviewResult.selected_reviewers.map((r) => `\`${r}\``).join(", ")})`
+        `- **#${ticket.ticketIssueNumber}** (${ticket.title}) — PR #${taskPr.number} squash-merged into \`${params.featureBranch}\` as \`${squashCommit.commit_title}\` (Reviewers: ${reviewResult.selected_reviewers.map((r) => `\`${r}\``).join(", ")})` +
+          formatTicketUsageSuffix(currentTokenUsage(), ticket.ticketIssueNumber, params.parsedDevAgentsConfig?.pricing)
       );
     } catch (err) {
       if (err instanceof LLMError) {

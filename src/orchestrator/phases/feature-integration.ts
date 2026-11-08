@@ -39,7 +39,8 @@ import {
   withFeatureCodeFixAttempts,
   type GitRefStateStore
 } from "../../state/git-ref-state.js";
-import { withUsageAttribution } from "../../usage/token-usage.js";
+import { currentTokenUsage, withUsageAttribution } from "../../usage/token-usage.js";
+import { formatEpicUsageSection } from "../../usage/usage-report.js";
 import { appendEpureCommandsSpoiler } from "../formatting/comments.js";
 import { callLlmJson } from "../llm-helper.js";
 import {
@@ -240,6 +241,7 @@ export async function runFeatureIntegrationPhase(
             `- **Summary**: ${params.epicConvergenceSummary}`
           ]
         : []),
+      ...formatEpicUsageSection(currentTokenUsage(), params.parsedDevAgentsConfig?.pricing),
       "",
       "## Governance",
       "- Requires human review and squash-merge into `dev` in the GitHub UI (ADR-0001, ADR-0027, Q45, Q91, Q95)."
@@ -1052,6 +1054,7 @@ export async function runFeatureIntegrationPhase(
         params.featureBranch +
         "` :",
       ...params.completedTicketsSummary,
+      ...formatEpicUsageSection(currentTokenUsage(), params.parsedDevAgentsConfig?.pricing),
       "",
       `👉 **Pull Request finale ouverte vers \`dev\`** : ${featurePr.html_url}`,
       "Conformément à la gouvernance EPURE (Q45, Q91, Q95), la fusion finale `feature/* → dev` est réservée à la validation humaine dans l'interface GitHub."

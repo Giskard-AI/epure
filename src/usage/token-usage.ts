@@ -39,7 +39,7 @@ export interface UsageAttribution {
   readonly ticket?: number | undefined;
 }
 
-const NO_TOKENS: TokenCounts = {
+export const NO_TOKENS: TokenCounts = {
   requests: 0,
   input_tokens: 0,
   cached_input_tokens: 0,

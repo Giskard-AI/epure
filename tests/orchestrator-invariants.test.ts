@@ -867,6 +867,82 @@ describe("Token usage is written with the run's existing state updates (#125)", 
     expect(router.unmatched).toEqual([]);
     expect(writes.map((w) => w.token_usage)).toEqual([{ epic: { plan: { "openai/gpt-test": expected } } }]);
   });
+
+  const SEEDED_USAGE = {
+    epic: { plan: { "openai/gpt-test": { requests: 2, input_tokens: 1_000_000, cached_input_tokens: 200_000, output_tokens: 100_000, thinking_tokens: 10_000 } } },
+    "78": { implementation: { "openai/gpt-test": { requests: 3, input_tokens: 3_000_000, cached_input_tokens: 1_000_000, output_tokens: 500_000, thinking_tokens: 0, usage_unavailable: 1 } } }
+  };
+  const PRICING_YAML = [
+    "pricing:",
+    "  openai/gpt-test:",
+    "    inputPerMTok: 2",
+    "    cachedInputPerMTok: 0.5",
+    "    outputPerMTok: 8",
+    "    source: https://example.test/pricing",
+    "    read_on: 2026-11-08",
+    ""
+  ].join("\n");
+  const base64File = (text: string) => json({ type: "file", encoding: "base64", content: Buffer.from(text, "utf8").toString("base64") });
+
+  it.each([
+    {
+      id: "status-shows-the-epic-total-each-scope-and-the-cost-with-its-price-source",
+      agentsYml: base64File(PRICING_YAML),
+      expectedLines: [
+        "- **LLM Usage**: 4,000,000 input tokens (1,200,000 cached) · 600,000 output (10,000 thinking) · 5 requests · 1 without usage data · $11.00",
+        "  - Planning & integration: 1,000,000 input tokens (200,000 cached) · 100,000 output (10,000 thinking) · 2 requests · $2.50",
+        "  - #78: 3,000,000 input tokens (1,000,000 cached) · 500,000 output (0 thinking) · 3 requests · 1 without usage data · $8.50",
+        "  - Prices from `.github/agents.yml`: `openai/gpt-test` read on 2026-11-08 (https://example.test/pricing)"
+      ]
+    },
+    {
+      id: "status-without-a-pricing-table-shows-tokens-only",
+      agentsYml: notFound(),
+      expectedLines: [
+        "- **LLM Usage**: 4,000,000 input tokens (1,200,000 cached) · 600,000 output (10,000 thinking) · 5 requests · 1 without usage data",
+        "  - Planning & integration: 1,000,000 input tokens (200,000 cached) · 100,000 output (10,000 thinking) · 2 requests",
+        "  - #78: 3,000,000 input tokens (1,000,000 cached) · 500,000 output (0 thinking) · 3 requests · 1 without usage data"
+      ]
+    }
+  ])("$id", async ({ agentsYml, expectedLines }) => {
+    const store = await seedState({ status: "active", subphase: "idle", token_usage: SEEDED_USAGE });
+    const router = declareIssueWrites(createGitHubMockRouter())
+      .on("GET", new RegExp(`^${R_RX}/contents/\\.github/agents\\.ya?ml\\?ref=`), notFound())
+      .on("GET", `${R}/contents/.github/agents.yml?ref=dev`, agentsYml);
+
+    await run(router, store, { command: "status", actor: "maintainer", issueNumber: ISSUE, commentId: 900 });
+
+    expect(router.unmatched).toEqual([]);
+    expect(postedComments(router)).toEqual([expect.stringContaining(`\n${expectedLines.join("\n")}\n`)]);
+  });
+
+  it.each([
+    {
+      id: "feature-pr-body-shows-the-total-at-opening-and-the-final-comment-the-total-after-review",
+      expectedTicketLine: "3,000,000 input tokens (1,000,000 cached) · 500,000 output (0 thinking) · 3 requests · 1 without usage data · $8.50",
+      expectedAtPrOpening: "4,000,000 input tokens (1,200,000 cached) · 600,000 output (10,000 thinking) · 6 requests · 2 without usage data · $11.00",
+      expectedFinal: "4,000,000 input tokens (1,200,000 cached) · 600,000 output (10,000 thinking) · 8 requests · 4 without usage data · $11.00"
+    }
+  ])("$id", async ({ expectedTicketLine, expectedAtPrOpening, expectedFinal }) => {
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const store = await seedState({ ...FEATURE_INTEGRATION_PENDING_STATE, token_usage: { epic: SEEDED_USAGE.epic, [String(ISSUE)]: SEEDED_USAGE["78"] } });
+    const router = declareImplementationFlow(createGitHubMockRouter(), "success", { taskPr: false, featurePr: false })
+      .on("GET", `${R}/contents/.github/agents.yml?ref=dev`, base64File(PRICING_YAML))
+      .on("GET", new RegExp(`/pulls\\?state=closed&head=${encodeURIComponent(`${OWNER}:${TASK_BRANCH}`)}`), json([{ number: 106, html_url: "pr106", merged_at: "2026-11-08T00:00:00Z", head: { sha: HEAD_SHA } }]))
+      .on("POST", `${R}/pulls`, json({ number: 105, html_url: "pr105", head: { sha: HEAD_SHA } }, 201));
+
+    try {
+      await run(router, store, { command: "approve", actor: "maintainer", issueNumber: ISSUE, commentId: 900 });
+    } finally {
+      vi.restoreAllMocks();
+    }
+
+    expect(router.unmatched).toEqual([]);
+    const prBody = (router.requests.find((r) => r.method === "POST" && r.path === `${R}/pulls`)?.body as { body: string }).body;
+    expect(prBody).toContain(`## LLM Usage\n- **Epic total**: ${expectedAtPrOpening}\n`);
+    expect(postedComments(router).at(-1)).toContain(`\n- **#${ISSUE}** (Async CI Feature) — PR [#106](pr106) already merged into \`${FEATURE_BRANCH}\` — LLM usage: ${expectedTicketLine}\n`);
+    expect(postedComments(router).at(-1)).toContain(`## LLM Usage\n- **Epic total**: ${expectedFinal}\n`);
+  });
 });
 
 const FAILING_SANDBOX: NonNullable<OrchestrateIssueInput["sandboxRunner"]> = async () => ({

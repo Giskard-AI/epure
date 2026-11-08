@@ -2999,6 +2999,18 @@ function addRequestUsage(record, attribution, usage) {
     [scope]: { ...phases, [attribution.phase]: addToModel(phases[attribution.phase] ?? {}, usage) }
   };
 }
+function totalTokensByModel(record, scope) {
+  const totals = {};
+  const scopes = scope === void 0 ? Object.values(record) : [record[scope] ?? {}];
+  for (const phases of scopes) {
+    for (const models of Object.values(phases)) {
+      for (const [model, counts] of Object.entries(models ?? {})) {
+        totals[model] = addTokenCounts(totals[model] ?? NO_TOKENS, counts);
+      }
+    }
+  }
+  return totals;
+}
 var TokenUsageLedger = class {
   pending = [];
   lastKnown = {};
@@ -3015,11 +3027,11 @@ var TokenUsageLedger = class {
   pendingCount() {
     return this.pending.length;
   }
-  fold(record, count2) {
-    return this.pending.slice(0, count2).reduce((acc, entry) => addRequestUsage(acc, entry.attribution, entry.usage), record ?? {});
+  fold(record, count3) {
+    return this.pending.slice(0, count3).reduce((acc, entry) => addRequestUsage(acc, entry.attribution, entry.usage), record ?? {});
   }
-  written(record, count2) {
-    this.pending = this.pending.slice(count2);
+  written(record, count3) {
+    this.pending = this.pending.slice(count3);
     this.lastKnown = record;
   }
 };
@@ -3031,14 +3043,14 @@ function meterTokenUsage(store, ledger) {
       return snapshot;
     },
     compareAndSwapRef: async (refName, expectedOldSha, nextState) => {
-      const count2 = ledger.pendingCount();
-      if (count2 === 0) {
+      const count3 = ledger.pendingCount();
+      if (count3 === 0) {
         return store.compareAndSwapRef(refName, expectedOldSha, nextState);
       }
-      const token_usage = ledger.fold(nextState.token_usage, count2);
+      const token_usage = ledger.fold(nextState.token_usage, count3);
       const result = await store.compareAndSwapRef(refName, expectedOldSha, { ...nextState, token_usage });
       if (result.swapped) {
-        ledger.written(token_usage, count2);
+        ledger.written(token_usage, count3);
       }
       return result;
     },
@@ -3055,6 +3067,9 @@ function withUsageAttribution(attribution, fn) {
     return fn();
   }
   return usageContext.run({ ledger: parent.ledger, attribution: { ...parent.attribution, ...attribution } }, fn);
+}
+function currentTokenUsage() {
+  return usageContext.getStore()?.ledger.current();
 }
 function reportLLMUsage(usage) {
   if (!("unavailable" in usage)) {
@@ -10498,6 +10513,69 @@ async function processPendingIssueCommentsBatch(input) {
   };
 }
 
+// src/usage/usage-report.ts
+function costUsd(counts, price) {
+  const uncached = counts.input_tokens - counts.cached_input_tokens;
+  const cachedPrice = price.cachedInputPerMTok ?? price.inputPerMTok;
+  return (uncached * price.inputPerMTok + counts.cached_input_tokens * cachedPrice + counts.output_tokens * price.outputPerMTok) / 1e6;
+}
+function costOfModels(models, pricing) {
+  let total = 0;
+  for (const [model, counts] of Object.entries(models)) {
+    const price = pricing?.[model];
+    if (!price) {
+      return null;
+    }
+    total += costUsd(counts, price);
+  }
+  return total;
+}
+var count2 = (n) => n.toLocaleString("en-US");
+var usd = (n) => n > 0 && n < 0.01 ? "< $0.01" : `$${n.toFixed(2)}`;
+function formatTokenUsage(models, pricing) {
+  const t = Object.values(models).reduce(addTokenCounts, NO_TOKENS);
+  if (t.requests === 0) {
+    return void 0;
+  }
+  const cost = costOfModels(models, pricing);
+  return [
+    `${count2(t.input_tokens)} input tokens (${count2(t.cached_input_tokens)} cached)`,
+    `${count2(t.output_tokens)} output (${count2(t.thinking_tokens)} thinking)`,
+    `${count2(t.requests)} ${t.requests === 1 ? "request" : "requests"}`,
+    ...t.usage_unavailable ? [`${count2(t.usage_unavailable)} without usage data`] : [],
+    ...cost === null ? [] : [usd(cost)]
+  ].join(" \xB7 ");
+}
+function formatTicketUsageSuffix(record, ticket, pricing) {
+  const line = formatTokenUsage(totalTokensByModel(record ?? {}, String(ticket)), pricing);
+  return line ? ` \u2014 LLM usage: ${line}` : "";
+}
+function formatEpicUsageSection(record, pricing) {
+  const line = formatTokenUsage(totalTokensByModel(record ?? {}), pricing);
+  return line ? ["", "## LLM Usage", `- **Epic total**: ${line}`] : [];
+}
+function formatStatusUsageLines(record, pricing) {
+  const total = totalTokensByModel(record ?? {});
+  const totalLine = formatTokenUsage(total, pricing);
+  if (!totalLine) {
+    return [];
+  }
+  const scopes = Object.keys(record ?? {}).sort(
+    (a, b) => a === EPIC_USAGE_SCOPE ? -1 : b === EPIC_USAGE_SCOPE ? 1 : Number(a) - Number(b)
+  );
+  const scopeLines = scopes.flatMap((scope) => {
+    const line = formatTokenUsage(totalTokensByModel(record ?? {}, scope), pricing);
+    const label = scope === EPIC_USAGE_SCOPE ? "Planning & integration" : `#${scope}`;
+    return line ? [`  - ${label}: ${line}`] : [];
+  });
+  const priced = Object.keys(total).filter((model) => pricing?.[model]).map((model) => `\`${model}\` read on ${pricing[model].read_on} (${pricing[model].source})`);
+  return [
+    `- **LLM Usage**: ${totalLine}`,
+    ...scopeLines,
+    ...priced.length > 0 ? [`  - Prices from \`.github/agents.yml\`: ${priced.join("; ")}`] : []
+  ];
+}
+
 // src/orchestrator/prompts/code-discipline.ts
 var EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT = [
   "## Discipline de code anti-slop (`kill-slop`), ASD-STE100 Controlled Technical Prompting & Concision (`caveman` mode `lite` + Auto-Clarity) \u2014 ADR-0030 / ADR-0031",
@@ -15752,6 +15830,7 @@ async function runFeatureIntegrationPhase(params) {
         "- **Verdict**: `CONVERGED`",
         `- **Summary**: ${params.epicConvergenceSummary}`
       ] : [],
+      ...formatEpicUsageSection(currentTokenUsage(), params.parsedDevAgentsConfig?.pricing),
       "",
       "## Governance",
       "- Requires human review and squash-merge into `dev` in the GitHub UI (ADR-0001, ADR-0027, Q45, Q91, Q95)."
@@ -16440,6 +16519,7 @@ Refs #${params.issueNumber}`
       "",
       "Tous les tickets du DAG ont \xE9t\xE9 impl\xE9ment\xE9s en TDD sur leurs branches `task/*`, v\xE9rifi\xE9s en sandbox isol\xE9e, audit\xE9s par le roster multi-agents (`ai-review` + `impeccable-gate`) et squash-merg\xE9s dans `" + params.featureBranch + "` :",
       ...params.completedTicketsSummary,
+      ...formatEpicUsageSection(currentTokenUsage(), params.parsedDevAgentsConfig?.pricing),
       "",
       `\u{1F449} **Pull Request finale ouverte vers \`dev\`** : ${featurePr.html_url}`,
       "Conform\xE9ment \xE0 la gouvernance EPURE (Q45, Q91, Q95), la fusion finale `feature/* \u2192 dev` est r\xE9serv\xE9e \xE0 la validation humaine dans l'interface GitHub."
@@ -16952,7 +17032,7 @@ async function runTicketExecutionLoop(params) {
       }
       completedTicketNumbers.add(ticket.ticketIssueNumber);
       params.completedTicketsSummary.push(
-        `- **#${ticket.ticketIssueNumber}** (${ticket.title}) \u2014 previously squash-merged into \`${params.featureBranch}\``
+        `- **#${ticket.ticketIssueNumber}** (${ticket.title}) \u2014 previously squash-merged into \`${params.featureBranch}\`` + formatTicketUsageSuffix(currentTokenUsage(), ticket.ticketIssueNumber, params.parsedDevAgentsConfig?.pricing)
       );
       continue;
     }
@@ -16967,7 +17047,7 @@ async function runTicketExecutionLoop(params) {
       }
       completedTicketNumbers.add(ticket.ticketIssueNumber);
       params.completedTicketsSummary.push(
-        `- **#${ticket.ticketIssueNumber}** (${ticket.title}) \u2014 PR [#${mergedTaskPr.number}](${mergedTaskPr.html_url}) already merged into \`${params.featureBranch}\``
+        `- **#${ticket.ticketIssueNumber}** (${ticket.title}) \u2014 PR [#${mergedTaskPr.number}](${mergedTaskPr.html_url}) already merged into \`${params.featureBranch}\`` + formatTicketUsageSuffix(currentTokenUsage(), ticket.ticketIssueNumber, params.parsedDevAgentsConfig?.pricing)
       );
       continue;
     }
@@ -18352,7 +18432,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
       }
       completedTicketNumbers.add(ticket.ticketIssueNumber);
       params.completedTicketsSummary.push(
-        `- **#${ticket.ticketIssueNumber}** (${ticket.title}) \u2014 PR #${taskPr.number} squash-merged into \`${params.featureBranch}\` as \`${squashCommit.commit_title}\` (Reviewers: ${reviewResult.selected_reviewers.map((r) => `\`${r}\``).join(", ")})`
+        `- **#${ticket.ticketIssueNumber}** (${ticket.title}) \u2014 PR #${taskPr.number} squash-merged into \`${params.featureBranch}\` as \`${squashCommit.commit_title}\` (Reviewers: ${reviewResult.selected_reviewers.map((r) => `\`${r}\``).join(", ")})` + formatTicketUsageSuffix(currentTokenUsage(), ticket.ticketIssueNumber, params.parsedDevAgentsConfig?.pricing)
       );
     } catch (err) {
       if (err instanceof LLMError) {
@@ -18803,6 +18883,7 @@ async function runMeteredIssueCommand(input, ledger) {
           })
         });
         const lease = readRunLease(updated.state);
+        const pricing = updated.state.token_usage ? await loadRepoAgentsConfig(gh, "dev").then(async (config) => config ?? await loadRepoAgentsConfig(gh, "main")).then((config) => config?.pricing).catch(() => void 0) : void 0;
         const statusBody = appendEpureCommandsSpoiler(
           [
             updated.issue_mirror_markdown,
@@ -18810,7 +18891,8 @@ async function runMeteredIssueCommand(input, ledger) {
               `- **Run Lease**: \u26A0\uFE0F stale \u2014 run \`${lease.runId}\` expired at ${lease.expiresAt} without finishing; \`/epure continue\` takes the plan over.`
             ] : [
               `- **Run Lease**: run \`${lease.runId}\` in progress until ${lease.expiresAt}`
-            ]
+            ],
+            ...formatStatusUsageLines(updated.state.token_usage, pricing)
           ].join("\n"),
           {
             phase: updated.state.phase,
@@ -19769,7 +19851,7 @@ ${t.filesToTouch.join(" ")}`
             }
             for (const ticket of ticketsManifest) {
               completedTicketsSummary.push(
-                `- **#${ticket.ticketIssueNumber}** (${ticket.title}) \u2014 previously squash-merged into \`${featureBranch}\``
+                `- **#${ticket.ticketIssueNumber}** (${ticket.title}) \u2014 previously squash-merged into \`${featureBranch}\`` + formatTicketUsageSuffix(currentTokenUsage(), ticket.ticketIssueNumber, parsedDevAgentsConfig?.pricing)
               );
             }
           }
