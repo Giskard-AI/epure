@@ -69,7 +69,7 @@ Le skill **`.agents/skills/setup-repo/SKILL.md`** est la **façon privilégiée*
 1. **Analyse du projet** : inspecte la stack (`package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, `Makefile`), la structure des modules `src/` et la présence ou non d'une interface utilisateur.
 2. **Simulation (`--dry-run`)** : exécute `dist/cli/setup-repo.mjs --dry-run` et présente le plan complet au mainteneur avant toute écriture.
 3. **Conception dynamique du roster de reviewers (`reviewers_dir`, par défaut `.agents/reviewers/*.md`)** : crée, conçoit et adapte les reviewers spécialisés en fonction des composants réels du projet (socle transverse `architecture-reviewer`, `security-reviewer`, `spec-parity-reviewer`, `standards-reviewer`, `user-advocate` + spécialistes métier/UI sur mesure avec routage `paths:`).
-4. **Application idempotente (`--apply --apply-github-settings`)** : écrit `.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`, les workflows appelants épinglés par SHA, configure le dépôt en squash-only et installe les 4 Repository Rulesets.
+4. **Application idempotente (`--apply --apply-github-settings`)** : écrit `.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`, les workflows appelants épinglés par SHA, configure le dépôt en squash-only et installe les 5 Repository Rulesets.
 
 ---
 
@@ -105,7 +105,7 @@ node dist/cli/setup-repo.mjs \
 | `--pinned-sha <sha>` | Dernier SHA EPURE | SHA Git immuable de 40 caractères de `Giskard-AI/epure` utilisé pour épingler les workflows appelants générés. |
 | `--dry-run` | `true` (si `--apply` omis) | Affiche le plan complet de bootstrap sans modifier aucun fichier ni appeler d'API d'écriture. Avec `--apply-github-settings`, lit les Rulesets existants et indique pour chacun `create`, `update` ou `noop`. |
 | `--apply` | `false` | Écrit les fichiers de configuration (`.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`), les workflows appelants et le socle des prompts de reviewers (`<reviewers_dir>/*.md`, par défaut `.agents/reviewers/*.md`). |
-| `--apply-github-settings` | `false` | Applique le mode squash-only et les 4 Repository Rulesets (`epure-feature-integrity`, `epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`) via l'API REST GitHub. |
+| `--apply-github-settings` | `false` | Applique le mode squash-only et les 5 Repository Rulesets (`epure-feature-integrity`, `epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`, `epure-release-tags`) via l'API REST GitHub. |
 | `--no-frontend-reviewers` | `false` | Omet `frontend-reviewer`, `accessibility-reviewer` et `design-reviewer` pour les dépôts sans UI. |
 | `--domain-reviewers <csv>` | Aucun | Génère des fichiers `<reviewers_dir>/<slug>-reviewer.md` supplémentaires pour les sous-domaines métier. |
 | `--reviewers-dir <chemin>` | `.agents/reviewers` | Répertoire du roster de reviewers écrit dans `.github/agents.yml` (`reviewers_dir`) et lu par l'orchestrateur depuis `dev` (p. ex. `--reviewers-dir .cursor/agents` pour une équipe souhaitant que Cursor charge les reviewers comme sous-agents). Les chemins absolus, les segments `.`/`..` et les chemins sous `src/` sont rejetés en *fail-closed* avec `SECURITY_INVARIANT_VIOLATION`. |
@@ -115,7 +115,7 @@ node dist/cli/setup-repo.mjs \
 | `--implementation-model <fournisseur/modèle>` | `anthropic/claude-sonnet-4-20250514` | Définit `models.implementation`. |
 | `--review-model <fournisseur/modèle>` | `openai/gpt-4.1` | Définit `models.review`. |
 | `--agent-app-id <id>` | Optionnel | ID numérique de `<owner>-epure-agent` ajouté en Bypass Actor (`always`) sur `epure-feature-governance` (`feature/*`), pour qu'EPURE pousse directement les intégrations de plan, synchronisations depuis `dev` et résolutions de conflits. `epure-feature-integrity` n'a aucun Bypass Actor : personne, l'App comprise, ne peut forcer un push ni supprimer une branche `feature/*`. |
-| `--release-app-id <id>` | Optionnel | ID numérique de `<owner>-epure-release` ajouté comme unique Bypass Actor sur `epure-release-immutability` (`main` et `v*`). |
+| `--release-app-id <id>` | Optionnel | ID numérique de `<owner>-epure-release` ajouté comme unique Bypass Actor sur `epure-release-immutability` (`main`) et `epure-release-tags` (`v*`). |
 | `--require-pr-approvals <N>` | `0` | Nombre d'approbations humaines requises sur `dev` (`0` pour compatibilité mainteneur solo ; `>=1` en équipe). |
 | `--json` | `false` | Affiche le résultat structuré complet `SetupRepoResult` au format JSON sur la sortie standard au lieu du résumé Markdown. |
 

@@ -28,7 +28,7 @@ features:
   - title: "3. TDD Sans Secret & Revue depuis dev"
     details: "Chaque ticket est codé en TDD dans une sandbox dépourvue de secrets (0 clé API ou PEM dans les sous-processus), audité par jusqu'à 4 reviewers spécialisés chargés depuis dev et validé par la porte UI Impeccable."
   - title: "4. Gouvernance à 2 Apps & État Git CAS"
-    details: "État atomique hors-branches dans refs/epure/state/<issue> sans polluer dev. Deux GitHub Apps distinctes (Agent App vs Release App) et 4 Rulesets garantissent le moindre privilège."
+    details: "État atomique hors-branches dans refs/epure/state/<issue> sans polluer dev. Deux GitHub Apps distinctes (Agent App vs Release App) et 5 Rulesets garantissent le moindre privilège."
 ---
 
 ## Vue d'Ensemble Interactive : Flux Global d'une Issue & PR

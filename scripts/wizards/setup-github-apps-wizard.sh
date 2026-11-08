@@ -809,7 +809,7 @@ run_wizard() {
   stage "Create & Install Release App (${RELEASE_APP_NAME})"
   say "Release App ('${RELEASE_APP_NAME}') is strictly isolated to controlled releases:"
   note "• Permissions: contents: write, metadata: read"
-  note "• Sole bypass actor on epure-release-immutability (main and v* tags)"
+  note "• Sole bypass actor on epure-release-immutability (main) and epure-release-tags (v* tags)"
   note "• Secrets stored strictly in --env release: EPURE_RELEASE_APP_ID, EPURE_RELEASE_APP_PRIVATE_KEY"
 
   local RELEASE_APP_ID=""

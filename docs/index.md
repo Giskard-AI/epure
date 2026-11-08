@@ -28,7 +28,7 @@ features:
   - title: "3. Secretless TDD & Trusted dev Review"
     details: "Tickets execute inside a secretless sandbox (0 API keys or App PEMs in subprocesses), audited by up to 4 domain-specialized reviewers loaded strictly from trusted dev, plus Impeccable WCAG AA UI gates."
   - title: "4. Dual-App Governance & CAS State"
-    details: "Out-of-branch atomic state in refs/epure/state/<issue> avoids commit noise on dev. Two dedicated GitHub Apps (Agent App vs. Release App) and 4 Repository Rulesets enforce strict privilege separation."
+    details: "Out-of-branch atomic state in refs/epure/state/<issue> avoids commit noise on dev. Two dedicated GitHub Apps (Agent App vs. Release App) and 5 Repository Rulesets enforce strict privilege separation."
 ---
 
 ## Interactive Overview: Global Issue & PR Flow
