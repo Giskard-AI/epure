@@ -562,11 +562,7 @@ describe("createOnce", () => {
 });
 
 describe("lostComment", () => {
-  const comment = (id: number, body: string, app: number | null = null) => ({
-    id,
-    body,
-    performed_via_github_app: app === null ? null : { id: app }
-  });
+  const comment = (id: number, body: string, login = "harness-admin") => ({ id, body, user: { login } });
 
   it.each([
     {
@@ -584,10 +580,11 @@ describe("lostComment", () => {
       posted: [5],
       expected: 9
     },
-    { id: "app-comment-with-the-same-body-is-ignored", comments: [comment(7, "/epure to-tickets", 5666371)], body: "/epure to-tickets", posted: [], expected: null },
+    { id: "app-comment-with-the-same-body-is-ignored", comments: [comment(7, "/epure to-tickets", "epure-agent[bot]")], body: "/epure to-tickets", posted: [], expected: null },
+    { id: "human-quoting-the-command-is-ignored", comments: [comment(8, "/epure to-tickets", "someone-else")], body: "/epure to-tickets", posted: [], expected: null },
     { id: "nothing-landed", comments: [comment(1, "/epure plan")], body: "/epure to-tickets", posted: [1], expected: null }
   ])("$id", ({ comments, body, posted, expected }) => {
-    expect(lostComment(comments, body, new Set(posted))?.id ?? null).toBe(expected);
+    expect(lostComment(comments, body, "harness-admin", new Set(posted))?.id ?? null).toBe(expected);
   });
 });
 

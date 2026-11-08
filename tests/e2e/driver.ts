@@ -150,6 +150,8 @@ interface Run {
   readonly resumes: ResumeEvent[];
   readonly jobFailures: JobFailure[];
   readonly postedComments: Set<number>;
+  // The token's user: what the harness posted is theirs.
+  login: string;
   issue: number;
 }
 
@@ -171,19 +173,26 @@ async function readState(run: Run, token: string): Promise<EpureIssueState | nul
 interface IssueComment {
   readonly id: number;
   readonly body?: string | undefined;
+  readonly user?: { readonly login: string } | null | undefined;
   readonly performed_via_github_app?: { readonly id: number } | null | undefined;
 }
 
 // The harness posts the same command again on a resume: only a comment it has not recorded can be the lost one.
-export function lostComment(comments: readonly IssueComment[], body: string, posted: ReadonlySet<number>): IssueComment | null {
-  return comments.find((c) => c.body === body && !c.performed_via_github_app && !posted.has(c.id)) ?? null;
+export function lostComment(
+  comments: readonly IssueComment[],
+  body: string,
+  login: string,
+  posted: ReadonlySet<number>
+): IssueComment | null {
+  return comments.find((c) => c.body === body && c.user?.login === login && !posted.has(c.id)) ?? null;
 }
 
 async function postComment(run: Run, body: string): Promise<number> {
   const path = `/repos/${run.gh.repository}/issues/${run.issue}/comments`;
   const comment = await createOnce(
     () => run.gh.call<IssueComment>("POST", path, { body }),
-    async () => lostComment(await run.gh.paginate<IssueComment>(path), body, run.postedComments)
+    async () => lostComment(await run.gh.paginate<IssueComment>(path), body, run.login, run.postedComments),
+    { log: run.log }
   );
   run.postedComments.add(comment.id);
   run.log(`[epic] #${run.issue} <- ${body.split("\n")[0]!.slice(0, 80)}`);
@@ -505,7 +514,7 @@ interface CreatedIssue {
   readonly number: number;
   readonly html_url: string;
   readonly title: string;
-  readonly created_at: string;
+  readonly user: { readonly login: string } | null;
   readonly pull_request?: unknown;
 }
 
@@ -528,6 +537,7 @@ export async function runSandboxEpic(
     resumes: [],
     jobFailures: [],
     postedComments: new Set(),
+    login: "",
     issue: 0
   };
   const settings: HarnessSettings = {
@@ -558,12 +568,15 @@ export async function runSandboxEpic(
     install = await clock.time("setup_repo", () => installEpure(run, seed, code.epureSha, token));
     await clock.time("install_ci", () => waitForInstallCi(run, install.commitSha));
 
+    run.login = (await gh.call<{ login: string }>("GET", "/user")).login;
+    // The reset deleted every issue: an epic by the token's user is this run's.
     const created = await createOnce(
       () => gh.call<CreatedIssue>("POST", `/repos/${gh.repository}/issues`, { title: EPIC_TITLE, body: EPIC_BODY }),
       async () =>
-        (await gh.paginate<CreatedIssue>(`/repos/${gh.repository}/issues?state=all&since=${encodeURIComponent(run.startedAt)}`)).find(
-          (i) => !i.pull_request && i.title === EPIC_TITLE && Date.parse(i.created_at) >= startedMs
-        ) ?? null
+        (await gh.paginate<CreatedIssue>(`/repos/${gh.repository}/issues?state=all`)).find(
+          (i) => !i.pull_request && i.title === EPIC_TITLE && i.user?.login === run.login
+        ) ?? null,
+      { log }
     );
     run.issue = created.number;
     issue = { number: created.number, url: created.html_url };
