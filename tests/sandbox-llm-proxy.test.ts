@@ -27,6 +27,8 @@ import {
 } from "./fixtures/fake-llm-upstream.js";
 
 const REAL_KEY = "sk-real-RunnerHeldKey1234567890ABCDEF";
+// OpenAI-compatible streams report usage only when the request asks for it.
+const STREAM_ASKING_FOR_USAGE = '{"stream":true,"stream_options":{"include_usage":true}}';
 const SSE_BODY = 'data: {"delta":"he"}\n\ndata: {"delta":"llo"}\n\n';
 
 const openUpstreams: FakeLlmUpstream[] = [];
@@ -314,7 +316,8 @@ describe("Sandbox LLM proxy & untrusted code credential isolation (#98)", () => 
       path: "/chat/completions",
       credential: (nonce: string) => ({ authorization: `Bearer ${nonce}` }),
       expectedUpstreamUrl: "/v1/chat/completions",
-      expectedAuth: ["authorization", `Bearer ${REAL_KEY}`]
+      expectedAuth: ["authorization", `Bearer ${REAL_KEY}`],
+      expectedForwardedBody: STREAM_ASKING_FOR_USAGE
     },
     {
       id: "openai-compatible-alias-nonce-header-replaces-sdk-placeholder",
@@ -326,7 +329,8 @@ describe("Sandbox LLM proxy & untrusted code credential isolation (#98)", () => 
         authorization: "Bearer sk-placeholder"
       }),
       expectedUpstreamUrl: "/compat/v1/chat/completions",
-      expectedAuth: ["authorization", `Bearer ${REAL_KEY}`]
+      expectedAuth: ["authorization", `Bearer ${REAL_KEY}`],
+      expectedForwardedBody: STREAM_ASKING_FOR_USAGE
     },
     {
       id: "openrouter-bearer",
@@ -335,7 +339,8 @@ describe("Sandbox LLM proxy & untrusted code credential isolation (#98)", () => 
       path: "/chat/completions",
       credential: (nonce: string) => ({ authorization: `Bearer ${nonce}` }),
       expectedUpstreamUrl: "/api/v1/chat/completions",
-      expectedAuth: ["authorization", `Bearer ${REAL_KEY}`]
+      expectedAuth: ["authorization", `Bearer ${REAL_KEY}`],
+      expectedForwardedBody: STREAM_ASKING_FOR_USAGE
     },
     {
       id: "azure-openai-api-key-keeps-api-version-query",
@@ -344,7 +349,8 @@ describe("Sandbox LLM proxy & untrusted code credential isolation (#98)", () => 
       path: "/openai/deployments/gpt-4o/chat/completions?api-version=2024-10-21",
       credential: (nonce: string) => ({ "api-key": nonce }),
       expectedUpstreamUrl: "/openai/deployments/gpt-4o/chat/completions?api-version=2024-10-21",
-      expectedAuth: ["api-key", REAL_KEY]
+      expectedAuth: ["api-key", REAL_KEY],
+      expectedForwardedBody: STREAM_ASKING_FOR_USAGE
     },
     {
       id: "azure-ai-foundry-api-key",
@@ -353,7 +359,8 @@ describe("Sandbox LLM proxy & untrusted code credential isolation (#98)", () => 
       path: "/chat/completions",
       credential: (nonce: string) => ({ "api-key": nonce }),
       expectedUpstreamUrl: "/openai/v1/chat/completions",
-      expectedAuth: ["api-key", REAL_KEY]
+      expectedAuth: ["api-key", REAL_KEY],
+      expectedForwardedBody: STREAM_ASKING_FOR_USAGE
     },
     {
       id: "anthropic-x-api-key",
@@ -362,7 +369,8 @@ describe("Sandbox LLM proxy & untrusted code credential isolation (#98)", () => 
       path: "/v1/messages",
       credential: (nonce: string) => ({ "x-api-key": nonce, "anthropic-version": "2023-06-01" }),
       expectedUpstreamUrl: "/v1/messages",
-      expectedAuth: ["x-api-key", REAL_KEY]
+      expectedAuth: ["x-api-key", REAL_KEY],
+      expectedForwardedBody: '{"stream":true}'
     },
     {
       id: "gemini-key-query-moves-to-header-and-alt-sse-stays",
@@ -371,7 +379,8 @@ describe("Sandbox LLM proxy & untrusted code credential isolation (#98)", () => 
       path: "/v1beta/models/gemini-3-flash-preview:streamGenerateContent?alt=sse&key=NONCE",
       credential: () => ({}),
       expectedUpstreamUrl: "/v1beta/models/gemini-3-flash-preview:streamGenerateContent?alt=sse",
-      expectedAuth: ["x-goog-api-key", REAL_KEY]
+      expectedAuth: ["x-goog-api-key", REAL_KEY],
+      expectedForwardedBody: '{"stream":true}'
     },
     {
       id: "vertex-express-x-goog-api-key",
@@ -381,11 +390,12 @@ describe("Sandbox LLM proxy & untrusted code credential isolation (#98)", () => 
       credential: (nonce: string) => ({ "x-goog-api-key": nonce }),
       expectedUpstreamUrl:
         "/v1/publishers/google/models/gemini-3-flash-preview:streamGenerateContent?alt=sse",
-      expectedAuth: ["x-goog-api-key", REAL_KEY]
+      expectedAuth: ["x-goog-api-key", REAL_KEY],
+      expectedForwardedBody: '{"stream":true}'
     }
   ] as const)(
     "createLlmSandboxProxy [$id]: forwards to the declared provider with the real key and streams SSE back",
-    async ({ provider, baseSuffix, path, credential, expectedUpstreamUrl, expectedAuth }) => {
+    async ({ provider, baseSuffix, path, credential, expectedUpstreamUrl, expectedAuth, expectedForwardedBody }) => {
       const upstream = await sseUpstream();
       const proxy = await createLlmSandboxProxy({
         upstream: resolveProviderUpstream(provider as ProviderKind, {
@@ -408,7 +418,7 @@ describe("Sandbox LLM proxy & untrusted code credential isolation (#98)", () => 
         const [forwarded] = upstream.requests;
         expect(upstream.requests).toHaveLength(1);
         expect(forwarded?.url).toBe(expectedUpstreamUrl);
-        expect(forwarded?.body).toBe('{"stream":true}');
+        expect(forwarded?.body).toBe(expectedForwardedBody);
         expect(forwarded?.headers[expectedAuth[0]]).toBe(expectedAuth[1]);
         const otherCredentialHeaders = ["authorization", "x-api-key", "api-key", "x-goog-api-key"]
           .filter((name) => name !== expectedAuth[0])

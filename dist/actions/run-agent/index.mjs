@@ -205,7 +205,122 @@ function resolveProviderUpstream(provider, providerConfig, env = process.env) {
 
 // src/usage/token-usage.ts
 import { AsyncLocalStorage } from "node:async_hooks";
+
+// src/llm/usage.ts
+var LLM_USAGE_LOG_PREFIX = "epure-llm-usage";
+function count(source, key) {
+  const value = source?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+function asCounts(value) {
+  return value && typeof value === "object" ? value : void 0;
+}
+function extractLLMTokenUsage(provider, model, body) {
+  const root = asCounts(body);
+  if (provider === "google" || provider === "vertex") {
+    const u2 = asCounts(root?.usageMetadata);
+    if (!u2) {
+      return null;
+    }
+    const thinking = count(u2, "thoughtsTokenCount");
+    return {
+      provider,
+      model,
+      input_tokens: count(u2, "promptTokenCount") + count(u2, "toolUsePromptTokenCount"),
+      cached_input_tokens: count(u2, "cachedContentTokenCount"),
+      output_tokens: count(u2, "candidatesTokenCount") + thinking,
+      thinking_tokens: thinking
+    };
+  }
+  const u = asCounts(root?.usage);
+  if (!u) {
+    return null;
+  }
+  if (provider === "anthropic") {
+    const cacheRead = count(u, "cache_read_input_tokens");
+    return {
+      provider,
+      model,
+      input_tokens: count(u, "input_tokens") + cacheRead + count(u, "cache_creation_input_tokens"),
+      cached_input_tokens: cacheRead,
+      output_tokens: count(u, "output_tokens"),
+      thinking_tokens: 0
+    };
+  }
+  if ("input_tokens" in u) {
+    return {
+      provider,
+      model,
+      input_tokens: count(u, "input_tokens"),
+      cached_input_tokens: count(asCounts(u.input_tokens_details), "cached_tokens"),
+      output_tokens: count(u, "output_tokens"),
+      thinking_tokens: count(asCounts(u.output_tokens_details), "reasoning_tokens")
+    };
+  }
+  return {
+    provider,
+    model,
+    input_tokens: count(u, "prompt_tokens"),
+    cached_input_tokens: count(asCounts(u.prompt_tokens_details), "cached_tokens"),
+    output_tokens: count(u, "completion_tokens"),
+    thinking_tokens: count(asCounts(u.completion_tokens_details), "reasoning_tokens")
+  };
+}
+function formatLLMUsageLogLine(usage) {
+  return `${LLM_USAGE_LOG_PREFIX} ${JSON.stringify(usage)}`;
+}
+
+// src/usage/token-usage.ts
+var NO_TOKENS = {
+  requests: 0,
+  input_tokens: 0,
+  cached_input_tokens: 0,
+  output_tokens: 0,
+  thinking_tokens: 0
+};
+function addTokenCounts(a, b) {
+  const unavailable = (a.usage_unavailable ?? 0) + (b.usage_unavailable ?? 0);
+  return {
+    requests: a.requests + b.requests,
+    input_tokens: a.input_tokens + b.input_tokens,
+    cached_input_tokens: a.cached_input_tokens + b.cached_input_tokens,
+    output_tokens: a.output_tokens + b.output_tokens,
+    thinking_tokens: a.thinking_tokens + b.thinking_tokens,
+    ...unavailable > 0 ? { usage_unavailable: unavailable } : {}
+  };
+}
+function countsOf(usage) {
+  if ("unavailable" in usage) {
+    return { ...NO_TOKENS, requests: 1, usage_unavailable: 1 };
+  }
+  return {
+    requests: 1,
+    input_tokens: usage.input_tokens,
+    cached_input_tokens: usage.cached_input_tokens,
+    output_tokens: usage.output_tokens,
+    thinking_tokens: usage.thinking_tokens
+  };
+}
+function addToModel(models, usage) {
+  const model = `${usage.provider}/${usage.model}`;
+  return { ...models, [model]: addTokenCounts(models[model] ?? NO_TOKENS, countsOf(usage)) };
+}
+function tokensByModel(usages) {
+  return usages.reduce(addToModel, {});
+}
 var usageContext = new AsyncLocalStorage();
+function reportLLMUsage(usage) {
+  if (!("unavailable" in usage)) {
+    process.stdout.write(`${formatLLMUsageLogLine(usage)}
+`);
+  }
+  const context = usageContext.getStore();
+  context?.ledger.record(context.attribution, usage);
+}
+function usageReporter() {
+  const inCallerContext = AsyncLocalStorage.snapshot();
+  return (usage) => inCallerContext(() => reportLLMUsage(usage));
+}
 
 // src/llm/client.ts
 function resolveConfigValue(val, env = process.env) {
@@ -2874,8 +2989,112 @@ import {
 import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 import { spawn, spawnSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
-import { pipeline, Transform } from "node:stream";
+import { pipeline, Transform, Writable } from "node:stream";
+
+// src/sandbox/llm-proxy-usage.ts
 import { brotliDecompressSync, gunzipSync, inflateSync } from "node:zlib";
+function decodeBody(body, contentEncoding) {
+  switch (String(contentEncoding ?? "").trim().toLowerCase()) {
+    case "gzip":
+    case "x-gzip":
+      return gunzipSync(body);
+    case "deflate":
+      return inflateSync(body);
+    case "br":
+      return brotliDecompressSync(body);
+    default:
+      return body;
+  }
+}
+function asObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : void 0;
+}
+function parseJson(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return void 0;
+  }
+}
+var OPENAI_COMPATIBLE = /* @__PURE__ */ new Set(["openai", "openrouter", "azure", "azure_ai"]);
+function meterRequest(provider, path, body, contentEncoding) {
+  const json = contentEncoding ? void 0 : asObject(parseJson(body.toString("utf8")));
+  const fromPath = /\/(?:models|deployments)\/([^/:]+)/.exec(path)?.[1];
+  const model = typeof json?.model === "string" && json.model || fromPath || "unknown";
+  if (!json || !OPENAI_COMPATIBLE.has(provider) || !path.endsWith("/chat/completions") || json.stream !== true) {
+    return { body, model };
+  }
+  const streamOptions = asObject(json.stream_options) ?? {};
+  if (streamOptions.include_usage === true) {
+    return { body, model };
+  }
+  return {
+    body: Buffer.from(JSON.stringify({ ...json, stream_options: { ...streamOptions, include_usage: true } })),
+    model
+  };
+}
+function meterResponse(provider, model, contentType, contentEncoding) {
+  const sse = contentType.includes("text/event-stream");
+  const json = contentType.includes("json");
+  const buffered = json || sse && Boolean(contentEncoding);
+  const raw = [];
+  const decoder = new TextDecoder();
+  let partialLine = "";
+  const found = {};
+  const absorb = (value) => {
+    if (Array.isArray(value)) {
+      value.forEach(absorb);
+      return;
+    }
+    const event = asObject(value);
+    const usage = asObject(event?.usage) ?? asObject(asObject(event?.message)?.usage) ?? asObject(asObject(event?.response)?.usage);
+    if (usage) {
+      found.usage = { ...found.usage, ...usage };
+    }
+    const metadata = asObject(event?.usageMetadata);
+    if (metadata) {
+      found.usageMetadata = metadata;
+    }
+  };
+  const readLines = (text) => {
+    const lines = (partialLine + text).split(/\r?\n/);
+    partialLine = lines.pop() ?? "";
+    for (const line of lines) {
+      if (line.startsWith("data:")) {
+        absorb(parseJson(line.slice("data:".length).trim()));
+      }
+    }
+  };
+  return {
+    onChunk(chunk) {
+      if (buffered) {
+        raw.push(Buffer.from(chunk));
+      } else if (sse) {
+        readLines(decoder.decode(chunk, { stream: true }));
+      }
+    },
+    onEnd() {
+      if (buffered) {
+        try {
+          const text = decodeBody(Buffer.concat(raw), contentEncoding).toString("utf8");
+          if (sse) {
+            readLines(`${text}
+`);
+          } else {
+            absorb(parseJson(text));
+          }
+        } catch {
+        }
+      } else if (sse) {
+        readLines(`${decoder.decode()}
+`);
+      }
+      return extractLLMTokenUsage(provider, model, found) ?? { provider, model, unavailable: true };
+    }
+  };
+}
+
+// src/sandbox/llm-sandbox.ts
 var SECRET_ENV_NAME_PATTERN = /^(?:.*API_KEY|.*_TOKEN|.*_SECRET|.*PRIVATE_KEY|LLM_API_KEY|GITHUB_TOKEN|GH_TOKEN|GITHUB_PAT|EPURE_.*(?:KEY|TOKEN|SECRET)|AWS_.*|AZURE_.*|GCP_.*|NPM_TOKEN|NODE_AUTH_TOKEN|ACTIONS_RUNTIME_TOKEN|ACTIONS_ID_TOKEN_REQUEST_TOKEN)$/i;
 var NONCE_HEADER = "x-epure-proxy-nonce";
 var CREDENTIAL_HEADERS = [
@@ -3144,19 +3363,6 @@ function guardObserver(open) {
     }
   };
 }
-function decodeBody(body, contentEncoding) {
-  switch (String(contentEncoding ?? "").trim().toLowerCase()) {
-    case "gzip":
-    case "x-gzip":
-      return gunzipSync(body);
-    case "deflate":
-      return inflateSync(body);
-    case "br":
-      return brotliDecompressSync(body);
-    default:
-      return body;
-  }
-}
 var ProxyRequestTooLargeError = class extends Error {
 };
 function sendProxyError(res, status, errorCode, errorMessage) {
@@ -3192,6 +3398,12 @@ async function createLlmSandboxProxy(options) {
   const agent = target.protocol === "https:" ? new HttpsAgent({ keepAlive: true }) : new HttpAgent({ keepAlive: true });
   const proxyNonce = randomBytes(24).toString("hex");
   const nonceBytes = Buffer.from(proxyNonce);
+  const reportUsage = usageReporter();
+  const relayedUsage = [];
+  const recordUsage = (usage) => {
+    relayedUsage.push(usage);
+    reportUsage(usage);
+  };
   const relay = (req, res) => {
     const rawUrl = req.url ?? "/";
     if (!rawUrl.startsWith("/")) {
@@ -3243,14 +3455,14 @@ async function createLlmSandboxProxy(options) {
       headers[name.toLowerCase()] = value;
     }
     headers[upstream.authHeader] = upstream.authHeader === "authorization" ? `Bearer ${apiKey}` : apiKey;
-    let responded = false;
+    let upstreamReq;
     let failed = false;
     const fail = (status, code, message) => {
       if (failed) {
         return;
       }
       failed = true;
-      upstreamReq.destroy();
+      upstreamReq?.destroy();
       if (res.headersSent) {
         res.destroy();
       } else {
@@ -3258,37 +3470,48 @@ async function createLlmSandboxProxy(options) {
         sendProxyError(res, status, code, message);
       }
     };
-    const upstreamReq = send({
-      agent,
-      hostname: target.hostname.replace(/^\[|\]$/g, ""),
-      port: target.port || void 0,
-      method: "POST",
-      path: `${basePath}${url.pathname}${query}`,
-      headers,
-      timeout: DEFAULT_LLM_REQUEST_TIMEOUT_MS
-    });
-    upstreamReq.on("timeout", () => upstreamReq.destroy(new Error("upstream idle timeout")));
-    upstreamReq.on(
-      "error",
-      () => fail(502, "PROXY_UPSTREAM_UNREACHABLE", `Sandbox LLM proxy could not reach ${upstreamHost}.`)
-    );
     res.on("close", () => {
       if (!res.writableFinished) {
-        upstreamReq.destroy();
+        upstreamReq?.destroy();
       }
     });
+    const forward = ({ body, model }) => {
+      headers["content-length"] = String(body.length);
+      const sent = send({
+        agent,
+        hostname: target.hostname.replace(/^\[|\]$/g, ""),
+        port: target.port || void 0,
+        method: "POST",
+        path: `${basePath}${url.pathname}${query}`,
+        headers,
+        timeout: DEFAULT_LLM_REQUEST_TIMEOUT_MS
+      });
+      upstreamReq = sent;
+      sent.on("timeout", () => sent.destroy(new Error("upstream idle timeout")));
+      sent.on(
+        "error",
+        () => fail(502, "PROXY_UPSTREAM_UNREACHABLE", `Sandbox LLM proxy could not reach ${upstreamHost}.`)
+      );
+      sent.on("response", (upstreamRes) => relayResponse(upstreamRes, model));
+      sent.end(body);
+    };
+    const chunks = [];
     let received = 0;
-    const limit = new Transform({
-      transform(chunk, _encoding, callback) {
+    const collect = new Writable({
+      write(chunk, _encoding, callback) {
         received += chunk.length;
-        callback(received > MAX_PROXY_REQUEST_BYTES ? new ProxyRequestTooLargeError() : null, chunk);
+        if (received > MAX_PROXY_REQUEST_BYTES) {
+          callback(new ProxyRequestTooLargeError());
+          return;
+        }
+        chunks.push(chunk);
+        callback();
       }
     });
-    pipeline(req, limit, upstreamReq, (err) => {
-      if (!err || responded) {
-        return;
-      }
-      if (err instanceof ProxyRequestTooLargeError) {
+    pipeline(req, collect, (err) => {
+      if (!err) {
+        forward(meterRequest(upstream.provider, url.pathname, Buffer.concat(chunks), req.headers["content-encoding"]));
+      } else if (err instanceof ProxyRequestTooLargeError) {
         fail(
           413,
           "PROXY_REQUEST_TOO_LARGE",
@@ -3298,21 +3521,16 @@ async function createLlmSandboxProxy(options) {
         fail(502, "PROXY_UPSTREAM_UNREACHABLE", `Sandbox LLM proxy could not reach ${upstreamHost}.`);
       }
     });
-    upstreamReq.on("response", (upstreamRes) => {
-      responded = true;
+    const relayResponse = (upstreamRes, model) => {
       const status = upstreamRes.statusCode ?? 502;
+      const contentType = String(upstreamRes.headers["content-type"] ?? "");
       const responseHeaders = forwardedHeaders(upstreamRes.headers, DROPPED_RESPONSE_HEADERS);
       const observer = guardObserver(
-        () => options.observeResponse?.({
-          method: "POST",
-          path: url.pathname,
-          status,
-          contentType: String(upstreamRes.headers["content-type"] ?? "")
-        })
+        () => options.observeResponse?.({ method: "POST", path: url.pathname, status, contentType })
       );
       if (status >= 400) {
-        const chunks = [];
-        upstreamRes.on("data", (chunk) => chunks.push(chunk));
+        const chunks2 = [];
+        upstreamRes.on("data", (chunk) => chunks2.push(chunk));
         upstreamRes.on("error", () => {
           observer.end();
           fail(502, "PROXY_UPSTREAM_UNREACHABLE", `Sandbox LLM proxy lost the response from ${upstreamHost}.`);
@@ -3320,7 +3538,7 @@ async function createLlmSandboxProxy(options) {
         upstreamRes.on("end", () => {
           let body;
           try {
-            body = decodeBody(Buffer.concat(chunks), upstreamRes.headers["content-encoding"]);
+            body = decodeBody(Buffer.concat(chunks2), upstreamRes.headers["content-encoding"]);
           } catch {
             observer.end();
             fail(502, "PROXY_UPSTREAM_UNREACHABLE", `Sandbox LLM proxy could not decode the error from ${upstreamHost}.`);
@@ -3337,14 +3555,19 @@ async function createLlmSandboxProxy(options) {
       }
       res.writeHead(status, responseHeaders);
       res.flushHeaders();
+      const meter = meterResponse(upstream.provider, model, contentType, upstreamRes.headers["content-encoding"]);
       const tap = new Transform({
         transform(chunk, _encoding, callback) {
+          meter.onChunk(chunk);
           observer.chunk(chunk);
           callback(null, chunk);
         }
       });
-      pipeline(upstreamRes, tap, res, () => observer.end());
-    });
+      pipeline(upstreamRes, tap, res, () => {
+        observer.end();
+        recordUsage(meter.onEnd());
+      });
+    };
   };
   const server = createServer((req, res) => {
     try {
@@ -3371,6 +3594,7 @@ async function createLlmSandboxProxy(options) {
   return {
     proxyUrl,
     proxyNonce,
+    usage: () => tokensByModel(relayedUsage),
     close: () => new Promise((resolve2) => {
       agent.destroy();
       server.closeAllConnections();
@@ -3567,7 +3791,8 @@ async function runInUntrustedCodeSandbox(input) {
       proxy_url: proxy?.proxyUrl ?? "",
       kernel_backend: selectKernelBackend(networkPolicy, capabilities),
       confined: selectKernelBackend(networkPolicy, capabilities) !== "none",
-      network_policy: networkPolicy
+      network_policy: networkPolicy,
+      ...proxy ? { llm_usage: proxy.usage() } : {}
     };
   } finally {
     await proxy?.close();

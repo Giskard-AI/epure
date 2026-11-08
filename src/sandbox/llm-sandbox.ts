@@ -4,6 +4,7 @@ import {
   Agent as HttpAgent,
   createServer,
   request as httpRequest,
+  type ClientRequest,
   type IncomingHttpHeaders,
   type IncomingMessage,
   type OutgoingHttpHeaders,
@@ -13,8 +14,7 @@ import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 import { spawn, spawnSync } from "node:child_process";
 import type { AddressInfo } from "node:net";
 import { dirname, resolve } from "node:path";
-import { pipeline, Transform } from "node:stream";
-import { brotliDecompressSync, gunzipSync, inflateSync } from "node:zlib";
+import { pipeline, Transform, Writable } from "node:stream";
 import { containsPrivateKeyMaterial } from "../auth/github-apps.js";
 import { redactSecrets } from "../auth/issue-command-gate.js";
 import {
@@ -25,6 +25,9 @@ import {
 } from "../llm/client.js";
 import type { ProviderConfig } from "../llm/types.js";
 import { resolveProviderUpstream, type ProviderUpstream } from "../llm/upstream.js";
+import type { LLMRequestUsage } from "../llm/usage.js";
+import { tokensByModel, usageReporter, type ModelTokenCounts } from "../usage/token-usage.js";
+import { decodeBody, meterRequest, meterResponse, type MeteredRequest } from "./llm-proxy-usage.js";
 
 export type SandboxErrorCode =
   | "NONE"
@@ -92,6 +95,8 @@ export interface CreateLlmSandboxProxyOptions {
 }
 
 export interface LlmSandboxProxyHandle extends SandboxProxyEndpoint {
+  // Successful responses relayed so far, per `<provider>/<model>` as the sandbox called it.
+  usage(): ModelTokenCounts;
   close(): Promise<void>;
 }
 
@@ -141,6 +146,8 @@ export interface SandboxExecutionResult {
   // false when the command ran without any kernel backend (local fallback outside CI).
   readonly confined?: boolean | undefined;
   readonly network_policy?: SandboxNetworkPolicy | undefined;
+  // What the agent session spent through the LLM proxy, per `<provider>/<model>`.
+  readonly llm_usage?: ModelTokenCounts | undefined;
 }
 
 const SECRET_ENV_NAME_PATTERN =
@@ -494,20 +501,6 @@ function guardObserver(
   };
 }
 
-function decodeBody(body: Buffer, contentEncoding: string | string[] | undefined): Buffer {
-  switch (String(contentEncoding ?? "").trim().toLowerCase()) {
-    case "gzip":
-    case "x-gzip":
-      return gunzipSync(body);
-    case "deflate":
-      return inflateSync(body);
-    case "br":
-      return brotliDecompressSync(body);
-    default:
-      return body;
-  }
-}
-
 class ProxyRequestTooLargeError extends Error {}
 
 function sendProxyError(
@@ -556,6 +549,12 @@ export async function createLlmSandboxProxy(
     target.protocol === "https:" ? new HttpsAgent({ keepAlive: true }) : new HttpAgent({ keepAlive: true });
   const proxyNonce = randomBytes(24).toString("hex");
   const nonceBytes = Buffer.from(proxyNonce);
+  const reportUsage = usageReporter();
+  const relayedUsage: LLMRequestUsage[] = [];
+  const recordUsage = (usage: LLMRequestUsage): void => {
+    relayedUsage.push(usage);
+    reportUsage(usage);
+  };
 
   const relay = (req: IncomingMessage, res: ServerResponse): void => {
     const rawUrl = req.url ?? "/";
@@ -612,14 +611,14 @@ export async function createLlmSandboxProxy(
     headers[upstream.authHeader] =
       upstream.authHeader === "authorization" ? `Bearer ${apiKey}` : apiKey;
 
-    let responded = false;
+    let upstreamReq: ClientRequest | undefined;
     let failed = false;
     const fail = (status: number, code: SandboxErrorCode, message: string): void => {
       if (failed) {
         return;
       }
       failed = true;
-      upstreamReq.destroy();
+      upstreamReq?.destroy();
       if (res.headersSent) {
         res.destroy();
       } else {
@@ -627,38 +626,50 @@ export async function createLlmSandboxProxy(
         sendProxyError(res, status, code, message);
       }
     };
-
-    const upstreamReq = send({
-      agent,
-      hostname: target.hostname.replace(/^\[|\]$/g, ""),
-      port: target.port || undefined,
-      method: "POST",
-      path: `${basePath}${url.pathname}${query}`,
-      headers,
-      timeout: DEFAULT_LLM_REQUEST_TIMEOUT_MS
-    });
-    upstreamReq.on("timeout", () => upstreamReq.destroy(new Error("upstream idle timeout")));
-    upstreamReq.on("error", () =>
-      fail(502, "PROXY_UPSTREAM_UNREACHABLE", `Sandbox LLM proxy could not reach ${upstreamHost}.`)
-    );
     res.on("close", () => {
       if (!res.writableFinished) {
-        upstreamReq.destroy();
+        upstreamReq?.destroy();
       }
     });
 
+    const forward = ({ body, model }: MeteredRequest): void => {
+      headers["content-length"] = String(body.length);
+      const sent = send({
+        agent,
+        hostname: target.hostname.replace(/^\[|\]$/g, ""),
+        port: target.port || undefined,
+        method: "POST",
+        path: `${basePath}${url.pathname}${query}`,
+        headers,
+        timeout: DEFAULT_LLM_REQUEST_TIMEOUT_MS
+      });
+      upstreamReq = sent;
+      sent.on("timeout", () => sent.destroy(new Error("upstream idle timeout")));
+      sent.on("error", () =>
+        fail(502, "PROXY_UPSTREAM_UNREACHABLE", `Sandbox LLM proxy could not reach ${upstreamHost}.`)
+      );
+      sent.on("response", (upstreamRes) => relayResponse(upstreamRes, model));
+      sent.end(body);
+    };
+
+    // Read whole, within the cap: the model is in the body, and the usage request may have to be added.
+    const chunks: Buffer[] = [];
     let received = 0;
-    const limit = new Transform({
-      transform(chunk: Buffer, _encoding, callback) {
+    const collect = new Writable({
+      write(chunk: Buffer, _encoding, callback) {
         received += chunk.length;
-        callback(received > MAX_PROXY_REQUEST_BYTES ? new ProxyRequestTooLargeError() : null, chunk);
+        if (received > MAX_PROXY_REQUEST_BYTES) {
+          callback(new ProxyRequestTooLargeError());
+          return;
+        }
+        chunks.push(chunk);
+        callback();
       }
     });
-    pipeline(req, limit, upstreamReq, (err) => {
-      if (!err || responded) {
-        return;
-      }
-      if (err instanceof ProxyRequestTooLargeError) {
+    pipeline(req, collect, (err) => {
+      if (!err) {
+        forward(meterRequest(upstream.provider, url.pathname, Buffer.concat(chunks), req.headers["content-encoding"]));
+      } else if (err instanceof ProxyRequestTooLargeError) {
         fail(
           413,
           "PROXY_REQUEST_TOO_LARGE",
@@ -669,17 +680,12 @@ export async function createLlmSandboxProxy(
       }
     });
 
-    upstreamReq.on("response", (upstreamRes) => {
-      responded = true;
+    const relayResponse = (upstreamRes: IncomingMessage, model: string): void => {
       const status = upstreamRes.statusCode ?? 502;
+      const contentType = String(upstreamRes.headers["content-type"] ?? "");
       const responseHeaders = forwardedHeaders(upstreamRes.headers, DROPPED_RESPONSE_HEADERS);
       const observer = guardObserver(() =>
-        options.observeResponse?.({
-          method: "POST",
-          path: url.pathname,
-          status,
-          contentType: String(upstreamRes.headers["content-type"] ?? "")
-        })
+        options.observeResponse?.({ method: "POST", path: url.pathname, status, contentType })
       );
 
       if (status >= 400) {
@@ -711,14 +717,19 @@ export async function createLlmSandboxProxy(
 
       res.writeHead(status, responseHeaders);
       res.flushHeaders();
+      const meter = meterResponse(upstream.provider, model, contentType, upstreamRes.headers["content-encoding"]);
       const tap = new Transform({
         transform(chunk: Buffer, _encoding, callback) {
+          meter.onChunk(chunk);
           observer.chunk(chunk);
           callback(null, chunk);
         }
       });
-      pipeline(upstreamRes, tap, res, () => observer.end());
-    });
+      pipeline(upstreamRes, tap, res, () => {
+        observer.end();
+        recordUsage(meter.onEnd());
+      });
+    };
   };
 
   const server = createServer((req, res) => {
@@ -749,6 +760,7 @@ export async function createLlmSandboxProxy(
   return {
     proxyUrl,
     proxyNonce,
+    usage: () => tokensByModel(relayedUsage),
     close: () =>
       new Promise<void>((resolve) => {
         agent.destroy();
@@ -1000,7 +1012,8 @@ export async function runInUntrustedCodeSandbox(
       proxy_url: proxy?.proxyUrl ?? "",
       kernel_backend: selectKernelBackend(networkPolicy, capabilities),
       confined: selectKernelBackend(networkPolicy, capabilities) !== "none",
-      network_policy: networkPolicy
+      network_policy: networkPolicy,
+      ...(proxy ? { llm_usage: proxy.usage() } : {})
     };
   } finally {
     await proxy?.close();

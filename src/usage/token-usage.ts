@@ -72,24 +72,25 @@ function countsOf(usage: LLMRequestUsage): TokenCounts {
   };
 }
 
+function addToModel(models: ModelTokenCounts, usage: LLMRequestUsage): ModelTokenCounts {
+  const model = `${usage.provider}/${usage.model}`;
+  return { ...models, [model]: addTokenCounts(models[model] ?? NO_TOKENS, countsOf(usage)) };
+}
+
+export function tokensByModel(usages: readonly LLMRequestUsage[]): ModelTokenCounts {
+  return usages.reduce(addToModel, {});
+}
+
 export function addRequestUsage(
   record: TokenUsageRecord,
   attribution: UsageAttribution,
   usage: LLMRequestUsage
 ): TokenUsageRecord {
   const scope = attribution.ticket === undefined ? EPIC_USAGE_SCOPE : String(attribution.ticket);
-  const model = `${usage.provider}/${usage.model}`;
   const phases = record[scope] ?? {};
-  const models = phases[attribution.phase] ?? {};
   return {
     ...record,
-    [scope]: {
-      ...phases,
-      [attribution.phase]: {
-        ...models,
-        [model]: addTokenCounts(models[model] ?? NO_TOKENS, countsOf(usage))
-      }
-    }
+    [scope]: { ...phases, [attribution.phase]: addToModel(phases[attribution.phase] ?? {}, usage) }
   };
 }
 
@@ -211,4 +212,10 @@ export function reportLLMUsage(usage: LLMRequestUsage): void {
   }
   const context = usageContext.getStore();
   context?.ledger.record(context.attribution, usage);
+}
+
+/** reportLLMUsage bound to the caller's attribution, for callbacks that run outside it (a proxy's server). */
+export function usageReporter(): (usage: LLMRequestUsage) => void {
+  const inCallerContext = AsyncLocalStorage.snapshot();
+  return (usage) => inCallerContext(() => reportLLMUsage(usage));
 }
