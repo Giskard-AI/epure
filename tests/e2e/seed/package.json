@@ -1,0 +1,16 @@
+{
+  "name": "epure-e2e-seed",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Tiny statistics library used as the seed of the EPURE end-to-end sandbox",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "5.1.0"
+  }
+}

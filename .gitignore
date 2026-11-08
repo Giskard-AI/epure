@@ -113,6 +113,7 @@ docs/.vitepress/cache/
 docs/.vitepress/dist/
 epure.live-test.json
 epure.live-github.json
+epure.e2e.json
 *.pem
 .cursor/plans/
 

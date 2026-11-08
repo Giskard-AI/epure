@@ -14,9 +14,10 @@
   "scripts": {
     "build": "node scripts/build-actions.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --exclude 'tests/live/**' --exclude 'tests/live-github/**'",
+    "test": "vitest run --exclude 'tests/live/**' --exclude 'tests/live-github/**' --exclude 'tests/e2e/**'",
     "test:live": "vitest run tests/live/",
     "test:live:github": "EPURE_LIVE_GITHUB=1 vitest run tests/live-github/",
+    "test:e2e:reset": "EPURE_E2E=reset vitest run tests/e2e/sandbox-epic.e2e.test.ts",
     "docs:diagrams": "node scripts/build-diagrams.mjs",
     "docs:llms": "node scripts/build-llms-txt.mjs",
     "docs:dev": "vitepress dev docs",
