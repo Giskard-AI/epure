@@ -1,8 +1,13 @@
+import type { ServerResponse } from "node:http";
 import { gzipSync } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveProviderUpstream, type ProviderKind } from "../src/llm/index.js";
 import { meterRequest, meterResponse } from "../src/sandbox/llm-proxy-usage.js";
-import { createLlmSandboxProxy, runInUntrustedCodeSandbox } from "../src/sandbox/llm-sandbox.js";
+import {
+  createLlmSandboxProxy,
+  MAX_PROXY_IN_FLIGHT_REQUESTS,
+  runInUntrustedCodeSandbox
+} from "../src/sandbox/llm-sandbox.js";
 import { runWithTokenUsageLedger, TokenUsageLedger, type LLMRequestUsage } from "../src/usage/token-usage.js";
 import { startFakeLlmUpstream, type FakeLlmUpstream } from "./fixtures/fake-llm-upstream.js";
 
@@ -98,6 +103,54 @@ describe("meterRequest", () => {
       body: { contents: [] },
       expectedBody: { contents: [] },
       expectedModel: "gemini-3-flash"
+    },
+    {
+      id: "azure-deployment-path-wins-over-the-body-model",
+      provider: "azure",
+      path: "/openai/deployments/gpt-prod/chat/completions",
+      body: { model: "made-up-by-the-sandbox" },
+      expectedBody: { model: "made-up-by-the-sandbox" },
+      expectedModel: "gpt-prod"
+    },
+    {
+      id: "vertex-path-wins-over-the-body-model",
+      provider: "vertex",
+      path: "/v1/projects/p/locations/l/publishers/google/models/gemini-3-pro:streamGenerateContent",
+      body: { model: "made-up-by-the-sandbox" },
+      expectedBody: { model: "made-up-by-the-sandbox" },
+      expectedModel: "gemini-3-pro"
+    },
+    {
+      id: "openrouter-body-model-with-a-slash-is-kept",
+      provider: "openrouter",
+      path: "/chat/completions",
+      body: { model: "anthropic/claude-x@2026:beta" },
+      expectedBody: { model: "anthropic/claude-x@2026:beta" },
+      expectedModel: "anthropic/claude-x@2026:beta"
+    },
+    {
+      id: "body-model-outside-the-label-charset-is-unknown",
+      provider: "openai",
+      path: "/chat/completions",
+      body: { model: "gpt-x\n<!-- -->" },
+      expectedBody: { model: "gpt-x\n<!-- -->" },
+      expectedModel: "unknown"
+    },
+    {
+      id: "body-model-over-128-characters-is-unknown",
+      provider: "openai",
+      path: "/chat/completions",
+      body: { model: "m".repeat(129) },
+      expectedBody: { model: "m".repeat(129) },
+      expectedModel: "unknown"
+    },
+    {
+      id: "body-model-that-is-not-a-string-is-unknown",
+      provider: "anthropic",
+      path: "/v1/messages",
+      body: { model: { name: "claude-x" } },
+      expectedBody: { model: { name: "claude-x" } },
+      expectedModel: "unknown"
     }
   ] as const)("$id", ({ provider, path, body, expectedBody, expectedModel }) => {
     const metered = meterRequest(provider, path, Buffer.from(JSON.stringify(body)), undefined);
@@ -160,6 +213,17 @@ describe("meterResponse", () => {
       contentType: "application/json",
       body: JSON.stringify({ type: "message", usage: { input_tokens: 7, output_tokens: 3 } }),
       expected: usage("anthropic", "m", 7, 0, 3, 0)
+    },
+    {
+      id: "later-null-counts-do-not-erase-earlier-ones",
+      provider: "anthropic",
+      contentType: "text/event-stream",
+      body: sse(
+        { type: "message_start", message: { usage: { input_tokens: 100, cache_read_input_tokens: 400, output_tokens: 1 } } },
+        { type: "message_delta", usage: { input_tokens: null, cache_read_input_tokens: null, output_tokens: 42, output_tokens_details: { thinking_tokens: null } } },
+        { type: "message_delta", usage: { output_tokens: 43, output_tokens_details: { thinking_tokens: 30 } } }
+      ),
+      expected: usage("anthropic", "m", 500, 400, 43, 30)
     },
     {
       id: "stream-without-usage-is-unavailable-not-zero",
@@ -283,6 +347,80 @@ describe("createLlmSandboxProxy usage", () => {
       }
     }
   );
+});
+
+describe("createLlmSandboxProxy request limits", () => {
+  const DEPTH = 50_000;
+
+  it.each([
+    { id: "deeply-nested-arrays", body: `{"model":"gpt-x","stream":true,"messages":${"[".repeat(DEPTH)}${"]".repeat(DEPTH)}}` },
+    { id: "deeply-nested-objects", body: `{"model":"gpt-x","stream":true,"messages":${'{"a":'.repeat(DEPTH)}1${"}".repeat(DEPTH)}}` }
+  ])("streamed chat body with $id gets a 400 and the proxy keeps serving", async ({ body }) => {
+    const upstream = await startFakeLlmUpstream((_req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end(OPENAI_CHAT_STREAM);
+    });
+    openUpstreams.push(upstream);
+    const proxy = await createLlmSandboxProxy({
+      upstream: resolveProviderUpstream("openai", { base_url: upstream.url }),
+      apiKey: REAL_KEY
+    });
+    const post = (requestBody: string) =>
+      fetch(`${proxy.proxyUrl}/chat/completions`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${proxy.proxyNonce}`, "content-type": "application/json" },
+        body: requestBody
+      });
+
+    try {
+      const rejected = await post(body);
+      const accepted = await post(JSON.stringify({ model: "gpt-x", stream: true }));
+
+      expect(rejected.status).toBe(400);
+      expect(((await rejected.json()) as { error_code: string }).error_code).toBe("PROXY_REQUEST_UNREADABLE");
+      expect(accepted.status).toBe(200);
+      expect(await accepted.text()).toBe(OPENAI_CHAT_STREAM);
+      expect(upstream.requests).toHaveLength(1);
+    } finally {
+      await proxy.close();
+    }
+  });
+
+  it("forwards at most MAX_PROXY_IN_FLIGHT_REQUESTS at once; later requests wait for a slot", async () => {
+    const held: ServerResponse[] = [];
+    const upstream = await startFakeLlmUpstream((_req, res) => {
+      held.push(res);
+    });
+    openUpstreams.push(upstream);
+    const proxy = await createLlmSandboxProxy({
+      upstream: resolveProviderUpstream("anthropic", { base_url: upstream.url }),
+      apiKey: REAL_KEY
+    });
+    const answer = (res: ServerResponse) => res.writeHead(200, { "content-type": "application/json" }).end("{}");
+
+    try {
+      const responses = Array.from({ length: MAX_PROXY_IN_FLIGHT_REQUESTS + 1 }, () =>
+        fetch(`${proxy.proxyUrl}/v1/messages`, {
+          method: "POST",
+          headers: { "x-api-key": proxy.proxyNonce },
+          body: JSON.stringify({ model: "claude-x" })
+        })
+      );
+      await vi.waitFor(() => expect(held).toHaveLength(MAX_PROXY_IN_FLIGHT_REQUESTS));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(held).toHaveLength(MAX_PROXY_IN_FLIGHT_REQUESTS);
+
+      answer(held[0]!);
+      await vi.waitFor(() => expect(held).toHaveLength(MAX_PROXY_IN_FLIGHT_REQUESTS + 1));
+      held.slice(1).forEach(answer);
+
+      expect((await Promise.all(responses)).map((res) => res.status)).toEqual(
+        Array(MAX_PROXY_IN_FLIGHT_REQUESTS + 1).fill(200)
+      );
+    } finally {
+      await proxy.close();
+    }
+  });
 });
 
 describe("runInUntrustedCodeSandbox usage", () => {
