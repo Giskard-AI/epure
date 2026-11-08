@@ -1,11 +1,11 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { GITHUB_ACTIONS_APP_ID } from "../src/auth/github-apps.js";
 import {
   applyGitHubRepositoryGovernance,
   buildGitHubRulesetApiPayload,
   buildGovernanceRulesets,
   CONVENTIONAL_COMMIT_PATTERN_REGEX,
-  GITHUB_ACTIONS_INTEGRATION_ID,
   planAndApplyRepoSetup,
   planGitHubRulesetChanges,
   type RepositoryRulesetSpec,
@@ -415,11 +415,11 @@ describe("EPURE v1.2.0 — Repository Rulesets, Multi-Agent Review Roster & Sema
       expect(rule?.parameters?.strict_required_status_checks_policy).toBe(false);
       expect(rule?.parameters?.do_not_enforce_on_create).toBe(true);
       expect(rule?.parameters?.required_status_checks.map((c) => c.context).sort()).toEqual([...reported].sort());
-      expect(new Set(rule?.parameters?.required_status_checks.map((c) => c.integration_id))).toEqual(new Set([GITHUB_ACTIONS_INTEGRATION_ID]));
+      expect(new Set(rule?.parameters?.required_status_checks.map((c) => c.integration_id))).toEqual(new Set([GITHUB_ACTIONS_APP_ID]));
     });
 
     const devSpec = buildGovernanceRulesets({ agentAppName: "a", releaseAppName: "r" }).devGovernance;
-    const pinnedDevChecks = (devSpec.requiredStatusChecks ?? []).map((context) => ({ context, integration_id: GITHUB_ACTIONS_INTEGRATION_ID }));
+    const pinnedDevChecks = (devSpec.requiredStatusChecks ?? []).map((context) => ({ context, integration_id: GITHUB_ACTIONS_APP_ID }));
     it.each([
       {
         id: "dev-ruleset-without-required-status-checks-from-the-previous-version-is-reported-as-update",

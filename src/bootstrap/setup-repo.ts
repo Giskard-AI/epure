@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { buildConsumerAppManifests } from "../auth/github-apps.js";
+import { buildConsumerAppManifests, GITHUB_ACTIONS_APP_ID } from "../auth/github-apps.js";
 import { EPURE_PUBLIC_VERSION } from "../contract/epure-contract.js";
 import {
   PROVIDER_EFFORTS,
@@ -1802,10 +1802,6 @@ const REQUIRED_CI_CHECKS = [
   "Zizmor"
 ] as const;
 
-// GitHub Actions' App id on github.com. Pinning a required check to it keeps a check run another App publishes
-// under the same name (EPURE's own "PR title") from satisfying the rule.
-export const GITHUB_ACTIONS_INTEGRATION_ID = 15368;
-
 export function buildGovernanceRulesets(params: {
   readonly agentAppName: string;
   readonly releaseAppName: string;
@@ -2458,7 +2454,8 @@ export function buildGitHubRulesetApiPayload(
         do_not_enforce_on_create: true,
         required_status_checks: spec.requiredStatusChecks.map((context) => ({
           context,
-          integration_id: GITHUB_ACTIONS_INTEGRATION_ID
+          // A check run another App publishes under the same name (EPURE's own "PR title") must not satisfy the rule.
+          integration_id: GITHUB_ACTIONS_APP_ID
         }))
       }
     });

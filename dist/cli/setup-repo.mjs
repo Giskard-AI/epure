@@ -8,6 +8,7 @@ import { existsSync as existsSync2, mkdirSync, readFileSync as readFileSync2, wr
 import { dirname, join as join2 } from "node:path";
 
 // src/auth/github-apps.ts
+var GITHUB_ACTIONS_APP_ID = 15368;
 function buildConsumerAppManifests(params) {
   const cleanOwner = params.ownerSlug.trim().toLowerCase().replace(/[^a-z0-9-]/g, "-");
   const agentApp = {
@@ -2859,7 +2860,6 @@ var REQUIRED_CI_CHECKS = [
   "Quality (Format, Lint, Typecheck, Test & Build)",
   "Zizmor"
 ];
-var GITHUB_ACTIONS_INTEGRATION_ID = 15368;
 function buildGovernanceRulesets(params) {
   const requiredChecks = REQUIRED_CI_CHECKS;
   const featureIntegrity = {
@@ -3396,7 +3396,8 @@ function buildGitHubRulesetApiPayload(spec, appIntegrationIds) {
         do_not_enforce_on_create: true,
         required_status_checks: spec.requiredStatusChecks.map((context) => ({
           context,
-          integration_id: GITHUB_ACTIONS_INTEGRATION_ID
+          // A check run another App publishes under the same name (EPURE's own "PR title") must not satisfy the rule.
+          integration_id: GITHUB_ACTIONS_APP_ID
         }))
       }
     });

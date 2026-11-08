@@ -8,8 +8,8 @@ import {
   mintRepositoryInstallationToken,
   revokeGitHubInstallationToken
 } from "../../src/auth/github-app-jwt.js";
+import { GITHUB_ACTIONS_APP_ID } from "../../src/auth/github-apps.js";
 import {
-  GITHUB_ACTIONS_INTEGRATION_ID,
   buildGitHubRulesetApiPayload,
   buildGovernanceRulesets,
   planGitHubRulesetChanges,
@@ -913,7 +913,7 @@ describeLive(
         expect({ before, updated: updated.status, after }).toEqual({ before: "update", updated: 200, after: "noop" });
         expect(stored.data.rules.find((r) => r.type === "required_status_checks")?.parameters).toMatchObject({
           strict_required_status_checks_policy: false,
-          required_status_checks: (spec.requiredStatusChecks ?? []).map((context) => ({ context, integration_id: GITHUB_ACTIONS_INTEGRATION_ID }))
+          required_status_checks: (spec.requiredStatusChecks ?? []).map((context) => ({ context, integration_id: GITHUB_ACTIONS_APP_ID }))
         });
       });
 
@@ -1176,6 +1176,7 @@ describeLive(
       it.for([
         { id: "dev-ruleset-refuses-a-squash-merge-while-the-required-check-is-red", ruleset: "devGovernance" as const, ciPasses: false, bypass: false, expectedMerge: 405 },
         { id: "dev-ruleset-lets-a-squash-merge-through-once-the-required-check-is-green", ruleset: "devGovernance" as const, ciPasses: true, bypass: false, expectedMerge: 200 },
+        { id: "feature-ruleset-refuses-a-squash-merge-without-bypass-while-the-required-check-is-red", ruleset: "featureGovernance" as const, ciPasses: false, bypass: false, expectedMerge: 405 },
         { id: "feature-ruleset-lets-the-agent-app-merge-a-task-pr-with-green-ci", ruleset: "featureGovernance" as const, ciPasses: true, bypass: true, expectedMerge: 200 }
       ])("$id", { timeout: RUN_TIMEOUT_MS + 60_000 }, async ({ ruleset, ciPasses, bypass, expectedMerge }, ctx) => {
         if (missingPermission) {

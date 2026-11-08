@@ -3,6 +3,7 @@ import {
   mintRepositoryInstallationToken,
   revokeGitHubInstallationToken
 } from "../auth/github-app-jwt.js";
+import { GITHUB_ACTIONS_APP_ID } from "../auth/github-apps.js";
 import { redactSecrets } from "../auth/issue-command-gate.js";
 import {
   discoverVerificationProfile,
@@ -131,7 +132,6 @@ import {
 } from "./types.js";
 import { resolveJobTimeoutMinutes } from "./job-timeout.js";
 import {
-  GITHUB_ACTIONS_APP_ID,
   parsePlanManifestFromComments,
   resolvePlanManifest,
   resolveSpecManifest,

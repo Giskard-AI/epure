@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { GITHUB_ACTIONS_APP_ID } from "../src/auth/github-apps.js";
 import { orchestrateIssueCommand } from "../src/orchestrator/issue-orchestrator.js";
 import {
-  GITHUB_ACTIONS_APP_ID,
   embedManifestJson,
   isSupersedableTicket,
   parsePlanManifestFromComments,
