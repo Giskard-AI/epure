@@ -436,6 +436,8 @@ export interface HarnessSettings {
   readonly install_ci_timeout_minutes: number;
   readonly poll_interval_ms: number;
   readonly stall_polls: number;
+  // Used instead of stall_polls while EPURE waits for ticket or feature CI.
+  readonly ci_wait_stall_polls: number;
 }
 
 export interface E2eRunResult {

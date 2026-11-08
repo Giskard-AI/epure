@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import {
   buildIssueStateRefName,
   createGitHubApiRefStateStore,
+  isWaitingSubphase,
   readRunLease,
   type EpureIssueState
 } from "../../src/state/git-ref-state.js";
@@ -47,6 +48,8 @@ const CI_WORKFLOW = ".github/workflows/ci.yml";
 const POLL_MS = 30_000;
 // Polls with nothing running and the plan still active before the harness calls it stalled.
 const STALL_POLLS = 6;
+// EPURE leaves a CI wait on GitHub's workflow_run event, which can arrive minutes after the CI run ended.
+const CI_WAIT_STALL_POLLS = 20;
 const INSTALL_CI_POLL_MS = 15_000;
 // The install commit's CI must have started by then.
 const INSTALL_CI_START_MS = 180_000;
@@ -85,6 +88,10 @@ export function stepDone(progress: StepProgress, state: Pick<EpureIssueState, "p
     return false;
   }
   return state.status === "awaiting_human_approval" || (state.phase !== "implementation" && state.phase !== "review");
+}
+
+export function stallPollsFor(state: Pick<EpureIssueState, "subphase"> | null): number {
+  return isWaitingSubphase(state?.subphase) ? CI_WAIT_STALL_POLLS : STALL_POLLS;
 }
 
 export function codeUnderTestProblems(input: {
@@ -265,7 +272,7 @@ async function drive(
       return state;
     }
     idlePolls = progress === "settled" ? idlePolls + 1 : 0;
-    if (idlePolls >= STALL_POLLS) {
+    if (idlePolls >= stallPollsFor(state)) {
       throw new Error(`EPURE stalled in ${state?.phase}/${state?.subphase ?? "idle"} with nothing running`);
     }
     if (Date.now() > deadline) {
@@ -552,7 +559,8 @@ export async function runSandboxEpic(
     implementation_timeout_minutes: config.implementationTimeoutMinutes,
     install_ci_timeout_minutes: config.installCiTimeoutMinutes,
     poll_interval_ms: POLL_MS,
-    stall_polls: STALL_POLLS
+    stall_polls: STALL_POLLS,
+    ci_wait_stall_polls: CI_WAIT_STALL_POLLS
   };
   const clock = new PhaseClock();
   let code = { epureSha: "", harnessCommit: "" };

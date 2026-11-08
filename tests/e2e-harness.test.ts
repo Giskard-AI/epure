@@ -10,6 +10,7 @@ import {
   installCiVerdict,
   lostComment,
   ranOnRunner,
+  stallPollsFor,
   stepDone,
   stepProgress,
   thinkingLevelFor,
@@ -995,6 +996,18 @@ describe("ranOnRunner", () => {
   });
 });
 
+describe("stallPollsFor", () => {
+  it.each<{ id: string; state: Pick<EpureIssueState, "subphase"> | null; expected: number }>([
+    { id: "waiting-for-ticket-ci-gets-the-long-window", state: { subphase: "waiting_ticket_ci" }, expected: 20 },
+    { id: "waiting-for-feature-ci-gets-the-long-window", state: { subphase: "waiting_feature_ci" }, expected: 20 },
+    { id: "idle-gets-the-short-window", state: { subphase: "idle" }, expected: 6 },
+    { id: "remediating-gets-the-short-window", state: { subphase: "remediating_feature" }, expected: 6 },
+    { id: "no-state-yet-gets-the-short-window", state: null, expected: 6 }
+  ])("$id", ({ state, expected }) => {
+    expect(stallPollsFor(state)).toBe(expected);
+  });
+});
+
 describe("collectEvidence", () => {
   const usage = `epure-llm-usage ${JSON.stringify({ provider: "google", model: "gemini-3.8-flash", input_tokens: 10, cached_input_tokens: 4, output_tokens: 6, thinking_tokens: 2 })}`;
   const json = (body: unknown) => new Response(JSON.stringify(body));
@@ -1189,7 +1202,8 @@ describe("renderMarkdownReport", () => {
         implementation_timeout_minutes: 240,
         install_ci_timeout_minutes: 20,
         poll_interval_ms: 30_000,
-        stall_polls: 6
+        stall_polls: 6,
+        ci_wait_stall_polls: 20
       },
       resume_policy: RESUME_POLICY,
       pricing: { source: "https://aistudio.google.com/docs/pricing, read 2026-11-08", table: {} },
