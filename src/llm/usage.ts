@@ -13,6 +13,15 @@ export interface LLMTokenUsage {
   readonly thinking_tokens: number;
 }
 
+// A successful response whose engine reported no usage: its tokens are unknown, never zero.
+export interface LLMUsageUnavailable {
+  readonly provider: ProviderKind;
+  readonly model: string;
+  readonly unavailable: true;
+}
+
+export type LLMRequestUsage = LLMTokenUsage | LLMUsageUnavailable;
+
 type Counts = Readonly<Record<string, unknown>>;
 
 function count(source: Counts | undefined, key: string): number {

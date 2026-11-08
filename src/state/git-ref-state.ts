@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { EpicGoalContract } from "../orchestrator/prompts/schemas.js";
 import type { TrackedTicketCommentMetadata } from "../orchestrator/types.js";
+import type { TokenUsageRecord } from "../usage/token-usage.js";
 
 export type IssueOrchestrationPhase =
   | "idle"
@@ -62,6 +63,8 @@ export interface EpureIssueState {
   // Source of truth for approve, continue and to-tickets: the manifest comments only display it.
   readonly plan_manifest?: PlanManifestRecord | undefined;
   readonly spec_manifest?: SpecManifestRecord | undefined;
+  // Running token totals, written with each update of the run that spent them; cost is computed at display time.
+  readonly token_usage?: TokenUsageRecord | undefined;
 }
 
 export interface PlanManifestRecord {
@@ -377,9 +380,9 @@ export function formatIssueStateMirrorMarkdown(state: EpureIssueState): string {
   ].join("\n");
 }
 
-/** The manifests stay out: they can exceed the comment size limit or contain `-->`. */
+/** The manifests and token usage stay out: they can exceed the comment size limit or contain `-->`. */
 export function formatIssueStateMarker(state: EpureIssueState): string {
-  const { plan_manifest: _plan, spec_manifest: _spec, ...summary } = state;
+  const { plan_manifest: _plan, spec_manifest: _spec, token_usage: _usage, ...summary } = state;
   return `<!-- epure-state:${JSON.stringify(summary)} -->`;
 }
 

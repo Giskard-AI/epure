@@ -2885,6 +2885,9 @@ Output ONLY a corrected, complete JSON object strictly matching the required sch
   );
 }
 
+// src/usage/token-usage.ts
+import { AsyncLocalStorage } from "node:async_hooks";
+
 // src/llm/usage.ts
 var LLM_USAGE_LOG_PREFIX = "epure-llm-usage";
 function count(source, key) {
@@ -2939,16 +2942,25 @@ function formatLLMUsageLogLine(usage) {
   return `${LLM_USAGE_LOG_PREFIX} ${JSON.stringify(usage)}`;
 }
 
+// src/usage/token-usage.ts
+var usageContext = new AsyncLocalStorage();
+function reportLLMUsage(usage) {
+  if (!("unavailable" in usage)) {
+    process.stdout.write(`${formatLLMUsageLogLine(usage)}
+`);
+  }
+  const context = usageContext.getStore();
+  context?.ledger.record(context.attribution, usage);
+}
+
 // src/llm/client.ts
 async function logTokenUsage(res, provider, model) {
+  let body;
   try {
-    const usage = extractLLMTokenUsage(provider, model, await res.clone().json());
-    if (usage) {
-      process.stdout.write(`${formatLLMUsageLogLine(usage)}
-`);
-    }
+    body = await res.clone().json();
   } catch {
   }
+  reportLLMUsage(extractLLMTokenUsage(provider, model, body) ?? { provider, model, unavailable: true });
 }
 function resolveConfigValue(val, env = process.env) {
   if (val === void 0) {
@@ -3516,7 +3528,7 @@ function formatIssueStateMirrorMarkdown(state) {
   ].join("\n");
 }
 function formatIssueStateMarker(state) {
-  const { plan_manifest: _plan, spec_manifest: _spec, ...summary } = state;
+  const { plan_manifest: _plan, spec_manifest: _spec, token_usage: _usage, ...summary } = state;
   return `<!-- epure-state:${JSON.stringify(summary)} -->`;
 }
 async function updateIssueStateWithCas(input) {

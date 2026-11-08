@@ -203,6 +203,10 @@ function resolveProviderUpstream(provider, providerConfig, env = process.env) {
   }
 }
 
+// src/usage/token-usage.ts
+import { AsyncLocalStorage } from "node:async_hooks";
+var usageContext = new AsyncLocalStorage();
+
 // src/llm/client.ts
 function resolveConfigValue(val, env = process.env) {
   if (val === void 0) {

@@ -97,6 +97,10 @@ var PROVIDER_EFFORTS = [
 var MODEL = String.raw`[\w.@-]+`;
 var GENERATE = String.raw`:(?:generateContent|streamGenerateContent)`;
 
+// src/usage/token-usage.ts
+import { AsyncLocalStorage } from "node:async_hooks";
+var usageContext = new AsyncLocalStorage();
+
 // src/orchestrator/github/rate-limit.ts
 var GITHUB_RATE_LIMIT_MAX_WAIT_MS = 5 * 60 * 1e3;
 var SECONDARY_RATE_LIMIT_DEFAULT_WAIT_MS = 60 * 1e3;
