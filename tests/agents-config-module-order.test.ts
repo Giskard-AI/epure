@@ -4,7 +4,10 @@ import {
   DEFAULT_AGENTS_CONFIG,
   parseAgentsYaml
 } from "../src/bootstrap/setup-repo.js";
-import { loadRepoAgentsConfig } from "../src/orchestrator/github/rest-client.js";
+import {
+  loadRepoAgentsConfig,
+  loadTrustedAgentsProviders
+} from "../src/orchestrator/github/rest-client.js";
 
 describe("agents.yml parsing when the orchestrator module graph loads first", () => {
   it.each([
@@ -36,5 +39,36 @@ describe("agents.yml parsing when the orchestrator module graph loads first", ()
     await expect(
       loadRepoAgentsConfig({ readSingleBranchFile: async (_b, path) => (path === ".github/agents.yml" ? yaml : null) }, "dev")
     ).rejects.toThrow("Invalid .github/agents.yml on 'dev'");
+  });
+
+  const PROVIDERS_YAML = [
+    "providers:",
+    "  corp-gateway:",
+    "    provider: openai",
+    "    base_url: https://llm.corp.example/v1",
+    "    api_key: os.environ/CORP_GATEWAY_API_KEY",
+    ""
+  ].join("\n");
+  it.each([
+    { id: "read-from-dev", files: { dev: PROVIDERS_YAML }, expectedAlias: "corp-gateway" },
+    { id: "falls-back-to-main-when-dev-has-none", files: { main: PROVIDERS_YAML }, expectedAlias: "corp-gateway" },
+    { id: "no-agents-yml-on-either-branch", files: {}, expectedAlias: undefined }
+  ])("[$id] loadTrustedAgentsProviders reads providers from the protected branches", async ({ files, expectedAlias }) => {
+    const branchFiles: Record<string, string> = files;
+    const providers = await loadTrustedAgentsProviders({
+      readSingleBranchFile: async (branch, path) =>
+        path === ".github/agents.yml" ? (branchFiles[branch] ?? null) : null
+    });
+
+    expect(providers ? Object.keys(providers) : undefined).toEqual(
+      expectedAlias ? [expectedAlias] : undefined
+    );
+    if (expectedAlias) {
+      expect(providers?.[expectedAlias]).toMatchObject({
+        provider: "openai",
+        base_url: "https://llm.corp.example/v1",
+        api_key: "os.environ/CORP_GATEWAY_API_KEY"
+      });
+    }
   });
 });

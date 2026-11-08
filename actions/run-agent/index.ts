@@ -1,5 +1,9 @@
 import { appendFileSync } from "node:fs";
 import { runTicketWithHarness } from "../../src/harness/agent-harness.js";
+import {
+  createGitHubRestHelper,
+  loadTrustedAgentsProviders
+} from "../../src/orchestrator/github/rest-client.js";
 
 function writeActionOutputs(outputs: Record<string, string>): void {
   const outputPath = process.env.GITHUB_OUTPUT;
@@ -36,9 +40,16 @@ async function main(): Promise<void> {
     changedFiles = ["src/index.ts"];
   }
 
+  const githubToken = (process.env.INPUT_GITHUB_TOKEN ?? "").trim();
+  const providers =
+    githubToken && repository
+      ? await loadTrustedAgentsProviders(createGitHubRestHelper({ repository, token: githubToken }))
+      : undefined;
+
   const result = await runTicketWithHarness({
     harness,
     model: process.env.INPUT_MODEL ?? "",
+    providers,
     repository,
     repositoryId,
     planIssueNumber,

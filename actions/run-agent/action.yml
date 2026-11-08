@@ -12,6 +12,10 @@ inputs:
   repository:
     description: "Target repository '<owner>/<repo>'"
     required: true
+  github_token:
+    description: "Token that reads .github/agents.yml from dev (else main) for provider aliases; never exposed to the sandbox"
+    required: false
+    default: "${{ github.token }}"
   repository_id:
     description: "Numeric GitHub repository ID"
     required: true

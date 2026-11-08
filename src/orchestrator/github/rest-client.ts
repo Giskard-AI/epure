@@ -1526,6 +1526,15 @@ export async function loadRepoAgentsConfig(
   }
 }
 
+// Read from dev (else main) through the API, never from a checkout an agent may have modified.
+export async function loadTrustedAgentsProviders(
+  gh: Pick<GitHubRestHelper, "readSingleBranchFile">
+): Promise<ReturnType<typeof parseAgentsYaml>["providers"]> {
+  const config =
+    (await loadRepoAgentsConfig(gh, "dev")) ?? (await loadRepoAgentsConfig(gh, "main"));
+  return config?.providers;
+}
+
 export async function loadOrchestratorStateFromGitRef(
   store: GitRefStateStore,
   issueNumber: number
