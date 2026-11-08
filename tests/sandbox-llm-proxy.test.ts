@@ -187,6 +187,67 @@ describe("Sandbox LLM proxy & untrusted code credential isolation (#98)", () => 
     }
   );
 
+  it.each([
+    { id: "no-llm-route-runs-offline", llm: undefined, expectedPolicy: "offline" },
+    { id: "llm-route-runs-proxy-only", llm: { model: "openai/gpt-5.4" }, expectedPolicy: "proxy_only" }
+  ])(
+    "runInUntrustedCodeSandbox [$id]: picks the network policy and reports an unconfined fallback",
+    async ({ llm, expectedPolicy }) => {
+      const result = await runInUntrustedCodeSandbox({
+        isolationAvailable: true,
+        runnerEnv: RUNNER_SECRETS_ENV,
+        kernelCapabilities: { landrunAvailable: false, bubblewrapAvailable: false },
+        command: process.execPath,
+        args: ["-e", "0"],
+        llm
+      });
+
+      expect(result.error_code).toBe("NONE");
+      expect(result.network_policy).toBe(expectedPolicy);
+      expect(result.kernel_backend).toBe("none");
+      expect(result.confined).toBe(false);
+    }
+  );
+
+  const isAlive = (pid: number): boolean => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  it.each([
+    {
+      id: "a-background-process-left-by-the-phase-dies-with-it",
+      script:
+        "const c = require('node:child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'inherit' }); c.unref(); console.log(c.pid);",
+      timeoutMs: 20_000,
+      expectedExitCode: 0
+    },
+    {
+      id: "a-timeout-kills-the-whole-group",
+      script:
+        "const c = require('node:child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'inherit' }); console.log(c.pid); setTimeout(() => {}, 30000);",
+      timeoutMs: 1_000,
+      expectedExitCode: 1
+    }
+  ])("runInUntrustedCodeSandbox [$id]", async ({ script, timeoutMs, expectedExitCode }) => {
+    const started = Date.now();
+    const result = await runInUntrustedCodeSandbox({
+      isolationAvailable: true,
+      runnerEnv: { PATH: process.env.PATH },
+      kernelCapabilities: { landrunAvailable: false, bubblewrapAvailable: false },
+      command: process.execPath,
+      args: ["-e", script],
+      timeoutMs
+    });
+
+    expect(Date.now() - started).toBeLessThan(15_000);
+    expect(result.exit_code).toBe(expectedExitCode);
+    expect(isAlive(Number(result.stdout.trim()))).toBe(false);
+  });
+
   const RUNNER_KEYS = {
     PATH: "/usr/bin",
     OPENAI_API_KEY: REAL_KEY,

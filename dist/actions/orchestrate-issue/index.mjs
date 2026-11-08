@@ -8010,7 +8010,7 @@ function parsePortFromProxyUrl(proxyUrl) {
 }
 async function runInUntrustedCodeSandbox(input) {
   const startMs = Date.now();
-  const networkPolicy = input.networkPolicy ?? "proxy_only";
+  const networkPolicy = input.networkPolicy ?? (input.llm ? "proxy_only" : "offline");
   if (!input.isolationAvailable) {
     return {
       isolated: false,
@@ -8110,6 +8110,7 @@ async function runInUntrustedCodeSandbox(input) {
           duration_ms: Date.now() - startMs,
           proxy_url: "",
           kernel_backend: selectKernelBackend("https_only", capabilities),
+          confined: selectKernelBackend("https_only", capabilities) !== "none",
           network_policy: "https_only"
         };
       }
@@ -8132,6 +8133,7 @@ async function runInUntrustedCodeSandbox(input) {
       duration_ms: Date.now() - startMs,
       proxy_url: proxy?.proxyUrl ?? "",
       kernel_backend: selectKernelBackend(networkPolicy, capabilities),
+      confined: selectKernelBackend(networkPolicy, capabilities) !== "none",
       network_policy: networkPolicy
     };
   } finally {
@@ -8152,13 +8154,21 @@ function spawnCaptured(command, args, cwd, env, timeoutMs) {
     const child = spawn(command, [...args], {
       cwd,
       env,
-      stdio: ["ignore", "pipe", "pipe"]
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: true
     });
+    const killGroup = () => {
+      if (child.pid !== void 0) {
+        try {
+          process.kill(-child.pid, "SIGKILL");
+        } catch {
+        }
+      }
+    };
     const stdoutChunks = [];
     const stderrChunks = [];
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-    }, timeoutMs);
+    const timer = setTimeout(killGroup, timeoutMs);
+    child.on("exit", killGroup);
     child.stdout.on("data", (chunk) => stdoutChunks.push(chunk));
     child.stderr.on("data", (chunk) => stderrChunks.push(chunk));
     child.on("error", (err) => {

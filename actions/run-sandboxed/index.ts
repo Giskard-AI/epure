@@ -57,6 +57,7 @@ async function main(): Promise<void> {
 
   writeActionOutputs({
     isolated: String(result.isolated),
+    confined: String(result.confined === true),
     error_code: result.error_code,
     exit_code: String(result.exit_code),
     stdout: result.stdout,

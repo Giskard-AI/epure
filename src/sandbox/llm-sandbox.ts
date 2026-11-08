@@ -138,6 +138,8 @@ export interface SandboxExecutionResult {
   readonly duration_ms: number;
   readonly proxy_url: string;
   readonly kernel_backend?: KernelSandboxBackend | undefined;
+  // false when the command ran without any kernel backend (local fallback outside CI).
+  readonly confined?: boolean | undefined;
   readonly network_policy?: SandboxNetworkPolicy | undefined;
 }
 
@@ -844,7 +846,8 @@ export async function runInUntrustedCodeSandbox(
   input: SandboxExecutionInput
 ): Promise<SandboxExecutionResult> {
   const startMs = Date.now();
-  const networkPolicy: SandboxNetworkPolicy = input.networkPolicy ?? "proxy_only";
+  const networkPolicy: SandboxNetworkPolicy =
+    input.networkPolicy ?? (input.llm ? "proxy_only" : "offline");
 
   if (!input.isolationAvailable) {
     return {
@@ -967,6 +970,7 @@ export async function runInUntrustedCodeSandbox(
           duration_ms: Date.now() - startMs,
           proxy_url: "",
           kernel_backend: selectKernelBackend("https_only", capabilities),
+          confined: selectKernelBackend("https_only", capabilities) !== "none",
           network_policy: "https_only"
         };
       }
@@ -995,6 +999,7 @@ export async function runInUntrustedCodeSandbox(
       duration_ms: Date.now() - startMs,
       proxy_url: proxy?.proxyUrl ?? "",
       kernel_backend: selectKernelBackend(networkPolicy, capabilities),
+      confined: selectKernelBackend(networkPolicy, capabilities) !== "none",
       network_policy: networkPolicy
     };
   } finally {
@@ -1028,18 +1033,28 @@ function spawnCaptured(
   timeoutMs: number
 ): Promise<SpawnedOutput> {
   return new Promise((resolvePromise) => {
+    // Own process group, so a phase's background processes die with it instead of outliving it.
     const child = spawn(command, [...args], {
       cwd,
       env,
-      stdio: ["ignore", "pipe", "pipe"]
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: true
     });
+    const killGroup = (): void => {
+      if (child.pid !== undefined) {
+        try {
+          process.kill(-child.pid, "SIGKILL");
+        } catch {
+          // the group is already gone
+        }
+      }
+    };
 
     const stdoutChunks: Buffer[] = [];
     const stderrChunks: Buffer[] = [];
 
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-    }, timeoutMs);
+    const timer = setTimeout(killGroup, timeoutMs);
+    child.on("exit", killGroup);
 
     child.stdout.on("data", (chunk: Buffer) => stdoutChunks.push(chunk));
     child.stderr.on("data", (chunk: Buffer) => stderrChunks.push(chunk));

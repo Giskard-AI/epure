@@ -28,6 +28,8 @@ inputs:
 outputs:
   isolated:
     description: "true when sandbox isolation and secret stripping succeeded"
+  confined:
+    description: "true when a kernel backend (bubblewrap, landrun) confined the command; false for the unconfined local fallback"
   error_code:
     description: "NONE or structured error code (e.g., SANDBOX_ISOLATION_UNAVAILABLE)"
   exit_code:
