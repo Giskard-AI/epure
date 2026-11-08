@@ -2911,6 +2911,7 @@ function buildGovernanceRulesets(params) {
     target: "branch",
     enforcement: "active",
     targetRefs: ["refs/heads/main"],
+    blockUpdates: true,
     blockDirectPushes: true,
     blockForcePushes: true,
     blockDeletions: true,

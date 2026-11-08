@@ -1863,11 +1863,13 @@ export function buildGovernanceRulesets(params: {
     bypassActors: []
   };
 
+  // `update` also refuses PR merges: only the Release App bypass moves main.
   const releaseImmutability: RepositoryRulesetSpec = {
     name: "epure-release-immutability",
     target: "branch",
     enforcement: "active",
     targetRefs: ["refs/heads/main"],
+    blockUpdates: true,
     blockDirectPushes: true,
     blockForcePushes: true,
     blockDeletions: true,

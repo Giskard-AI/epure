@@ -4,7 +4,9 @@ import {
   buildGitHubRulesetApiPayload,
   buildGovernanceRulesets,
   CONVENTIONAL_COMMIT_PATTERN_REGEX,
-  planGitHubRulesetChanges
+  planGitHubRulesetChanges,
+  type RepositoryRulesetSpec,
+  type ResourcePlanAction
 } from "../src/bootstrap/setup-repo.js";
 import { verifyPublisherMergeBoundary } from "../src/orchestrator/issue-orchestrator.js";
 import { validateAgentProposal } from "../src/publisher/isolated-publisher.js";
@@ -175,10 +177,10 @@ describe("EPURE v1.2.0 — Repository Rulesets, Multi-Agent Review Roster & Sema
         expectedBypass: []
       },
       {
-        id: "main-ruleset-blocks-direct-push-force-push-and-deletion-except-for-the-release-app",
+        id: "main-ruleset-blocks-updates-pr-merges-direct-push-force-push-and-deletion-except-for-the-release-app",
         ruleset: "epure-release-immutability",
         expectedTarget: "branch",
-        expectedRules: ["deletion", "non_fast_forward", "pull_request"],
+        expectedRules: ["update", "deletion", "non_fast_forward", "pull_request"],
         expectedBypass: [{ actor_id: 2888449, actor_type: "Integration", bypass_mode: "always" }]
       },
       {
@@ -299,7 +301,11 @@ describe("EPURE v1.2.0 — Repository Rulesets, Multi-Agent Review Roster & Sema
       expect(new Set(methods)).toEqual(new Set(["GET"]));
     });
 
-    it.each([
+    it.each<{
+      id: string;
+      remote: Record<string, Partial<Pick<RepositoryRulesetSpec, "target" | "targetRefs" | "blockUpdates">>>;
+      expected: Record<string, ResourcePlanAction>;
+    }>([
       {
         id: "release-rulesets-generated-by-this-version-are-noop",
         remote: { "epure-release-immutability": {}, "epure-release-tags": {} },
@@ -307,27 +313,29 @@ describe("EPURE v1.2.0 — Repository Rulesets, Multi-Agent Review Roster & Sema
       },
       {
         id: "previous-main-and-tags-release-ruleset-is-updated-to-main-only-and-the-tag-ruleset-is-created",
-        remote: { "epure-release-immutability": { include: ["refs/heads/main", "refs/tags/v*"] } },
+        remote: { "epure-release-immutability": { targetRefs: ["refs/heads/main", "refs/tags/v*"], blockUpdates: false } },
         expected: { "epure-release-immutability": "update", "epure-release-tags": "create" }
       },
       {
+        id: "main-ruleset-without-the-update-rule-letting-any-writer-merge-into-main-is-reported-as-update",
+        remote: { "epure-release-immutability": { blockUpdates: false }, "epure-release-tags": {} },
+        expected: { "epure-release-immutability": "update", "epure-release-tags": "noop" }
+      },
+      {
         id: "tag-ruleset-stored-with-a-branch-target-is-reported-as-update",
-        remote: { "epure-release-immutability": {}, "epure-release-tags": { target: "branch" as const } },
+        remote: { "epure-release-immutability": {}, "epure-release-tags": { target: "branch" } },
         expected: { "epure-release-immutability": "noop", "epure-release-tags": "update" }
       }
     ])("$id", async ({ remote, expected }) => {
       const bundle = buildGovernanceRulesets({ agentAppName: "a", releaseAppName: "r" });
       const specs = [bundle.releaseImmutability, bundle.releaseTags];
-      const overrides: Record<string, { include?: string[]; target?: "branch" | "tag" }> = remote;
-      const responses: Record<string, unknown> = { "/rulesets": [] };
+      const listed: Array<{ id: number; name: string }> = [];
+      const responses: Record<string, unknown> = { "/rulesets": listed };
       specs.forEach((spec, i) => {
-        const override = overrides[spec.name];
+        const override = remote[spec.name];
         if (override) {
-          (responses["/rulesets"] as unknown[]).push({ id: i + 1, name: spec.name });
-          responses[`/rulesets/${i + 1}`] = buildGitHubRulesetApiPayload(
-            { ...spec, target: override.target ?? spec.target, targetRefs: override.include ?? spec.targetRefs },
-            { releaseAppIntegrationId: 2888449 }
-          );
+          listed.push({ id: i + 1, name: spec.name });
+          responses[`/rulesets/${i + 1}`] = buildGitHubRulesetApiPayload({ ...spec, ...override }, { releaseAppIntegrationId: 2888449 });
         }
       });
       const mockFetch: typeof fetch = async (input) => {

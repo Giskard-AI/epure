@@ -1,7 +1,8 @@
+import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   mintRepositoryInstallationToken,
@@ -923,6 +924,95 @@ describeLive(
         const remove = await api("DELETE", `${R}/git/${tagPrefix}/v1.0.0`);
 
         expect({ create: create.status, move: move.status, remove: remove.status }).toEqual(expected);
+      });
+
+      // Replays the push of release-promote.yml: annotated tag, then one `git push --atomic` of main and the tag,
+      // the token passed to git through the process environment only.
+      function atomicReleasePush(auth: string, sha: string, mainRef: string, tagRef: string): boolean {
+        const dir = mkdtempSync(join(tmpdir(), "epure-live-release-"));
+        const basicAuth = Buffer.from(`x-access-token:${auth}`).toString("base64");
+        const env = {
+          ...process.env,
+          GIT_CONFIG_COUNT: "1",
+          GIT_CONFIG_KEY_0: "http.https://github.com/.extraheader",
+          GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${basicAuth}`,
+          GIT_COMMITTER_NAME: "epure-live",
+          GIT_COMMITTER_EMAIL: "epure-live@users.noreply.github.com"
+        };
+        const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, env, stdio: "pipe" });
+        const remote = `https://github.com/${cfg.repository}.git`;
+        try {
+          git("init", "-q");
+          // Depth 2 brings the current main (the parent): without it git refuses the fast-forward client-side.
+          git("fetch", "-q", "--depth=2", remote, sha);
+          git("tag", "-a", tagRef.replace("refs/tags/", ""), sha, "-m", `test(${NS}): release`);
+          try {
+            git("push", "-q", "--atomic", remote, `${sha}:${mainRef}`, `${tagRef}:${tagRef}`);
+            return true;
+          } catch (error) {
+            console.warn(`[live-github] atomic release push refused: ${String((error as { stderr?: Buffer }).stderr ?? "").trim()}`);
+            return false;
+          }
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      }
+
+      // The sandbox App plays both roles: a writer that is not a bypass actor, and the bypassing Release App.
+      it.each([
+        {
+          id: "previous-main-ruleset-without-update-rule-lets-a-non-bypass-writer-merge-a-pr-into-main",
+          blockUpdates: false,
+          bypass: false,
+          via: "pr-merge",
+          expected: { accepted: true, mainMoved: true, tagCreated: false }
+        },
+        {
+          id: "main-ruleset-refuses-a-pr-merge-into-main-by-a-non-bypass-writer",
+          blockUpdates: true,
+          bypass: false,
+          via: "pr-merge",
+          expected: { accepted: false, mainMoved: false, tagCreated: false }
+        },
+        {
+          id: "main-and-tag-rulesets-refuse-the-atomic-release-push-of-a-non-bypass-writer-and-move-neither-ref",
+          blockUpdates: true,
+          bypass: false,
+          via: "atomic-push",
+          expected: { accepted: false, mainMoved: false, tagCreated: false }
+        },
+        {
+          id: "release-app-bypass-fast-forwards-main-and-pushes-the-v-tag-in-one-atomic-push",
+          blockUpdates: true,
+          bypass: true,
+          via: "atomic-push",
+          expected: { accepted: true, mainMoved: true, tagCreated: true }
+        }
+      ] as const)("$id", async ({ blockUpdates, bypass, via, expected }) => {
+        const slug = `main-${blockUpdates ? "locked" : "open"}-${bypass ? "bypass" : "writer"}-${via}`;
+        const main = await createBranch(`${slug}/main`, baseSha);
+        const next = await commitOnTop([baseSha], `${NS}/${slug}.txt`, "release candidate\n");
+        const dev = await createBranch(`${slug}/dev`, next);
+        const mainRef = `refs/heads/${main}`;
+        const tagRef = `refs/tags/${NS}/${slug}/v1.0.0`;
+        const releaseApp = bypass ? { releaseAppIntegrationId: Number(cfg.appId) } : {};
+        const immutability = { ...scopeToRun(generated.releaseImmutability, slug), targetRefs: [mainRef], blockUpdates };
+        const tags = { ...scopeToRun(generated.releaseTags, slug), targetRefs: [`refs/tags/${NS}/${slug}/v*`] };
+        expect((await createRuleset(tags, releaseApp)).status).toBe(201);
+        expect((await createRuleset(immutability, releaseApp)).status).toBe(201);
+
+        let accepted: boolean;
+        if (via === "pr-merge") {
+          const pr = await api<{ number: number }>("POST", `${R}/pulls`, { title: `test(${NS}): promote`, head: dev, base: main });
+          expect(pr.status).toBe(201);
+          accepted = (await api("PUT", `${R}/pulls/${pr.data.number}/merge`, { merge_method: "squash" })).status === 200;
+        } else {
+          accepted = atomicReleasePush(token, next, mainRef, tagRef);
+        }
+        const mainSha = (await api<{ object: { sha: string } }>("GET", `${R}/git/${mainRef}`)).data.object.sha;
+        const tag = await api("GET", `${R}/git/${tagRef}`);
+
+        expect({ accepted, mainMoved: mainSha !== baseSha, tagCreated: tag.status === 200 }).toEqual(expected);
       });
     });
 

@@ -126,7 +126,7 @@ git push origin dev
      - `epure-feature-integrity` (`refs/heads/feature/*`): blocks deletion and force-push with no bypass actor, so not even the `Agent App` can rewrite or delete a feature branch. Consequence: merged `feature/*` branches stay on GitHub. `delete_branch_on_merge` cannot remove them and neither can an admin; to prune them, temporarily disable this ruleset (Settings → Rules → Rulesets), delete the merged branches, then re-enable it.
      - `epure-feature-governance` (`refs/heads/feature/*`): `Agent App` in `always` bypass for autonomous `task/* -> feature/*` squash-merges once checks pass and for EPURE's direct writes (plan integration, `dev` merge syncs, conflict resolutions); humans still go through PRs.
      - `epure-dev-governance` (`refs/heads/dev`): No `Agent App` bypass (`required_approving_review_count: 0` by default for solo-maintainer compatibility; configurable via `--require-pr-approvals <N>`).
-     - `epure-release-immutability` (`refs/heads/main`): no direct push, force-push or deletion; `Release App` as sole Bypass Actor.
+     - `epure-release-immutability` (`refs/heads/main`): no update (PR merges included), direct push, force-push or deletion; `Release App` as sole Bypass Actor, so only a release moves `main`. An urgent manual hotfix on `main` requires an admin to disable this ruleset temporarily.
      - `epure-release-tags` (`refs/tags/v*`, a tag ruleset): no creation, move or deletion of `v*` tags; `Release App` as sole Bypass Actor.
 
 ## Fail-Closed Trade-Offs
