@@ -441,7 +441,7 @@ async function installEpure(
   }
 }
 
-export interface RunEvidence {
+interface RunEvidence {
   readonly usage: ReadonlyArray<UsageLine & { readonly run_id: number; readonly job_id: number }>;
   readonly jobs: readonly ActionsJob[];
   readonly unavailableJobLogs: readonly number[];
@@ -450,15 +450,16 @@ export interface RunEvidence {
 
 export interface WorkflowJob {
   readonly id: number;
+  readonly status: string;
   readonly conclusion: string | null;
   readonly runner_name: string | null;
   readonly started_at: string | null;
   readonly completed_at: string | null;
 }
 
-// GitHub stamps skipped jobs with start and end times but gives them no runner, no log and no bill.
+// Only a job a runner picked up has a log and a bill: GitHub stamps skipped jobs with start and end times but no runner.
 export function ranOnRunner(job: WorkflowJob): boolean {
-  return job.conclusion !== "skipped" && Boolean(job.runner_name);
+  return Boolean(job.runner_name);
 }
 
 export async function collectEvidence(run: Pick<Run, "gh" | "startedAt">): Promise<RunEvidence> {
@@ -468,15 +469,17 @@ export async function collectEvidence(run: Pick<Run, "gh" | "startedAt">): Promi
   const jobs: ActionsJob[] = [];
   const unavailableJobLogs: number[] = [];
   for (const wr of runs) {
+    // filter=all: the jobs of every attempt, so a re-run job is counted and billed too.
     const ran = (
-      await run.gh.paginate<WorkflowJob>(`${R}/actions/runs/${wr.id}/jobs`, (page) => (page as { jobs: WorkflowJob[] }).jobs)
+      await run.gh.paginate<WorkflowJob>(`${R}/actions/runs/${wr.id}/jobs?filter=all`, (page) => (page as { jobs: WorkflowJob[] }).jobs)
     ).filter(ranOnRunner);
     jobs.push(...ran.map((j) => ({ workflow: wr.path, started_at: j.started_at, completed_at: j.completed_at })));
     if (wr.path !== ISSUE_COMMAND_WORKFLOW) {
       continue;
     }
     for (const job of ran) {
-      const log = await run.gh.text(`${R}/actions/jobs/${job.id}/logs`);
+      // One unreadable log loses that job's usage, not the evidence of the whole run.
+      const log = job.status === "completed" ? await run.gh.text(`${R}/actions/jobs/${job.id}/logs`).catch(() => null) : null;
       if (log === null) {
         unavailableJobLogs.push(job.id);
         continue;

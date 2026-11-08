@@ -4,7 +4,17 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createInitialIssueState, type EpureIssueState } from "../src/state/git-ref-state.js";
 import { assertE2eSandboxRepository, loadE2eConfig, resolveGitHubToken } from "./e2e/config.js";
-import { codeUnderTestProblems, installCiVerdict, lostComment, ranOnRunner, stepDone, stepProgress, thinkingLevelFor } from "./e2e/driver.js";
+import {
+  codeUnderTestProblems,
+  collectEvidence,
+  installCiVerdict,
+  lostComment,
+  ranOnRunner,
+  stepDone,
+  stepProgress,
+  thinkingLevelFor,
+  type WorkflowJob
+} from "./e2e/driver.js";
 import { classifyEscalation, GATE_CODE_CLASS, RECORDED_REASON_CLASS } from "./e2e/escalations.js";
 import { createGitHubApi, createOnce, GitHubOutcomeUnknownError } from "./e2e/github.js";
 import {
@@ -965,22 +975,63 @@ describe("hostClock", () => {
   });
 });
 
-describe("ranOnRunner", () => {
-  const job = (conclusion: string | null, runner: string | null) => ({
-    id: 1,
-    conclusion,
-    runner_name: runner,
-    started_at: "2026-11-08T11:06:15Z",
-    completed_at: "2026-11-08T11:06:15Z"
-  });
+const workflowJob = (id: number, status: string, conclusion: string | null, runner: string | null): WorkflowJob => ({
+  id,
+  status,
+  conclusion,
+  runner_name: runner,
+  started_at: "2026-11-08T11:06:15Z",
+  completed_at: status === "completed" ? "2026-11-08T11:08:15Z" : null
+});
 
-  it.each([
-    { id: "skipped-job-stamped-with-times-has-no-log", job: job("skipped", null), expected: false },
-    { id: "successful-job-on-a-runner", job: job("success", "GitHub Actions 1000117064"), expected: true },
-    { id: "failed-job-on-a-runner", job: job("failure", "GitHub Actions 1000117064"), expected: true },
-    { id: "job-cancelled-before-a-runner-picked-it", job: job("cancelled", null), expected: false }
-  ])("$id", ({ job: j, expected }) => {
-    expect(ranOnRunner(j)).toBe(expected);
+describe("ranOnRunner", () => {
+  it.each<{ id: string; job: WorkflowJob; expected: boolean }>([
+    { id: "skipped-job-stamped-with-times-has-no-log", job: workflowJob(1, "completed", "skipped", null), expected: false },
+    { id: "successful-job-on-a-runner", job: workflowJob(1, "completed", "success", "GitHub Actions 1000117064"), expected: true },
+    { id: "failed-job-on-a-runner", job: workflowJob(1, "completed", "failure", "GitHub Actions 1000117064"), expected: true },
+    { id: "job-cancelled-before-a-runner-picked-it", job: workflowJob(1, "completed", "cancelled", null), expected: false }
+  ])("$id", ({ job, expected }) => {
+    expect(ranOnRunner(job)).toBe(expected);
+  });
+});
+
+describe("collectEvidence", () => {
+  const usage = `epure-llm-usage ${JSON.stringify({ provider: "google", model: "gemini-3.8-flash", input_tokens: 10, cached_input_tokens: 4, output_tokens: 6, thinking_tokens: 2 })}`;
+  const json = (body: unknown) => new Response(JSON.stringify(body));
+
+  it("lists every attempt's jobs, reads completed jobs' logs and records each unreadable log", async () => {
+    const jobUrls: string[] = [];
+    const fetchImpl = (async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes("/actions/runs?")) {
+        return json({ workflow_runs: [{ id: 7, path: ".github/workflows/epure-issue-command.yml", status: "completed", conclusion: "success", html_url: "", head_branch: "main" }] });
+      }
+      if (url.includes("/actions/runs/7/jobs")) {
+        jobUrls.push(url);
+        return json({
+          jobs: [
+            workflowJob(1, "completed", "success", "runner 1"),
+            workflowJob(2, "completed", "success", "runner 2"),
+            workflowJob(3, "in_progress", null, "runner 3"),
+            workflowJob(4, "completed", "skipped", null)
+          ]
+        });
+      }
+      if (url.endsWith("/actions/jobs/1/logs")) {
+        return new Response(`2026-11-08T11:07:00.0000000Z ${usage}\n`);
+      }
+      return new Response("", { status: 403 });
+    }) as typeof fetch;
+    const gh = createGitHubApi("t", "o/sandbox", { fetchImpl, sleep: async () => undefined });
+
+    const evidence = await collectEvidence({ gh, startedAt: "2026-11-08T11:00:00.000Z" });
+
+    expect({
+      jobUrls: jobUrls.map((u) => new URL(u).searchParams.get("filter")),
+      usageJobs: evidence.usage.map((u) => u.job_id),
+      unavailable: evidence.unavailableJobLogs,
+      billedJobs: evidence.jobs.length
+    }).toEqual({ jobUrls: ["all"], usageJobs: [1], unavailable: [2, 3], billedJobs: 3 });
   });
 });
 
