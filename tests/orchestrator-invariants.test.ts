@@ -928,9 +928,9 @@ describe("Token usage is written with the run's existing state updates (#125)", 
   const PRICING_YAML = [
     "pricing:",
     "  openai/gpt-test:",
-    "    inputPerMTok: 2",
-    "    cachedInputPerMTok: 0.5",
-    "    outputPerMTok: 8",
+    "    input_per_mtok: 2",
+    "    cached_input_per_mtok: 0.5",
+    "    output_per_mtok: 8",
     "    source: https://example.test/pricing",
     "    read_on: 2026-11-08",
     ""

@@ -19,9 +19,9 @@ const tokens = (input: number, cached: number, output: number, thinking = 0, req
 });
 
 const PRICE: ModelPricing = {
-  inputPerMTok: 2,
-  cachedInputPerMTok: 0.5,
-  outputPerMTok: 8,
+  input_per_mtok: 2,
+  cached_input_per_mtok: 0.5,
+  output_per_mtok: 8,
   source: "https://example.test/pricing",
   read_on: "2026-11-08"
 };
@@ -33,7 +33,7 @@ describe("costUsd", () => {
     {
       id: "cached-input-bills-at-the-input-price-without-a-cached-price",
       counts: tokens(1_000_000, 400_000, 0),
-      price: { ...PRICE, cachedInputPerMTok: undefined },
+      price: { ...PRICE, cached_input_per_mtok: undefined },
       expected: 2
     },
     { id: "thinking-tokens-inside-output-bill-as-output", counts: tokens(0, 0, 500_000, 400_000), price: PRICE, expected: 4 }

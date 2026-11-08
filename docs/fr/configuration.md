@@ -156,9 +156,9 @@ EPURE relève dans `refs/epure/state/<issue>` les jetons consommés par l'epic e
 ```yaml
 pricing:
   google/gemini-3.8-flash:
-    inputPerMTok: 0.75
-    cachedInputPerMTok: 0.075
-    outputPerMTok: 3.75
+    input_per_mtok: 0.75
+    cached_input_per_mtok: 0.075
+    output_per_mtok: 3.75
     source: https://ai.google.dev/gemini-api/docs/pricing
     read_on: 2026-11-08
 ```
@@ -166,13 +166,13 @@ pricing:
 | Clé | Type | Défaut | Description |
 | --- | --- | --- | --- |
 | `pricing.<fournisseur>/<modèle>` | map | *(Facultatif)* | Une entrée par modèle, avec la clé de l'état et des lignes `epure-llm-usage` des journaux de job : la famille de fournisseur (`google`, `anthropic`, `openai`, `azure`, `azure_ai`, `openrouter`, `vertex`) puis le modèle envoyé à l'API, pas l'alias de `providers:`. |
-| `pricing.<modèle>.inputPerMTok` | `number` | *(Obligatoire)* | Dollars par million de jetons d'entrée. |
-| `pricing.<modèle>.cachedInputPerMTok` | `number` | `inputPerMTok` | Dollars par million de jetons d'entrée en cache. |
-| `pricing.<modèle>.outputPerMTok` | `number` | *(Obligatoire)* | Dollars par million de jetons de sortie. Les jetons de réflexion sont facturés à ce prix. |
+| `pricing.<modèle>.input_per_mtok` | `number` | *(Obligatoire)* | Dollars par million de jetons d'entrée. |
+| `pricing.<modèle>.cached_input_per_mtok` | `number` | `input_per_mtok` | Dollars par million de jetons d'entrée en cache. |
+| `pricing.<modèle>.output_per_mtok` | `number` | *(Obligatoire)* | Dollars par million de jetons de sortie. Les jetons de réflexion sont facturés à ce prix. |
 | `pricing.<modèle>.source` | `string` | *(Obligatoire)* | URL de la page de prix, affichée par `/epure status`. |
 | `pricing.<modèle>.read_on` | `string` | *(Obligatoire)* | Date de lecture du prix, affichée par `/epure status`. |
 
-Un prix absent ou négatif, une `source` ou un `read_on` manquant rendent `.github/agents.yml` invalide, comme toute autre clé. Une ligne qui comprend un modèle sans prix n'affiche que les jetons : une somme partielle passerait pour le coût complet. Le coût est une estimation : l'écriture en cache d'Anthropic est comptée au prix d'entrée, et les requêtes dont le moteur n'a pas rendu d'usage n'y figurent pas (leur nombre est affiché, « without usage data »).
+Une entrée dont un prix est absent ou négatif, ou sans `source` ou `read_on`, est ignorée avec une ligne `::warning` dans le journal du job ; le reste de `.github/agents.yml` s'applique. Une ligne qui comprend un modèle sans prix n'affiche que les jetons : une somme partielle passerait pour le coût complet. Le coût est une estimation : l'écriture en cache d'Anthropic est comptée au prix d'entrée, et les requêtes dont le moteur n'a pas rendu d'usage n'y figurent pas : leur nombre est affiché (« without usage data ») et le coût se lit alors `≥ $X`. Le `epure.e2e.json` du harnais e2e reprend les mêmes prix sous `inputPerMTok`, `cachedInputPerMTok` et `outputPerMTok`.
 
 ### `security_invariants` & Chemins Sensibles
 

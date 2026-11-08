@@ -850,11 +850,11 @@ export function serializeAgentsConfigYaml(
     pricingLines.push("pricing:");
     for (const [model, price] of Object.entries(config.pricing)) {
       pricingLines.push(`  ${escapeYamlDoubleQuoted(model)}:`);
-      pricingLines.push(`    inputPerMTok: ${price.inputPerMTok}`);
-      if (price.cachedInputPerMTok !== undefined) {
-        pricingLines.push(`    cachedInputPerMTok: ${price.cachedInputPerMTok}`);
+      pricingLines.push(`    input_per_mtok: ${price.input_per_mtok}`);
+      if (price.cached_input_per_mtok !== undefined) {
+        pricingLines.push(`    cached_input_per_mtok: ${price.cached_input_per_mtok}`);
       }
-      pricingLines.push(`    outputPerMTok: ${price.outputPerMTok}`);
+      pricingLines.push(`    output_per_mtok: ${price.output_per_mtok}`);
       pricingLines.push(`    source: ${escapeYamlDoubleQuoted(price.source)}`);
       pricingLines.push(`    read_on: ${escapeYamlDoubleQuoted(price.read_on)}`);
     }
@@ -992,7 +992,7 @@ function parseYamlStringArrayInline(raw: string): string[] {
   return items;
 }
 
-// A price without its source and date, or with a typo, would show a wrong cost: reject it.
+// A price without its source and date, or with a typo, would show a wrong cost: the entry is dropped.
 function parsePricingEntry(
   model: string,
   fields: Readonly<Record<string, string>>
@@ -1015,11 +1015,11 @@ function parsePricingEntry(
     return value;
   };
   return {
-    inputPerMTok: dollars("inputPerMTok"),
-    ...(fields.cachedInputPerMTok !== undefined
-      ? { cachedInputPerMTok: dollars("cachedInputPerMTok") }
+    input_per_mtok: dollars("input_per_mtok"),
+    ...(fields.cached_input_per_mtok !== undefined
+      ? { cached_input_per_mtok: dollars("cached_input_per_mtok") }
       : {}),
-    outputPerMTok: dollars("outputPerMTok"),
+    output_per_mtok: dollars("output_per_mtok"),
     source: text("source"),
     read_on: text("read_on")
   };
@@ -1560,12 +1560,16 @@ export function parseAgentsYaml(yamlContent: string): ParsedAgentsConfig {
     hasTargetsKey ||
     parsedTargets.length > 0;
 
-  const pricing: Record<string, ModelPricing> = Object.fromEntries(
-    Object.entries(pricingFields).map(([model, fields]) => [
-      model,
-      parsePricingEntry(model, fields)
-    ])
-  );
+  const pricing: Record<string, ModelPricing> = {};
+  for (const [model, fields] of Object.entries(pricingFields)) {
+    try {
+      pricing[model] = parsePricingEntry(model, fields);
+    } catch (err) {
+      process.stdout.write(
+        `::warning title=EPURE pricing::${(err as Error).message} This price is ignored: costs of ${model} are not shown.\n`
+      );
+    }
+  }
 
   // A traversal segment must stop the run, not fall back to the default config.
   if (

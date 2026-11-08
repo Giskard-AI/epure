@@ -64,7 +64,7 @@ Settings live in `epure.e2e.json` (see `epure.e2e.example.json`); `EPURE_E2E_CON
 | `model` | `EPURE_E2E_MODEL` | required for a run | One `<provider>/<model>` for every phase. |
 | `llmEnvironment` | | `epure-agent` | GitHub Environment holding the agent App key and `LLM_API_KEY`. |
 | `agentAppId`, `releaseAppId` | `EPURE_E2E_AGENT_APP_ID`, `EPURE_E2E_RELEASE_APP_ID` | written by the wizard | The sandbox's two Apps. |
-| `pricing` | | `{}` | USD per million tokens keyed by `<provider>/<model>`: `inputPerMTok`, `outputPerMTok`, `cachedInputPerMTok`. |
+| `pricing` | | `{}` | USD per million tokens keyed by `<provider>/<model>`: `inputPerMTok`, `outputPerMTok`, `cachedInputPerMTok` (`input_per_mtok`, `output_per_mtok`, `cached_input_per_mtok` in `.github/agents.yml`). |
 | `pricingSource` | | empty | Where and when the prices were read. |
 | `outputDir` | | `.scratch/e2e` | Parent directory of each run's results. |
 | `maxGrillReplies` | | `3` | Scripted grilling answers before `/epure to-spec`. |

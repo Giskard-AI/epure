@@ -11,7 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   PINNED_RTK_VERSION,
   buildRenovateConfigJson,
@@ -333,9 +333,9 @@ describe("2. .github/agents.yml defaults (Q78) and non-weakenable security invar
   });
 
   const GEMINI_PRICE = {
-    inputPerMTok: 0.75,
-    cachedInputPerMTok: 0.075,
-    outputPerMTok: 3.75,
+    input_per_mtok: 0.75,
+    cached_input_per_mtok: 0.075,
+    output_per_mtok: 3.75,
     source: "https://ai.google.dev/gemini-api/docs/pricing#gemini-3.8-flash",
     read_on: "2026-11-08"
   };
@@ -350,9 +350,9 @@ describe("2. .github/agents.yml defaults (Q78) and non-weakenable security invar
       yaml: [
         "pricing:",
         "  google/gemini-3.8-flash:",
-        "    inputPerMTok: 0.75",
-        "    cachedInputPerMTok: 0.075 # context caching",
-        "    outputPerMTok: 3.75",
+        "    input_per_mtok: 0.75",
+        "    cached_input_per_mtok: 0.075 # context caching",
+        "    output_per_mtok: 3.75",
         "    source: https://ai.google.dev/gemini-api/docs/pricing#gemini-3.8-flash",
         "    read_on: 2026-11-08",
         "security_invariants:",
@@ -366,16 +366,16 @@ describe("2. .github/agents.yml defaults (Q78) and non-weakenable security invar
       yaml: [
         "pricing:",
         '  "bedrock/anthropic.claude-v5:0":',
-        "    inputPerMTok: 3",
-        "    outputPerMTok: 15",
+        "    input_per_mtok: 3",
+        "    output_per_mtok: 15",
         '    source: "https://aws.amazon.com/bedrock/pricing/"',
         "    read_on: '2026-11-01'",
         ""
       ].join("\n"),
       expectedPricing: {
         "bedrock/anthropic.claude-v5:0": {
-          inputPerMTok: 3,
-          outputPerMTok: 15,
+          input_per_mtok: 3,
+          output_per_mtok: 15,
           source: "https://aws.amazon.com/bedrock/pricing/",
           read_on: "2026-11-01"
         }
@@ -393,14 +393,43 @@ describe("2. .github/agents.yml defaults (Q78) and non-weakenable security invar
   });
 
   it.each([
-    { id: "missing-output-price", fields: ["inputPerMTok: 1", "source: s", "read_on: d"], error: "pricing.m/x.outputPerMTok" },
-    { id: "non-numeric-input-price", fields: ["inputPerMTok: $1", "outputPerMTok: 2", "source: s", "read_on: d"], error: "pricing.m/x.inputPerMTok" },
-    { id: "negative-cached-price", fields: ["inputPerMTok: 1", "cachedInputPerMTok: -1", "outputPerMTok: 2", "source: s", "read_on: d"], error: "pricing.m/x.cachedInputPerMTok" },
-    { id: "missing-source", fields: ["inputPerMTok: 1", "outputPerMTok: 2", "read_on: d"], error: "pricing.m/x.source" },
-    { id: "missing-read-on-date", fields: ["inputPerMTok: 1", "outputPerMTok: 2", "source: s"], error: "pricing.m/x.read_on" }
-  ])("parseAgentsYaml rejects an incomplete price: $id", ({ fields, error }) => {
-    const yaml = ["pricing:", "  m/x:", ...fields.map((f) => `    ${f}`), ""].join("\n");
-    expect(() => parseAgentsYaml(yaml)).toThrowError(error);
+    { id: "missing-output-price", fields: ["input_per_mtok: 1", "source: s", "read_on: d"], error: "pricing.m/x.output_per_mtok" },
+    { id: "non-numeric-input-price", fields: ["input_per_mtok: $1", "output_per_mtok: 2", "source: s", "read_on: d"], error: "pricing.m/x.input_per_mtok" },
+    { id: "negative-cached-price", fields: ["input_per_mtok: 1", "cached_input_per_mtok: -1", "output_per_mtok: 2", "source: s", "read_on: d"], error: "pricing.m/x.cached_input_per_mtok" },
+    { id: "missing-source", fields: ["input_per_mtok: 1", "output_per_mtok: 2", "read_on: d"], error: "pricing.m/x.source" },
+    { id: "missing-read-on-date", fields: ["input_per_mtok: 1", "output_per_mtok: 2", "source: s"], error: "pricing.m/x.read_on" },
+    { id: "pre-release-camel-case-keys", fields: ["inputPerMTok: 1", "outputPerMTok: 2", "source: s", "read_on: d"], error: "pricing.m/x.input_per_mtok" }
+  ])("parseAgentsYaml drops an incomplete price with one warning and keeps the rest: $id", ({ fields, error }) => {
+    const writes: string[] = [];
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    const yaml = [
+      "pricing:",
+      "  m/x:",
+      ...fields.map((f) => `    ${f}`),
+      "  google/gemini-3.8-flash:",
+      "    input_per_mtok: 0.75",
+      "    cached_input_per_mtok: 0.075",
+      "    output_per_mtok: 3.75",
+      "    source: https://ai.google.dev/gemini-api/docs/pricing#gemini-3.8-flash",
+      "    read_on: 2026-11-08",
+      "harness: codex",
+      ""
+    ].join("\n");
+
+    try {
+      const parsed = parseAgentsYaml(yaml);
+
+      expect(parsed.pricing).toEqual({ "google/gemini-3.8-flash": GEMINI_PRICE });
+      expect(parsed.harness).toBe("codex");
+      expect(writes).toHaveLength(1);
+      expect(writes[0]).toMatch(/^::warning title=EPURE pricing::[^\n]*\n$/);
+      expect(writes[0]).toContain(error);
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 
   it.each([
@@ -768,9 +797,9 @@ describe("2b. Configurable reviewers_dir, llm_environment and models (planAndApp
     const tempRepoDir = mkdtempSync(join(tmpdir(), "epure-setup-pricing-"));
     const pricing = {
       "anthropic/claude-sonnet-5": {
-        inputPerMTok: 3,
-        cachedInputPerMTok: 0.3,
-        outputPerMTok: 15,
+        input_per_mtok: 3,
+        cached_input_per_mtok: 0.3,
+        output_per_mtok: 15,
         source: "https://www.anthropic.com/pricing",
         read_on: "2026-11-08"
       }
