@@ -27,6 +27,7 @@ import {
   updateIssueStateWithCas,
   type GitRefStateStore
 } from "../../src/state/git-ref-state.js";
+import { meterTokenUsage, TokenUsageLedger } from "../../src/usage/token-usage.js";
 
 export interface LiveGitHubConfig {
   readonly repository: string;
@@ -434,6 +435,56 @@ describeLive(
         expect(result.cas_conflicts_recovered).toBe(1);
         expect(final.status).toBe("cancelled");
         expect(final.last_processed_comment_id).toBe(42);
+      });
+
+      it("a run's token usage is written with its state update, once, after a concurrent write and without an extra commit", async () => {
+        const issueNumber = 5;
+        const stateRef = `refs/epure/state/${issueNumber}`;
+        const plainStore = namespacedStore(
+          createGitHubApiRefStateStore({ repository: cfg.repository, githubToken: token })
+        );
+        await updateIssueStateWithCas({ issueNumber, store: plainStore, mutator: (prev) => ({ ...prev, phase: "implementation" }) });
+        let competingSha = "";
+        const racingStore = namespacedStore(
+          createGitHubApiRefStateStore({
+            repository: cfg.repository,
+            githubToken: token,
+            fetchImpl: fetchWithConcurrentWriterBeforeStateUpdate(async () => {
+              const current = await plainStore.readRef(stateRef);
+              const competing = await plainStore.compareAndSwapRef(stateRef, current.sha, {
+                ...current.state!,
+                version: current.state!.version + 1,
+                last_processed_comment_id: 9
+              });
+              competingSha = competing.newSha;
+            })
+          })
+        );
+        const ledger = new TokenUsageLedger();
+        ledger.record(
+          { phase: "implementation", ticket: 101 },
+          { provider: "anthropic", model: "claude-haiku-5-5", input_tokens: 1200, cached_input_tokens: 200, output_tokens: 300, thinking_tokens: 0 }
+        );
+
+        const result = await updateIssueStateWithCas({
+          issueNumber,
+          store: meterTokenUsage(racingStore, ledger),
+          mutator: (prev) => ({ ...prev, phase: "review" })
+        });
+
+        const final = await plainStore.readRef(stateRef);
+        const commit = await api<{ parents: Array<{ sha: string }> }>("GET", `${R}/git/commits/${final.sha}`);
+        expect(result.cas_conflicts_recovered).toBe(1);
+        expect(final.state).toMatchObject({ phase: "review", last_processed_comment_id: 9 });
+        expect(final.state?.token_usage).toEqual({
+          "101": {
+            implementation: {
+              "anthropic/claude-haiku-5-5": { requests: 1, input_tokens: 1200, cached_input_tokens: 200, output_tokens: 300, thinking_tokens: 0 }
+            }
+          }
+        });
+        expect(commit.data.parents.map((p) => p.sha)).toEqual([competingSha]);
+        expect(ledger.pendingCount()).toBe(0);
       });
     });
 
