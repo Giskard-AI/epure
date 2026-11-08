@@ -546,6 +546,19 @@ describeLive(
           expect(subIssue.title.trim().endsWith("...")).toBe(false);
           expect(subIssue.body).not.toContain("## Description\n...");
         }
+
+        const usage = (await store.readRef("refs/epure/state/42")).state?.token_usage?.epic;
+        for (const phase of ["plan", "grilling", "spec", "tickets"] as const) {
+          const models = Object.values(usage?.[phase] ?? {});
+          expect(models.length, phase).toBeGreaterThan(0);
+          for (const counts of models) {
+            expect(counts.requests, phase).toBeGreaterThan(0);
+            expect(counts.input_tokens, phase).toBeGreaterThan(0);
+            expect(counts.output_tokens, phase).toBeGreaterThan(0);
+            expect(counts.usage_unavailable, phase).toBeUndefined();
+          }
+        }
+        console.log(`[${target.id}] token_usage ${JSON.stringify(usage)}`);
       },
       600_000
     );
