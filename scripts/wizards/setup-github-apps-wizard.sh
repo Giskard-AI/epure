@@ -612,6 +612,25 @@ _run_manual_app_flow() {
   pause "Press Enter once ${app_name} is installed on ${repo}"
 }
 
+# read_llm_key_file PATH sets the caller's LLM_KEY_VALUE; an empty key stops the wizard.
+read_llm_key_file() {
+  local path="$1" perms
+  if [[ ! -r "$path" ]]; then
+    warn "Cannot read --llm-api-key-file ${path}."
+    exit 1
+  fi
+  LLM_KEY_VALUE=$(<"$path")
+  LLM_KEY_VALUE="${LLM_KEY_VALUE%$'\r'}"
+  if [[ -z "$LLM_KEY_VALUE" ]]; then
+    warn "--llm-api-key-file ${path} is empty."
+    exit 1
+  fi
+  perms=$(stat -c '%a' "$path" 2>/dev/null || stat -f '%Lp' "$path")
+  if (( 8#$perms & 8#044 )); then
+    warn "${path} is readable by group or others (mode ${perms}): run chmod 600 ${path}."
+  fi
+}
+
 run_wizard() {
   local REPO=""
   local LLM_ENV=""
@@ -695,11 +714,29 @@ run_wizard() {
     exit 1
   fi
 
+  local LLM_KEY_VALUE=""
+  [[ -n "$LLM_KEY_FILE" ]] && read_llm_key_file "$LLM_KEY_FILE"
+
+  if [[ -n "$E2E_CONFIG" ]]; then
+    local repo_name
+    repo_name=$(printf '%s' "${REPO#*/}" | tr '[:upper:]' '[:lower:]')
+    if [[ "$repo_name" != *sandbox* || "$repo_name" == "epure-live-sandbox" ]]; then
+      warn "--e2e-config needs a dedicated sandbox: '${REPO}' must contain 'sandbox' and must not be epure-live-sandbox."
+      exit 1
+    fi
+  fi
+
   local OWNER="${REPO%%/*}"
-  local CLEAN_OWNER
+  local CLEAN_OWNER CLEAN_PREFIX
   CLEAN_OWNER=$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
-  local AGENT_APP_NAME="${APP_NAME_PREFIX:-${CLEAN_OWNER}-epure}-agent"
-  local RELEASE_APP_NAME="${APP_NAME_PREFIX:-${CLEAN_OWNER}-epure}-release"
+  CLEAN_PREFIX=$(printf '%s' "$APP_NAME_PREFIX" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
+  local AGENT_APP_NAME="${CLEAN_PREFIX:-${CLEAN_OWNER}-epure}-agent"
+  local RELEASE_APP_NAME="${CLEAN_PREFIX:-${CLEAN_OWNER}-epure}-release"
+  # GitHub refuses App names longer than 34 characters; the release name is the longer one.
+  if (( ${#RELEASE_APP_NAME} > 34 )); then
+    warn "App name '${RELEASE_APP_NAME}' is longer than GitHub's 34 characters: pass a shorter --app-name-prefix."
+    exit 1
+  fi
 
   if [[ -z "$LLM_ENV" ]]; then
     say "Choose the GitHub Environment name that scopes Agent App & LLM secrets."
@@ -819,9 +856,7 @@ run_wizard() {
   note "Supported provider-specific secret names (for os.environ/<NAME> in .github/agents.yml):"
   note "  OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, AZURE_OPENAI_API_KEY, AZURE_AI_API_KEY"
 
-  local LLM_KEY_VALUE=""
   if [[ -n "$LLM_KEY_FILE" ]]; then
-    LLM_KEY_VALUE=$(<"$LLM_KEY_FILE")
     note "Read the LLM API key from ${LLM_KEY_FILE}."
   else
     ask_secret LLM_KEY_VALUE "Enter LLM API key (hidden input, stored in --env ${LLM_ENV}):"
