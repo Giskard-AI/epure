@@ -9,6 +9,7 @@ import {
   type LLMCallOptions,
   type ProviderConfig
 } from "../types.js";
+import { googleApiRoot } from "../upstream.js";
 import { sanitizeSchemaForGemini } from "./schema-utils.js";
 
 export const GEMINI_SKIP_THOUGHT_SIGNATURE_SENTINEL =
@@ -82,20 +83,9 @@ export function buildGoogleGenerateContentUrl(params: {
       : `${rawBase}${sep}key=${keyEncoded}`;
   }
 
-  if (rawBase.endsWith("/models")) {
-    return `${rawBase}/${modelEncoded}:generateContent?key=${keyEncoded}`;
-  }
-
-  if (isVertex) {
-    const versioned = /\/v1(?:beta1)?$/i.test(rawBase) ? rawBase : `${rawBase}/v1`;
-    return `${versioned}/publishers/google/models/${modelEncoded}:generateContent?key=${keyEncoded}`;
-  }
-
-  if (/\/v1(?:beta)?$/i.test(rawBase)) {
-    return `${rawBase}/models/${modelEncoded}:generateContent?key=${keyEncoded}`;
-  }
-
-  return `${rawBase}/v1beta/models/${modelEncoded}:generateContent?key=${keyEncoded}`;
+  const { root, version } = googleApiRoot(rawBase, isVertex ? "vertex" : "google");
+  const models = isVertex ? "publishers/google/models" : "models";
+  return `${root}/${version}/${models}/${modelEncoded}:generateContent?key=${keyEncoded}`;
 }
 
 function extractTextFromParts(parts: readonly GeminiContentPart[]): string {

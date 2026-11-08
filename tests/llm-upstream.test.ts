@@ -5,6 +5,8 @@ import {
   type ProviderConfig,
   type ProviderKind
 } from "../src/llm/index.js";
+import { buildGoogleGenerateContentUrl } from "../src/llm/providers/google.js";
+import { buildOpenAICompatibleEndpointAndHeaders } from "../src/llm/providers/openai.js";
 
 describe("resolveProviderUpstream", () => {
   it.each([
@@ -102,6 +104,47 @@ describe("resolveProviderUpstream", () => {
       expect(denied.filter(isAllowed)).toEqual([]);
     }
   );
+
+  const MODEL = "m-1";
+  const clientUrl = (provider: ProviderKind, baseUrl: string): string =>
+    (provider === "google" || provider === "vertex"
+      ? buildGoogleGenerateContentUrl({ model: MODEL, apiKey: "k", baseUrl, provider })
+      : buildOpenAICompatibleEndpointAndHeaders({
+          provider: provider as "openai" | "azure_ai",
+          model: MODEL,
+          apiKey: "k",
+          providerConfig: { base_url: baseUrl },
+          env: {}
+        }).url
+    ).replace(/\?.*$/, "");
+
+  it.each([
+    { id: "openai-alias-without-v1", provider: "openai", baseUrl: "http://127.0.0.1:9/", sdkPath: "/chat/completions" },
+    { id: "openai-alias-with-v1", provider: "openai", baseUrl: "https://gw.example/v1", sdkPath: "/chat/completions" },
+    { id: "openai-alias-full-url", provider: "openai", baseUrl: "https://gw.example/v1/chat/completions", sdkPath: "/chat/completions" },
+    { id: "azure-ai-models-suffix", provider: "azure_ai", baseUrl: "https://hub.services.ai.azure.com/models", sdkPath: "/chat/completions" },
+    { id: "azure-ai-v1", provider: "azure_ai", baseUrl: "https://hub.services.ai.azure.com/openai/v1", sdkPath: "/chat/completions" },
+    { id: "gemini-models-suffix", provider: "google", baseUrl: "https://gw.example/v1beta/models", sdkPath: `/v1beta/models/${MODEL}:generateContent` },
+    { id: "gemini-without-version", provider: "google", baseUrl: "https://gw.example", sdkPath: `/v1beta/models/${MODEL}:generateContent` },
+    { id: "gemini-v1", provider: "google", baseUrl: "https://gw.example/v1", sdkPath: `/v1/models/${MODEL}:generateContent` },
+    { id: "vertex-models-suffix", provider: "vertex", baseUrl: "https://aiplatform.googleapis.com/v1/publishers/google/models", sdkPath: `/v1/publishers/google/models/${MODEL}:generateContent` },
+    { id: "vertex-without-version", provider: "vertex", baseUrl: "https://aiplatform.googleapis.com", sdkPath: `/v1/publishers/google/models/${MODEL}:generateContent` }
+  ] as const)(
+    "[$id] the proxy forwards to the same URL the LLMClient calls",
+    ({ provider, baseUrl, sdkPath }) => {
+      const upstream = resolveProviderUpstream(provider, { base_url: baseUrl }, {});
+
+      expect(upstream.allowedPaths.some((p) => p.test(sdkPath))).toBe(true);
+      expect(`${upstream.baseUrl}${sdkPath}`).toBe(clientUrl(provider, baseUrl));
+    }
+  );
+
+  it.each([
+    { id: "carries-default-headers", config: { default_headers: { "HTTP-Referer": "https://epure.dev" } }, expected: { "HTTP-Referer": "https://epure.dev" } },
+    { id: "no-default-headers", config: {}, expected: {} }
+  ])("[$id] carries the provider's default_headers to the proxy", ({ config, expected }) => {
+    expect(resolveProviderUpstream("openrouter", config, {}).defaultHeaders).toEqual(expected);
+  });
 
   it.each([
     { id: "azure-without-endpoint", provider: "azure" },

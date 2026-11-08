@@ -10,6 +10,7 @@ import {
   type LLMCallOptions,
   type ProviderConfig
 } from "../types.js";
+import { azureAiRoot, openAiCompatibleRoot } from "../upstream.js";
 import {
   closeObjectSchemasForOpenAI,
   normalizeToolParametersForJsonSchema
@@ -130,22 +131,8 @@ export function buildOpenAICompatibleEndpointAndHeaders(params: {
       );
     }
 
-    // Strip trailing slashes and any trailing /models suffix on Azure AI Foundry endpoints
-    const normalizedBase = rawEndpoint
-      .replace(/\/+$/, "")
-      .replace(/\/models$/i, "");
-
-    let url: string;
-    if (normalizedBase.endsWith("/chat/completions")) {
-      url = normalizedBase;
-    } else if (normalizedBase.endsWith("/v1")) {
-      url = `${normalizedBase}/chat/completions`;
-    } else {
-      url = `${normalizedBase}/openai/v1/chat/completions`;
-    }
-
     return {
-      url,
+      url: `${azureAiRoot(rawEndpoint)}/chat/completions`,
       headers: {
         "Content-Type": "application/json",
         "api-key": apiKey,
@@ -156,26 +143,14 @@ export function buildOpenAICompatibleEndpointAndHeaders(params: {
   }
 
   // Standard OpenAI, OpenRouter or OpenAI-compatible custom endpoint
-  const openAiBase = (
+  const openAiBase =
     rawBaseUrl ??
     (params.provider === "openrouter"
       ? "https://openrouter.ai/api/v1"
-      : (env.OPENAI_BASE_URL ?? "https://api.openai.com/v1"))
-  )
-    .trim()
-    .replace(/\/+$/, "");
-
-  let url: string;
-  if (openAiBase.endsWith("/chat/completions")) {
-    url = openAiBase;
-  } else if (openAiBase.endsWith("/v1")) {
-    url = `${openAiBase}/chat/completions`;
-  } else {
-    url = `${openAiBase}/v1/chat/completions`;
-  }
+      : (env.OPENAI_BASE_URL ?? "https://api.openai.com/v1"));
 
   return {
-    url,
+    url: `${openAiCompatibleRoot(openAiBase)}/chat/completions`,
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,

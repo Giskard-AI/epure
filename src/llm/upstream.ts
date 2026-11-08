@@ -13,6 +13,7 @@ export interface ProviderUpstream {
   readonly baseUrl: string;
   readonly authHeader: ProviderAuthHeader;
   readonly allowedPaths: readonly RegExp[];
+  readonly defaultHeaders: Readonly<Record<string, string>>;
 }
 
 const MODEL = String.raw`[\w.@-]+`;
@@ -21,6 +22,36 @@ const OPENAI_PATHS: readonly RegExp[] = [/^\/chat\/completions$/, /^\/responses$
 
 function trimBase(raw: string): string {
   return raw.trim().replace(/\/+$/, "");
+}
+
+// The root that "/chat/completions" is appended to, for the LLMClient and the sandbox proxy alike.
+export function openAiCompatibleRoot(base: string): string {
+  const trimmed = trimBase(base);
+  if (trimmed.endsWith("/chat/completions")) {
+    return trimmed.slice(0, -"/chat/completions".length);
+  }
+  return /\/v1$/.test(trimmed) ? trimmed : `${trimmed}/v1`;
+}
+
+export function azureAiRoot(endpoint: string): string {
+  const root = trimBase(endpoint).replace(/\/models$/i, "");
+  if (root.endsWith("/chat/completions")) {
+    return root.slice(0, -"/chat/completions".length);
+  }
+  return /\/v1$/.test(root) ? root : `${root}/openai/v1`;
+}
+
+// Splits a Gemini/Vertex base into the host root and the API version the client calls.
+export function googleApiRoot(
+  base: string,
+  provider: "google" | "vertex"
+): { readonly root: string; readonly version: string } {
+  const trimmed = trimBase(base).replace(/(?:\/publishers\/google)?\/models$/, "");
+  const versioned = /^(.*)\/(v1beta1?|v1)$/i.exec(trimmed);
+  if (versioned?.[1] !== undefined && versioned[2] !== undefined) {
+    return { root: versioned[1], version: versioned[2] };
+  }
+  return { root: trimmed, version: provider === "vertex" ? "v1" : "v1beta" };
 }
 
 function requireEndpoint(
@@ -43,20 +74,24 @@ export function resolveProviderUpstream(
   env: Readonly<Record<string, string | undefined>> = process.env
 ): ProviderUpstream {
   const configured = providerConfig?.baseUrl ?? providerConfig?.base_url;
+  const defaultHeaders = {
+    ...(providerConfig?.defaultHeaders ?? providerConfig?.default_headers ?? {})
+  };
 
   switch (provider) {
     case "openai":
     case "openrouter":
       return {
         provider,
-        baseUrl: trimBase(
+        baseUrl: openAiCompatibleRoot(
           configured ??
             (provider === "openrouter"
               ? "https://openrouter.ai/api/v1"
               : (env.OPENAI_BASE_URL ?? "https://api.openai.com/v1"))
-        ).replace(/\/chat\/completions$/, ""),
+        ),
         authHeader: "authorization",
-        allowedPaths: OPENAI_PATHS
+        allowedPaths: OPENAI_PATHS,
+        defaultHeaders
       };
     case "azure":
       return {
@@ -70,23 +105,23 @@ export function resolveProviderUpstream(
         allowedPaths: [
           new RegExp(`^/openai/deployments/${MODEL}/chat/completions$`),
           /^\/openai\/v1\/(?:chat\/completions|responses)$/
-        ]
+        ],
+        defaultHeaders
       };
-    case "azure_ai": {
-      const root = requireEndpoint(
-        provider,
-        configured ?? env.AZURE_AI_ENDPOINT ?? env.AZURE_AI_BASE_URL,
-        "AZURE_AI_ENDPOINT / AZURE_AI_BASE_URL"
-      )
-        .replace(/\/models$/i, "")
-        .replace(/\/chat\/completions$/, "");
+    case "azure_ai":
       return {
         provider,
-        baseUrl: /\/v1$/.test(root) ? root : `${root}/openai/v1`,
+        baseUrl: azureAiRoot(
+          requireEndpoint(
+            provider,
+            configured ?? env.AZURE_AI_ENDPOINT ?? env.AZURE_AI_BASE_URL,
+            "AZURE_AI_ENDPOINT / AZURE_AI_BASE_URL"
+          )
+        ),
         authHeader: "api-key",
-        allowedPaths: OPENAI_PATHS
+        allowedPaths: OPENAI_PATHS,
+        defaultHeaders
       };
-    }
     case "anthropic":
       return {
         provider,
@@ -95,24 +130,23 @@ export function resolveProviderUpstream(
           ""
         ),
         authHeader: "x-api-key",
-        allowedPaths: [/^\/v1\/messages$/]
+        allowedPaths: [/^\/v1\/messages$/],
+        defaultHeaders
       };
     case "google":
       return {
         provider,
-        baseUrl: trimBase(
-          configured ?? "https://generativelanguage.googleapis.com"
-        ).replace(/\/v1(?:beta)?$/, ""),
+        baseUrl: googleApiRoot(configured ?? "https://generativelanguage.googleapis.com", provider)
+          .root,
         authHeader: "x-goog-api-key",
-        allowedPaths: [new RegExp(`^/v1(?:beta)?/models/${MODEL}${GENERATE}$`)]
+        allowedPaths: [new RegExp(`^/v1(?:beta)?/models/${MODEL}${GENERATE}$`)],
+        defaultHeaders
       };
     case "vertex":
       return {
         provider,
-        baseUrl: trimBase(configured ?? "https://aiplatform.googleapis.com").replace(
-          /\/v1(?:beta1)?$/,
-          ""
-        ),
+        baseUrl: googleApiRoot(configured ?? "https://aiplatform.googleapis.com", provider).root,
+        defaultHeaders,
         authHeader: "x-goog-api-key",
         allowedPaths: [
           new RegExp(

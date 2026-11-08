@@ -2142,6 +2142,124 @@ Output ONLY a corrected, complete JSON object strictly matching the required sch
   );
 }
 
+// src/llm/upstream.ts
+var MODEL = String.raw`[\w.@-]+`;
+var GENERATE = String.raw`:(?:generateContent|streamGenerateContent)`;
+var OPENAI_PATHS = [/^\/chat\/completions$/, /^\/responses$/];
+function trimBase(raw) {
+  return raw.trim().replace(/\/+$/, "");
+}
+function openAiCompatibleRoot(base) {
+  const trimmed = trimBase(base);
+  if (trimmed.endsWith("/chat/completions")) {
+    return trimmed.slice(0, -"/chat/completions".length);
+  }
+  return /\/v1$/.test(trimmed) ? trimmed : `${trimmed}/v1`;
+}
+function azureAiRoot(endpoint) {
+  const root = trimBase(endpoint).replace(/\/models$/i, "");
+  if (root.endsWith("/chat/completions")) {
+    return root.slice(0, -"/chat/completions".length);
+  }
+  return /\/v1$/.test(root) ? root : `${root}/openai/v1`;
+}
+function googleApiRoot(base, provider) {
+  const trimmed = trimBase(base).replace(/(?:\/publishers\/google)?\/models$/, "");
+  const versioned = /^(.*)\/(v1beta1?|v1)$/i.exec(trimmed);
+  if (versioned?.[1] !== void 0 && versioned[2] !== void 0) {
+    return { root: versioned[1], version: versioned[2] };
+  }
+  return { root: trimmed, version: provider === "vertex" ? "v1" : "v1beta" };
+}
+function requireEndpoint(provider, value, hint) {
+  if (!value?.trim()) {
+    throw new BadRequestError(`Provider '${provider}' requires base_url (or ${hint}).`, {
+      provider,
+      status: 400
+    });
+  }
+  return trimBase(value);
+}
+function resolveProviderUpstream(provider, providerConfig, env = process.env) {
+  const configured = providerConfig?.baseUrl ?? providerConfig?.base_url;
+  const defaultHeaders = {
+    ...providerConfig?.defaultHeaders ?? providerConfig?.default_headers ?? {}
+  };
+  switch (provider) {
+    case "openai":
+    case "openrouter":
+      return {
+        provider,
+        baseUrl: openAiCompatibleRoot(
+          configured ?? (provider === "openrouter" ? "https://openrouter.ai/api/v1" : env.OPENAI_BASE_URL ?? "https://api.openai.com/v1")
+        ),
+        authHeader: "authorization",
+        allowedPaths: OPENAI_PATHS,
+        defaultHeaders
+      };
+    case "azure":
+      return {
+        provider,
+        baseUrl: requireEndpoint(
+          provider,
+          configured ?? env.AZURE_OPENAI_ENDPOINT ?? env.AZURE_API_BASE,
+          "AZURE_OPENAI_ENDPOINT / AZURE_API_BASE"
+        ),
+        authHeader: "api-key",
+        allowedPaths: [
+          new RegExp(`^/openai/deployments/${MODEL}/chat/completions$`),
+          /^\/openai\/v1\/(?:chat\/completions|responses)$/
+        ],
+        defaultHeaders
+      };
+    case "azure_ai":
+      return {
+        provider,
+        baseUrl: azureAiRoot(
+          requireEndpoint(
+            provider,
+            configured ?? env.AZURE_AI_ENDPOINT ?? env.AZURE_AI_BASE_URL,
+            "AZURE_AI_ENDPOINT / AZURE_AI_BASE_URL"
+          )
+        ),
+        authHeader: "api-key",
+        allowedPaths: OPENAI_PATHS,
+        defaultHeaders
+      };
+    case "anthropic":
+      return {
+        provider,
+        baseUrl: trimBase(configured ?? "https://api.anthropic.com").replace(
+          /(?:\/v1)?(?:\/messages)?$/,
+          ""
+        ),
+        authHeader: "x-api-key",
+        allowedPaths: [/^\/v1\/messages$/],
+        defaultHeaders
+      };
+    case "google":
+      return {
+        provider,
+        baseUrl: googleApiRoot(configured ?? "https://generativelanguage.googleapis.com", provider).root,
+        authHeader: "x-goog-api-key",
+        allowedPaths: [new RegExp(`^/v1(?:beta)?/models/${MODEL}${GENERATE}$`)],
+        defaultHeaders
+      };
+    case "vertex":
+      return {
+        provider,
+        baseUrl: googleApiRoot(configured ?? "https://aiplatform.googleapis.com", provider).root,
+        defaultHeaders,
+        authHeader: "x-goog-api-key",
+        allowedPaths: [
+          new RegExp(
+            `^/v1(?:beta1)?/(?:projects/[\\w-]+/locations/[\\w-]+/)?publishers/google/models/${MODEL}${GENERATE}$`
+          )
+        ]
+      };
+  }
+}
+
 // src/llm/providers/google.ts
 var GEMINI_SKIP_THOUGHT_SIGNATURE_SENTINEL = "c2tpcF90aG91Z2h0X3NpZ25hdHVyZV92YWxpZGF0b3I=";
 function buildGoogleGenerateContentUrl(params) {
@@ -2153,17 +2271,9 @@ function buildGoogleGenerateContentUrl(params) {
     const sep2 = rawBase.includes("?") ? "&" : "?";
     return rawBase.includes("key=") ? rawBase : `${rawBase}${sep2}key=${keyEncoded}`;
   }
-  if (rawBase.endsWith("/models")) {
-    return `${rawBase}/${modelEncoded}:generateContent?key=${keyEncoded}`;
-  }
-  if (isVertex) {
-    const versioned = /\/v1(?:beta1)?$/i.test(rawBase) ? rawBase : `${rawBase}/v1`;
-    return `${versioned}/publishers/google/models/${modelEncoded}:generateContent?key=${keyEncoded}`;
-  }
-  if (/\/v1(?:beta)?$/i.test(rawBase)) {
-    return `${rawBase}/models/${modelEncoded}:generateContent?key=${keyEncoded}`;
-  }
-  return `${rawBase}/v1beta/models/${modelEncoded}:generateContent?key=${keyEncoded}`;
+  const { root, version } = googleApiRoot(rawBase, isVertex ? "vertex" : "google");
+  const models = isVertex ? "publishers/google/models" : "models";
+  return `${root}/${version}/${models}/${modelEncoded}:generateContent?key=${keyEncoded}`;
 }
 function extractTextFromParts(parts) {
   const nonThoughtText = parts.filter((p) => !p.thought).map((p) => p.text ?? "").join("");
@@ -2542,9 +2652,9 @@ function buildOpenAICompatibleEndpointAndHeaders(params) {
       );
     }
     const apiVersion = (rawApiVersion ?? env.AZURE_API_VERSION ?? "2024-10-21").trim();
-    const url2 = `${base}/openai/deployments/${encodeURIComponent(params.model.trim())}/chat/completions?api-version=${encodeURIComponent(apiVersion)}`;
+    const url = `${base}/openai/deployments/${encodeURIComponent(params.model.trim())}/chat/completions?api-version=${encodeURIComponent(apiVersion)}`;
     return {
-      url: url2,
+      url,
       headers: {
         "Content-Type": "application/json",
         "api-key": apiKey,
@@ -2560,17 +2670,8 @@ function buildOpenAICompatibleEndpointAndHeaders(params) {
         { provider: "azure_ai", status: 400 }
       );
     }
-    const normalizedBase = rawEndpoint.replace(/\/+$/, "").replace(/\/models$/i, "");
-    let url2;
-    if (normalizedBase.endsWith("/chat/completions")) {
-      url2 = normalizedBase;
-    } else if (normalizedBase.endsWith("/v1")) {
-      url2 = `${normalizedBase}/chat/completions`;
-    } else {
-      url2 = `${normalizedBase}/openai/v1/chat/completions`;
-    }
     return {
-      url: url2,
+      url: `${azureAiRoot(rawEndpoint)}/chat/completions`,
       headers: {
         "Content-Type": "application/json",
         "api-key": apiKey,
@@ -2579,17 +2680,9 @@ function buildOpenAICompatibleEndpointAndHeaders(params) {
       }
     };
   }
-  const openAiBase = (rawBaseUrl ?? (params.provider === "openrouter" ? "https://openrouter.ai/api/v1" : env.OPENAI_BASE_URL ?? "https://api.openai.com/v1")).trim().replace(/\/+$/, "");
-  let url;
-  if (openAiBase.endsWith("/chat/completions")) {
-    url = openAiBase;
-  } else if (openAiBase.endsWith("/v1")) {
-    url = `${openAiBase}/chat/completions`;
-  } else {
-    url = `${openAiBase}/v1/chat/completions`;
-  }
+  const openAiBase = rawBaseUrl ?? (params.provider === "openrouter" ? "https://openrouter.ai/api/v1" : env.OPENAI_BASE_URL ?? "https://api.openai.com/v1");
   return {
-    url,
+    url: `${openAiCompatibleRoot(openAiBase)}/chat/completions`,
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,
@@ -7344,100 +7437,6 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
 import { spawn, spawnSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
-
-// src/llm/upstream.ts
-var MODEL = String.raw`[\w.@-]+`;
-var GENERATE = String.raw`:(?:generateContent|streamGenerateContent)`;
-var OPENAI_PATHS = [/^\/chat\/completions$/, /^\/responses$/];
-function trimBase(raw) {
-  return raw.trim().replace(/\/+$/, "");
-}
-function requireEndpoint(provider, value, hint) {
-  if (!value?.trim()) {
-    throw new BadRequestError(`Provider '${provider}' requires base_url (or ${hint}).`, {
-      provider,
-      status: 400
-    });
-  }
-  return trimBase(value);
-}
-function resolveProviderUpstream(provider, providerConfig, env = process.env) {
-  const configured = providerConfig?.baseUrl ?? providerConfig?.base_url;
-  switch (provider) {
-    case "openai":
-    case "openrouter":
-      return {
-        provider,
-        baseUrl: trimBase(
-          configured ?? (provider === "openrouter" ? "https://openrouter.ai/api/v1" : env.OPENAI_BASE_URL ?? "https://api.openai.com/v1")
-        ).replace(/\/chat\/completions$/, ""),
-        authHeader: "authorization",
-        allowedPaths: OPENAI_PATHS
-      };
-    case "azure":
-      return {
-        provider,
-        baseUrl: requireEndpoint(
-          provider,
-          configured ?? env.AZURE_OPENAI_ENDPOINT ?? env.AZURE_API_BASE,
-          "AZURE_OPENAI_ENDPOINT / AZURE_API_BASE"
-        ),
-        authHeader: "api-key",
-        allowedPaths: [
-          new RegExp(`^/openai/deployments/${MODEL}/chat/completions$`),
-          /^\/openai\/v1\/(?:chat\/completions|responses)$/
-        ]
-      };
-    case "azure_ai": {
-      const root = requireEndpoint(
-        provider,
-        configured ?? env.AZURE_AI_ENDPOINT ?? env.AZURE_AI_BASE_URL,
-        "AZURE_AI_ENDPOINT / AZURE_AI_BASE_URL"
-      ).replace(/\/models$/i, "").replace(/\/chat\/completions$/, "");
-      return {
-        provider,
-        baseUrl: /\/v1$/.test(root) ? root : `${root}/openai/v1`,
-        authHeader: "api-key",
-        allowedPaths: OPENAI_PATHS
-      };
-    }
-    case "anthropic":
-      return {
-        provider,
-        baseUrl: trimBase(configured ?? "https://api.anthropic.com").replace(
-          /(?:\/v1)?(?:\/messages)?$/,
-          ""
-        ),
-        authHeader: "x-api-key",
-        allowedPaths: [/^\/v1\/messages$/]
-      };
-    case "google":
-      return {
-        provider,
-        baseUrl: trimBase(
-          configured ?? "https://generativelanguage.googleapis.com"
-        ).replace(/\/v1(?:beta)?$/, ""),
-        authHeader: "x-goog-api-key",
-        allowedPaths: [new RegExp(`^/v1(?:beta)?/models/${MODEL}${GENERATE}$`)]
-      };
-    case "vertex":
-      return {
-        provider,
-        baseUrl: trimBase(configured ?? "https://aiplatform.googleapis.com").replace(
-          /\/v1(?:beta1)?$/,
-          ""
-        ),
-        authHeader: "x-goog-api-key",
-        allowedPaths: [
-          new RegExp(
-            `^/v1(?:beta1)?/(?:projects/[\\w-]+/locations/[\\w-]+/)?publishers/google/models/${MODEL}${GENERATE}$`
-          )
-        ]
-      };
-  }
-}
-
-// src/sandbox/llm-sandbox.ts
 var SECRET_ENV_NAME_PATTERN = /^(?:.*API_KEY|.*_TOKEN|.*_SECRET|.*PRIVATE_KEY|LLM_API_KEY|GITHUB_TOKEN|GH_TOKEN|GITHUB_PAT|EPURE_.*(?:KEY|TOKEN|SECRET)|AWS_.*|AZURE_.*|GCP_.*|NPM_TOKEN|NODE_AUTH_TOKEN|ACTIONS_RUNTIME_TOKEN|ACTIONS_ID_TOKEN_REQUEST_TOKEN)$/i;
 var NONCE_HEADER = "x-epure-proxy-nonce";
 var CREDENTIAL_HEADERS = [
