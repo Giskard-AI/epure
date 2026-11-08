@@ -35,15 +35,76 @@ Before each major or minor release, run real EPURE end to end on `Giskard-AI/epu
 
 Human prerequisites, once:
 
-1. `gh auth refresh -h github.com -s workflow`: the reset writes `.github/workflows`. Your `gh` user needs admin on the sandbox (rulesets, issue deletion) and posts every `/epure` command.
-2. `bash scripts/wizards/setup-github-apps-wizard.sh --repo Giskard-AI/epure-e2e-sandbox --llm-env epure-agent --app-name-prefix giskard-ai-epure-e2e --llm-api-key-file ~/.config/epure/gemini.apikey --e2e-config epure.e2e.json`: it creates the two dedicated Apps, installs them on the sandbox only, stores their keys and the LLM key in the sandbox's GitHub Environments, and writes the App IDs to `epure.e2e.json` (git-ignored, no secrets).
+1. A GitHub token for the harness. Prefer a fine-grained personal access token in `EPURE_E2E_GITHUB_TOKEN`: resource owner `Giskard-AI`, repository access `Giskard-AI/epure-e2e-sandbox` only, and these repository permissions:
+   - Actions: read and write (list runs and jobs, read job logs, cancel runs at reset).
+   - Administration: read and write (merge settings and rulesets written by `setup-repo`, ruleset deletion at reset).
+   - Contents: read and write (blobs, trees, commits and refs of the seed and the install commit).
+   - Environments: read (names of the agent environment's secrets).
+   - Issues: read and write (the epic, every `/epure` comment, issue deletion at reset).
+   - Metadata: read (mandatory).
+   - Pull requests: read and write (close leftover pull requests, read task pull request reviews).
+   - Workflows: read and write (push `.github/workflows`).
+
+   The token's user must be an admin of the sandbox and posts every `/epure` command. Without `EPURE_E2E_GITHUB_TOKEN` the harness falls back to `GH_TOKEN`, `GITHUB_TOKEN`, then `gh auth token`, which usually reaches every repository of the user; such a classic token needs the `repo` and `workflow` scopes (`gh auth refresh -h github.com -s workflow`).
+2. `bash scripts/wizards/setup-github-apps-wizard.sh --repo Giskard-AI/epure-e2e-sandbox --llm-env epure-agent --app-name-prefix giskard-ai-epure-e2e --llm-api-key-file ~/.config/epure/gemini.apikey --e2e-config epure.e2e.json`: it creates the two dedicated Apps, installs them on the sandbox only, stores their keys and the LLM key in the sandbox's GitHub Environments, and writes the App IDs to `epure.e2e.json` (git-ignored, no secrets). With `--e2e-config` it refuses any `--repo` whose name lacks `sandbox` or that is `epure-live-sandbox`.
 
 Each run:
 
-1. Push the EPURE commit under test with its built `dist/`, set `epureRef` (branch, tag or SHA) in `epure.e2e.json`, and run from a checkout of that commit: the local `dist/cli/setup-repo.mjs` writes the sandbox's caller workflows. `model` is one `<provider>/<model>` for every phase; `pricing` gives its USD per million tokens.
+1. Push the EPURE commit under test with its built `dist/`, set `epureRef` (branch, tag or SHA) in `epure.e2e.json`, and run from a clean checkout of exactly that commit: the local `dist/cli/setup-repo.mjs` writes the sandbox's caller workflows. The harness refuses to start when `HEAD` is not the commit `epureRef` resolves to, when the worktree has uncommitted changes, or when rebuilding `dist/` changes it. Commit seed edits first: the reset uploads the committed `tests/e2e/seed` tree (file modes kept, never `node_modules`) and checks that the uploaded tree has git's tree SHA.
 2. Run `npm run test:e2e` (it takes hours; `npm run test:e2e:reset` only resets). The run writes `result.json`, `report.md`, `usage.jsonl` and `comments.json` to `.scratch/e2e/<run-id>/`.
 
-A run passes when the feature PR to `dev` is open, no escalation is an internal error, and no ticket escalates twice; the harness resumes a first escalation per ticket with `/epure continue`. Cost comes from the `epure-llm-usage` line that `LLMClient` prints for every LLM response, read back from the orchestrator job logs.
+Before any destructive call, the harness reads the repository without following redirects: its `full_name` must equal `repository`, it must be private and not `epure-live-sandbox`, the token's user must be an admin, and a classic token must carry `repo` and `workflow`. After pushing the install commit to `main` and `dev`, it waits for that commit's CI and stops as soon as a job is red. The GitHub client retries 5xx responses and network errors (never the creation of an issue or a comment) and waits out rate limits with `createGitHubRateLimitedFetch`.
+
+Settings live in `epure.e2e.json` (see `epure.e2e.example.json`); `EPURE_E2E_CONFIG` points at another file. An environment override may fill a setting the file lacks; when both are set they must be equal, or the harness stops.
+
+| Setting | Override | Default | Meaning |
+| --- | --- | --- | --- |
+| `repository` | `EPURE_E2E_REPOSITORY` | required | The sandbox repository. |
+| `epureRef` | `EPURE_E2E_EPURE_REF` | required for a run | Branch, tag or SHA of `Giskard-AI/epure` under test. |
+| `model` | `EPURE_E2E_MODEL` | required for a run | One `<provider>/<model>` for every phase. |
+| `llmEnvironment` | | `epure-agent` | GitHub Environment holding the agent App key and `LLM_API_KEY`. |
+| `agentAppId`, `releaseAppId` | `EPURE_E2E_AGENT_APP_ID`, `EPURE_E2E_RELEASE_APP_ID` | written by the wizard | The sandbox's two Apps. |
+| `pricing` | | `{}` | USD per million tokens keyed by `<provider>/<model>`: `inputPerMTok`, `outputPerMTok`, `cachedInputPerMTok`. |
+| `pricingSource` | | empty | Where and when the prices were read. |
+| `outputDir` | | `.scratch/e2e` | Parent directory of each run's results. |
+| `maxGrillReplies` | | `3` | Scripted grilling answers before `/epure to-spec`. |
+| `planningStepTimeoutMinutes` | | `30` | Limit for each planning command. |
+| `implementationTimeoutMinutes` | | `240` | Limit from `/epure approve` to the feature pull request. |
+| `installCiTimeoutMinutes` | | `20` | Limit for the install commit's CI. |
+
+`result.json` is the baseline record: both SHAs (`epure_sha` under test and the `harness_commit` that ran), the seed tree SHA, the engine that ran (read from the installed caller workflow; the in-house loop ignores `agents.yml`'s `harness`), every setting including the thinking level, the resume policy, the pricing table and its source, phase timings, every usage record with its timestamp, run id, job id, phase and number of `/epure continue` before it, Actions minutes from job durations, escalations with their class, orchestrator job failures, and `comparable`.
+
+A run passes when the feature PR to `dev` is open, no escalation is internal or unclassified, no ticket escalates twice, no orchestrator run fails, and at least one usage record exists (no record means an unknown cost, not $0). The harness resumes a first legitimate escalation per ticket with `/epure continue`. A run is `comparable` with another when it planned exactly 2 tickets, CI ran on at least one `task/*` branch, and a task pull request got a review. Cost comes from the `epure-llm-usage` line that `LLMClient` prints right after the Actions timestamp for every LLM response, read back from the orchestrator job logs.
+
+Escalation classes (`tests/e2e/escalations.ts`): `internal` means EPURE or its configuration is at fault; `legitimate` means the work, a guard or an external system stopped the run as designed. `npm test` fails when EPURE gains a reason missing from this table.
+
+| Reason | Class | Why |
+| --- | --- | --- |
+| `remediation_exhausted` | legitimate | The model could not make the task green within its fix attempts. |
+| `epic_convergence_exhausted` | legitimate | The feature audit kept finding gaps. |
+| `grace_window_timeout` | legitimate | External CI never reported the expected checks. |
+| `sensitive_path_violation` | legitimate | The guard refused a change to a protected path. |
+| `merge_conflict_unresolved` | legitimate | The model could not resolve a conflict with the feature branch. |
+| `merge_conflict_stage1_failed` | legitimate | The conflict resolution broke the local checks. |
+| `pr_not_mergeable` | legitimate | GitHub refused the merge. |
+| `resync_verification_failed` | internal | Review or CI failed again right after EPURE resynced the task branch. |
+| `wall_clock_budget_exhausted` | legitimate | The time budget ran out. |
+| `transient_llm_api_exhausted` | legitimate | The provider kept failing. |
+| `llm_quota_or_auth_failure` | legitimate | Provider quota or key. |
+| `llm_request_invalid` | internal | The provider rejected EPURE's request, or its answer stayed malformed after corrective retries. |
+| `llm_refusal` | legitimate | The model refused. |
+| `model_config_missing` | internal | The configuration lacks a model EPURE needs. |
+| `github_rate_limited` | legitimate | GitHub rate limit. |
+| `branch_update_conflict` | internal | EPURE's own branch update conflicted. |
+| `ambiguous_feature_branch` | internal | EPURE could not tell which feature branch is the plan's. |
+| `plan_manifest_missing` | internal | The plan manifest is missing from the state and the comments. |
+| `internal_error` | internal | Any other EPURE error. |
+| `GLOSSARY_MISSING_FOR_DOMAIN_TERMS` | legitimate | Spec gate: the generated glossary is missing. |
+| `ADR_MISSING_OR_INCOMPLETE` | legitimate | Spec gate: an ADR is missing or incomplete. |
+| `SPEC_MISSING_OR_INCOMPLETE` | legitimate | Spec gate: the spec is missing or incomplete. |
+| `TICKET_GRAPH_EMPTY` | legitimate | Ticket gate: the model planned no ticket. |
+| `TICKET_GRAPH_CYCLE_DETECTED` | legitimate | Ticket gate: the tickets block each other in a cycle. |
+| `UNPROVEN_BLOCKER_CLOSURE` | internal | Only a human closing a blocker as not planned triggers it, and the harness never does. |
 
 ### Semantic Versioning (`vMAJOR.MINOR.PATCH`)
 

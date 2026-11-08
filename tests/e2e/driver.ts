@@ -1,8 +1,7 @@
 import { execFileSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import type { LLMTokenUsage } from "../../src/llm/usage.js";
 import {
   buildIssueStateRefName,
   createGitHubApiRefStateStore,
@@ -11,27 +10,46 @@ import {
 } from "../../src/state/git-ref-state.js";
 import type { E2eConfig } from "./config.js";
 import { EPIC_BODY, EPIC_TITLE, GRILL_ANSWERS } from "./epic.js";
+import { classifyEscalation } from "./escalations.js";
 import type { GitHubApi } from "./github.js";
 import {
+  actionsMinutes,
+  assessComparability,
+  attributeUsage,
   decideEscalation,
+  deriveEngine,
   escalationReasonFromComment,
   evaluateRun,
   parseUsageLines,
   PhaseClock,
   renderMarkdownReport,
+  RESUME_POLICY,
   summarizeUsage,
+  summarizeUsageByPhase,
+  type ActionsJob,
   type E2eRunResult,
+  type EngineRecord,
   type EscalationEvent,
-  type PullRequestRef
+  type HarnessSettings,
+  type JobFailure,
+  type PullRequestRef,
+  type ResumeEvent,
+  type UsageLine
 } from "./report.js";
-import { commitFiles, forceBranches, readTreeFiles, resetSandbox, SEED_DIR } from "./reset.js";
+import { commitTree, forceBranches, resetSandbox, SEED_PATH, verifyDestructiveTarget, type TreeFile } from "./reset.js";
 
 const EPURE_REPOSITORY = "Giskard-AI/epure";
 const ISSUE_COMMAND_WORKFLOW = ".github/workflows/epure-issue-command.yml";
+const CI_WORKFLOW = ".github/workflows/ci.yml";
 const POLL_MS = 30_000;
 // Polls with nothing running and the plan still active before the harness calls it stalled.
 const STALL_POLLS = 6;
+const INSTALL_CI_POLL_MS = 15_000;
+// The install commit's CI must have started by then.
+const INSTALL_CI_START_MS = 180_000;
 const AGENT_SECRETS = ["EPURE_AGENT_APP_ID", "EPURE_AGENT_APP_PRIVATE_KEY", "LLM_API_KEY"];
+const FAILED_CONCLUSIONS = new Set(["failure", "timed_out", "startup_failure"]);
+const GREEN_CONCLUSIONS = new Set(["success", "skipped", "neutral"]);
 
 export type StepProgress = "pending" | "settled" | "suspended" | "done";
 
@@ -55,12 +73,58 @@ export function stepProgress(
   return state.status === "done" ? "done" : "settled";
 }
 
+export function codeUnderTestProblems(input: {
+  readonly pinnedSha: string;
+  readonly headSha: string;
+  readonly dirty: string;
+  readonly distDrift: string;
+}): string[] {
+  return [
+    ...(input.headSha === input.pinnedSha
+      ? []
+      : [`the local checkout is at ${input.headSha.slice(0, 12)}, the pinned EPURE commit is ${input.pinnedSha.slice(0, 12)}`]),
+    ...(input.dirty ? [`the worktree has uncommitted changes:\n${input.dirty}`] : []),
+    ...(input.distDrift ? [`dist/ at the pinned commit does not match its source (rebuild, commit, push):\n${input.distDrift}`] : [])
+  ];
+}
+
 interface WorkflowRun {
   readonly id: number;
   readonly path: string;
   readonly status: string;
   readonly conclusion: string | null;
   readonly html_url: string;
+  readonly head_branch: string | null;
+}
+
+export type InstallCiVerdict =
+  | { readonly state: "pending" }
+  | { readonly state: "green" }
+  | { readonly state: "red"; readonly failed: readonly string[] };
+
+// Red as soon as one job fails, so a broken install stops the run within minutes.
+export function installCiVerdict(
+  runs: ReadonlyArray<Pick<WorkflowRun, "path" | "status" | "conclusion">>,
+  failedJobs: readonly string[]
+): InstallCiVerdict {
+  const failed = [
+    ...failedJobs,
+    ...runs
+      .filter((r) => r.status === "completed" && !GREEN_CONCLUSIONS.has(r.conclusion ?? ""))
+      .map((r) => `${r.path} (${r.conclusion ?? "no conclusion"})`)
+  ];
+  if (failed.length) {
+    return { state: "red", failed };
+  }
+  if (!runs.some((r) => r.path === CI_WORKFLOW) || runs.some((r) => r.status !== "completed")) {
+    return { state: "pending" };
+  }
+  return { state: "green" };
+}
+
+// EPURE passes HIGH explicitly or lets the Google provider default Gemini 3 to HIGH; it sets none for other providers.
+export function thinkingLevelFor(model: string): string {
+  return /^google\/gemini-3/i.test(model) ? "HIGH" : "provider default";
 }
 
 interface Run {
@@ -69,10 +133,13 @@ interface Run {
   readonly log: (line: string) => void;
   readonly startedAt: string;
   readonly escalations: EscalationEvent[];
+  readonly resumes: ResumeEvent[];
+  readonly jobFailures: JobFailure[];
   issue: number;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const git = (args: readonly string[]) => execFileSync("git", args, { encoding: "utf8" });
 
 async function listRunsSince(run: Run): Promise<WorkflowRun[]> {
   return run.gh.paginate<WorkflowRun>(
@@ -92,10 +159,16 @@ async function postComment(run: Run, body: string): Promise<number> {
   return comment.id;
 }
 
+interface IssueComment {
+  readonly body?: string | undefined;
+  readonly performed_via_github_app?: { readonly id: number } | null | undefined;
+}
+
+// Only the agent App speaks for EPURE: a human comment quoting an escalation heading is ignored.
 async function latestEscalationReason(run: Run): Promise<string | null> {
-  const comments = await run.gh.paginate<{ body: string }>(`/repos/${run.gh.repository}/issues/${run.issue}/comments`);
+  const comments = await run.gh.paginate<IssueComment>(`/repos/${run.gh.repository}/issues/${run.issue}/comments`);
   for (const c of comments.reverse()) {
-    const reason = escalationReasonFromComment(c.body ?? "");
+    const reason = c.performed_via_github_app?.id === run.config.agentAppId ? escalationReasonFromComment(c.body ?? "") : null;
     if (reason) {
       return reason;
     }
@@ -120,31 +193,41 @@ async function drive(
     const runs = await listRunsSince(run);
     const state = await readState(run, token);
     // EPURE records its own failures as escalations: a failed run means it could not.
-    const failed = runs.find((r) => r.path === ISSUE_COMMAND_WORKFLOW && r.conclusion === "failure");
+    const failed = runs.find((r) => r.path === ISSUE_COMMAND_WORKFLOW && FAILED_CONCLUSIONS.has(r.conclusion ?? ""));
     if (failed) {
-      run.escalations.push({ reason: "orchestrator_job_failed", ticket: run.issue, phase: state?.phase ?? "idle", at: new Date().toISOString() });
+      run.jobFailures.push({
+        run_id: failed.id,
+        url: failed.html_url,
+        conclusion: failed.conclusion ?? "",
+        phase: state?.phase ?? "idle",
+        at: new Date().toISOString()
+      });
       throw new Error(`EPURE workflow run failed: ${failed.html_url}`);
     }
     const progress = stepProgress(state, since, runs.filter((r) => r.status !== "completed").length, Date.now());
     if (progress === "suspended" && state) {
+      const reason = state.last_escalation?.reason ?? (await latestEscalationReason(run)) ?? "unrecorded";
       const event: EscalationEvent = {
-        reason: state.last_escalation?.reason ?? (await latestEscalationReason(run)) ?? "unrecorded",
+        reason,
+        class: classifyEscalation(reason),
         ticket: state.last_escalation?.ticket_number ?? state.active_ticket_number ?? run.issue,
         phase: state.phase,
         at: new Date().toISOString()
       };
       const decision = decideEscalation(run.escalations, event);
       run.escalations.push(event);
-      run.log(`[epic] escalation on #${event.ticket} (${event.reason}): ${decision.action}, ${decision.why}`);
+      run.log(`[epic] escalation on #${event.ticket} (${event.reason}, ${event.class}): ${decision.action}, ${decision.why}`);
       if (decision.action === "stop") {
         throw new Error(`escalation ${event.reason} on #${event.ticket}: ${decision.why}`);
       }
-      since = { commentId: await postComment(run, resume), version: state.version };
+      const commentId = await postComment(run, resume);
+      run.resumes.push({ at: new Date().toISOString(), ticket: event.ticket, command: resume.split("\n")[0]! });
+      since = { commentId, version: state.version };
       idlePolls = 0;
       continue;
     }
-    if (progress === "done" || (progress === "settled" && state?.phase !== "implementation" && state?.phase !== "review")) {
-      return state!;
+    if (state && (progress === "done" || (progress === "settled" && state.phase !== "implementation" && state.phase !== "review"))) {
+      return state;
     }
     idlePolls = progress === "settled" ? idlePolls + 1 : 0;
     if (idlePolls >= STALL_POLLS) {
@@ -171,28 +254,51 @@ async function resolveEpureSha(gh: GitHubApi, ref: string): Promise<string> {
   return sha;
 }
 
-async function preflight(config: E2eConfig, gh: GitHubApi): Promise<string> {
+// The local setup-repo writes the sandbox workflows, so the checkout must be the pinned commit, clean, with its own dist/.
+function verifyCodeUnderTest(pinnedSha: string): string {
+  const headSha = git(["rev-parse", "HEAD"]).trim();
+  const checkout = { pinnedSha, headSha, dirty: git(["status", "--porcelain"]).trim(), distDrift: "" };
+  let problems = codeUnderTestProblems(checkout);
+  if (problems.length === 0) {
+    execFileSync(process.execPath, ["scripts/build-actions.mjs"], { stdio: "ignore" });
+    const distDrift = git(["status", "--porcelain", "--", "dist"]).trim();
+    if (distDrift) {
+      // The worktree was clean: every change under dist/ comes from this build.
+      git(["checkout", "--", "dist"]);
+      git(["clean", "-fdq", "--", "dist"]);
+    }
+    problems = codeUnderTestProblems({ ...checkout, distDrift });
+  }
+  if (problems.length) {
+    throw new Error(`refusing to run: ${problems.join("; ")}`);
+  }
+  return headSha;
+}
+
+async function preflight(config: E2eConfig, gh: GitHubApi): Promise<{ readonly epureSha: string; readonly harnessCommit: string }> {
   if (!config.agentAppId || !config.releaseAppId) {
     throw new Error("agentAppId and releaseAppId are missing from the e2e config: run the GitHub Apps wizard with --e2e-config");
   }
   if (!config.epureRef || !config.model) {
     throw new Error('the e2e config needs "epureRef" and "model"');
   }
-  const R = `/repos/${gh.repository}`;
-  const { login } = await gh.call<{ login: string }>("GET", "/user");
-  const { permission } = await gh.call<{ permission: string }>("GET", `${R}/collaborators/${login}/permission`);
-  if (permission !== "admin" && permission !== "write") {
-    throw new Error(`${login} has "${permission}" on ${gh.repository}: /epure commands need write access`);
-  }
-  const secrets = await gh.call<{ secrets: Array<{ name: string }> }>("GET", `${R}/environments/${config.llmEnvironment}/secrets`, undefined, [200, 404]);
+  const epureSha = await resolveEpureSha(gh, config.epureRef);
+  const harnessCommit = verifyCodeUnderTest(epureSha);
+  await verifyDestructiveTarget(gh);
+  const secrets = await gh.call<{ secrets?: Array<{ name: string }> }>(
+    "GET",
+    `/repos/${gh.repository}/environments/${config.llmEnvironment}/secrets`,
+    undefined,
+    [200, 404]
+  );
   const missing = AGENT_SECRETS.filter((name) => !(secrets.secrets ?? []).some((s) => s.name === name));
   if (missing.length) {
     throw new Error(`environment "${config.llmEnvironment}" lacks ${missing.join(", ")}: run the GitHub Apps wizard`);
   }
-  return resolveEpureSha(gh, config.epureRef);
+  return { epureSha, harnessCommit };
 }
 
-function runSetupRepo(dir: string, config: E2eConfig, repository: string, sha: string, token: string, githubSettings: boolean): void {
+function runSetupRepo(dir: string, config: E2eConfig, repository: string, sha: string, token: string, githubSettings: boolean): string[] {
   const args = [
     resolve("dist/cli/setup-repo.mjs"),
     ...["--repo", repository, "--dir", dir, "--pinned-sha", sha, "--model", config.model, "--llm-env", config.llmEnvironment, "--apply", "--json"],
@@ -201,44 +307,115 @@ function runSetupRepo(dir: string, config: E2eConfig, repository: string, sha: s
       : [])
   ];
   const out = execFileSync(process.execPath, args, { encoding: "utf8", env: { ...process.env, GITHUB_TOKEN: token } });
-  const status = (JSON.parse(out) as { status: string }).status;
-  if (status === "error") {
+  const result = JSON.parse(out) as { status: string; mutated_files: string[] };
+  if (result.status === "error") {
     throw new Error(`setup-repo failed: ${out.slice(0, 2000)}`);
+  }
+  return result.mutated_files;
+}
+
+async function waitForInstallCi(run: Run, sha: string): Promise<void> {
+  const R = `/repos/${run.gh.repository}`;
+  const started = Date.now();
+  for (;;) {
+    await sleep(INSTALL_CI_POLL_MS);
+    const runs = await run.gh.paginate<WorkflowRun>(
+      `${R}/actions/runs?head_sha=${sha}`,
+      (page) => (page as { workflow_runs: WorkflowRun[] }).workflow_runs
+    );
+    const failedJobs: string[] = [];
+    for (const wr of runs.filter((r) => r.status !== "completed")) {
+      const { jobs } = await run.gh.call<{ jobs: Array<{ name: string; conclusion: string | null }> }>(
+        "GET",
+        `${R}/actions/runs/${wr.id}/jobs?per_page=100`
+      );
+      failedJobs.push(...jobs.filter((j) => FAILED_CONCLUSIONS.has(j.conclusion ?? "")).map((j) => `${wr.path}: ${j.name} ${wr.html_url}`));
+    }
+    const verdict = installCiVerdict(runs, failedJobs);
+    if (verdict.state === "green") {
+      run.log(`[setup-repo] CI green on the install commit ${sha.slice(0, 12)}`);
+      return;
+    }
+    if (verdict.state === "red") {
+      throw new Error(`CI is red on the install commit ${sha.slice(0, 12)}: ${verdict.failed.join(", ")}`);
+    }
+    const elapsed = Date.now() - started;
+    if (!runs.some((r) => r.path === CI_WORKFLOW) && elapsed > INSTALL_CI_START_MS) {
+      throw new Error(`no CI run started for the install commit ${sha.slice(0, 12)}`);
+    }
+    if (elapsed > run.config.installCiTimeoutMinutes * 60_000) {
+      throw new Error(`CI on the install commit ${sha.slice(0, 12)} still running after ${run.config.installCiTimeoutMinutes} min`);
+    }
   }
 }
 
 // Files land on main and dev before the rulesets exist: the release ruleset would refuse the push.
-async function installEpure(run: Run, seedSha: string, sha: string, token: string): Promise<void> {
-  const localSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-  if (localSha !== sha) {
-    run.log(`[setup-repo] warning: the workflows for EPURE ${sha.slice(0, 12)} come from the local setup-repo at ${localSha.slice(0, 12)}`);
-  }
+async function installEpure(
+  run: Run,
+  seed: { readonly commitSha: string; readonly treeSha: string },
+  sha: string,
+  token: string
+): Promise<{ readonly commitSha: string; readonly engine: EngineRecord }> {
   const dir = mkdtempSync(join(tmpdir(), "epure-e2e-"));
   try {
-    cpSync(SEED_DIR, dir, { recursive: true });
-    runSetupRepo(dir, run.config, run.gh.repository, sha, token, false);
-    const commit = await commitFiles(run.gh, readTreeFiles(dir), `chore: install EPURE ${sha.slice(0, 12)} with setup-repo`, [seedSha]);
-    await forceBranches(run.gh, ["main", "dev"], commit);
+    // The committed seed only, with its file modes: what the sandbox received at reset.
+    execFileSync("tar", ["-x", "-C", dir], { input: execFileSync("git", ["archive", "--format=tar", `HEAD:${SEED_PATH}`]) });
+    const files: TreeFile[] = runSetupRepo(dir, run.config, run.gh.repository, sha, token, false).map((path) => ({
+      path,
+      mode: statSync(join(dir, path)).mode & 0o111 ? "100755" : "100644",
+      content: readFileSync(join(dir, path))
+    }));
+    const { commitSha } = await commitTree(run.gh, files, `chore: install EPURE ${sha.slice(0, 12)} with setup-repo`, [seed.commitSha], seed.treeSha);
+    await forceBranches(run.gh, ["main", "dev"], commitSha);
+    const engine = deriveEngine(readFileSync(join(dir, ISSUE_COMMAND_WORKFLOW), "utf8"), readFileSync(join(dir, ".github/agents.yml"), "utf8"));
     runSetupRepo(dir, run.config, run.gh.repository, sha, token, true);
-    run.log(`[setup-repo] EPURE ${sha.slice(0, 12)} installed at ${commit}, rulesets applied`);
+    run.log(`[setup-repo] EPURE ${sha.slice(0, 12)} installed at ${commitSha}, rulesets applied, engine ${engine.executed}`);
+    return { commitSha, engine };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
-async function collectUsage(run: Run): Promise<LLMTokenUsage[]> {
+interface RunEvidence {
+  readonly usage: ReadonlyArray<UsageLine & { readonly run_id: number; readonly job_id: number }>;
+  readonly jobs: readonly ActionsJob[];
+  readonly taskBranchCiRuns: number;
+}
+
+async function collectEvidence(run: Run): Promise<RunEvidence> {
   const R = `/repos/${run.gh.repository}`;
-  const records: LLMTokenUsage[] = [];
-  for (const wr of (await listRunsSince(run)).filter((r) => r.path === ISSUE_COMMAND_WORKFLOW)) {
-    const { jobs } = await run.gh.call<{ jobs: Array<{ id: number; name: string; conclusion: string | null }> }>(
-      "GET",
-      `${R}/actions/runs/${wr.id}/jobs?per_page=100`
+  const runs = await listRunsSince(run);
+  const usage: Array<UsageLine & { run_id: number; job_id: number }> = [];
+  const jobs: ActionsJob[] = [];
+  for (const wr of runs) {
+    const runJobs = await run.gh.paginate<{ id: number; started_at: string | null; completed_at: string | null }>(
+      `${R}/actions/runs/${wr.id}/jobs`,
+      (page) => (page as { jobs: Array<{ id: number; started_at: string | null; completed_at: string | null }> }).jobs
     );
-    for (const job of jobs.filter((j) => j.name.startsWith("Orchestrate") && j.conclusion !== "skipped")) {
-      records.push(...parseUsageLines(await run.gh.text(`${R}/actions/jobs/${job.id}/logs`)));
+    jobs.push(...runJobs.map((j) => ({ workflow: wr.path, started_at: j.started_at, completed_at: j.completed_at })));
+    if (wr.path !== ISSUE_COMMAND_WORKFLOW) {
+      continue;
+    }
+    for (const job of runJobs.filter((j) => j.started_at)) {
+      const lines = parseUsageLines(await run.gh.text(`${R}/actions/jobs/${job.id}/logs`));
+      usage.push(...lines.map((line) => ({ ...line, run_id: wr.id, job_id: job.id })));
     }
   }
-  return records;
+  return {
+    usage,
+    jobs,
+    taskBranchCiRuns: runs.filter((r) => r.path === CI_WORKFLOW && r.head_branch?.startsWith("task/")).length
+  };
+}
+
+async function countReviewedTaskPrs(gh: GitHubApi): Promise<number> {
+  const pulls = await gh.paginate<{ number: number; head: { ref: string } }>(`/repos/${gh.repository}/pulls?state=all`);
+  let reviewed = 0;
+  for (const pr of pulls.filter((p) => p.head.ref.startsWith("task/"))) {
+    const reviews = await gh.call<unknown[]>("GET", `/repos/${gh.repository}/pulls/${pr.number}/reviews?per_page=1`);
+    reviewed += reviews.length > 0 ? 1 : 0;
+  }
+  return reviewed;
 }
 
 async function findFeaturePr(run: Run, state: EpureIssueState | null): Promise<PullRequestRef | null> {
@@ -257,16 +434,40 @@ export async function runSandboxEpic(
 ): Promise<{ readonly result: E2eRunResult; readonly dir: string }> {
   const startedMs = Date.now();
   const runId = new Date(startedMs).toISOString().replace(/[:.]/g, "-");
-  const run: Run = { config, gh, log, startedAt: new Date(startedMs).toISOString(), escalations: [], issue: 0 };
+  const run: Run = {
+    config,
+    gh,
+    log,
+    startedAt: new Date(startedMs).toISOString(),
+    escalations: [],
+    resumes: [],
+    jobFailures: [],
+    issue: 0
+  };
+  const settings: HarnessSettings = {
+    model: config.model,
+    thinking_level: thinkingLevelFor(config.model),
+    llm_environment: config.llmEnvironment,
+    max_grill_replies: config.maxGrillReplies,
+    planning_step_timeout_minutes: config.planningStepTimeoutMinutes,
+    implementation_timeout_minutes: config.implementationTimeoutMinutes,
+    install_ci_timeout_minutes: config.installCiTimeoutMinutes,
+    poll_interval_ms: POLL_MS,
+    stall_polls: STALL_POLLS
+  };
   const clock = new PhaseClock();
-  let epureSha = "";
+  let code = { epureSha: "", harnessCommit: "" };
+  let seed = { commitSha: "", treeSha: "" };
+  let install: { commitSha: string; engine: EngineRecord | null } = { commitSha: "", engine: null };
   let issue: PullRequestRef | null = null;
   let error: string | null = null;
 
   try {
-    epureSha = await clock.time("preflight", () => preflight(config, gh));
-    const { seedSha } = await clock.time("reset", () => resetSandbox(gh, log));
-    await clock.time("setup_repo", () => installEpure(run, seedSha, epureSha, token));
+    code = await clock.time("preflight", () => preflight(config, gh));
+    const reset = await clock.time("reset", () => resetSandbox(gh, log));
+    seed = { commitSha: reset.seedCommitSha, treeSha: reset.seedTreeSha };
+    install = await clock.time("setup_repo", () => installEpure(run, seed, code.epureSha, token));
+    await clock.time("install_ci", () => waitForInstallCi(run, install.commitSha));
 
     const created = await gh.call<{ number: number; html_url: string }>("POST", `/repos/${gh.repository}/issues`, { title: EPIC_TITLE, body: EPIC_BODY });
     run.issue = created.number;
@@ -286,7 +487,7 @@ export async function runSandboxEpic(
     state = await clock.time("tickets", () => drive(run, token, "/epure to-tickets", "/epure to-tickets", planning));
     expectState(state, "tickets", "awaiting_human_approval");
     await clock.time("implementation", () =>
-      drive(run, token, "/epure approve", "/epure continue", config.implementationTimeoutMinutes)
+      drive(run, token, "/epure approve", RESUME_POLICY.resume_command, config.implementationTimeoutMinutes)
     );
   } catch (err) {
     error = err instanceof Error ? err.message : String(err);
@@ -297,34 +498,54 @@ export async function runSandboxEpic(
   mkdirSync(dir, { recursive: true });
   const finalState = run.issue ? await readState(run, token).catch(() => null) : null;
   const featurePr = run.issue ? await findFeaturePr(run, finalState) : null;
-  const usageRecords = await collectUsage(run).catch((err: unknown) => {
-    log(`[e2e] usage collection failed: ${err instanceof Error ? err.message : String(err)}`);
-    return [];
+  const evidence = await collectEvidence(run).catch((err: unknown): RunEvidence => {
+    log(`[e2e] usage and job collection failed: ${err instanceof Error ? err.message : String(err)}`);
+    return { usage: [], jobs: [], taskBranchCiRuns: 0 };
   });
+  const reviewedTaskPrs = run.issue ? await countReviewedTaskPrs(gh).catch(() => 0) : 0;
   if (run.issue) {
     const comments = await gh.paginate<unknown>(`/repos/${gh.repository}/issues/${run.issue}/comments`);
     writeFileSync(join(dir, "comments.json"), `${JSON.stringify(comments, null, 2)}\n`);
   }
-  writeFileSync(join(dir, "usage.jsonl"), usageRecords.map((r) => JSON.stringify(r)).join("\n"));
+  const records = attributeUsage(evidence.usage, clock.phases, run.resumes);
+  writeFileSync(join(dir, "usage.jsonl"), records.map((r) => JSON.stringify(r)).join("\n"));
 
-  const { success, checks } = evaluateRun(featurePr, run.escalations);
+  const tickets = finalState?.plan_manifest?.tickets.map((t) => t.ticketIssueNumber) ?? [];
+  const { success, checks } = evaluateRun({
+    featurePr,
+    escalations: run.escalations,
+    jobFailures: run.jobFailures,
+    usageRecords: records.length
+  });
   const endedMs = Date.now();
   const result: E2eRunResult = {
-    schema_version: 1,
+    schema_version: 2,
     run_id: runId,
     repository: gh.repository,
-    epure_ref: config.epureRef,
-    epure_sha: epureSha,
-    model: config.model,
+    code_under_test: { epure_ref: config.epureRef, epure_sha: code.epureSha, harness_commit: code.harnessCommit },
+    seed: { tree_sha: seed.treeSha, commit_sha: seed.commitSha },
+    install_commit_sha: install.commitSha,
+    engine: install.engine,
+    settings,
+    resume_policy: RESUME_POLICY,
+    pricing: { source: config.pricingSource, table: config.pricing },
     started_at: run.startedAt,
     ended_at: new Date(endedMs).toISOString(),
     duration_ms: endedMs - startedMs,
     issue,
-    tickets: finalState?.plan_manifest?.tickets.map((t) => t.ticketIssueNumber) ?? [],
+    tickets,
     feature_pr: featurePr,
     phases: clock.phases,
-    usage: summarizeUsage(usageRecords, config.pricing),
+    usage: {
+      ...summarizeUsage(records, config.pricing),
+      by_phase: summarizeUsageByPhase(records, config.pricing),
+      records
+    },
+    actions: actionsMinutes(evidence.jobs),
     escalations: run.escalations,
+    resumes: run.resumes,
+    job_failures: run.jobFailures,
+    comparable: assessComparability({ tickets: tickets.length, taskBranchCiRuns: evidence.taskBranchCiRuns, reviewedTaskPrs }),
     success,
     checks,
     error
