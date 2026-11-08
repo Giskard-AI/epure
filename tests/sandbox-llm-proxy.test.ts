@@ -1,7 +1,8 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveProviderUpstream, type ProviderKind } from "../src/llm/index.js";
+import { runPolyglotStage1Verification } from "../src/sandbox/polyglot-workspace-runner.js";
 import {
   buildKernelSandboxedCommand,
   buildSanitizedSandboxEnv,
@@ -33,7 +34,14 @@ async function sseUpstream(): Promise<FakeLlmUpstream> {
   return upstream;
 }
 
+// The suite itself runs in CI: rows that need "not CI" must not inherit the runner's flags.
+beforeEach(() => {
+  vi.stubEnv("GITHUB_ACTIONS", "");
+  vi.stubEnv("CI", "");
+});
+
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await Promise.all(openUpstreams.splice(0).map((u) => u.close()));
 });
 
@@ -48,6 +56,7 @@ describe("Sandbox LLM proxy & untrusted code credential isolation (#98)", () => 
     CORP_GATEWAY_API_KEY: "corp-RealGatewaySecret1234567890",
     GITHUB_TOKEN: "ghs_RealWriteInstallationToken1234567890",
     GH_TOKEN: "ghp_RealPersonalAccessToken1234567890",
+    INPUT_GITHUB_TOKEN: "ghs_ActionInputToken1234567890",
     EPURE_AGENT_APP_PRIVATE_KEY:
       "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA0123456789\n-----END RSA PRIVATE KEY-----",
     EPURE_RELEASE_APP_PRIVATE_KEY:
@@ -64,6 +73,7 @@ describe("Sandbox LLM proxy & untrusted code credential isolation (#98)", () => 
     { id: "strips-alias-key-named-in-agents-yml", forbiddenKey: "CORP_GATEWAY_API_KEY" },
     { id: "strips-github-token", forbiddenKey: "GITHUB_TOKEN" },
     { id: "strips-gh-token", forbiddenKey: "GH_TOKEN" },
+    { id: "strips-action-input-github-token", forbiddenKey: "INPUT_GITHUB_TOKEN" },
     { id: "strips-agent-app-private-key", forbiddenKey: "EPURE_AGENT_APP_PRIVATE_KEY" },
     { id: "strips-release-app-private-key", forbiddenKey: "EPURE_RELEASE_APP_PRIVATE_KEY" },
     { id: "strips-npm-and-cloud-tokens", forbiddenKey: "NPM_TOKEN" }
@@ -769,6 +779,61 @@ describe("Sandbox LLM proxy & untrusted code credential isolation (#98)", () => 
       expect(result.error_code).toBe(expectedErrorCode);
       expect(result.isolated).toBe(expectedErrorCode === "NONE");
       expect(result.stdout).toBe(expectedErrorCode === "NONE" ? "sandbox-check\n" : "");
+    }
+  );
+
+  it.each([
+    {
+      id: "github-actions-in-the-orchestrator-env-refuses-even-with-a-trimmed-runner-env",
+      processEnv: { GITHUB_ACTIONS: "true" },
+      expected: { error_code: "SANDBOX_ISOLATION_UNAVAILABLE", isolated: false }
+    },
+    {
+      id: "ci-equals-1-counts-as-ci",
+      processEnv: { CI: "1" },
+      expected: { error_code: "SANDBOX_ISOLATION_UNAVAILABLE", isolated: false }
+    },
+    {
+      id: "outside-ci-the-step-runs-unconfined-and-fails-on-its-own",
+      processEnv: {},
+      expected: { error_code: "SANDBOX_COMMAND_FAILED", isolated: true }
+    }
+  ])(
+    "runPolyglotStage1Verification [$id]: Stage 1 cannot bypass CI fail-closed",
+    async ({ processEnv, expected }) => {
+      for (const [name, value] of Object.entries(processEnv)) {
+        vi.stubEnv(name, value);
+      }
+      const seen: Array<{ error_code: string; isolated: boolean }> = [];
+      const res = await runPolyglotStage1Verification({
+        profile: {
+          wait_for_external_ci: false,
+          external_ci_timeout_minutes: 1,
+          grace_window_seconds: 0,
+          targets: [
+            {
+              name: "api",
+              working_directory: ".",
+              kind: "node",
+              path_patterns: ["**"],
+              test_command: "npm test"
+            }
+          ]
+        },
+        files: [{ path: "src/index.ts", content: "export const x = 1;\n" }],
+        changedPaths: ["src/index.ts"],
+        llmApiKey: "test-llm-key",
+        // No landrun or bwrap on this PATH, and no CI flag in what Stage 1 passes down.
+        runnerEnv: { PATH: "/nonexistent-epure-bin", HOME: "/nonexistent-epure-home" },
+        sandboxRunner: async (input) => {
+          const result = await runInUntrustedCodeSandbox(input);
+          seen.push({ error_code: result.error_code, isolated: result.isolated });
+          return result;
+        }
+      });
+
+      expect(res.passed).toBe(false);
+      expect(seen).toEqual([expected]);
     }
   );
 

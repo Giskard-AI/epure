@@ -124,7 +124,7 @@ export interface SandboxExecutionResult {
 }
 
 const SECRET_ENV_NAME_PATTERN =
-  /^(?:.*API_KEY|LLM_API_KEY|GITHUB_TOKEN|GH_TOKEN|GITHUB_PAT|EPURE_.*(?:KEY|TOKEN|SECRET)|AWS_.*|AZURE_.*|GCP_.*|NPM_TOKEN|NODE_AUTH_TOKEN|ACTIONS_RUNTIME_TOKEN|ACTIONS_ID_TOKEN_REQUEST_TOKEN)$/i;
+  /^(?:.*API_KEY|.*_TOKEN|.*_SECRET|.*PRIVATE_KEY|LLM_API_KEY|GITHUB_TOKEN|GH_TOKEN|GITHUB_PAT|EPURE_.*(?:KEY|TOKEN|SECRET)|AWS_.*|AZURE_.*|GCP_.*|NPM_TOKEN|NODE_AUTH_TOKEN|ACTIONS_RUNTIME_TOKEN|ACTIONS_ID_TOKEN_REQUEST_TOKEN)$/i;
 
 const NONCE_HEADER = "x-epure-proxy-nonce";
 // The sandbox presents the nonce where its SDK would put a key; the proxy swaps it for the real one.
@@ -797,8 +797,13 @@ export async function runInUntrustedCodeSandbox(
   }
 }
 
+// Reads this process's own environment too: callers cannot opt out by passing a trimmed runnerEnv.
 function isCiRunner(runnerEnv: Readonly<Record<string, string | undefined>>): boolean {
-  return runnerEnv.GITHUB_ACTIONS === "true" || runnerEnv.CI === "true";
+  const flagged = (value: string | undefined): boolean =>
+    value !== undefined && ["true", "1"].includes(value.trim().toLowerCase());
+  return [process.env, runnerEnv].some(
+    (env) => flagged(env.GITHUB_ACTIONS) || flagged(env.CI)
+  );
 }
 
 interface SpawnedOutput {

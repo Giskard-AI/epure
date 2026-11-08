@@ -7438,7 +7438,7 @@ function resolveProviderUpstream(provider, providerConfig, env = process.env) {
 }
 
 // src/sandbox/llm-sandbox.ts
-var SECRET_ENV_NAME_PATTERN = /^(?:.*API_KEY|LLM_API_KEY|GITHUB_TOKEN|GH_TOKEN|GITHUB_PAT|EPURE_.*(?:KEY|TOKEN|SECRET)|AWS_.*|AZURE_.*|GCP_.*|NPM_TOKEN|NODE_AUTH_TOKEN|ACTIONS_RUNTIME_TOKEN|ACTIONS_ID_TOKEN_REQUEST_TOKEN)$/i;
+var SECRET_ENV_NAME_PATTERN = /^(?:.*API_KEY|.*_TOKEN|.*_SECRET|.*PRIVATE_KEY|LLM_API_KEY|GITHUB_TOKEN|GH_TOKEN|GITHUB_PAT|EPURE_.*(?:KEY|TOKEN|SECRET)|AWS_.*|AZURE_.*|GCP_.*|NPM_TOKEN|NODE_AUTH_TOKEN|ACTIONS_RUNTIME_TOKEN|ACTIONS_ID_TOKEN_REQUEST_TOKEN)$/i;
 var NONCE_HEADER = "x-epure-proxy-nonce";
 var CREDENTIAL_HEADERS = [
   NONCE_HEADER,
@@ -7986,7 +7986,10 @@ async function runInUntrustedCodeSandbox(input) {
   }
 }
 function isCiRunner(runnerEnv) {
-  return runnerEnv.GITHUB_ACTIONS === "true" || runnerEnv.CI === "true";
+  const flagged = (value) => value !== void 0 && ["true", "1"].includes(value.trim().toLowerCase());
+  return [process.env, runnerEnv].some(
+    (env) => flagged(env.GITHUB_ACTIONS) || flagged(env.CI)
+  );
 }
 function spawnCaptured(command, args, cwd, env, timeoutMs) {
   return new Promise((resolvePromise) => {
@@ -10956,6 +10959,7 @@ async function runTestsInIsolatedWorkspace(params) {
       isTaskBranch: params.isTaskBranch,
       reviewersDir: params.reviewersDir,
       llmApiKey: params.llmApiKey,
+      runnerEnv: process.env,
       bootstrappedTargets: params.bootstrappedTargets,
       sandboxRunner: params.sandboxRunner,
       label: params.label
