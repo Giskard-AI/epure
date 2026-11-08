@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createInitialIssueState, type EpureIssueState } from "../src/state/git-ref-state.js";
 import { assertE2eSandboxRepository, loadE2eConfig, resolveGitHubToken } from "./e2e/config.js";
-import { codeUnderTestProblems, installCiVerdict, stepProgress, thinkingLevelFor } from "./e2e/driver.js";
+import { codeUnderTestProblems, installCiVerdict, ranOnRunner, stepDone, stepProgress, thinkingLevelFor } from "./e2e/driver.js";
 import { classifyEscalation, GATE_CODE_CLASS, RECORDED_REASON_CLASS } from "./e2e/escalations.js";
 import { createGitHubApi } from "./e2e/github.js";
 import {
@@ -352,6 +352,16 @@ describe("createGitHubApi", () => {
     await expect(api.text("/repos/o/sandbox/actions/jobs/1/logs")).resolves.toBe("2026-11-08T10:00:00.0000000Z hello");
     expect(calls[1]).toEqual({ url: "https://logs.example/job.txt?sig=1", init: { redirect: "error" } });
   });
+
+  it.each([
+    { id: "job-without-a-log-is-null", status: 404, expected: null },
+    { id: "log-forbidden-to-the-token-throws", status: 403, expected: /HTTP 403/ }
+  ])("$id", async ({ status, expected }) => {
+    const { api } = fake([new Response("{}", { status })]);
+    const read = api.text("/repos/o/sandbox/actions/jobs/1/logs");
+
+    await (expected === null ? expect(read).resolves.toBeNull() : expect(read).rejects.toThrow(expected));
+  });
 });
 
 describe("PhaseClock", () => {
@@ -623,10 +633,46 @@ describe("evaluateRun", () => {
     { id: "failed-orchestrator-run-fails", pr, escalations: [], jobFailures: [failure], usage: 5, failed: ["no-orchestrator-job-failure"] },
     { id: "zero-usage-records-fail", pr, escalations: [], jobFailures: [], usage: 0, failed: ["llm-usage-recorded"] }
   ])("$id", ({ pr: featurePr, escalations, jobFailures, usage, failed }) => {
-    const { success, checks } = evaluateRun({ featurePr, escalations, jobFailures, usageRecords: usage });
+    const { success, checks } = evaluateRun({
+      featurePr,
+      escalations,
+      jobFailures,
+      usageRecords: usage,
+      unavailableJobLogs: [],
+      evidenceError: null
+    });
 
     expect(checks.filter((c) => !c.passed).map((c) => c.id)).toEqual(failed);
     expect(success).toBe(failed.length === 0);
+  });
+
+  it.each([
+    { id: "every-orchestrator-log-read", unavailable: [], error: null, passed: true, detail: "5 requests" },
+    {
+      id: "orchestrator-job-without-log-leaves-the-cost-incomplete",
+      unavailable: [128711902545],
+      error: null,
+      passed: false,
+      detail: "no log for orchestrator jobs 128711902545: cost incomplete"
+    },
+    {
+      id: "failed-collection-is-reported-not-shown-as-zero",
+      unavailable: [],
+      error: "GET /runs: HTTP 502",
+      passed: false,
+      detail: "evidence collection failed: GET /runs: HTTP 502"
+    }
+  ])("$id", ({ unavailable, error, passed, detail }) => {
+    const { checks } = evaluateRun({
+      featurePr: pr,
+      escalations: [],
+      jobFailures: [],
+      usageRecords: 5,
+      unavailableJobLogs: unavailable,
+      evidenceError: error
+    });
+
+    expect(checks.find((c) => c.id === "llm-usage-recorded")).toEqual({ id: "llm-usage-recorded", passed, detail });
   });
 });
 
@@ -642,9 +688,47 @@ describe("assessComparability", () => {
       id: "no-task-ci-and-no-review",
       input: { tickets: 2, taskBranchCiRuns: 0, reviewedTaskPrs: 0 },
       expected: { comparable: false, unmet: ["no CI run on a task/* branch", "no review on a task pull request"] }
+    },
+    {
+      id: "unread-workflow-runs-are-unknown-not-absent",
+      input: { tickets: 2, taskBranchCiRuns: null, reviewedTaskPrs: 2 },
+      expected: { comparable: false, unmet: ["CI runs on task/* branches unknown: evidence collection failed"] }
     }
   ])("$id", ({ input, expected }) => {
     expect(assessComparability(input)).toEqual(expected);
+  });
+});
+
+describe("ranOnRunner", () => {
+  const job = (conclusion: string | null, runner: string | null) => ({
+    id: 1,
+    conclusion,
+    runner_name: runner,
+    started_at: "2026-11-08T11:06:15Z",
+    completed_at: "2026-11-08T11:06:15Z"
+  });
+
+  it.each([
+    { id: "skipped-job-stamped-with-times-has-no-log", job: job("skipped", null), expected: false },
+    { id: "successful-job-on-a-runner", job: job("success", "GitHub Actions 1000117064"), expected: true },
+    { id: "failed-job-on-a-runner", job: job("failure", "GitHub Actions 1000117064"), expected: true },
+    { id: "job-cancelled-before-a-runner-picked-it", job: job("cancelled", null), expected: false }
+  ])("$id", ({ job: j, expected }) => {
+    expect(ranOnRunner(j)).toBe(expected);
+  });
+});
+
+describe("stepDone", () => {
+  it.each([
+    { id: "planning-step-awaiting-approval", progress: "settled", phase: "spec", status: "awaiting_human_approval", expected: true },
+    { id: "grilling-awaiting-an-answer", progress: "settled", phase: "grilling", status: "active", expected: true },
+    { id: "gate-3-feature-pr-awaits-the-human-merge", progress: "settled", phase: "review", status: "awaiting_human_approval", expected: true },
+    { id: "implementation-idle-between-tickets-is-not-done", progress: "settled", phase: "implementation", status: "active", expected: false },
+    { id: "review-still-active-is-not-done", progress: "settled", phase: "review", status: "active", expected: false },
+    { id: "work-still-running", progress: "pending", phase: "review", status: "awaiting_human_approval", expected: false },
+    { id: "epic-done", progress: "done", phase: "completed", status: "done", expected: true }
+  ] as const)("$id", ({ progress, phase, status, expected }) => {
+    expect(stepDone(progress, { phase, status })).toBe(expected);
   });
 });
 
@@ -798,13 +882,14 @@ describe("renderMarkdownReport", () => {
       tickets: [3, 4],
       feature_pr: null,
       phases: [{ name: "plan", started_at: "", ended_at: "", duration_ms: 90_000, outcome: "ok" }],
-      usage: { ...summarizeUsage([], {}), by_phase: {}, records: [] },
+      usage: { ...summarizeUsage([], {}), by_phase: {}, unavailable_job_logs: [], records: [] },
       actions: { jobs: 4, minutes: 12.5, billable_minutes: 14, by_workflow: {} },
       escalations,
       resumes: [],
       job_failures: [],
       comparable: { comparable: false, unmet: ["no review on a task pull request"] },
-      ...evaluateRun({ featurePr: null, escalations, jobFailures: [], usageRecords: 0 }),
+      evidence_error: null,
+      ...evaluateRun({ featurePr: null, escalations, jobFailures: [], usageRecords: 0, unavailableJobLogs: [], evidenceError: null }),
       error: "timed out",
       ...patch
     };

@@ -6,8 +6,8 @@ export interface GitHubApi {
   status(method: string, path: string, body?: unknown): Promise<number>;
   paginate<T>(path: string, pick?: (page: unknown) => readonly T[]): Promise<T[]>;
   graphql<T>(query: string, variables: Record<string, unknown>): Promise<T>;
-  // Follows one redirect without the token: job logs live behind a signed storage URL.
-  text(path: string): Promise<string>;
+  // Follows one redirect without the token: job logs live behind a signed storage URL. null on 404.
+  text(path: string): Promise<string | null>;
   // null for tokens without OAuth scopes (fine-grained PATs, App tokens).
   oauthScopes(): Promise<string[] | null>;
 }
@@ -107,12 +107,16 @@ export function createGitHubApi(token: string, repository: string, options: GitH
       }
       return res.data as T;
     },
-    async text(path: string): Promise<string> {
+    async text(path: string): Promise<string | null> {
       let resp = await send("GET", path);
       const location = resp.headers.get("location");
       if (resp.status === 302 && location) {
         await resp.body?.cancel();
         resp = await fetchImpl(location, { redirect: "error" });
+      }
+      if (resp.status === 404) {
+        await resp.body?.cancel();
+        return null;
       }
       if (!resp.ok) {
         throw new Error(`GET ${path}: HTTP ${resp.status}`);

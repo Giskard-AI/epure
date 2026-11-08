@@ -254,8 +254,10 @@ export function evaluateRun(input: {
   readonly escalations: readonly EscalationEvent[];
   readonly jobFailures: readonly JobFailure[];
   readonly usageRecords: number;
+  readonly unavailableJobLogs: readonly number[];
+  readonly evidenceError: string | null;
 }): { readonly success: boolean; readonly checks: readonly SuccessCheck[] } {
-  const { featurePr, escalations, jobFailures, usageRecords } = input;
+  const { featurePr, escalations, jobFailures, usageRecords, unavailableJobLogs, evidenceError } = input;
   const internal = escalations.filter((e) => e.class !== "legitimate");
   const perTicket = new Map<number, number>();
   for (const e of escalations) {
@@ -285,8 +287,14 @@ export function evaluateRun(input: {
     },
     {
       id: "llm-usage-recorded",
-      passed: usageRecords > 0,
-      detail: usageRecords > 0 ? `${usageRecords} requests` : "no epure-llm-usage line in the orchestrator logs: cost unknown"
+      passed: usageRecords > 0 && unavailableJobLogs.length === 0 && evidenceError === null,
+      detail: evidenceError
+        ? `evidence collection failed: ${evidenceError}`
+        : unavailableJobLogs.length
+          ? `no log for orchestrator jobs ${unavailableJobLogs.join(", ")}: cost incomplete`
+          : usageRecords > 0
+            ? `${usageRecords} requests`
+            : "no epure-llm-usage line in the orchestrator logs: cost unknown"
     }
   ];
   return { success: checks.every((c) => c.passed), checks };
@@ -300,12 +308,17 @@ export interface Comparability {
 // A run compares with another only when both did the same work: two tickets, CI on a task branch, a review.
 export function assessComparability(input: {
   readonly tickets: number;
-  readonly taskBranchCiRuns: number;
+  // null when the workflow runs could not be read.
+  readonly taskBranchCiRuns: number | null;
   readonly reviewedTaskPrs: number;
 }): Comparability {
   const unmet = [
     ...(input.tickets === 2 ? [] : [`${input.tickets} tickets instead of 2`]),
-    ...(input.taskBranchCiRuns > 0 ? [] : ["no CI run on a task/* branch"]),
+    ...(input.taskBranchCiRuns === null
+      ? ["CI runs on task/* branches unknown: evidence collection failed"]
+      : input.taskBranchCiRuns > 0
+        ? []
+        : ["no CI run on a task/* branch"]),
     ...(input.reviewedTaskPrs > 0 ? [] : ["no review on a task pull request"])
   ];
   return { comparable: unmet.length === 0, unmet };
@@ -366,6 +379,8 @@ export interface E2eRunResult {
   readonly phases: readonly PhaseTiming[];
   readonly usage: UsageSummary & {
     readonly by_phase: Readonly<Record<string, UsageTotals>>;
+    // Orchestrator jobs that ran but whose log GitHub no longer serves: their requests are missing.
+    readonly unavailable_job_logs: readonly number[];
     readonly records: readonly UsageRecord[];
   };
   readonly actions: ActionsMinutes;
@@ -373,6 +388,7 @@ export interface E2eRunResult {
   readonly resumes: readonly ResumeEvent[];
   readonly job_failures: readonly JobFailure[];
   readonly comparable: Comparability;
+  readonly evidence_error: string | null;
   readonly success: boolean;
   readonly checks: readonly SuccessCheck[];
   readonly error: string | null;

@@ -73,6 +73,17 @@ export function stepProgress(
   return state.status === "done" ? "done" : "settled";
 }
 
+// Implementation and review settle between tickets with nothing running; they end at Gate 3, awaiting the human merge into dev.
+export function stepDone(progress: StepProgress, state: Pick<EpureIssueState, "phase" | "status">): boolean {
+  if (progress === "done") {
+    return true;
+  }
+  if (progress !== "settled") {
+    return false;
+  }
+  return state.status === "awaiting_human_approval" || (state.phase !== "implementation" && state.phase !== "review");
+}
+
 export function codeUnderTestProblems(input: {
   readonly pinnedSha: string;
   readonly headSha: string;
@@ -141,7 +152,7 @@ interface Run {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const git = (args: readonly string[]) => execFileSync("git", args, { encoding: "utf8" });
 
-async function listRunsSince(run: Run): Promise<WorkflowRun[]> {
+async function listRunsSince(run: Pick<Run, "gh" | "startedAt">): Promise<WorkflowRun[]> {
   return run.gh.paginate<WorkflowRun>(
     `/repos/${run.gh.repository}/actions/runs?created=${encodeURIComponent(`>=${run.startedAt}`)}`,
     (page) => (page as { workflow_runs: WorkflowRun[] }).workflow_runs
@@ -226,7 +237,7 @@ async function drive(
       idlePolls = 0;
       continue;
     }
-    if (state && (progress === "done" || (progress === "settled" && state.phase !== "implementation" && state.phase !== "review"))) {
+    if (state && stepDone(progress, state)) {
       return state;
     }
     idlePolls = progress === "settled" ? idlePolls + 1 : 0;
@@ -376,35 +387,57 @@ async function installEpure(
   }
 }
 
-interface RunEvidence {
+export interface RunEvidence {
   readonly usage: ReadonlyArray<UsageLine & { readonly run_id: number; readonly job_id: number }>;
   readonly jobs: readonly ActionsJob[];
-  readonly taskBranchCiRuns: number;
+  readonly unavailableJobLogs: readonly number[];
+  // null when the evidence could not be collected.
+  readonly taskBranchCiRuns: number | null;
+  readonly error: string | null;
 }
 
-async function collectEvidence(run: Run): Promise<RunEvidence> {
+export interface WorkflowJob {
+  readonly id: number;
+  readonly conclusion: string | null;
+  readonly runner_name: string | null;
+  readonly started_at: string | null;
+  readonly completed_at: string | null;
+}
+
+// GitHub stamps skipped jobs with start and end times but gives them no runner, no log and no bill.
+export function ranOnRunner(job: WorkflowJob): boolean {
+  return job.conclusion !== "skipped" && Boolean(job.runner_name);
+}
+
+export async function collectEvidence(run: Pick<Run, "gh" | "startedAt">): Promise<RunEvidence> {
   const R = `/repos/${run.gh.repository}`;
   const runs = await listRunsSince(run);
   const usage: Array<UsageLine & { run_id: number; job_id: number }> = [];
   const jobs: ActionsJob[] = [];
+  const unavailableJobLogs: number[] = [];
   for (const wr of runs) {
-    const runJobs = await run.gh.paginate<{ id: number; started_at: string | null; completed_at: string | null }>(
-      `${R}/actions/runs/${wr.id}/jobs`,
-      (page) => (page as { jobs: Array<{ id: number; started_at: string | null; completed_at: string | null }> }).jobs
-    );
-    jobs.push(...runJobs.map((j) => ({ workflow: wr.path, started_at: j.started_at, completed_at: j.completed_at })));
+    const ran = (
+      await run.gh.paginate<WorkflowJob>(`${R}/actions/runs/${wr.id}/jobs`, (page) => (page as { jobs: WorkflowJob[] }).jobs)
+    ).filter(ranOnRunner);
+    jobs.push(...ran.map((j) => ({ workflow: wr.path, started_at: j.started_at, completed_at: j.completed_at })));
     if (wr.path !== ISSUE_COMMAND_WORKFLOW) {
       continue;
     }
-    for (const job of runJobs.filter((j) => j.started_at)) {
-      const lines = parseUsageLines(await run.gh.text(`${R}/actions/jobs/${job.id}/logs`));
-      usage.push(...lines.map((line) => ({ ...line, run_id: wr.id, job_id: job.id })));
+    for (const job of ran) {
+      const log = await run.gh.text(`${R}/actions/jobs/${job.id}/logs`);
+      if (log === null) {
+        unavailableJobLogs.push(job.id);
+        continue;
+      }
+      usage.push(...parseUsageLines(log).map((line) => ({ ...line, run_id: wr.id, job_id: job.id })));
     }
   }
   return {
     usage,
     jobs,
-    taskBranchCiRuns: runs.filter((r) => r.path === CI_WORKFLOW && r.head_branch?.startsWith("task/")).length
+    unavailableJobLogs,
+    taskBranchCiRuns: runs.filter((r) => r.path === CI_WORKFLOW && r.head_branch?.startsWith("task/")).length,
+    error: null
   };
 }
 
@@ -486,9 +519,10 @@ export async function runSandboxEpic(
     expectState(state, "spec", "awaiting_human_approval");
     state = await clock.time("tickets", () => drive(run, token, "/epure to-tickets", "/epure to-tickets", planning));
     expectState(state, "tickets", "awaiting_human_approval");
-    await clock.time("implementation", () =>
+    state = await clock.time("implementation", () =>
       drive(run, token, "/epure approve", RESUME_POLICY.resume_command, config.implementationTimeoutMinutes)
     );
+    expectState(state, "review", "awaiting_human_approval");
   } catch (err) {
     error = err instanceof Error ? err.message : String(err);
     log(`[e2e] stopped: ${error}`);
@@ -499,9 +533,13 @@ export async function runSandboxEpic(
   const finalState = run.issue ? await readState(run, token).catch(() => null) : null;
   const featurePr = run.issue ? await findFeaturePr(run, finalState) : null;
   const evidence = await collectEvidence(run).catch((err: unknown): RunEvidence => {
-    log(`[e2e] usage and job collection failed: ${err instanceof Error ? err.message : String(err)}`);
-    return { usage: [], jobs: [], taskBranchCiRuns: 0 };
+    const message = err instanceof Error ? err.message : String(err);
+    log(`[e2e] usage and job collection failed: ${message}`);
+    return { usage: [], jobs: [], unavailableJobLogs: [], taskBranchCiRuns: null, error: message };
   });
+  if (evidence.unavailableJobLogs.length) {
+    log(`[e2e] no log for orchestrator jobs ${evidence.unavailableJobLogs.join(", ")}: their LLM usage is missing`);
+  }
   const reviewedTaskPrs = run.issue ? await countReviewedTaskPrs(gh).catch(() => 0) : 0;
   if (run.issue) {
     const comments = await gh.paginate<unknown>(`/repos/${gh.repository}/issues/${run.issue}/comments`);
@@ -515,7 +553,9 @@ export async function runSandboxEpic(
     featurePr,
     escalations: run.escalations,
     jobFailures: run.jobFailures,
-    usageRecords: records.length
+    usageRecords: records.length,
+    unavailableJobLogs: evidence.unavailableJobLogs,
+    evidenceError: evidence.error
   });
   const endedMs = Date.now();
   const result: E2eRunResult = {
@@ -539,6 +579,7 @@ export async function runSandboxEpic(
     usage: {
       ...summarizeUsage(records, config.pricing),
       by_phase: summarizeUsageByPhase(records, config.pricing),
+      unavailable_job_logs: evidence.unavailableJobLogs,
       records
     },
     actions: actionsMinutes(evidence.jobs),
@@ -546,6 +587,7 @@ export async function runSandboxEpic(
     resumes: run.resumes,
     job_failures: run.jobFailures,
     comparable: assessComparability({ tickets: tickets.length, taskBranchCiRuns: evidence.taskBranchCiRuns, reviewedTaskPrs }),
+    evidence_error: evidence.error,
     success,
     checks,
     error
