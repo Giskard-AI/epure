@@ -1045,6 +1045,14 @@ describe("5. Pre-bundled CLI (dist/cli/setup-repo.mjs) & skill (.agents/skills/s
   );
 
   it.each([
+    { id: "rtk-archive-download-retries", url: "/${RTK_ARCHIVE}" },
+    { id: "rtk-checksums-download-retries", url: "/checksums.txt" }
+  ])("sandbox tooling retries transient GitHub release download errors [$id]", ({ url }) => {
+    const download = buildSandboxToolingSetupSteps().find((line) => line.includes("curl") && line.includes(url));
+    expect(download).toContain("--retry 5 --retry-all-errors");
+  });
+
+  it.each([
     { id: "no-github-env-write", forbidden: "$GITHUB_ENV" },
     { id: "no-github-path-write", forbidden: "$GITHUB_PATH" }
   ])(
