@@ -35,6 +35,8 @@ permissions:
 
 jobs:
   verify-contract:
+    # Breaking change if renamed: consumer rulesets require the check "Verify EPURE Consumer Contract / <this name>"
+    # (setup-repo REQUIRED_CI_CHECKS), so every consumer's dev stays blocked until it re-runs setup-repo.
     name: "Verify EPURE Consumer Contract"
     runs-on: ubuntu-26.04
     timeout-minutes: 30
