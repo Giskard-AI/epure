@@ -1,6 +1,4 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { formatLLMUsageLogLine, type LLMRequestUsage } from "../llm/usage.js";
-import type { GitRefStateStore } from "../state/git-ref-state.js";
 
 export const USAGE_PHASES = [
   "plan",
@@ -13,6 +11,27 @@ export const USAGE_PHASES = [
   "integration"
 ] as const;
 export type UsagePhase = (typeof USAGE_PHASES)[number];
+
+/** The usage of one successful LLM response; `provider` is the router's provider kind or an engine's own name. */
+export interface LLMTokenUsage {
+  readonly provider: string;
+  readonly model: string;
+  // Every prompt token, cached ones included.
+  readonly input_tokens: number;
+  readonly cached_input_tokens: number;
+  // Every billed output token, thinking included.
+  readonly output_tokens: number;
+  readonly thinking_tokens: number;
+}
+
+// A successful response whose engine reported no usage: its tokens are unknown, never zero.
+export interface LLMUsageUnavailable {
+  readonly provider: string;
+  readonly model: string;
+  readonly unavailable: true;
+}
+
+export type LLMRequestUsage = LLMTokenUsage | LLMUsageUnavailable;
 
 export interface TokenCounts {
   readonly requests: number;
@@ -72,15 +91,6 @@ function countsOf(usage: LLMRequestUsage): TokenCounts {
   };
 }
 
-function addToModel(models: ModelTokenCounts, usage: LLMRequestUsage): ModelTokenCounts {
-  const model = `${usage.provider}/${usage.model}`;
-  return { ...models, [model]: addTokenCounts(models[model] ?? NO_TOKENS, countsOf(usage)) };
-}
-
-export function tokensByModel(usages: readonly LLMRequestUsage[]): ModelTokenCounts {
-  return usages.reduce(addToModel, {});
-}
-
 export function addRequestUsage(
   record: TokenUsageRecord,
   attribution: UsageAttribution,
@@ -88,9 +98,14 @@ export function addRequestUsage(
 ): TokenUsageRecord {
   const scope = attribution.ticket === undefined ? EPIC_USAGE_SCOPE : String(attribution.ticket);
   const phases = record[scope] ?? {};
+  const models = phases[attribution.phase] ?? {};
+  const model = `${usage.provider}/${usage.model}`;
   return {
     ...record,
-    [scope]: { ...phases, [attribution.phase]: addToModel(phases[attribution.phase] ?? {}, usage) }
+    [scope]: {
+      ...phases,
+      [attribution.phase]: { ...models, [model]: addTokenCounts(models[model] ?? NO_TOKENS, countsOf(usage)) }
+    }
   };
 }
 
@@ -150,30 +165,6 @@ export class TokenUsageLedger {
   }
 }
 
-/** Every state write of the run also writes its pending usage: no extra commit, nothing lost on a retried CAS. */
-export function meterTokenUsage(store: GitRefStateStore, ledger: TokenUsageLedger): GitRefStateStore {
-  return {
-    readRef: async (refName) => {
-      const snapshot = await store.readRef(refName);
-      ledger.observe(snapshot.state?.token_usage);
-      return snapshot;
-    },
-    compareAndSwapRef: async (refName, expectedOldSha, nextState) => {
-      const count = ledger.pendingCount();
-      if (count === 0) {
-        return store.compareAndSwapRef(refName, expectedOldSha, nextState);
-      }
-      const token_usage = ledger.fold(nextState.token_usage, count);
-      const result = await store.compareAndSwapRef(refName, expectedOldSha, { ...nextState, token_usage });
-      if (result.swapped) {
-        ledger.written(token_usage, count);
-      }
-      return result;
-    },
-    ...(store.listIssueStates ? { listIssueStates: () => store.listIssueStates!() } : {})
-  };
-}
-
 interface UsageContext {
   readonly ledger: TokenUsageLedger;
   readonly attribution: UsageAttribution;
@@ -205,17 +196,13 @@ export function currentTokenUsage(): TokenUsageRecord | undefined {
   return usageContext.getStore()?.ledger.current();
 }
 
-/** One `epure-llm-usage` log line per response with known usage, and the run's ledger. */
-export function reportLLMUsage(usage: LLMRequestUsage): void {
-  if (!("unavailable" in usage)) {
-    process.stdout.write(`${formatLLMUsageLogLine(usage)}\n`);
-  }
+/** Adds one response's usage to the run's ledger under the current attribution; a no-op outside a metered run. */
+export function recordTokenUsage(usage: LLMRequestUsage): void {
   const context = usageContext.getStore();
   context?.ledger.record(context.attribution, usage);
 }
 
-/** reportLLMUsage bound to the caller's attribution, for callbacks that run outside it (a proxy's server). */
-export function usageReporter(): (usage: LLMRequestUsage) => void {
-  const inCallerContext = AsyncLocalStorage.snapshot();
-  return (usage) => inCallerContext(() => reportLLMUsage(usage));
+/** Runs a callback in the caller's usage context, for callbacks that run outside it (a proxy's server). */
+export function bindToUsageContext(): <R>(fn: () => R) => R {
+  return AsyncLocalStorage.snapshot();
 }

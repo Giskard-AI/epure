@@ -13,7 +13,7 @@ import {
   type ReviewerAgentName
 } from "../review/reviewer-roster.js";
 import { DEFAULT_REVIEWERS_DIR } from "../review/reviewers-dir.js";
-import type { ModelPricing, PricingTable } from "../usage/usage-report.js";
+import type { ModelPricing, PricingTable } from "../usage/pricing.js";
 import {
   buildRenovateConfigJson,
   buildSandboxToolingSetupSteps,

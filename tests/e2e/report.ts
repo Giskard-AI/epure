@@ -1,9 +1,10 @@
-import { LLM_USAGE_LOG_PREFIX, type LLMTokenUsage } from "../../src/llm/usage.js";
+import { LLM_USAGE_LOG_PREFIX } from "../../src/llm/usage.js";
 import {
   addTokenCounts,
   NO_TOKENS,
   totalTokensByModel,
   USAGE_PHASES,
+  type LLMTokenUsage,
   type ModelTokenCounts,
   type TokenCounts,
   type TokenUsageRecord

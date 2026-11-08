@@ -1,20 +1,20 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { LLMClient } from "../src/llm/client.js";
-import type { LLMRequestUsage } from "../src/llm/usage.js";
+import { reportLLMUsage } from "../src/llm/usage.js";
 import {
   createInMemoryGitRefStateStore,
   formatIssueStateMarker,
   updateIssueStateWithCas
 } from "../src/state/git-ref-state.js";
+import { meterTokenUsage } from "../src/state/metered-state-store.js";
 import {
   addRequestUsage,
   currentTokenUsage,
-  meterTokenUsage,
-  reportLLMUsage,
   runWithTokenUsageLedger,
   TokenUsageLedger,
   totalTokensByModel,
   withUsageAttribution,
+  type LLMRequestUsage,
   type TokenUsageRecord,
   type UsageAttribution
 } from "../src/usage/token-usage.js";

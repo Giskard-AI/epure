@@ -1,10 +1,9 @@
 import { gzipSync } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveProviderUpstream, type ProviderKind } from "../src/llm/index.js";
-import type { LLMRequestUsage } from "../src/llm/usage.js";
 import { meterRequest, meterResponse } from "../src/sandbox/llm-proxy-usage.js";
 import { createLlmSandboxProxy, runInUntrustedCodeSandbox } from "../src/sandbox/llm-sandbox.js";
-import { runWithTokenUsageLedger, TokenUsageLedger } from "../src/usage/token-usage.js";
+import { runWithTokenUsageLedger, TokenUsageLedger, type LLMRequestUsage } from "../src/usage/token-usage.js";
 import { startFakeLlmUpstream, type FakeLlmUpstream } from "./fixtures/fake-llm-upstream.js";
 
 const REAL_KEY = "sk-real-RunnerHeldKey1234567890ABCDEF";
@@ -274,9 +273,10 @@ describe("createLlmSandboxProxy usage", () => {
 
         expect(await res.text()).toBe(responseBody);
         expect(JSON.parse(upstream.requests[0]!.body)).toEqual(expectedForwarded);
-        await vi.waitFor(() => expect(proxy.usage()).toEqual(expectedUsage));
-        expect(ledger.current()).toEqual(
-          Object.keys(expectedUsage).length > 0 ? { "5": { implementation: expectedUsage } } : {}
+        await vi.waitFor(() =>
+          expect(ledger.current()).toEqual(
+            Object.keys(expectedUsage).length > 0 ? { "5": { implementation: expectedUsage } } : {}
+          )
         );
       } finally {
         await proxy.close();
@@ -288,7 +288,7 @@ describe("createLlmSandboxProxy usage", () => {
 describe("runInUntrustedCodeSandbox usage", () => {
   it.each([
     {
-      id: "two-agent-requests-are-summed-on-the-result",
+      id: "two-agent-requests-are-summed-in-the-callers-ledger",
       requests: 2,
       expected: {
         "anthropic/claude-x": { requests: 2, input_tokens: 1000, cached_input_tokens: 800, output_tokens: 84, thinking_tokens: 60 }
@@ -296,6 +296,7 @@ describe("runInUntrustedCodeSandbox usage", () => {
     },
     { id: "agent-without-llm-requests-reports-no-usage", requests: 0, expected: {} }
   ])("$id", async ({ requests, expected }) => {
+    const ledger = new TokenUsageLedger();
     const upstream = await startFakeLlmUpstream((_req, res) => {
       res.writeHead(200, { "content-type": "text/event-stream" });
       res.end(ANTHROPIC_STREAM);
@@ -312,15 +313,17 @@ describe("runInUntrustedCodeSandbox usage", () => {
       "}"
     ].join("\n");
 
-    const result = await runInUntrustedCodeSandbox({
-      isolationAvailable: true,
-      runnerEnv: { PATH: process.env.PATH ?? "/usr/bin:/bin", ANTHROPIC_API_KEY: REAL_KEY },
-      command: process.execPath,
-      args: ["--input-type=module", "-e", script, String(requests)],
-      llm: { model: "anthropic/claude-configured", providers: { anthropic: { provider: "anthropic", base_url: upstream.url } } }
-    });
+    const result = await runWithTokenUsageLedger(ledger, { phase: "implementation", ticket: 5 }, () =>
+      runInUntrustedCodeSandbox({
+        isolationAvailable: true,
+        runnerEnv: { PATH: process.env.PATH ?? "/usr/bin:/bin", ANTHROPIC_API_KEY: REAL_KEY },
+        command: process.execPath,
+        args: ["--input-type=module", "-e", script, String(requests)],
+        llm: { model: "anthropic/claude-configured", providers: { anthropic: { provider: "anthropic", base_url: upstream.url } } }
+      })
+    );
 
     expect(result.error_code).toBe("NONE");
-    expect(result.llm_usage).toEqual(expected);
+    expect(ledger.current()).toEqual(requests > 0 ? { "5": { implementation: expected } } : {});
   });
 });

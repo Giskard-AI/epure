@@ -1,26 +1,12 @@
+import {
+  bindToUsageContext,
+  recordTokenUsage,
+  type LLMRequestUsage,
+  type LLMTokenUsage
+} from "../usage/token-usage.js";
 import type { ProviderKind } from "./types.js";
 
 export const LLM_USAGE_LOG_PREFIX = "epure-llm-usage";
-
-export interface LLMTokenUsage {
-  readonly provider: ProviderKind;
-  readonly model: string;
-  // Every prompt token, cached ones included.
-  readonly input_tokens: number;
-  readonly cached_input_tokens: number;
-  // Every billed output token, thinking included.
-  readonly output_tokens: number;
-  readonly thinking_tokens: number;
-}
-
-// A successful response whose engine reported no usage: its tokens are unknown, never zero.
-export interface LLMUsageUnavailable {
-  readonly provider: ProviderKind;
-  readonly model: string;
-  readonly unavailable: true;
-}
-
-export type LLMRequestUsage = LLMTokenUsage | LLMUsageUnavailable;
 
 type Counts = Readonly<Record<string, unknown>>;
 
@@ -92,4 +78,22 @@ export function extractLLMTokenUsage(
 
 export function formatLLMUsageLogLine(usage: LLMTokenUsage): string {
   return `${LLM_USAGE_LOG_PREFIX} ${JSON.stringify(usage)}`;
+}
+
+/**
+ * The one channel for LLM usage: the job-log line and the run's ledger. `LLMClient` and the sandbox
+ * proxy call it per response; an engine that bypasses both calls it once per session with its counts,
+ * or with `unavailable: true` when it has none.
+ */
+export function reportLLMUsage(usage: LLMRequestUsage): void {
+  if (!("unavailable" in usage)) {
+    process.stdout.write(`${formatLLMUsageLogLine(usage)}\n`);
+  }
+  recordTokenUsage(usage);
+}
+
+/** reportLLMUsage bound to the caller's attribution, for callbacks that run outside it (a proxy's server). */
+export function usageReporter(): (usage: LLMRequestUsage) => void {
+  const inCallerContext = bindToUsageContext();
+  return (usage) => inCallerContext(() => reportLLMUsage(usage));
 }

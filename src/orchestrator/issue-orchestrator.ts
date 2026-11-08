@@ -55,9 +55,9 @@ import {
   formatResumeContextMarkdown,
   selectResumeContextComments
 } from "../state/comment-batch-cursor.js";
+import { meterTokenUsage } from "../state/metered-state-store.js";
 import {
   currentTokenUsage,
-  meterTokenUsage,
   runWithTokenUsageLedger,
   TokenUsageLedger,
   withUsageAttribution,

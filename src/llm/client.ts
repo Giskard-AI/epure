@@ -16,8 +16,7 @@ import type {
   ProviderKind,
   ResponseSchemaSpec
 } from "./types.js";
-import { reportLLMUsage } from "../usage/token-usage.js";
-import { extractLLMTokenUsage } from "./usage.js";
+import { extractLLMTokenUsage, reportLLMUsage } from "./usage.js";
 
 async function logTokenUsage(res: Response, provider: ProviderKind, model: string): Promise<void> {
   let body: unknown;

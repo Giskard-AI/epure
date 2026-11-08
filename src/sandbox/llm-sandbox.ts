@@ -25,8 +25,7 @@ import {
 } from "../llm/client.js";
 import type { ProviderConfig } from "../llm/types.js";
 import { resolveProviderUpstream, type ProviderUpstream } from "../llm/upstream.js";
-import type { LLMRequestUsage } from "../llm/usage.js";
-import { tokensByModel, usageReporter, type ModelTokenCounts } from "../usage/token-usage.js";
+import { usageReporter } from "../llm/usage.js";
 import { decodeBody, meterRequest, meterResponse, type MeteredRequest } from "./llm-proxy-usage.js";
 
 export type SandboxErrorCode =
@@ -95,8 +94,6 @@ export interface CreateLlmSandboxProxyOptions {
 }
 
 export interface LlmSandboxProxyHandle extends SandboxProxyEndpoint {
-  // Successful responses relayed so far, per `<provider>/<model>` as the sandbox called it.
-  usage(): ModelTokenCounts;
   close(): Promise<void>;
 }
 
@@ -146,8 +143,6 @@ export interface SandboxExecutionResult {
   // false when the command ran without any kernel backend (local fallback outside CI).
   readonly confined?: boolean | undefined;
   readonly network_policy?: SandboxNetworkPolicy | undefined;
-  // What the agent session spent through the LLM proxy, per `<provider>/<model>`.
-  readonly llm_usage?: ModelTokenCounts | undefined;
 }
 
 const SECRET_ENV_NAME_PATTERN =
@@ -550,11 +545,6 @@ export async function createLlmSandboxProxy(
   const proxyNonce = randomBytes(24).toString("hex");
   const nonceBytes = Buffer.from(proxyNonce);
   const reportUsage = usageReporter();
-  const relayedUsage: LLMRequestUsage[] = [];
-  const recordUsage = (usage: LLMRequestUsage): void => {
-    relayedUsage.push(usage);
-    reportUsage(usage);
-  };
 
   const relay = (req: IncomingMessage, res: ServerResponse): void => {
     const rawUrl = req.url ?? "/";
@@ -727,7 +717,7 @@ export async function createLlmSandboxProxy(
       });
       pipeline(upstreamRes, tap, res, () => {
         observer.end();
-        recordUsage(meter.onEnd());
+        reportUsage(meter.onEnd());
       });
     };
   };
@@ -760,7 +750,6 @@ export async function createLlmSandboxProxy(
   return {
     proxyUrl,
     proxyNonce,
-    usage: () => tokensByModel(relayedUsage),
     close: () =>
       new Promise<void>((resolve) => {
         agent.destroy();
@@ -1012,8 +1001,7 @@ export async function runInUntrustedCodeSandbox(
       proxy_url: proxy?.proxyUrl ?? "",
       kernel_backend: selectKernelBackend(networkPolicy, capabilities),
       confined: selectKernelBackend(networkPolicy, capabilities) !== "none",
-      network_policy: networkPolicy,
-      ...(proxy ? { llm_usage: proxy.usage() } : {})
+      network_policy: networkPolicy
     };
   } finally {
     await proxy?.close();

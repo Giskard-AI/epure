@@ -1,12 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { costOfModels, costUsd, type ModelPricing } from "../src/usage/pricing.js";
 import type { TokenCounts, TokenUsageRecord } from "../src/usage/token-usage.js";
 import {
-  costOfModels,
-  costUsd,
   formatEpicUsageSection,
   formatTicketUsageSuffix,
-  formatTokenUsage,
-  type ModelPricing
+  formatTokenUsage
 } from "../src/usage/usage-report.js";
 
 const tokens = (input: number, cached: number, output: number, thinking = 0, requests = 1): TokenCounts => ({

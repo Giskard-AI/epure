@@ -1,6 +1,7 @@
 import { brotliDecompressSync, gunzipSync, inflateSync } from "node:zlib";
 import type { ProviderKind } from "../llm/types.js";
-import { extractLLMTokenUsage, type LLMRequestUsage } from "../llm/usage.js";
+import { extractLLMTokenUsage } from "../llm/usage.js";
+import type { LLMRequestUsage } from "../usage/token-usage.js";
 
 export function decodeBody(body: Buffer, contentEncoding: string | string[] | undefined): Buffer {
   switch (String(contentEncoding ?? "").trim().toLowerCase()) {

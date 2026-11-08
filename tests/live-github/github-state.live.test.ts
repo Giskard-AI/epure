@@ -27,7 +27,8 @@ import {
   updateIssueStateWithCas,
   type GitRefStateStore
 } from "../../src/state/git-ref-state.js";
-import { meterTokenUsage, TokenUsageLedger } from "../../src/usage/token-usage.js";
+import { meterTokenUsage } from "../../src/state/metered-state-store.js";
+import { TokenUsageLedger } from "../../src/usage/token-usage.js";
 
 export interface LiveGitHubConfig {
   readonly repository: string;
