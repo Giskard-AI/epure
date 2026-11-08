@@ -305,14 +305,21 @@ export interface Comparability {
   readonly unmet: readonly string[];
 }
 
-// A run compares with another only when both did the same work: two tickets, CI on a task branch, a review.
+// Timer drift and short pauses of the WSL VM stay below this.
+const HOST_ASLEEP_TOLERANCE_MS = 60_000;
+
+// A run compares with another only when both did the same work (two tickets, CI on a task branch, a review) on an awake host.
 export function assessComparability(input: {
   readonly tickets: number;
   // null when the workflow runs could not be read.
   readonly taskBranchCiRuns: number | null;
   readonly reviewedTaskPrs: number;
+  readonly hostAsleepMs: number;
 }): Comparability {
   const unmet = [
+    ...(input.hostAsleepMs > HOST_ASLEEP_TOLERANCE_MS
+      ? [`the host slept ${(input.hostAsleepMs / 60_000).toFixed(1)} min during the run: durations are inflated`]
+      : []),
     ...(input.tickets === 2 ? [] : [`${input.tickets} tickets instead of 2`]),
     ...(input.taskBranchCiRuns === null
       ? ["CI runs on task/* branches unknown: evidence collection failed"]
@@ -373,6 +380,8 @@ export interface E2eRunResult {
   readonly started_at: string;
   readonly ended_at: string;
   readonly duration_ms: number;
+  // Wall-clock time the harness process did not run: a sleeping laptop.
+  readonly host_asleep_ms: number;
   readonly issue: PullRequestRef | null;
   readonly tickets: readonly number[];
   readonly feature_pr: PullRequestRef | null;

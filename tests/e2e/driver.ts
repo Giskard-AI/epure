@@ -11,7 +11,7 @@ import {
 import type { E2eConfig } from "./config.js";
 import { EPIC_BODY, EPIC_TITLE, GRILL_ANSWERS } from "./epic.js";
 import { classifyEscalation } from "./escalations.js";
-import type { GitHubApi } from "./github.js";
+import { createOnce, type GitHubApi } from "./github.js";
 import {
   actionsMinutes,
   assessComparability,
@@ -146,6 +146,7 @@ interface Run {
   readonly escalations: EscalationEvent[];
   readonly resumes: ResumeEvent[];
   readonly jobFailures: JobFailure[];
+  readonly postedComments: Set<number>;
   issue: number;
 }
 
@@ -160,19 +161,30 @@ async function listRunsSince(run: Pick<Run, "gh" | "startedAt">): Promise<Workfl
 }
 
 async function readState(run: Run, token: string): Promise<EpureIssueState | null> {
-  const store = createGitHubApiRefStateStore({ repository: run.gh.repository, githubToken: token });
+  const store = createGitHubApiRefStateStore({ repository: run.gh.repository, githubToken: token, fetchImpl: run.gh.fetch });
   return (await store.readRef(buildIssueStateRefName(run.issue))).state;
 }
 
-async function postComment(run: Run, body: string): Promise<number> {
-  const comment = await run.gh.call<{ id: number }>("POST", `/repos/${run.gh.repository}/issues/${run.issue}/comments`, { body });
-  run.log(`[epic] #${run.issue} <- ${body.split("\n")[0]!.slice(0, 80)}`);
-  return comment.id;
-}
-
 interface IssueComment {
+  readonly id: number;
   readonly body?: string | undefined;
   readonly performed_via_github_app?: { readonly id: number } | null | undefined;
+}
+
+// The harness posts the same command again on a resume: only a comment it has not recorded can be the lost one.
+export function lostComment(comments: readonly IssueComment[], body: string, posted: ReadonlySet<number>): IssueComment | null {
+  return comments.find((c) => c.body === body && !c.performed_via_github_app && !posted.has(c.id)) ?? null;
+}
+
+async function postComment(run: Run, body: string): Promise<number> {
+  const path = `/repos/${run.gh.repository}/issues/${run.issue}/comments`;
+  const comment = await createOnce(
+    () => run.gh.call<IssueComment>("POST", path, { body }),
+    async () => lostComment(await run.gh.paginate<IssueComment>(path), body, run.postedComments)
+  );
+  run.postedComments.add(comment.id);
+  run.log(`[epic] #${run.issue} <- ${body.split("\n")[0]!.slice(0, 80)}`);
+  return comment.id;
 }
 
 // Only the agent App speaks for EPURE: a human comment quoting an escalation heading is ignored.
@@ -459,6 +471,14 @@ async function findFeaturePr(run: Run, state: EpureIssueState | null): Promise<P
   return pr ? { number: pr.number, url: pr.html_url } : null;
 }
 
+interface CreatedIssue {
+  readonly number: number;
+  readonly html_url: string;
+  readonly title: string;
+  readonly created_at: string;
+  readonly pull_request?: unknown;
+}
+
 export async function runSandboxEpic(
   config: E2eConfig,
   gh: GitHubApi,
@@ -466,6 +486,8 @@ export async function runSandboxEpic(
   log: (line: string) => void
 ): Promise<{ readonly result: E2eRunResult; readonly dir: string }> {
   const startedMs = Date.now();
+  // The monotonic clock stops while the host sleeps; the wall clock does not.
+  const startedMonotonicMs = performance.now();
   const runId = new Date(startedMs).toISOString().replace(/[:.]/g, "-");
   const run: Run = {
     config,
@@ -475,6 +497,7 @@ export async function runSandboxEpic(
     escalations: [],
     resumes: [],
     jobFailures: [],
+    postedComments: new Set(),
     issue: 0
   };
   const settings: HarnessSettings = {
@@ -502,7 +525,13 @@ export async function runSandboxEpic(
     install = await clock.time("setup_repo", () => installEpure(run, seed, code.epureSha, token));
     await clock.time("install_ci", () => waitForInstallCi(run, install.commitSha));
 
-    const created = await gh.call<{ number: number; html_url: string }>("POST", `/repos/${gh.repository}/issues`, { title: EPIC_TITLE, body: EPIC_BODY });
+    const created = await createOnce(
+      () => gh.call<CreatedIssue>("POST", `/repos/${gh.repository}/issues`, { title: EPIC_TITLE, body: EPIC_BODY }),
+      async () =>
+        (await gh.paginate<CreatedIssue>(`/repos/${gh.repository}/issues?state=all&since=${encodeURIComponent(run.startedAt)}`)).find(
+          (i) => !i.pull_request && i.title === EPIC_TITLE && Date.parse(i.created_at) >= startedMs
+        ) ?? null
+    );
     run.issue = created.number;
     issue = { number: created.number, url: created.html_url };
     log(`[epic] created ${created.html_url}`);
@@ -558,6 +587,7 @@ export async function runSandboxEpic(
     evidenceError: evidence.error
   });
   const endedMs = Date.now();
+  const hostAsleepMs = Math.max(0, Math.round(endedMs - startedMs - (performance.now() - startedMonotonicMs)));
   const result: E2eRunResult = {
     schema_version: 2,
     run_id: runId,
@@ -572,6 +602,7 @@ export async function runSandboxEpic(
     started_at: run.startedAt,
     ended_at: new Date(endedMs).toISOString(),
     duration_ms: endedMs - startedMs,
+    host_asleep_ms: hostAsleepMs,
     issue,
     tickets,
     feature_pr: featurePr,
@@ -586,7 +617,12 @@ export async function runSandboxEpic(
     escalations: run.escalations,
     resumes: run.resumes,
     job_failures: run.jobFailures,
-    comparable: assessComparability({ tickets: tickets.length, taskBranchCiRuns: evidence.taskBranchCiRuns, reviewedTaskPrs }),
+    comparable: assessComparability({
+      tickets: tickets.length,
+      taskBranchCiRuns: evidence.taskBranchCiRuns,
+      reviewedTaskPrs,
+      hostAsleepMs
+    }),
     evidence_error: evidence.error,
     success,
     checks,

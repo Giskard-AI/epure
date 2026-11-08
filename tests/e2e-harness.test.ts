@@ -4,9 +4,9 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createInitialIssueState, type EpureIssueState } from "../src/state/git-ref-state.js";
 import { assertE2eSandboxRepository, loadE2eConfig, resolveGitHubToken } from "./e2e/config.js";
-import { codeUnderTestProblems, installCiVerdict, ranOnRunner, stepDone, stepProgress, thinkingLevelFor } from "./e2e/driver.js";
+import { codeUnderTestProblems, installCiVerdict, lostComment, ranOnRunner, stepDone, stepProgress, thinkingLevelFor } from "./e2e/driver.js";
 import { classifyEscalation, GATE_CODE_CLASS, RECORDED_REASON_CLASS } from "./e2e/escalations.js";
-import { createGitHubApi } from "./e2e/github.js";
+import { createGitHubApi, createOnce, GitHubOutcomeUnknownError } from "./e2e/github.js";
 import {
   actionsMinutes,
   assessComparability,
@@ -286,22 +286,38 @@ describe("createGitHubApi", () => {
 
   it.each([
     { id: "retries-a-502-then-returns-the-data", steps: [json(502, {}), json(200, { ok: 1 })], calls: 2 },
-    { id: "retries-a-network-error-then-returns-the-data", steps: [new TypeError("fetch failed"), json(200, { ok: 1 })], calls: 2 }
+    { id: "retries-a-network-error-then-returns-the-data", steps: [new TypeError("fetch failed"), json(200, { ok: 1 })], calls: 2 },
+    {
+      id: "retries-a-request-aborted-by-its-timeout",
+      steps: [new DOMException("The operation was aborted due to timeout", "TimeoutError"), json(200, { ok: 1 })],
+      calls: 2
+    },
+    {
+      id: "waits-out-a-secondary-rate-limit",
+      steps: [json(403, { message: "You have exceeded a secondary rate limit" }), json(200, { ok: 1 })],
+      calls: 2
+    },
+    {
+      id: "rides-out-five-transient-failures",
+      steps: [new TypeError("fetch failed"), json(502, {}), json(503, {}), json(504, {}), new TypeError("fetch failed"), json(200, { ok: 1 })],
+      calls: 6
+    }
   ])("$id", async ({ steps, calls }) => {
     const { api, calls: made } = fake(steps);
 
     await expect(api.call("GET", "/repos/o/sandbox")).resolves.toEqual({ ok: 1 });
     expect(made).toHaveLength(calls);
+    expect(made.every((c) => c.init?.signal instanceof AbortSignal)).toBe(true);
   });
 
   it.each([
     {
-      id: "gives-up-after-four-transient-failures",
+      id: "gives-up-after-six-transient-failures",
       method: "GET",
       path: "/repos/o/sandbox",
-      steps: [json(503, {}), json(503, {}), json(503, {}), json(503, {})],
+      steps: Array.from({ length: 6 }, () => json(503, {})),
       error: /HTTP 503/,
-      calls: 4
+      calls: 6
     },
     {
       id: "keeps-the-status-of-a-non-json-error",
@@ -350,7 +366,41 @@ describe("createGitHubApi", () => {
     ]);
 
     await expect(api.text("/repos/o/sandbox/actions/jobs/1/logs")).resolves.toBe("2026-11-08T10:00:00.0000000Z hello");
-    expect(calls[1]).toEqual({ url: "https://logs.example/job.txt?sig=1", init: { redirect: "error" } });
+    expect(calls[1]?.url).toBe("https://logs.example/job.txt?sig=1");
+    expect(calls[1]?.init).toMatchObject({ redirect: "error" });
+    expect(calls[1]?.init?.headers).toBeUndefined();
+  });
+
+  it.each([
+    { id: "storage-network-error", failure: new TypeError("fetch failed") },
+    { id: "storage-503", failure: new Response("", { status: 503 }) }
+  ])("asks for a fresh log URL after a $id", async ({ failure }) => {
+    const redirect = () => new Response("", { status: 302, headers: { location: "https://logs.example/job.txt?sig=1" } });
+    const { api, calls } = fake([redirect(), failure, redirect(), new Response("log", { status: 200 })]);
+
+    await expect(api.text("/repos/o/sandbox/actions/jobs/1/logs")).resolves.toBe("log");
+    expect(calls).toHaveLength(4);
+  });
+
+  it("retries the reads of a fetch consumer such as the state store", async () => {
+    const { api, calls } = fake([json(502, {}), json(200, { object: { sha: "a" } })]);
+
+    const resp = await api.fetch("https://api.github.com/repos/o/sandbox/git/ref/epure/state/12", { method: "GET", headers: { Accept: "x" } });
+
+    await expect(resp.json()).resolves.toEqual({ object: { sha: "a" } });
+    expect(calls).toHaveLength(2);
+    expect(calls[0]?.init?.headers).toMatchObject({ Authorization: "Bearer t" });
+  });
+
+  it.each([
+    { id: "comment-creation-lost-in-a-502", path: "/repos/o/sandbox/issues/1/comments", step: json(502, {}) },
+    { id: "comment-creation-lost-on-the-network", path: "/repos/o/sandbox/issues/1/comments", step: new TypeError("fetch failed") },
+    { id: "issue-creation-lost-on-the-network", path: "/repos/o/sandbox/issues", step: new TypeError("other side closed") }
+  ])("reports a $id as an unknown outcome without replaying it", async ({ path, step }) => {
+    const { api, calls } = fake([step]);
+
+    await expect(api.call("POST", path, { body: "x" })).rejects.toBeInstanceOf(GitHubOutcomeUnknownError);
+    expect(calls).toHaveLength(1);
   });
 
   it.each([
@@ -361,6 +411,74 @@ describe("createGitHubApi", () => {
     const read = api.text("/repos/o/sandbox/actions/jobs/1/logs");
 
     await (expected === null ? expect(read).resolves.toBeNull() : expect(read).rejects.toThrow(expected));
+  });
+});
+
+describe("createOnce", () => {
+  const lost = () => new GitHubOutcomeUnknownError("POST", "/repos/o/sandbox/issues/1/comments", "fetch failed");
+
+  it.each([
+    { id: "created-at-once", outcomes: ["ok"], landed: [], expected: "created", posts: 1, probes: 0 },
+    { id: "lost-response-but-the-comment-landed", outcomes: ["lost"], landed: ["landed"], expected: "landed", posts: 1, probes: 1 },
+    { id: "lost-response-and-nothing-landed-posts-again", outcomes: ["lost", "ok"], landed: [null], expected: "created", posts: 2, probes: 1 },
+    { id: "definite-refusal-is-not-retried", outcomes: ["422"], landed: [], expected: /HTTP 422/, posts: 1, probes: 0 },
+    {
+      id: "gives-up-after-four-lost-responses",
+      outcomes: ["lost", "lost", "lost", "lost"],
+      landed: [null, null, null],
+      expected: GitHubOutcomeUnknownError,
+      posts: 4,
+      probes: 3
+    }
+  ])("$id", async ({ outcomes, landed, expected, posts, probes }) => {
+    let posted = 0;
+    let probed = 0;
+    const create = async () => {
+      const outcome = outcomes[posted++];
+      if (outcome === "lost") {
+        throw lost();
+      }
+      if (outcome === "422") {
+        throw new Error("POST /repos/o/sandbox/issues/1/comments: HTTP 422");
+      }
+      return "created";
+    };
+    const probe = async () => (landed[probed++] ?? null) as string | null;
+
+    const result = createOnce(create, probe, async () => undefined);
+
+    await (typeof expected === "string" ? expect(result).resolves.toBe(expected) : expect(result).rejects.toThrow(expected));
+    expect({ posted, probed }).toEqual({ posted: posts, probed: probes });
+  });
+});
+
+describe("lostComment", () => {
+  const comment = (id: number, body: string, app: number | null = null) => ({
+    id,
+    body,
+    performed_via_github_app: app === null ? null : { id: app }
+  });
+
+  it.each([
+    {
+      id: "unrecorded-harness-comment-is-the-lost-one",
+      comments: [comment(1, "/epure plan"), comment(2, "/epure to-tickets")],
+      body: "/epure to-tickets",
+      posted: [1],
+      expected: 2
+    },
+    { id: "earlier-identical-command-is-not-the-lost-one", comments: [comment(5, "/epure to-spec")], body: "/epure to-spec", posted: [5], expected: null },
+    {
+      id: "resume-repost-finds-the-new-identical-command",
+      comments: [comment(5, "/epure to-spec"), comment(9, "/epure to-spec")],
+      body: "/epure to-spec",
+      posted: [5],
+      expected: 9
+    },
+    { id: "app-comment-with-the-same-body-is-ignored", comments: [comment(7, "/epure to-tickets", 5666371)], body: "/epure to-tickets", posted: [], expected: null },
+    { id: "nothing-landed", comments: [comment(1, "/epure plan")], body: "/epure to-tickets", posted: [1], expected: null }
+  ])("$id", ({ comments, body, posted, expected }) => {
+    expect(lostComment(comments, body, new Set(posted))?.id ?? null).toBe(expected);
   });
 });
 
@@ -693,9 +811,15 @@ describe("assessComparability", () => {
       id: "unread-workflow-runs-are-unknown-not-absent",
       input: { tickets: 2, taskBranchCiRuns: null, reviewedTaskPrs: 2 },
       expected: { comparable: false, unmet: ["CI runs on task/* branches unknown: evidence collection failed"] }
+    },
+    { id: "short-vm-pause-is-tolerated", input: { tickets: 2, taskBranchCiRuns: 3, reviewedTaskPrs: 2, hostAsleepMs: 20_000 }, expected: { comparable: true, unmet: [] } },
+    {
+      id: "host-asleep-inflates-durations",
+      input: { tickets: 2, taskBranchCiRuns: 3, reviewedTaskPrs: 2, hostAsleepMs: 3_533_000 },
+      expected: { comparable: false, unmet: ["the host slept 58.9 min during the run: durations are inflated"] }
     }
   ])("$id", ({ input, expected }) => {
-    expect(assessComparability(input)).toEqual(expected);
+    expect(assessComparability({ hostAsleepMs: 0, ...input })).toEqual(expected);
   });
 });
 
@@ -878,6 +1002,7 @@ describe("renderMarkdownReport", () => {
       started_at: "2026-11-08T10:00:00.000Z",
       ended_at: "2026-11-08T11:00:00.000Z",
       duration_ms: 3_600_000,
+      host_asleep_ms: 0,
       issue: { number: 1, url: "https://github.com/o/sandbox/issues/1" },
       tickets: [3, 4],
       feature_pr: null,
