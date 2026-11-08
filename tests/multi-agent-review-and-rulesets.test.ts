@@ -139,8 +139,8 @@ describe("EPURE v1.2.0 — Repository Rulesets, Multi-Agent Review Roster & Sema
         { name: "epure-feature-integrity", action: "created", id: 99 },
         { name: "epure-feature-governance", action: "created", id: 99 },
         { name: "epure-dev-governance", action: "updated", id: 42 },
-        { name: "epure-release-immutability", action: "created", id: 99 },
-        { name: "epure-release-tags", action: "created", id: 99 }
+        { name: "epure-release-tags", action: "created", id: 99 },
+        { name: "epure-release-immutability", action: "created", id: 99 }
       ]);
 
       const patchCall = calls.find((c) => c.method === "PATCH");
@@ -355,7 +355,7 @@ describe("EPURE v1.2.0 — Repository Rulesets, Multi-Agent Review Roster & Sema
     });
 
     it.each([
-      { id: "apply-without-release-app-id-is-refused", dryRun: false, agentAppIntegrationId: 11, releaseAppIntegrationId: undefined, missing: /epure-release-immutability.*epure-release-tags.*--release-app-id/ },
+      { id: "apply-without-release-app-id-is-refused", dryRun: false, agentAppIntegrationId: 11, releaseAppIntegrationId: undefined, missing: /epure-release-tags.*epure-release-immutability.*--release-app-id/ },
       { id: "apply-without-agent-app-id-is-refused", dryRun: false, agentAppIntegrationId: undefined, releaseAppIntegrationId: 22, missing: /epure-feature-governance.*--agent-app-id/ },
       { id: "apply-with-an-unparsable-release-app-id-is-refused", dryRun: false, agentAppIntegrationId: 11, releaseAppIntegrationId: Number.NaN, missing: /--release-app-id/ },
       { id: "dry-run-without-release-app-id-reports-the-same-refusal", dryRun: true, agentAppIntegrationId: 11, releaseAppIntegrationId: undefined, missing: /epure-release-tags.*--release-app-id/ }

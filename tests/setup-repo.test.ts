@@ -109,8 +109,8 @@ describe("1. Dry-run simulation & guided application (planAndApplyRepoSetup)", (
         "epure-feature-integrity",
         "epure-feature-governance",
         "epure-dev-governance",
-        "epure-release-immutability",
-        "epure-release-tags"
+        "epure-release-tags",
+        "epure-release-immutability"
       ]);
       expect(result.ruleset_spec.targetRefs).toEqual(["refs/heads/main"]);
       expect(result.ruleset_spec.blockDirectPushes).toBe(true);

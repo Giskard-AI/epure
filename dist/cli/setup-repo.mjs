@@ -2947,7 +2947,8 @@ function buildGovernanceRulesets(params) {
     devGovernance,
     releaseImmutability,
     releaseTags,
-    all: [featureIntegrity, featureGovernance, devGovernance, releaseImmutability, releaseTags]
+    // Tags before main: an apply that fails midway never leaves v* unprotected.
+    all: [featureIntegrity, featureGovernance, devGovernance, releaseTags, releaseImmutability]
   };
 }
 function planAndApplyRepoSetup(input) {
