@@ -1,7 +1,9 @@
+import type { ProviderKind } from "./types.js";
+
 export const LLM_USAGE_LOG_PREFIX = "epure-llm-usage";
 
 export interface LLMTokenUsage {
-  readonly provider: string;
+  readonly provider: ProviderKind;
   readonly model: string;
   // Every prompt token, cached ones included.
   readonly input_tokens: number;
@@ -23,7 +25,7 @@ function asCounts(value: unknown): Counts | undefined {
 }
 
 export function extractLLMTokenUsage(
-  provider: string,
+  provider: ProviderKind,
   model: string,
   body: unknown
 ): LLMTokenUsage | null {

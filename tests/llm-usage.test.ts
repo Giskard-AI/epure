@@ -45,7 +45,7 @@ describe("extractLLMTokenUsage", () => {
       body: { usageMetadata: { promptTokenCount: 10 } },
       expected: { input_tokens: 10, cached_input_tokens: 0, output_tokens: 0, thinking_tokens: 0 }
     }
-  ])("$id", ({ provider, body, expected }) => {
+  ] as const)("$id", ({ provider, body, expected }) => {
     expect(extractLLMTokenUsage(provider, "m", body)).toEqual({ provider, model: "m", ...expected });
   });
 
@@ -53,7 +53,7 @@ describe("extractLLMTokenUsage", () => {
     { id: "gemini-response-without-usage-metadata", provider: "google", body: { candidates: [] } },
     { id: "openai-response-without-usage", provider: "openai", body: { choices: [] } },
     { id: "non-object-body", provider: "anthropic", body: "text" }
-  ])("returns null for $id", ({ provider, body }) => {
+  ] as const)("returns null for $id", ({ provider, body }) => {
     expect(extractLLMTokenUsage(provider, "m", body)).toBeNull();
   });
 });

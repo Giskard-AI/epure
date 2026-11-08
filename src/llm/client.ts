@@ -19,7 +19,7 @@ import type {
 import { extractLLMTokenUsage, formatLLMUsageLogLine } from "./usage.js";
 
 // One stdout line per successful request: the e2e harness sums them from the job logs.
-async function logTokenUsage(res: Response, provider: string, model: string): Promise<void> {
+async function logTokenUsage(res: Response, provider: ProviderKind, model: string): Promise<void> {
   try {
     const usage = extractLLMTokenUsage(provider, model, await res.clone().json());
     if (usage) {
