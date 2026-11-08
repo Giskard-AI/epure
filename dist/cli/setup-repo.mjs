@@ -3718,8 +3718,19 @@ function resolveGitHubToken(explicitToken) {
     return "";
   }
 }
+var PINNED_SHA_PATTERN = /^[0-9a-f]{40}$/;
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (!PINNED_SHA_PATTERN.test(args.epurePinnedSha?.trim() ?? "")) {
+    if (!args.dryRun || args.applyGithubSettings) {
+      throw new Error(
+        '--apply and --apply-github-settings need --pinned-sha <40-hex commit SHA of Giskard-AI/epure on GitHub>, e.g. --pinned-sha "$(git -C <epure-checkout> rev-parse HEAD)".'
+      );
+    }
+    process.stderr.write(
+      "setup-repo: warning: no valid --pinned-sha; this dry-run pins a placeholder commit that does not exist. Pass --pinned-sha before --apply.\n"
+    );
+  }
   const result = planAndApplyRepoSetup({
     repository: args.repository,
     repoRootDir: args.repoRootDir,

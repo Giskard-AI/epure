@@ -81,7 +81,7 @@ Invoquée automatiquement par le skill `/setup-repo` (ou exécutable manuellemen
 node dist/cli/setup-repo.mjs \
   --repo <owner>/<name> \
   --target-dir <chemin> \
-  [--pinned-sha <sha-40-caracteres>] \
+  --pinned-sha <sha-40-caracteres> \
   [--dry-run | --apply] \
   [--apply-github-settings] \
   [--no-frontend-reviewers] \
@@ -102,7 +102,7 @@ node dist/cli/setup-repo.mjs \
 | --- | --- | --- |
 | `--repo <owner/name>` | *(Obligatoire)* | Identifiant du dépôt GitHub cible (ex. `my-org/craft-calculator`). |
 | `--target-dir <chemin>` (alias `--dir`, `--repo-root`) | Répertoire courant | Chemin local où sont écrits `.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`, les workflows et les prompts des reviewers (`<reviewers_dir>/*.md`). |
-| `--pinned-sha <sha>` | Dernier SHA EPURE | SHA Git immuable de 40 caractères de `Giskard-AI/epure` utilisé pour épingler les workflows appelants générés. |
+| `--pinned-sha <sha>` | *(Requis avec `--apply` ou `--apply-github-settings`)* | SHA Git immuable de 40 caractères de `Giskard-AI/epure` utilisé pour épingler les workflows appelants générés, en général le commit du checkout EPURE exécuté (`git -C <checkout-epure> rev-parse HEAD`). Le commit doit exister sur GitHub : sinon le `epure-check.yml` généré échoue au démarrage, le check requis `Verify EPURE Consumer Contract / Verify EPURE Consumer Contract` n'est jamais publié et toute PR vers `dev` reste bloquée. Sans lui, `--apply` et `--apply-github-settings` échouent avant toute écriture ; un dry-run avertit et épingle un commit fictif. |
 | `--dry-run` | `true` (si `--apply` omis) | Affiche le plan complet de bootstrap sans modifier aucun fichier ni appeler d'API d'écriture. Avec `--apply-github-settings`, lit les Rulesets existants et indique pour chacun `create`, `update` ou `noop`. |
 | `--apply` | `false` | Écrit les fichiers de configuration (`.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`), les workflows appelants et le socle des prompts de reviewers (`<reviewers_dir>/*.md`, par défaut `.agents/reviewers/*.md`). |
 | `--apply-github-settings` | `false` | Applique le mode squash-only et les 5 Repository Rulesets (`epure-feature-integrity`, `epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`, `epure-release-tags`) via l'API REST GitHub. |

@@ -332,7 +332,7 @@ summary() {
     return
   fi
   printf '\n  %sRun this command next to apply repository files, rulesets, and bypass actors:%s\n\n' "$BOLD" "$RESET"
-  printf '    node dist/cli/setup-repo.mjs --repo %s --agent-app-id %s --release-app-id %s --apply --apply-github-settings\n\n' \
+  printf '    node dist/cli/setup-repo.mjs --repo %s --pinned-sha "$(git rev-parse HEAD)" --agent-app-id %s --release-app-id %s --apply --apply-github-settings\n\n' \
     "$repo" "$agent_id" "$release_id"
 }
 

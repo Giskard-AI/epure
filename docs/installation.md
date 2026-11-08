@@ -76,6 +76,7 @@ The `/setup-repo` skill first runs the underlying CLI in `--dry-run` mode and pr
 node dist/cli/setup-repo.mjs \
   --repo my-org/craft-calculator \
   --target-dir /path/to/craft-calculator \
+  --pinned-sha "$(git -C /path/to/epure rev-parse HEAD)" \
   --agent-app-id 123456 \
   --release-app-id 654321 \
   --dry-run
@@ -89,6 +90,7 @@ Once you confirm the dry-run report, the `/setup-repo` skill applies the reposit
 node dist/cli/setup-repo.mjs \
   --repo my-org/craft-calculator \
   --target-dir /path/to/craft-calculator \
+  --pinned-sha "$(git -C /path/to/epure rev-parse HEAD)" \
   --agent-app-id 123456 \
   --release-app-id 654321 \
   --apply \

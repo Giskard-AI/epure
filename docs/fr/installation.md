@@ -76,6 +76,7 @@ Le skill `/setup-repo` invoque d'abord la CLI sous-jacente en mode `--dry-run` e
 node dist/cli/setup-repo.mjs \
   --repo my-org/craft-calculator \
   --target-dir /chemin/vers/craft-calculator \
+  --pinned-sha "$(git -C /chemin/vers/epure rev-parse HEAD)" \
   --agent-app-id 123456 \
   --release-app-id 654321 \
   --dry-run
@@ -89,6 +90,7 @@ Après votre validation, le skill `/setup-repo` applique la gouvernance via `--a
 node dist/cli/setup-repo.mjs \
   --repo my-org/craft-calculator \
   --target-dir /chemin/vers/craft-calculator \
+  --pinned-sha "$(git -C /chemin/vers/epure rev-parse HEAD)" \
   --agent-app-id 123456 \
   --release-app-id 654321 \
   --apply \

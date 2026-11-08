@@ -35,6 +35,7 @@ export {
   type VerificationTargetSpec
 };
 
+// Placeholder for dry-runs and tests: no such commit exists, so the CLI refuses to write with it.
 export const DEFAULT_EPURE_PINNED_SHA =
   "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
 export { EPURE_PUBLIC_VERSION };

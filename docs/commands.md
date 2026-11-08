@@ -81,7 +81,7 @@ Invoked automatically by the `/setup-repo` skill (or runnable directly from a te
 node dist/cli/setup-repo.mjs \
   --repo <owner>/<name> \
   --target-dir <path> \
-  [--pinned-sha <40-char-sha>] \
+  --pinned-sha <40-char-sha> \
   [--dry-run | --apply] \
   [--apply-github-settings] \
   [--no-frontend-reviewers] \
@@ -102,7 +102,7 @@ node dist/cli/setup-repo.mjs \
 | --- | --- | --- |
 | `--repo <owner/name>` | *(Required)* | Target GitHub repository slug (e.g., `my-org/craft-calculator`). |
 | `--target-dir <path>` (aliases `--dir`, `--repo-root`) | Current directory | Local checkout path where `.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`, workflows, and the reviewer prompts (`<reviewers_dir>/*.md`) are written. |
-| `--pinned-sha <sha>` | Latest EPURE SHA | Immutable 40-character Git commit SHA of `Giskard-AI/epure` used to pin generated caller workflows. |
+| `--pinned-sha <sha>` | *(Required with `--apply` or `--apply-github-settings`)* | Immutable 40-character Git commit SHA of `Giskard-AI/epure` used to pin generated caller workflows, usually the commit of the EPURE checkout you run (`git -C <epure-checkout> rev-parse HEAD`). The commit must exist on GitHub: otherwise the generated `epure-check.yml` fails at startup, the required check `Verify EPURE Consumer Contract / Verify EPURE Consumer Contract` never reports and every PR into `dev` stays blocked. Without it, `--apply` and `--apply-github-settings` fail before any write; a dry-run warns and pins a placeholder commit. |
 | `--dry-run` | `true` (if `--apply` omitted) | Prints the complete bootstrap plan without modifying local files or calling write APIs. With `--apply-github-settings`, reads the existing rulesets and reports `create`, `update` or `noop` for each. |
 | `--apply` | `false` | Writes configuration files (`.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`), caller workflows, and base reviewer prompts (`<reviewers_dir>/*.md`, default `.agents/reviewers/*.md`). |
 | `--apply-github-settings` | `false` | Applies squash-only repository settings and the 5 Repository Rulesets (`epure-feature-integrity`, `epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`, `epure-release-tags`) via the GitHub REST API. |

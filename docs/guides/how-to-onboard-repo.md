@@ -57,6 +57,7 @@ The agent inspects the repository's elements (language, build scripts, UI presen
 node dist/cli/setup-repo.mjs \
   --repo my-org/craft-calculator \
   --target-dir /path/to/craft-calculator \
+  --pinned-sha "$(git -C /path/to/epure rev-parse HEAD)" \
   --agent-app-id 123456 \
   --release-app-id 654321 \
   --dry-run
@@ -79,6 +80,7 @@ Once you confirm, the `/setup-repo` skill runs `--apply --apply-github-settings`
 node dist/cli/setup-repo.mjs \
   --repo my-org/craft-calculator \
   --target-dir /path/to/craft-calculator \
+  --pinned-sha "$(git -C /path/to/epure rev-parse HEAD)" \
   --agent-app-id 123456 \
   --release-app-id 654321 \
   --apply \
