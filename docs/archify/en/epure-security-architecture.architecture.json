@@ -146,7 +146,7 @@
       "items": [
         "Job 1 authorize-command runs with 0 secrets; Job 2 runs inside isolated GitHub Environment <llm-env>",
         "Agent App writes only to plan/*, task/*, and feature/* (blocked from merging to dev or pushing to main)",
-        "Release App runs exclusively in environment: release as sole Bypass Actor on main and v* tags"
+        "Release App runs exclusively in environment: release as sole Bypass Actor of epure-release-immutability (main, no PR merge) and epure-release-tags (v*)"
       ]
     },
     {
