@@ -27,6 +27,14 @@ describe("extractLLMTokenUsage", () => {
       expected: { input_tokens: 1050, cached_input_tokens: 900, output_tokens: 70, thinking_tokens: 0 }
     },
     {
+      id: "anthropic-thinking-comes-from-output-details-and-stays-in-output",
+      provider: "anthropic",
+      body: {
+        usage: { input_tokens: 29, output_tokens: 230, output_tokens_details: { thinking_tokens: 223 } }
+      },
+      expected: { input_tokens: 29, cached_input_tokens: 0, output_tokens: 230, thinking_tokens: 223 }
+    },
+    {
       id: "openai-chat-completion-reports-cached-and-reasoning-details",
       provider: "openai",
       body: {

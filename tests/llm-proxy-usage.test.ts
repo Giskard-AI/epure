@@ -30,7 +30,7 @@ const usage = (
 const ANTHROPIC_STREAM = sse(
   { type: "message_start", message: { model: "claude-x", usage: { input_tokens: 100, cache_read_input_tokens: 400, output_tokens: 1 } } },
   { type: "content_block_delta", delta: { type: "text_delta", text: "héllo" } },
-  { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 42 } },
+  { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 42, output_tokens_details: { thinking_tokens: 30 } } },
   { type: "message_stop" }
 );
 const OPENAI_CHAT_STREAM = `${sse(
@@ -125,7 +125,7 @@ describe("meterResponse", () => {
       provider: "anthropic",
       contentType: "text/event-stream",
       body: ANTHROPIC_STREAM,
-      expected: usage("anthropic", "m", 500, 400, 42, 0)
+      expected: usage("anthropic", "m", 500, 400, 42, 30)
     },
     {
       id: "openai-chat-final-usage-chunk",
@@ -192,7 +192,7 @@ describe("meterResponse", () => {
     meter.onChunk(compressed.subarray(0, 10));
     meter.onChunk(compressed.subarray(10));
 
-    expect(meter.onEnd()).toEqual(usage("anthropic", "m", 500, 400, 42, 0));
+    expect(meter.onEnd()).toEqual(usage("anthropic", "m", 500, 400, 42, 30));
   });
 });
 
@@ -235,7 +235,7 @@ describe("createLlmSandboxProxy usage", () => {
       responseBody: ANTHROPIC_STREAM,
       expectedForwarded: { model: "claude-x", stream: true },
       expectedUsage: {
-        "anthropic/claude-x": { requests: 1, input_tokens: 500, cached_input_tokens: 400, output_tokens: 42, thinking_tokens: 0 }
+        "anthropic/claude-x": { requests: 1, input_tokens: 500, cached_input_tokens: 400, output_tokens: 42, thinking_tokens: 30 }
       }
     },
     {
@@ -291,7 +291,7 @@ describe("runInUntrustedCodeSandbox usage", () => {
       id: "two-agent-requests-are-summed-on-the-result",
       requests: 2,
       expected: {
-        "anthropic/claude-x": { requests: 2, input_tokens: 1000, cached_input_tokens: 800, output_tokens: 84, thinking_tokens: 0 }
+        "anthropic/claude-x": { requests: 2, input_tokens: 1000, cached_input_tokens: 800, output_tokens: 84, thinking_tokens: 60 }
       }
     },
     { id: "agent-without-llm-requests-reports-no-usage", requests: 0, expected: {} }

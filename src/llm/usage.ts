@@ -66,7 +66,7 @@ export function extractLLMTokenUsage(
       input_tokens: count(u, "input_tokens") + cacheRead + count(u, "cache_creation_input_tokens"),
       cached_input_tokens: cacheRead,
       output_tokens: count(u, "output_tokens"),
-      thinking_tokens: 0
+      thinking_tokens: count(asCounts(u.output_tokens_details), "thinking_tokens")
     };
   }
   // The Responses API names them input/output tokens, chat completions prompt/completion tokens.

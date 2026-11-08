@@ -2926,7 +2926,7 @@ function extractLLMTokenUsage(provider, model, body) {
       input_tokens: count(u, "input_tokens") + cacheRead + count(u, "cache_creation_input_tokens"),
       cached_input_tokens: cacheRead,
       output_tokens: count(u, "output_tokens"),
-      thinking_tokens: 0
+      thinking_tokens: count(asCounts(u.output_tokens_details), "thinking_tokens")
     };
   }
   if ("input_tokens" in u) {
