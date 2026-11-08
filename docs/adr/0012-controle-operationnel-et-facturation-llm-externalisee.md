@@ -20,5 +20,5 @@ La question Q13 avait initialement approuvé un budget financier par ticket et p
 ## Conséquences
 
 - Pas de persistance de coûts dans GitHub ; pas de base externe ni de service financier.
-- La visibilité financière reste celle des tableaux de bord / API des fournisseurs, hors périmètre du MVP.
+- La visibilité financière reste celle des tableaux de bord / API des fournisseurs, hors périmètre du MVP. _Modifiée par l'ADR-0035 : les jetons sont relevés dans l'état du plan et un coût estimé est affiché par ticket et par epic ; la facturation de référence reste celle du fournisseur._
 - Les timeouts et limites de tentatives encadrent l'exécution mais ne garantissent pas un coût maximum.
