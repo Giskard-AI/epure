@@ -332,6 +332,77 @@ describe("2. .github/agents.yml defaults (Q78) and non-weakenable security invar
     );
   });
 
+  const GEMINI_PRICE = {
+    inputPerMTok: 0.75,
+    cachedInputPerMTok: 0.075,
+    outputPerMTok: 3.75,
+    source: "https://ai.google.dev/gemini-api/docs/pricing#gemini-3.8-flash",
+    read_on: "2026-11-08"
+  };
+  it.each([
+    {
+      id: "no-pricing-section",
+      yaml: "harness: pi\n",
+      expectedPricing: undefined
+    },
+    {
+      id: "unquoted-model-key-with-cached-price",
+      yaml: [
+        "pricing:",
+        "  google/gemini-3.8-flash:",
+        "    inputPerMTok: 0.75",
+        "    cachedInputPerMTok: 0.075 # context caching",
+        "    outputPerMTok: 3.75",
+        "    source: https://ai.google.dev/gemini-api/docs/pricing#gemini-3.8-flash",
+        "    read_on: 2026-11-08",
+        "security_invariants:",
+        "  sandbox_isolation: true",
+        ""
+      ].join("\n"),
+      expectedPricing: { "google/gemini-3.8-flash": GEMINI_PRICE }
+    },
+    {
+      id: "quoted-model-key-with-colon-and-no-cached-price",
+      yaml: [
+        "pricing:",
+        '  "bedrock/anthropic.claude-v5:0":',
+        "    inputPerMTok: 3",
+        "    outputPerMTok: 15",
+        '    source: "https://aws.amazon.com/bedrock/pricing/"',
+        "    read_on: '2026-11-01'",
+        ""
+      ].join("\n"),
+      expectedPricing: {
+        "bedrock/anthropic.claude-v5:0": {
+          inputPerMTok: 3,
+          outputPerMTok: 15,
+          source: "https://aws.amazon.com/bedrock/pricing/",
+          read_on: "2026-11-01"
+        }
+      }
+    }
+  ])("parseAgentsYaml reads the pricing table: $id", ({ yaml, expectedPricing }) => {
+    expect(parseAgentsYaml(yaml).pricing).toEqual(expectedPricing);
+  });
+
+  it("setup-repo serializes the pricing table and parses it back unchanged", () => {
+    const pricing = { "google/gemini-3.8-flash": GEMINI_PRICE };
+    const yaml = serializeAgentsYml({ ...DEFAULT_AGENTS_CONFIG, pricing }, false);
+
+    expect(parseAgentsYaml(yaml).pricing).toEqual(pricing);
+  });
+
+  it.each([
+    { id: "missing-output-price", fields: ["inputPerMTok: 1", "source: s", "read_on: d"], error: "pricing.m/x.outputPerMTok" },
+    { id: "non-numeric-input-price", fields: ["inputPerMTok: $1", "outputPerMTok: 2", "source: s", "read_on: d"], error: "pricing.m/x.inputPerMTok" },
+    { id: "negative-cached-price", fields: ["inputPerMTok: 1", "cachedInputPerMTok: -1", "outputPerMTok: 2", "source: s", "read_on: d"], error: "pricing.m/x.cachedInputPerMTok" },
+    { id: "missing-source", fields: ["inputPerMTok: 1", "outputPerMTok: 2", "read_on: d"], error: "pricing.m/x.source" },
+    { id: "missing-read-on-date", fields: ["inputPerMTok: 1", "outputPerMTok: 2", "source: s"], error: "pricing.m/x.read_on" }
+  ])("parseAgentsYaml rejects an incomplete price: $id", ({ fields, error }) => {
+    const yaml = ["pricing:", "  m/x:", ...fields.map((f) => `    ${f}`), ""].join("\n");
+    expect(() => parseAgentsYaml(yaml)).toThrowError(error);
+  });
+
   it.each([
     {
       id: "allows-valid-custom-harness-codex-and-relaxed-merge-policy",
@@ -688,6 +759,37 @@ describe("2b. Configurable reviewers_dir, llm_environment and models (planAndApp
           r.path.startsWith(".agents/reviewers/")
         )
       ).toBe(true);
+    } finally {
+      rmSync(tempRepoDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps an existing pricing table when it rewrites agents.yml", () => {
+    const tempRepoDir = mkdtempSync(join(tmpdir(), "epure-setup-pricing-"));
+    const pricing = {
+      "anthropic/claude-sonnet-5": {
+        inputPerMTok: 3,
+        cachedInputPerMTok: 0.3,
+        outputPerMTok: 15,
+        source: "https://www.anthropic.com/pricing",
+        read_on: "2026-11-08"
+      }
+    };
+    try {
+      mkdirSync(join(tempRepoDir, ".github"), { recursive: true });
+      writeFileSync(
+        join(tempRepoDir, ".github", "agents.yml"),
+        serializeAgentsYml({ ...DEFAULT_AGENTS_CONFIG, pricing }, false)
+      );
+      const result = planAndApplyRepoSetup({
+        repository: "acme-org/payments",
+        repoRootDir: tempRepoDir,
+        dryRun: false
+      });
+      expect(result.agents_config.pricing).toEqual(pricing);
+      expect(
+        parseAgentsYaml(readFileSync(join(tempRepoDir, ".github", "agents.yml"), "utf8")).pricing
+      ).toEqual(pricing);
     } finally {
       rmSync(tempRepoDir, { recursive: true, force: true });
     }

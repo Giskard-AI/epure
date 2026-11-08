@@ -884,7 +884,8 @@ function resolveAgentsConfig(overrides = {}) {
     preview_retention_days: overrides.preview_retention_days ?? DEFAULT_AGENTS_CONFIG.preview_retention_days,
     github_pages_previews: pagesPreviews,
     verification,
-    ...webTools ? { web_tools: webTools } : {}
+    ...webTools ? { web_tools: webTools } : {},
+    ...overrides.pricing ? { pricing: overrides.pricing } : {}
   };
   return {
     valid: true,
@@ -954,6 +955,32 @@ function parseYamlStringArrayInline(raw) {
   }
   return items;
 }
+function parsePricingEntry(model, fields) {
+  const dollars = (key) => {
+    const raw = fields[key]?.trim();
+    const value = raw ? Number(raw) : Number.NaN;
+    if (!Number.isFinite(value) || value < 0) {
+      throw new Error(
+        `pricing.${model}.${key} must be a non-negative number of dollars per million tokens.`
+      );
+    }
+    return value;
+  };
+  const text = (key) => {
+    const value = fields[key]?.trim();
+    if (!value) {
+      throw new Error(`pricing.${model}.${key} is required.`);
+    }
+    return value;
+  };
+  return {
+    inputPerMTok: dollars("inputPerMTok"),
+    ...fields.cachedInputPerMTok !== void 0 ? { cachedInputPerMTok: dollars("cachedInputPerMTok") } : {},
+    outputPerMTok: dollars("outputPerMTok"),
+    source: text("source"),
+    read_on: text("read_on")
+  };
+}
 function parseAgentsYaml(yamlContent) {
   let harness;
   let reviewers_dir;
@@ -985,6 +1012,8 @@ function parseAgentsYaml(yamlContent) {
   const targets = [];
   const securityOverrides = {};
   const webToolsOverrides = {};
+  const pricingFields = {};
+  let currentPricingModel = null;
   const lines = yamlContent.split(/\r?\n/);
   let section = "root";
   let inTargets = false;
@@ -1044,6 +1073,7 @@ function parseAgentsYaml(yamlContent) {
       currentTarget = null;
       currentProviderAlias = null;
       inProviderDefaultHeaders = false;
+      currentPricingModel = null;
       const kv = /^([a-zA-Z0-9_]+):\s*(.*)$/.exec(trimmed);
       if (!kv || !kv[1]) {
         continue;
@@ -1064,6 +1094,10 @@ function parseAgentsYaml(yamlContent) {
       }
       if (key === "web_tools" && !val) {
         section = "web_tools";
+        continue;
+      }
+      if (key === "pricing" && !val) {
+        section = "pricing";
         continue;
       }
       if ((key === "security_invariants" || key === "security_overrides") && !val) {
@@ -1233,6 +1267,23 @@ function parseAgentsYaml(yamlContent) {
       }
       continue;
     }
+    if (section === "pricing") {
+      if (indent === 2) {
+        const kv = /^("[^"]+"|'[^']+'|\S+?):(?:\s+.*)?$/.exec(trimmed);
+        currentPricingModel = kv?.[1] ? unquoteYamlScalar(kv[1]) : null;
+        if (currentPricingModel) {
+          pricingFields[currentPricingModel] = {};
+        }
+      } else if (currentPricingModel) {
+        const kv = /^([a-zA-Z0-9_]+):\s*(.+)$/.exec(trimmed);
+        if (kv && kv[1] && kv[2]) {
+          pricingFields[currentPricingModel][kv[1]] = unquoteYamlScalar(
+            kv[2].replace(/\s+#.*$/, "")
+          );
+        }
+      }
+      continue;
+    }
     if (section === "security") {
       const kv = /^([a-zA-Z0-9_]+):\s*(.+)$/.exec(trimmed);
       if (kv && kv[1] && kv[2]) {
@@ -1346,6 +1397,12 @@ function parseAgentsYaml(yamlContent) {
     ...t.build_command ? { build_command: t.build_command } : {}
   }));
   const hasVerificationOverrides = wait_for_external_ci !== void 0 || external_ci_timeout_minutes !== void 0 || grace_window_seconds !== void 0 || deferred_external_workflows !== void 0 || hasTargetsKey || parsedTargets.length > 0;
+  const pricing = Object.fromEntries(
+    Object.entries(pricingFields).map(([model, fields]) => [
+      model,
+      parsePricingEntry(model, fields)
+    ])
+  );
   if (reviewers_dir !== void 0 && reviewers_dir.split(/[\\/]/).some((s) => s === "." || s === "..")) {
     throw new Error(
       `reviewers_dir '${reviewers_dir}' must not contain '.' or '..' path segments.`
@@ -1381,6 +1438,7 @@ function parseAgentsYaml(yamlContent) {
       }
     } : {},
     ...Object.keys(webToolsOverrides).length > 0 ? { web_tools: webToolsOverrides } : {},
+    ...Object.keys(pricing).length > 0 ? { pricing } : {},
     ...Object.keys(securityOverrides).length > 0 ? { security_overrides: securityOverrides } : {}
   };
   const resolved = resolveAgentsConfig(overrides);
