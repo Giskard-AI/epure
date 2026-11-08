@@ -54,7 +54,9 @@ export async function startFakeLlmUpstream(
 
 export interface RawProxyResponse {
   readonly status: number;
+  readonly headers: IncomingHttpHeaders;
   readonly body: string;
+  readonly rawBody: Buffer;
 }
 
 // Sends request lines fetch() refuses to build (absolute-form targets, CONNECT, dot segments).
@@ -74,16 +76,23 @@ export function rawProxyRequest(
       (res) => {
         const chunks: Buffer[] = [];
         res.on("data", (chunk: Buffer) => chunks.push(chunk));
-        res.on("end", () =>
-          resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") })
-        );
+        res.on("end", () => {
+          const rawBody = Buffer.concat(chunks);
+          resolve({
+            status: res.statusCode ?? 0,
+            headers: res.headers,
+            body: rawBody.toString("utf8"),
+            rawBody
+          });
+        });
       }
     );
+    const empty = { headers: {}, body: "", rawBody: Buffer.alloc(0) };
     req.on("connect", (res, socket) => {
       socket.destroy();
-      resolve({ status: res.statusCode ?? 0, body: "" });
+      resolve({ status: res.statusCode ?? 0, ...empty });
     });
-    req.on("error", () => resolve({ status: 0, body: "" }));
+    req.on("error", () => resolve({ status: 0, ...empty }));
     req.end(params.body);
   });
 }

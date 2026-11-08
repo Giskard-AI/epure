@@ -1,6 +1,8 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { request as httpRequest, type ServerResponse } from "node:http";
 import { createConnection, createServer, type Server } from "node:net";
 import { join } from "node:path";
+import { gunzipSync, gzipSync } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveProviderUpstream, type ProviderKind } from "../src/llm/index.js";
 import { runPolyglotStage1Verification } from "../src/sandbox/polyglot-workspace-runner.js";
@@ -8,6 +10,7 @@ import {
   buildKernelSandboxedCommand,
   buildSanitizedSandboxEnv,
   createLlmSandboxProxy,
+  MAX_PROXY_REQUEST_BYTES,
   probeKernelSandboxCapabilities,
   runInUntrustedCodeSandbox,
   selectKernelBackend,
@@ -19,7 +22,8 @@ import {
 import {
   rawProxyRequest,
   startFakeLlmUpstream,
-  type FakeLlmUpstream
+  type FakeLlmUpstream,
+  type RecordedUpstreamRequest
 } from "./fixtures/fake-llm-upstream.js";
 
 const REAL_KEY = "sk-real-RunnerHeldKey1234567890ABCDEF";
@@ -458,6 +462,302 @@ describe("Sandbox LLM proxy & untrusted code credential isolation (#98)", () => 
       ]);
       expect(Buffer.concat(observed).toString()).toBe(SSE_BODY);
       expect(observerEnded).toBe(true);
+    } finally {
+      await proxy.close();
+    }
+  });
+
+  it.each([
+    {
+      id: "redirect-is-relayed-to-the-sandbox-and-never-followed-with-the-key",
+      respond: (second: FakeLlmUpstream) => (_req: RecordedUpstreamRequest, res: ServerResponse) => {
+        res.writeHead(307, { location: `${second.url}/v1/messages` });
+        res.end();
+      },
+      expectedStatus: 307,
+      expectedHeaders: (second: FakeLlmUpstream) => ({ location: `${second.url}/v1/messages` }),
+      expectedBody: ""
+    },
+    {
+      id: "rate-limit-429-keeps-retry-after",
+      respond: () => (_req: RecordedUpstreamRequest, res: ServerResponse) => {
+        res.writeHead(429, { "retry-after": "7", "content-type": "application/json" });
+        res.end('{"error":"rate limited"}');
+      },
+      expectedStatus: 429,
+      expectedHeaders: () => ({ "retry-after": "7" }),
+      expectedBody: '{"error":"rate limited"}'
+    },
+    {
+      id: "gzip-stream-is-relayed-byte-for-byte",
+      respond: () => (_req: RecordedUpstreamRequest, res: ServerResponse) => {
+        res.writeHead(200, { "content-type": "text/event-stream", "content-encoding": "gzip" });
+        res.end(gzipSync(SSE_BODY));
+      },
+      expectedStatus: 200,
+      expectedHeaders: () => ({ "content-encoding": "gzip" }),
+      expectedBody: SSE_BODY
+    },
+    {
+      id: "gzip-error-echoing-the-key-is-decoded-and-redacted",
+      respond: () => (req: RecordedUpstreamRequest, res: ServerResponse) => {
+        res.writeHead(401, { "content-encoding": "gzip" });
+        res.end(gzipSync(`invalid x-api-key ${String(req.headers["x-api-key"])}`));
+      },
+      expectedStatus: 401,
+      expectedHeaders: () => ({ "content-encoding": undefined }),
+      expectedBody: "invalid x-api-key [REDACTED]"
+    }
+  ])(
+    "createLlmSandboxProxy [$id]: relays the upstream answer",
+    async ({ respond, expectedStatus, expectedHeaders, expectedBody }) => {
+      const second = await startFakeLlmUpstream((_req, res) => {
+        res.end();
+      });
+      const upstream = await startFakeLlmUpstream(respond(second));
+      openUpstreams.push(second, upstream);
+      const proxy = await createLlmSandboxProxy({
+        upstream: resolveProviderUpstream("anthropic", { base_url: upstream.url }),
+        apiKey: REAL_KEY
+      });
+
+      try {
+        const res = await rawProxyRequest(proxy.proxyUrl, {
+          method: "POST",
+          path: "/v1/messages",
+          headers: { "x-api-key": proxy.proxyNonce },
+          body: "{}"
+        });
+        const body =
+          res.headers["content-encoding"] === "gzip"
+            ? gunzipSync(res.rawBody).toString("utf8")
+            : res.body;
+
+        const expected = expectedHeaders(second);
+        expect(res.status).toBe(expectedStatus);
+        expect(Object.fromEntries(Object.keys(expected).map((name) => [name, res.headers[name]]))).toEqual(expected);
+        expect(body).toBe(expectedBody);
+        expect(second.requests).toEqual([]);
+      } finally {
+        await proxy.close();
+      }
+    }
+  );
+
+  it.each([
+    {
+      id: "query-without-a-key-is-forwarded-verbatim",
+      query: "?alt=sse&x=a%20b",
+      expectedQuery: "?alt=sse&x=a%20b"
+    },
+    {
+      id: "query-carrying-the-nonce-as-key-is-rebuilt-without-it",
+      query: "?key=NONCE&alt=sse",
+      expectedQuery: "?alt=sse"
+    }
+  ])(
+    "createLlmSandboxProxy [$id]: shapes the forwarded request",
+    async ({ query, expectedQuery }) => {
+      const upstream = await sseUpstream();
+      const proxy = await createLlmSandboxProxy({
+        upstream: resolveProviderUpstream("google", {
+          base_url: upstream.url,
+          default_headers: { "X-Gateway-Tenant": "epure" }
+        }),
+        apiKey: REAL_KEY
+      });
+      const path = "/v1beta/models/gemini-3-flash:streamGenerateContent";
+
+      try {
+        const res = await rawProxyRequest(proxy.proxyUrl, {
+          method: "POST",
+          path: `${path}${query.replace("NONCE", proxy.proxyNonce)}`,
+          headers: {
+            "x-goog-api-key": proxy.proxyNonce,
+            connection: "x-hop",
+            "x-hop": "1",
+            expect: "100-continue"
+          },
+          body: "{}"
+        });
+
+        expect(res.status).toBe(200);
+        expect(upstream.requests.map((r) => r.url)).toEqual([`${path}${expectedQuery}`]);
+        const forwarded = upstream.requests[0]!.headers;
+        expect(forwarded["x-goog-api-key"]).toBe(REAL_KEY);
+        expect(forwarded["x-gateway-tenant"]).toBe("epure");
+        expect(forwarded["x-hop"]).toBeUndefined();
+        expect(forwarded.expect).toBeUndefined();
+      } finally {
+        await proxy.close();
+      }
+    }
+  );
+
+  it.each([
+    {
+      id: "declared-length-over-the-cap",
+      headers: { "content-length": String(MAX_PROXY_REQUEST_BYTES + 1) },
+      body: "{}"
+    },
+    {
+      id: "chunked-body-over-the-cap",
+      headers: { "transfer-encoding": "chunked" },
+      body: "x".repeat(MAX_PROXY_REQUEST_BYTES + 1024)
+    }
+  ])("createLlmSandboxProxy [$id]: answers 413", async ({ headers, body }) => {
+    const upstream = await sseUpstream();
+    const proxy = await createLlmSandboxProxy({
+      upstream: resolveProviderUpstream("anthropic", { base_url: upstream.url }),
+      apiKey: REAL_KEY
+    });
+
+    try {
+      const res = await rawProxyRequest(proxy.proxyUrl, {
+        method: "POST",
+        path: "/v1/messages",
+        headers: { "x-api-key": proxy.proxyNonce, ...headers },
+        body
+      });
+
+      expect(res.status).toBe(413);
+      expect((JSON.parse(res.body) as { error_code: string }).error_code).toBe(
+        "PROXY_REQUEST_TOO_LARGE"
+      );
+      expect(upstream.requests).toEqual([]);
+    } finally {
+      await proxy.close();
+    }
+  });
+
+  it.each([
+    {
+      id: "observer-throwing-on-every-call",
+      observeResponse: () => ({
+        onChunk: () => {
+          throw new Error("observer bug");
+        },
+        onEnd: () => {
+          throw new Error("observer bug");
+        }
+      })
+    },
+    {
+      id: "observer-factory-throwing",
+      observeResponse: () => {
+        throw new Error("observer bug");
+      }
+    }
+  ])("createLlmSandboxProxy [$id]: the stream still reaches the sandbox", async ({ observeResponse }) => {
+    const upstream = await sseUpstream();
+    const proxy = await createLlmSandboxProxy({
+      upstream: resolveProviderUpstream("anthropic", { base_url: upstream.url }),
+      apiKey: REAL_KEY,
+      observeResponse
+    });
+
+    try {
+      const res = await fetch(`${proxy.proxyUrl}/v1/messages`, {
+        method: "POST",
+        headers: { "x-api-key": proxy.proxyNonce },
+        body: "{}"
+      });
+
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe(SSE_BODY);
+    } finally {
+      await proxy.close();
+    }
+  });
+
+  it("createLlmSandboxProxy [client-abort-reaches-the-upstream-and-ends-the-observer]", async () => {
+    let upstreamClosedEarly: (value: boolean) => void = () => undefined;
+    const upstreamClosed = new Promise<boolean>((resolveClosed) => {
+      upstreamClosedEarly = resolveClosed;
+    });
+    const upstream = await startFakeLlmUpstream((_req, res) => {
+      res.on("close", () => upstreamClosedEarly(!res.writableFinished));
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write('data: {"delta":"he"}\n\n');
+    });
+    openUpstreams.push(upstream);
+    let observerEnded = false;
+    const proxy = await createLlmSandboxProxy({
+      upstream: resolveProviderUpstream("anthropic", { base_url: upstream.url }),
+      apiKey: REAL_KEY,
+      observeResponse: () => ({
+        onChunk: () => undefined,
+        onEnd: () => {
+          observerEnded = true;
+        }
+      })
+    });
+
+    try {
+      const abort = new AbortController();
+      const res = await fetch(`${proxy.proxyUrl}/v1/messages`, {
+        method: "POST",
+        headers: { "x-api-key": proxy.proxyNonce },
+        body: "{}",
+        signal: abort.signal
+      });
+      await res.body!.getReader().read();
+      abort.abort();
+
+      expect(await upstreamClosed).toBe(true);
+      await vi.waitFor(() => expect(observerEnded).toBe(true));
+    } finally {
+      await proxy.close();
+    }
+  });
+
+  it("createLlmSandboxProxy [backpressure-from-a-slow-sandbox-reaches-the-upstream]", async () => {
+    const total = 64 * 1024 * 1024;
+    const chunk = Buffer.alloc(64 * 1024, 97);
+    let written = 0;
+    const upstream = await startFakeLlmUpstream((_req, res) => {
+      res.writeHead(200, { "content-type": "application/octet-stream" });
+      const pump = (): void => {
+        while (written < total) {
+          written += chunk.length;
+          if (!res.write(chunk)) {
+            res.once("drain", pump);
+            return;
+          }
+        }
+        res.end();
+      };
+      pump();
+    });
+    openUpstreams.push(upstream);
+    const proxy = await createLlmSandboxProxy({
+      upstream: resolveProviderUpstream("anthropic", { base_url: upstream.url }),
+      apiKey: REAL_KEY
+    });
+
+    try {
+      const { hostname, port } = new URL(proxy.proxyUrl);
+      const received = await new Promise<{ whilePaused: number; bytes: number }>((resolveBytes) => {
+        const req = httpRequest(
+          { host: hostname, port, method: "POST", path: "/v1/messages", headers: { "x-api-key": proxy.proxyNonce } },
+          (res) => {
+            res.pause();
+            setTimeout(() => {
+              const whilePaused = written;
+              let bytes = 0;
+              res.on("data", (data: Buffer) => {
+                bytes += data.length;
+              });
+              res.on("end", () => resolveBytes({ whilePaused, bytes }));
+              res.resume();
+            }, 300);
+          }
+        );
+        req.end("{}");
+      });
+
+      expect(received.whilePaused).toBeLessThan(total / 2);
+      expect(received.bytes).toBe(total);
     } finally {
       await proxy.close();
     }

@@ -3,11 +3,17 @@ import { appendFileSync } from "node:fs";
 
 // src/sandbox/llm-sandbox.ts
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { once } from "node:events";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { createServer } from "node:http";
+import {
+  Agent as HttpAgent,
+  createServer,
+  request as httpRequest
+} from "node:http";
+import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 import { spawn, spawnSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
+import { pipeline, Transform } from "node:stream";
+import { brotliDecompressSync, gunzipSync, inflateSync } from "node:zlib";
 
 // src/auth/issue-command-gate.ts
 var SECRET_PATTERNS = [
@@ -347,6 +353,7 @@ function resolveProviderApiKey(params) {
   const fallback = env.LLM_API_KEY?.trim();
   return fallback && fallback.length > 0 ? fallback : void 0;
 }
+var DEFAULT_LLM_REQUEST_TIMEOUT_MS = 9e5;
 
 // src/sandbox/llm-sandbox.ts
 var SECRET_ENV_NAME_PATTERN = /^(?:.*API_KEY|.*_TOKEN|.*_SECRET|.*PRIVATE_KEY|LLM_API_KEY|GITHUB_TOKEN|GH_TOKEN|GITHUB_PAT|EPURE_.*(?:KEY|TOKEN|SECRET)|AWS_.*|AZURE_.*|GCP_.*|NPM_TOKEN|NODE_AUTH_TOKEN|ACTIONS_RUNTIME_TOKEN|ACTIONS_ID_TOKEN_REQUEST_TOKEN)$/i;
@@ -372,14 +379,11 @@ var DROPPED_REQUEST_HEADERS = /* @__PURE__ */ new Set([
   ...CREDENTIAL_HEADERS,
   ...HOP_BY_HOP_HEADERS,
   "host",
-  "content-length",
+  "expect",
   "accept-encoding"
 ]);
-var DROPPED_RESPONSE_HEADERS = /* @__PURE__ */ new Set([
-  ...HOP_BY_HOP_HEADERS,
-  "content-length",
-  "content-encoding"
-]);
+var DROPPED_RESPONSE_HEADERS = new Set(HOP_BY_HOP_HEADERS);
+var MAX_PROXY_REQUEST_BYTES = 20 * 1024 * 1024;
 function buildSanitizedSandboxEnv(runnerEnv, proxy) {
   const sanitized = {};
   for (const [key, value] of Object.entries(runnerEnv)) {
@@ -581,14 +585,60 @@ function probeKernelSandboxCapabilities(runnerEnv = process.env) {
   cachedDefaultCapabilitiesPath = pathVal;
   return result;
 }
-function readRequestBody(req) {
-  return new Promise((resolve2, reject) => {
-    const chunks = [];
-    req.on("data", (chunk) => chunks.push(chunk));
-    req.on("end", () => resolve2(Buffer.concat(chunks)));
-    req.on("error", reject);
-  });
+function forwardedHeaders(source, dropped) {
+  const namedByConnection = new Set(
+    String(source.connection ?? "").split(",").map((token) => token.trim().toLowerCase()).filter(Boolean)
+  );
+  const out = {};
+  for (const [name, value] of Object.entries(source)) {
+    if (value !== void 0 && !dropped.has(name) && !namedByConnection.has(name)) {
+      out[name] = value;
+    }
+  }
+  return out;
 }
+function guardObserver(open) {
+  let observer;
+  try {
+    observer = open();
+  } catch {
+    observer = void 0;
+  }
+  let ended = false;
+  return {
+    chunk(chunk) {
+      try {
+        observer?.onChunk(chunk);
+      } catch {
+      }
+    },
+    end() {
+      if (ended) {
+        return;
+      }
+      ended = true;
+      try {
+        observer?.onEnd();
+      } catch {
+      }
+    }
+  };
+}
+function decodeBody(body, contentEncoding) {
+  switch (String(contentEncoding ?? "").trim().toLowerCase()) {
+    case "gzip":
+    case "x-gzip":
+      return gunzipSync(body);
+    case "deflate":
+      return inflateSync(body);
+    case "br":
+      return brotliDecompressSync(body);
+    default:
+      return body;
+  }
+}
+var ProxyRequestTooLargeError = class extends Error {
+};
 function sendProxyError(res, status, errorCode, errorMessage) {
   res.statusCode = status;
   res.setHeader("content-type", "application/json");
@@ -615,10 +665,14 @@ function isNonce(candidate, nonce) {
 async function createLlmSandboxProxy(options) {
   const { upstream } = options;
   const apiKey = options.apiKey.trim();
-  const upstreamHost = new URL(upstream.baseUrl).host;
+  const target = new URL(upstream.baseUrl);
+  const upstreamHost = target.host;
+  const basePath = target.pathname.replace(/\/+$/, "");
+  const send = target.protocol === "https:" ? httpsRequest : httpRequest;
+  const agent = target.protocol === "https:" ? new HttpsAgent({ keepAlive: true }) : new HttpAgent({ keepAlive: true });
   const proxyNonce = randomBytes(24).toString("hex");
   const nonceBytes = Buffer.from(proxyNonce);
-  const relay = async (req, res) => {
+  const relay = (req, res) => {
     const rawUrl = req.url ?? "/";
     if (!rawUrl.startsWith("/")) {
       sendProxyError(
@@ -648,68 +702,134 @@ async function createLlmSandboxProxy(options) {
       );
       return;
     }
-    url.searchParams.delete("key");
-    const headers = new Headers();
-    for (const [name, value] of Object.entries(req.headers)) {
-      if (value !== void 0 && !DROPPED_REQUEST_HEADERS.has(name)) {
-        headers.set(name, Array.isArray(value) ? value.join(", ") : value);
-      }
-    }
-    headers.set(
-      upstream.authHeader,
-      upstream.authHeader === "authorization" ? `Bearer ${apiKey}` : apiKey
-    );
-    const body = await readRequestBody(req);
-    const abort = new AbortController();
-    res.on("close", () => abort.abort());
-    let upstreamRes;
-    try {
-      upstreamRes = await fetch(`${upstream.baseUrl}${url.pathname}${url.search}`, {
-        method: "POST",
-        headers,
-        body,
-        signal: abort.signal
-      });
-    } catch {
+    if (Number(req.headers["content-length"] ?? 0) > MAX_PROXY_REQUEST_BYTES) {
+      res.setHeader("connection", "close");
       sendProxyError(
         res,
-        502,
-        "PROXY_UPSTREAM_UNREACHABLE",
-        `Sandbox LLM proxy could not reach ${upstreamHost}.`
+        413,
+        "PROXY_REQUEST_TOO_LARGE",
+        `Sandbox LLM proxy accepts request bodies up to ${MAX_PROXY_REQUEST_BYTES} bytes.`
       );
       return;
     }
-    res.statusCode = upstreamRes.status;
-    upstreamRes.headers.forEach((value, name) => {
-      if (!DROPPED_RESPONSE_HEADERS.has(name)) {
-        res.setHeader(name, value);
+    const rawQuery = rawUrl.includes("?") ? rawUrl.slice(rawUrl.indexOf("?")) : "";
+    let query = rawQuery;
+    if (url.searchParams.has("key")) {
+      url.searchParams.delete("key");
+      query = url.search;
+    }
+    const headers = forwardedHeaders(req.headers, DROPPED_REQUEST_HEADERS);
+    for (const [name, value] of Object.entries(upstream.defaultHeaders)) {
+      headers[name.toLowerCase()] = value;
+    }
+    headers[upstream.authHeader] = upstream.authHeader === "authorization" ? `Bearer ${apiKey}` : apiKey;
+    let responded = false;
+    let failed = false;
+    const fail = (status, code, message) => {
+      if (failed) {
+        return;
       }
-    });
-    const observer = options.observeResponse?.({
+      failed = true;
+      upstreamReq.destroy();
+      if (res.headersSent) {
+        res.destroy();
+      } else {
+        res.setHeader("connection", "close");
+        sendProxyError(res, status, code, message);
+      }
+    };
+    const upstreamReq = send({
+      agent,
+      hostname: target.hostname.replace(/^\[|\]$/g, ""),
+      port: target.port || void 0,
       method: "POST",
-      path: url.pathname,
-      status: upstreamRes.status,
-      contentType: upstreamRes.headers.get("content-type") ?? ""
+      path: `${basePath}${url.pathname}${query}`,
+      headers,
+      timeout: DEFAULT_LLM_REQUEST_TIMEOUT_MS
     });
-    if (!upstreamRes.ok || !upstreamRes.body) {
-      const errorBody = Buffer.from(redactSecrets(await upstreamRes.text(), [apiKey]));
-      observer?.onChunk(errorBody);
-      observer?.onEnd();
-      res.end(errorBody);
-      return;
-    }
-    res.flushHeaders();
-    for await (const chunk of upstreamRes.body) {
-      observer?.onChunk(chunk);
-      if (!res.write(chunk)) {
-        await once(res, "drain", { signal: abort.signal });
+    upstreamReq.on("timeout", () => upstreamReq.destroy(new Error("upstream idle timeout")));
+    upstreamReq.on(
+      "error",
+      () => fail(502, "PROXY_UPSTREAM_UNREACHABLE", `Sandbox LLM proxy could not reach ${upstreamHost}.`)
+    );
+    res.on("close", () => {
+      if (!res.writableFinished) {
+        upstreamReq.destroy();
       }
-    }
-    observer?.onEnd();
-    res.end();
+    });
+    let received = 0;
+    const limit = new Transform({
+      transform(chunk, _encoding, callback) {
+        received += chunk.length;
+        callback(received > MAX_PROXY_REQUEST_BYTES ? new ProxyRequestTooLargeError() : null, chunk);
+      }
+    });
+    pipeline(req, limit, upstreamReq, (err) => {
+      if (!err || responded) {
+        return;
+      }
+      if (err instanceof ProxyRequestTooLargeError) {
+        fail(
+          413,
+          "PROXY_REQUEST_TOO_LARGE",
+          `Sandbox LLM proxy accepts request bodies up to ${MAX_PROXY_REQUEST_BYTES} bytes.`
+        );
+      } else {
+        fail(502, "PROXY_UPSTREAM_UNREACHABLE", `Sandbox LLM proxy could not reach ${upstreamHost}.`);
+      }
+    });
+    upstreamReq.on("response", (upstreamRes) => {
+      responded = true;
+      const status = upstreamRes.statusCode ?? 502;
+      const responseHeaders = forwardedHeaders(upstreamRes.headers, DROPPED_RESPONSE_HEADERS);
+      const observer = guardObserver(
+        () => options.observeResponse?.({
+          method: "POST",
+          path: url.pathname,
+          status,
+          contentType: String(upstreamRes.headers["content-type"] ?? "")
+        })
+      );
+      if (status >= 400) {
+        const chunks = [];
+        upstreamRes.on("data", (chunk) => chunks.push(chunk));
+        upstreamRes.on("error", () => {
+          observer.end();
+          fail(502, "PROXY_UPSTREAM_UNREACHABLE", `Sandbox LLM proxy lost the response from ${upstreamHost}.`);
+        });
+        upstreamRes.on("end", () => {
+          let body;
+          try {
+            body = decodeBody(Buffer.concat(chunks), upstreamRes.headers["content-encoding"]);
+          } catch {
+            observer.end();
+            fail(502, "PROXY_UPSTREAM_UNREACHABLE", `Sandbox LLM proxy could not decode the error from ${upstreamHost}.`);
+            return;
+          }
+          const redacted = Buffer.from(redactSecrets(body.toString("utf8"), [apiKey]));
+          delete responseHeaders["content-encoding"];
+          responseHeaders["content-length"] = String(redacted.length);
+          observer.chunk(redacted);
+          observer.end();
+          res.writeHead(status, responseHeaders).end(redacted);
+        });
+        return;
+      }
+      res.writeHead(status, responseHeaders);
+      res.flushHeaders();
+      const tap = new Transform({
+        transform(chunk, _encoding, callback) {
+          observer.chunk(chunk);
+          callback(null, chunk);
+        }
+      });
+      pipeline(upstreamRes, tap, res, () => observer.end());
+    });
   };
   const server = createServer((req, res) => {
-    relay(req, res).catch(() => {
+    try {
+      relay(req, res);
+    } catch {
       if (res.headersSent) {
         res.destroy();
       } else {
@@ -717,10 +837,10 @@ async function createLlmSandboxProxy(options) {
           res,
           502,
           "PROXY_UPSTREAM_UNREACHABLE",
-          `Sandbox LLM proxy lost the response from ${upstreamHost}.`
+          `Sandbox LLM proxy could not build the request to ${upstreamHost}.`
         );
       }
-    });
+    }
   });
   await new Promise((resolve2, reject) => {
     server.once("error", reject);
@@ -732,6 +852,7 @@ async function createLlmSandboxProxy(options) {
     proxyUrl,
     proxyNonce,
     close: () => new Promise((resolve2) => {
+      agent.destroy();
       server.closeAllConnections();
       server.close(() => resolve2());
     })
