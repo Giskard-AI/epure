@@ -22,6 +22,7 @@ import {
   actionsMinutes,
   assessComparability,
   attributeUsage,
+  compareStateUsageWithLogs,
   decideEscalation,
   deriveEngine,
   escalationReasonFromComment,
@@ -31,6 +32,7 @@ import {
   PhaseClock,
   renderMarkdownReport,
   RESUME_POLICY,
+  summarizeStateUsage,
   summarizeUsage,
   summarizeUsageByPhase,
   type E2eRunResult,
@@ -706,6 +708,57 @@ describe("summarizeUsage", () => {
   });
 });
 
+describe("token usage in the EPURE state against the job logs", () => {
+  const pricing = { "google/flash": { inputPerMTok: 1, outputPerMTok: 4, cachedInputPerMTok: 0.1 } };
+  const at = "2026-11-08T10:00:00.000Z";
+  const counts = (requests: number, input: number, output: number, unavailable = 0) => ({
+    requests,
+    input_tokens: input,
+    cached_input_tokens: 0,
+    output_tokens: output,
+    thinking_tokens: 0,
+    ...(unavailable ? { usage_unavailable: unavailable } : {})
+  });
+  const STATE = {
+    epic: { plan: { "google/flash": counts(1, 1_000_000, 0) } },
+    "3": { implementation: { "google/flash": counts(2, 2_000_000, 1_000_000) }, review: { "google/flash": counts(1, 0, 0, 1) } },
+    "4": { implementation: { "google/flash": counts(1, 1_000_000, 0) } }
+  };
+
+  it("sums each EPURE phase across planning and every ticket", () => {
+    const summary = summarizeStateUsage(STATE, pricing);
+
+    expect(Object.fromEntries(Object.entries(summary.by_phase).map(([phase, t]) => [phase, [t.requests, t.cost_usd]]))).toEqual({
+      plan: [1, 1],
+      implementation: [3, 7],
+      review: [1, 0]
+    });
+    expect(summary.total).toMatchObject({ requests: 5, input_tokens: 4_000_000, output_tokens: 1_000_000, usage_unavailable: 1, cost_usd: 8 });
+  });
+
+  const MATCHING_LOGS = [
+    usageAt(at, "flash", 1_000_000),
+    usageAt(at, "flash", 1_000_000),
+    usageAt(at, "flash", 1_000_000, 0, 1_000_000),
+    usageAt(at, "flash", 1_000_000)
+  ];
+  it.each([
+    { id: "matching-logs-ignore-requests-without-usage", logs: MATCHING_LOGS, expected: [] },
+    {
+      id: "a-log-line-missing-from-the-state-is-reported",
+      logs: [...MATCHING_LOGS, usageAt(at, "flash", 5)],
+      expected: ["google/flash: requests 4 in the state, 5 in the logs, input_tokens 4000000 in the state, 4000005 in the logs"]
+    },
+    {
+      id: "a-model-only-in-the-logs-is-reported",
+      logs: [...MATCHING_LOGS, usageAt(at, "pro", 0, 0, 7)],
+      expected: ["google/pro: requests 0 in the state, 1 in the logs, output_tokens 0 in the state, 7 in the logs"]
+    }
+  ])("$id", ({ logs, expected }) => {
+    expect(compareStateUsageWithLogs(STATE, logs)).toEqual(expected);
+  });
+});
+
 describe("actionsMinutes", () => {
   const job = (workflow: string, started: string | null, completed: string | null) => ({
     workflow,
@@ -854,6 +907,7 @@ describe("evaluateRun", () => {
     jobFailures: [],
     usageRecords: 5,
     unavailableJobLogs: [],
+    stateUsageMismatches: [],
     unknown: {}
   } satisfies Parameters<typeof evaluateRun>[0];
 
@@ -872,7 +926,9 @@ describe("evaluateRun", () => {
     { id: "unclassified-escalation-fails", patch: { escalations: [escalation(1, "unrecorded")] }, failed: ["no-internal-escalation"] },
     { id: "two-escalations-on-one-ticket-fail", patch: { escalations: [escalation(3), escalation(3)] }, failed: ["at-most-one-escalation-per-ticket"] },
     { id: "failed-orchestrator-run-fails", patch: { jobFailures: [failure] }, failed: ["no-orchestrator-job-failure"] },
-    { id: "zero-usage-records-fail", patch: { usageRecords: 0 }, failed: ["llm-usage-recorded"] }
+    { id: "zero-usage-records-fail", patch: { usageRecords: 0 }, failed: ["llm-usage-recorded"] },
+    { id: "state-without-token-usage-fails", patch: { stateUsageMismatches: null }, failed: ["state-usage-matches-job-logs"] },
+    { id: "state-disagreeing-with-the-logs-fails", patch: { stateUsageMismatches: ["google/flash: requests 4 in the state, 5 in the logs"] }, failed: ["state-usage-matches-job-logs"] }
   ])("$id", ({ patch, failed }) => {
     const { success, checks } = evaluateRun({ ...passing, ...patch });
 
@@ -914,6 +970,16 @@ describe("evaluateRun", () => {
     const { checks } = evaluateRun({ ...passing, unavailableJobLogs: unavailable, unknown });
 
     expect(checks.find((c) => c.id === "llm-usage-recorded")).toEqual({ id: "llm-usage-recorded", passed, detail });
+  });
+
+  it.each<{ id: string; patch: Partial<Parameters<typeof evaluateRun>[0]>; detail: string }>([
+    { id: "agreeing-state-and-logs", patch: {}, detail: "the state's token usage equals the job-log totals" },
+    { id: "no-usage-in-the-state", patch: { stateUsageMismatches: null }, detail: "no token_usage in the EPURE state" },
+    { id: "unreadable-state", patch: { stateUsageMismatches: null, unknown: { end_state: "GET ref: HTTP 502" } }, detail: "EPURE state unknown: GET ref: HTTP 502" },
+    { id: "unreadable-job-logs", patch: { stateUsageMismatches: null, unknown: { usage: "GET /runs: HTTP 502" } }, detail: "job logs unknown: GET /runs: HTTP 502" },
+    { id: "mismatches-are-listed", patch: { stateUsageMismatches: ["a/x: requests 1 in the state, 2 in the logs", "b/y: requests 0 in the state, 1 in the logs"] }, detail: "a/x: requests 1 in the state, 2 in the logs; b/y: requests 0 in the state, 1 in the logs" }
+  ])("state-usage-matches-job-logs detail: $id", ({ patch, detail }) => {
+    expect(evaluateRun({ ...passing, ...patch }).checks.find((c) => c.id === "state-usage-matches-job-logs")?.detail).toBe(detail);
   });
 });
 
@@ -1186,7 +1252,7 @@ describe("renderMarkdownReport", () => {
     const escalations = [escalation(3)];
     const endState = { phase: "review", status: "active", subphase: "waiting_feature_ci" };
     return {
-      schema_version: 3,
+      schema_version: 4,
       run_id: "r1",
       repository: "Giskard-AI/epure-e2e-sandbox",
       code_under_test: { epure_ref: "dev", epure_sha: "0123456789abcdef", harness_commit: "0123456789abcdef" },
@@ -1217,6 +1283,7 @@ describe("renderMarkdownReport", () => {
       feature_pr: null,
       phases: [{ name: "plan", started_at: "", ended_at: "", duration_ms: 90_000, outcome: "ok" }],
       usage: { ...summarizeUsage([], {}), by_phase: {}, unavailable_job_logs: [], records: [] },
+      state_usage: null,
       actions: { jobs: 4, minutes: 12.5, billable_minutes: 14, by_workflow: {} },
       reviewed_task_prs: 0,
       escalations,
@@ -1224,7 +1291,7 @@ describe("renderMarkdownReport", () => {
       job_failures: [],
       comparable: { comparable: false, unmet: ["no review on a task pull request"] },
       unknown: {},
-      ...evaluateRun({ endState, error: "timed out", featurePr: null, escalations, jobFailures: [], usageRecords: 0, unavailableJobLogs: [], unknown: {} }),
+      ...evaluateRun({ endState, error: "timed out", featurePr: null, escalations, jobFailures: [], usageRecords: 0, unavailableJobLogs: [], stateUsageMismatches: null, unknown: {} }),
       error: "timed out",
       ...patch
     };
@@ -1242,10 +1309,31 @@ describe("renderMarkdownReport", () => {
     { id: "comparable-flag", expected: "- Comparable: no (no review on a task pull request)" },
     { id: "phase-duration", expected: "| plan | 1.5 min | ok |" },
     { id: "zero-usage-is-unknown-cost-not-zero", expected: "No usage records: the cost of this run is unknown." },
+    { id: "no-state-usage", expected: "## LLM usage recorded in the EPURE state\n\nNo token usage in the EPURE state." },
     { id: "escalation-with-class", expected: "- #3 in implementation: `remediation_exhausted` (legitimate)" },
     { id: "harness-stop", expected: "- Harness stopped: timed out" }
   ])("states $id", ({ expected }) => {
     expect(renderMarkdownReport(baseResult({}))).toContain(expected);
+  });
+
+  it("lists the state's usage per EPURE phase and the requests without usage", () => {
+    const stateUsage = summarizeStateUsage(
+      {
+        epic: { plan: { "google/flash": { requests: 2, input_tokens: 100, cached_input_tokens: 10, output_tokens: 20, thinking_tokens: 5, usage_unavailable: 1 } } }
+      },
+      {}
+    );
+
+    expect(renderMarkdownReport(baseResult({ state_usage: stateUsage }))).toContain(
+      [
+        "| EPURE phase | Requests | Input (cached) | Output (thinking) | Cost |",
+        "| --- | --- | --- | --- | --- |",
+        "| plan | 2 | 100 (10) | 20 (5) | unpriced |",
+        "| total | 2 | 100 (10) | 20 (5) | unpriced |",
+        "",
+        "1 of these requests reported no usage: their tokens are unknown."
+      ].join("\n")
+    );
   });
 
   it("lists job failures apart from escalations", () => {

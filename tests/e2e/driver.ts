@@ -18,6 +18,7 @@ import {
   actionsMinutes,
   assessComparability,
   attributeUsage,
+  compareStateUsageWithLogs,
   decideEscalation,
   deriveEngine,
   escalationReasonFromComment,
@@ -27,6 +28,7 @@ import {
   PhaseClock,
   renderMarkdownReport,
   RESUME_POLICY,
+  summarizeStateUsage,
   summarizeUsage,
   summarizeUsageByPhase,
   type ActionsJob,
@@ -649,6 +651,7 @@ export async function runSandboxEpic(
 
   const endState = finalState ? { phase: finalState.phase, status: finalState.status, subphase: finalState.subphase ?? null } : null;
   const tickets = unknown.end_state ? null : (finalState?.plan_manifest?.tickets.map((t) => t.ticketIssueNumber) ?? []);
+  const stateUsage = finalState?.token_usage;
   const { success, checks } = evaluateRun({
     endState,
     error,
@@ -657,6 +660,7 @@ export async function runSandboxEpic(
     jobFailures: run.jobFailures,
     usageRecords: records.length,
     unavailableJobLogs: evidence?.unavailableJobLogs ?? [],
+    stateUsageMismatches: stateUsage && evidence ? compareStateUsageWithLogs(stateUsage, records) : null,
     unknown
   });
   const clockEnd = await attempt("host_clock", () => sampleClock(gh));
@@ -668,7 +672,7 @@ export async function runSandboxEpic(
     githubMs: githubElapsedMs
   });
   const result: E2eRunResult = {
-    schema_version: 3,
+    schema_version: 4,
     run_id: runId,
     repository: gh.repository,
     code_under_test: { epure_ref: config.epureRef, epure_sha: code.epureSha, harness_commit: code.harnessCommit },
@@ -693,6 +697,7 @@ export async function runSandboxEpic(
       unavailable_job_logs: evidence.unavailableJobLogs,
       records
     },
+    state_usage: stateUsage ? summarizeStateUsage(stateUsage, config.pricing) : null,
     actions: evidence && actionsMinutes(evidence.jobs),
     reviewed_task_prs: reviewedTaskPrs,
     escalations: run.escalations,

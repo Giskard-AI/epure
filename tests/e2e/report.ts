@@ -1,4 +1,13 @@
 import { LLM_USAGE_LOG_PREFIX, type LLMTokenUsage } from "../../src/llm/usage.js";
+import {
+  addTokenCounts,
+  NO_TOKENS,
+  totalTokensByModel,
+  USAGE_PHASES,
+  type ModelTokenCounts,
+  type TokenCounts,
+  type TokenUsageRecord
+} from "../../src/usage/token-usage.js";
 import type { ModelPricing } from "./config.js";
 import type { EscalationClass } from "./escalations.js";
 
@@ -46,6 +55,8 @@ export interface UsageTotals {
   readonly thinking_tokens: number;
   // null when the model has no entry in the pricing table.
   readonly cost_usd: number | null;
+  // State only: requests among `requests` whose engine reported no usage.
+  readonly usage_unavailable?: number | undefined;
 }
 
 export interface UsageSummary {
@@ -132,7 +143,7 @@ export function summarizeUsage(
     by_model[key] = { ...s, cost_usd: price ? costOf(s, price) : null };
   }
   const models = Object.values(by_model);
-  const add = (field: keyof Omit<UsageTotals, "cost_usd">) => models.reduce((sum, m) => sum + m[field], 0);
+  const add = (field: keyof Omit<UsageTotals, "cost_usd" | "usage_unavailable">) => models.reduce((sum, m) => sum + m[field], 0);
   return {
     by_model,
     total: {
@@ -154,6 +165,65 @@ export function summarizeUsageByPhase(
   return Object.fromEntries(
     phases.map((phase) => [phase, summarizeUsage(records.filter((r) => r.phase === phase), pricing).total])
   );
+}
+
+function totalsOfModels(models: ModelTokenCounts, pricing: Readonly<Record<string, ModelPricing>>): UsageTotals {
+  const t = Object.values(models).reduce(addTokenCounts, NO_TOKENS);
+  const entries = Object.entries(models);
+  return {
+    requests: t.requests,
+    input_tokens: t.input_tokens,
+    cached_input_tokens: t.cached_input_tokens,
+    output_tokens: t.output_tokens,
+    thinking_tokens: t.thinking_tokens,
+    cost_usd: entries.every(([model]) => pricing[model])
+      ? entries.reduce((sum, [model, counts]) => sum + costOf(counts, pricing[model]!), 0)
+      : null,
+    ...(t.usage_unavailable ? { usage_unavailable: t.usage_unavailable } : {})
+  };
+}
+
+export interface StateUsageSummary {
+  readonly by_phase: Readonly<Record<string, UsageTotals>>;
+  readonly total: UsageTotals;
+}
+
+/** The epic's `token_usage` from refs/epure/state, per EPURE phase across planning and every ticket. */
+export function summarizeStateUsage(
+  record: TokenUsageRecord,
+  pricing: Readonly<Record<string, ModelPricing>>
+): StateUsageSummary {
+  const by_phase: Record<string, UsageTotals> = {};
+  for (const phase of USAGE_PHASES) {
+    const models: Record<string, TokenCounts> = {};
+    for (const phases of Object.values(record)) {
+      for (const [model, counts] of Object.entries(phases[phase] ?? {})) {
+        models[model] = addTokenCounts(models[model] ?? NO_TOKENS, counts);
+      }
+    }
+    if (Object.keys(models).length > 0) {
+      by_phase[phase] = totalsOfModels(models, pricing);
+    }
+  }
+  return { by_phase, total: totalsOfModels(totalTokensByModel(record), pricing) };
+}
+
+const COMPARED_FIELDS = ["requests", "input_tokens", "cached_input_tokens", "output_tokens", "thinking_tokens"] as const;
+
+// A request without usage data writes no log line, so only requests with usage compare.
+export function compareStateUsageWithLogs(record: TokenUsageRecord, logs: readonly LLMTokenUsage[]): string[] {
+  const fromState = totalTokensByModel(record);
+  const fromLogs = summarizeUsage(logs, {}).by_model;
+  const models = [...new Set([...Object.keys(fromState), ...Object.keys(fromLogs)])].sort();
+  return models.flatMap((model) => {
+    const s = fromState[model] ?? NO_TOKENS;
+    const state = { ...s, requests: s.requests - (s.usage_unavailable ?? 0) };
+    const log = fromLogs[model] ?? { ...NO_TOKENS, cost_usd: null };
+    const differing = COMPARED_FIELDS.filter((field) => state[field] !== log[field]);
+    return differing.length === 0
+      ? []
+      : [`${model}: ${differing.map((f) => `${f} ${state[f]} in the state, ${log[f]} in the logs`).join(", ")}`];
+  });
 }
 
 export interface ActionsJob {
@@ -240,7 +310,8 @@ export interface SuccessCheck {
     | "no-internal-escalation"
     | "at-most-one-escalation-per-ticket"
     | "no-orchestrator-job-failure"
-    | "llm-usage-recorded";
+    | "llm-usage-recorded"
+    | "state-usage-matches-job-logs";
   readonly passed: boolean;
   readonly detail: string;
 }
@@ -280,9 +351,11 @@ export function evaluateRun(input: {
   readonly jobFailures: readonly JobFailure[];
   readonly usageRecords: number;
   readonly unavailableJobLogs: readonly number[];
+  // compareStateUsageWithLogs; null when the state holds no token usage or either side is unknown.
+  readonly stateUsageMismatches: readonly string[] | null;
   readonly unknown: Unknowns;
 }): { readonly success: boolean; readonly checks: readonly SuccessCheck[] } {
-  const { endState, error, featurePr, escalations, jobFailures, usageRecords, unavailableJobLogs, unknown } = input;
+  const { endState, error, featurePr, escalations, jobFailures, usageRecords, unavailableJobLogs, stateUsageMismatches, unknown } = input;
   const accepted = acceptedEndState(endState);
   const internal = escalations.filter((e) => e.class !== "legitimate");
   const perTicket = new Map<number, number>();
@@ -336,6 +409,19 @@ export function evaluateRun(input: {
           : usageRecords > 0
             ? `${usageRecords} requests`
             : "no epure-llm-usage line in the orchestrator logs: cost unknown"
+    },
+    {
+      id: "state-usage-matches-job-logs",
+      passed: stateUsageMismatches !== null && stateUsageMismatches.length === 0,
+      detail: unknown.end_state
+        ? `EPURE state unknown: ${unknown.end_state}`
+        : unknown.usage
+          ? `job logs unknown: ${unknown.usage}`
+          : stateUsageMismatches === null
+            ? "no token_usage in the EPURE state"
+            : stateUsageMismatches.length === 0
+              ? "the state's token usage equals the job-log totals"
+              : stateUsageMismatches.join("; ")
     }
   ];
   return { success: checks.every((c) => c.passed), checks };
@@ -441,7 +527,7 @@ export interface HarnessSettings {
 }
 
 export interface E2eRunResult {
-  readonly schema_version: 3;
+  readonly schema_version: 4;
   readonly run_id: string;
   readonly repository: string;
   readonly code_under_test: {
@@ -474,6 +560,8 @@ export interface E2eRunResult {
         readonly records: readonly UsageRecord[];
       })
     | null;
+  // What EPURE wrote to refs/epure/state; null when the state holds none or could not be read.
+  readonly state_usage: StateUsageSummary | null;
   readonly actions: ActionsMinutes | null;
   readonly reviewed_task_prs: number | null;
   readonly escalations: readonly EscalationEvent[];
@@ -530,6 +618,20 @@ export function renderMarkdownReport(r: E2eRunResult): string {
           ...Object.entries(r.usage.by_model).map(usageRow),
           ...Object.entries(r.usage.by_phase).map(([phase, u]) => usageRow([`phase ${phase}`, u])),
           usageRow(["total", r.usage.total])
+        ]),
+    "",
+    "## LLM usage recorded in the EPURE state",
+    "",
+    ...(r.state_usage === null
+      ? ["No token usage in the EPURE state."]
+      : [
+          "| EPURE phase | Requests | Input (cached) | Output (thinking) | Cost |",
+          "| --- | --- | --- | --- | --- |",
+          ...Object.entries(r.state_usage.by_phase).map(usageRow),
+          usageRow(["total", r.state_usage.total]),
+          ...(r.state_usage.total.usage_unavailable
+            ? ["", `${r.state_usage.total.usage_unavailable} of these requests reported no usage: their tokens are unknown.`]
+            : [])
         ]),
     "",
     `## Escalations (${r.escalations.length})`,
