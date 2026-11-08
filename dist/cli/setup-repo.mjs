@@ -2853,14 +2853,15 @@ function computeFilePlanAction(repoRootDir, relPath, desiredContent) {
   const existing = readFileSync2(fullPath, "utf8");
   return existing === desiredContent ? "noop" : "update";
 }
+var REQUIRED_CI_CHECKS = [
+  "Verify EPURE Consumer Contract / Verify EPURE Consumer Contract",
+  "PR title",
+  "Quality (Format, Lint, Typecheck, Test & Build)",
+  "Zizmor"
+];
+var GITHUB_ACTIONS_INTEGRATION_ID = 15368;
 function buildGovernanceRulesets(params) {
-  const requiredChecks = [
-    "verify-contract / Verify EPURE Consumer Contract",
-    "PR title",
-    "ai-review",
-    "Quality (Format, Lint, Typecheck, Test & Build)",
-    "Zizmor"
-  ];
+  const requiredChecks = REQUIRED_CI_CHECKS;
   const featureIntegrity = {
     name: "epure-feature-integrity",
     target: "branch",
@@ -2975,7 +2976,7 @@ function planAndApplyRepoSetup(input) {
       pattern: "dev",
       requirePullRequest: true,
       requireStatusChecks: true,
-      requiredChecks: ["verify-contract", "PR title", "ai-review", "Quality (Format, Lint, Typecheck, Test & Build)", "Zizmor"],
+      requiredChecks: REQUIRED_CI_CHECKS,
       requireHumanApproval: true,
       allowedMergeMethods: ["squash"],
       allowMergeCommit: false,
@@ -2985,7 +2986,7 @@ function planAndApplyRepoSetup(input) {
       pattern: "feature/*",
       requirePullRequest: true,
       requireStatusChecks: true,
-      requiredChecks: ["verify-contract", "PR title", "ai-review", "Quality (Format, Lint, Typecheck, Test & Build)", "Zizmor"],
+      requiredChecks: REQUIRED_CI_CHECKS,
       requireHumanApproval: false,
       allowedMergeMethods: ["squash"],
       allowMergeCommit: false,
@@ -3384,6 +3385,20 @@ function buildGitHubRulesetApiPayload(spec, appIntegrationIds) {
       }
     });
   }
+  if (spec.requiredStatusChecks && spec.requiredStatusChecks.length > 0) {
+    rules.push({
+      type: "required_status_checks",
+      parameters: {
+        // Not strict: bringing a feature/* head up to date is a push epure-feature-governance refuses to humans,
+        // so a strict dev rule would leave the feature PR unmergeable each time dev moves.
+        strict_required_status_checks_policy: false,
+        required_status_checks: spec.requiredStatusChecks.map((context) => ({
+          context,
+          integration_id: GITHUB_ACTIONS_INTEGRATION_ID
+        }))
+      }
+    });
+  }
   if (spec.commitMessagePattern) {
     rules.push({
       type: "commit_message_pattern",
@@ -3409,11 +3424,18 @@ function buildGitHubRulesetApiPayload(spec, appIntegrationIds) {
     rules
   };
 }
+function ruleFingerprint(rule) {
+  if (rule.type !== "required_status_checks") {
+    return rule.type;
+  }
+  const checks = (rule.parameters?.required_status_checks ?? []).map((c) => `${c.context}@${c.integration_id ?? "any"}`).sort();
+  return JSON.stringify([rule.type, rule.parameters?.strict_required_status_checks_policy === true, checks]);
+}
 function rulesetFingerprint(ruleset) {
   return JSON.stringify({
     target: ruleset.target,
     include: [...ruleset.conditions?.ref_name?.include ?? []].sort(),
-    rules: (ruleset.rules ?? []).map((r) => r.type).sort(),
+    rules: (ruleset.rules ?? []).map(ruleFingerprint).sort(),
     bypass: (ruleset.bypass_actors ?? []).map((a) => `${a.actor_type}:${a.actor_id}:${a.bypass_mode}`).sort()
   });
 }
