@@ -53,3 +53,10 @@ This page provides the aligned **English <-> French** ubiquitous language refere
 | **Schema-Enforced Structured Output (`ResponseSchemaSpec<T>`)** | *Sortie structurée par schéma* | Contract pairing a strict JSON Schema (`responseSchema`, `response_format.json_schema`, or `output_config.format`) with a runtime TypeScript validator, executing a 2-phase tool loop + schema-locked final turn on Google Gemini. |
 | **Contextual `/epure` Command Cheat-Sheet (`formatEpureCommandsSpoiler`)** | *Aide-mémoire contextuel des commandes `/epure`* | Collapsible `<details>` block appended to every EPURE issue comment, sub-issue body, and PR description summarizing available commands and highlighting the recommended next action for the current phase. |
 
+## 5. Token Usage & Displayed Cost (ADR-0035)
+
+| English Term | French Canonical Term (`GLOSSARY.md`) | Definition & Invariant |
+| --- | --- | --- |
+| **Token Usage (`token_usage`)** | *Usage des jetons* | Tokens spent by the epic and by each ticket, per phase and per `<provider>/<model>`, kept in `refs/epure/state/<issue>` and written with the existing state updates. Fed in the same format by `LLMClient` and the sandbox LLM proxy. A request whose engine reports no usage counts as `usage_unavailable`, never as zero tokens. |
+| **Pricing Table (`pricing`)** | *Table de prix* | Optional `.github/agents.yml` section: USD per million input, cached-input and output tokens per model, with source URL and read-on date. Cost is computed at display time and never stored; thinking tokens bill as output. |
+

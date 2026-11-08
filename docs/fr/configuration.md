@@ -149,6 +149,31 @@ Toujours chargé à l'exécution depuis la branche de confiance `dev` afin qu'un
 | `web_tools.max_fetch_bytes` | `integer` | `16384` | Volume maximal en octets UTF-8 retourné par appel `web_fetch` après nettoyage HTML. |
 | `web_tools.timeout_ms` | `integer` | `10000` | Délai d'expiration HTTP en millisecondes par requête d'exploration Web. |
 
+### `pricing` (Affichage du Coût des Jetons — ADR-0035)
+
+EPURE relève dans `refs/epure/state/<issue>` les jetons consommés par l'epic et par chaque ticket, par phase et par modèle, que l'appel vienne du `LLMClient` ou d'une session d'agent derrière le proxy LLM de sandbox. `/epure status`, la ligne de chaque ticket terminé et la section `## LLM Usage` de la PR `feature/* -> dev` et du commentaire final affichent ces jetons. Avec la section facultative `pricing:`, ils affichent aussi un coût, calculé au moment de l'affichage et jamais stocké. EPURE ne récupère jamais de prix ; `setup-repo` conserve une section `pricing:` existante quand il réécrit le fichier.
+
+```yaml
+pricing:
+  google/gemini-3.8-flash:
+    inputPerMTok: 0.75
+    cachedInputPerMTok: 0.075
+    outputPerMTok: 3.75
+    source: https://ai.google.dev/gemini-api/docs/pricing
+    read_on: 2026-11-08
+```
+
+| Clé | Type | Défaut | Description |
+| --- | --- | --- | --- |
+| `pricing.<fournisseur>/<modèle>` | map | *(Facultatif)* | Une entrée par modèle, avec la clé de l'état et des lignes `epure-llm-usage` des journaux de job : la famille de fournisseur (`google`, `anthropic`, `openai`, `azure`, `azure_ai`, `openrouter`, `vertex`) puis le modèle envoyé à l'API, pas l'alias de `providers:`. |
+| `pricing.<modèle>.inputPerMTok` | `number` | *(Obligatoire)* | Dollars par million de jetons d'entrée. |
+| `pricing.<modèle>.cachedInputPerMTok` | `number` | `inputPerMTok` | Dollars par million de jetons d'entrée en cache. |
+| `pricing.<modèle>.outputPerMTok` | `number` | *(Obligatoire)* | Dollars par million de jetons de sortie. Les jetons de réflexion sont facturés à ce prix. |
+| `pricing.<modèle>.source` | `string` | *(Obligatoire)* | URL de la page de prix, affichée par `/epure status`. |
+| `pricing.<modèle>.read_on` | `string` | *(Obligatoire)* | Date de lecture du prix, affichée par `/epure status`. |
+
+Un prix absent ou négatif, une `source` ou un `read_on` manquant rendent `.github/agents.yml` invalide, comme toute autre clé. Une ligne qui comprend un modèle sans prix n'affiche que les jetons : une somme partielle passerait pour le coût complet. Le coût est une estimation : l'écriture en cache d'Anthropic est comptée au prix d'entrée, et les requêtes dont le moteur n'a pas rendu d'usage n'y figurent pas (leur nombre est affiché, « without usage data »).
+
 ### `security_invariants` & Chemins Sensibles
 
 Toute tentative dans `.github/agents.yml` d'abaisser `security_invariants` (`require_write_permission: false`, `sandbox_isolation: false`, `allow_agent_release: true`, `auto_merge_dev: true`, `auto_merge_main: true`) est rejetée en mode *fail-closed* avec l'erreur `SECURITY_INVARIANT_VIOLATION`. De plus, toute modification de `.github/workflows/**`, `.github/agents.yml`, du répertoire du roster de reviewers (le `reviewers_dir/**` configuré ainsi que `.agents/reviewers/**` par défaut) ou `CODEOWNERS` sur une branche `task/*` déclenche une **Escalade sur Chemin Sensible** (`needs-human`) tant qu'un mainteneur n'a pas explicitement accordé le label `approved-sensitive-change` (Q81, Q93).

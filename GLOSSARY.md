@@ -512,6 +512,14 @@ _Éviter_ : exposer les secrets d'agent ou de LLM à l'étape d'autorisation ini
 **Cloisonnement des secrets par environnements GitHub (environnement d'agent `<llm-env>` et environnement `release`)** : séparation stricte des secrets d'exécution d'agent (`EPURE_AGENT_APP_ID`, `EPURE_AGENT_APP_PRIVATE_KEY`, `LLM_API_KEY` ou variable fournisseur configurée dans `.github/agents.yml`, associés à un environnement GitHub dédié dont le nom est libre et agnostique du fournisseur LLM — `epure-agent` par défaut (clé `llm_environment` de `.github/agents.yml`, `setup-repo --llm-env`), autres exemples : `llm`, `openai`, `anthropic`, `gemini` — requis uniquement après `authorize-command`) et des secrets de promotion stable (`EPURE_RELEASE_APP_ID`, `EPURE_RELEASE_APP_PRIVATE_KEY` associés à l'environnement protégé `release` avec approbation humaine obligatoire), garantissant zéro exposition de secrets aux workflows publics (conformité Zizmor).
 _Éviter_ : stocker les clés privées de GitHub App ou les clés API LLM comme secrets globaux du dépôt accessibles à tous les jobs.
 
+## Usage des jetons et coût affiché (ADR-0035)
+
+**Usage des jetons** (`token_usage`) : jetons consommés par l'epic (`epic`) et par chaque ticket, par phase et par modèle `<fournisseur>/<modèle>` (`requests`, `input_tokens`, `cached_input_tokens`, `output_tokens`, `thinking_tokens`), conservés dans `refs/epure/state/<issue>` et écrits avec les mises à jour d'état existantes. Le `LLMClient` et le **Proxy LLM de sandbox** l'alimentent au même format.
+_Éviter_ : compter zéro jeton pour une requête dont le moteur ne rend pas d'usage (elle compte en `usage_unavailable`).
+
+**Table de prix** (`pricing`) : section facultative de `.github/agents.yml` donnant, par modèle, les dollars par million de jetons d'entrée, d'entrée en cache et de sortie, avec l'URL de la source et la date de lecture. Le coût est calculé à l'affichage, jamais stocké ; les jetons de réflexion sont facturés au prix de sortie.
+_Éviter_ : budget, plafond de dépense (hors périmètre, ADR-0012).
+
 
 
 

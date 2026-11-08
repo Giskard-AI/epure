@@ -443,7 +443,7 @@ All `/epure` commands are posted as comments on a GitHub Issue. Every command is
 | `/epure approve` | <span class="epure-badge epure-badge--human">Mandatory Human Gate 2</span> | `implementation` | Integrates the approved `plan/*` artifacts (`GLOSSARY.md` additive merge, monotonic & semantic ADR collision reconciliation, `docs/specs/<slug>.md`, `DESIGN.md`) directly into `feature/<issue>-<slug>` without an intermediate `plan/* -> dev` PR (ADR-0031, ADR-0032), locks the signed `spec_sha` mandate in `refs/epure/state/<issue>`, and executes the ticket DAG (`task/* -> feature/*`). |
 | `/epure continue` | <span class="epure-badge epure-badge--optional">Lifecycle Continuation</span> | `implementation`, `review` (or the phase a cancel interrupted) | Resumes orchestration after a `needs-human` suspension, after resolving a 3-way conflict, or after external CI (`waiting_ticket_ci` / `waiting_feature_ci`) completes (ADR-0031). After a `remediation_exhausted` escalation (also one recorded before a cancel), `continue` or `approve` grants the ticket or feature PR one fresh remediation budget, recorded as `{actor, comment_id, scope, ticket}` in the state and announced in the resume comment. Comments posted after the last processed command (`last_processed_comment_id`, so including those posted just before the escalation) by `write`/`admin` humans reach the resumed session (last 10, 8,000 characters max; only `OWNER`/`MEMBER`/`COLLABORATOR` authors get a permission lookup, 10 distinct authors max); `/epure` commands, comments posted through a GitHub App and EPURE's own comments are left out. `/epure cancel` then `/epure continue` is supported in every phase: the plan returns to the state it was cancelled from (a grill, spec or ticket review wait, or a suspension that still requires the phase command). A suspended planning phase resumes with its own command (`/epure plan`, `/epure to-spec`, `/epure to-tickets`), which the escalation comment names. A plan cancelled by closing the issue resumes only once the issue is reopened; otherwise EPURE replies with a reopen request and the plan stays `cancelled`. |
 | `/epure sync` (alias `/epure rebase`) | <span class="epure-badge epure-badge--optional">Git Branch Sync</span> | `implementation` | Synchronizes `dev -> feature/<issue>-<slug>` (and cascades `feature/* -> active_task_branch`) with additive `GLOSSARY.md` merging, monotonic ADR reconciliation, 3-way LLM conflict resolution, and **Stage 1 Sandbox** verification before committing (ADR-0031, ADR-0032). |
-| `/epure status` | <span class="epure-badge epure-badge--optional">Optional Override</span> | *(Read-only)* | Reads `refs/epure/state/<issue>` and posts a fresh summary of the current phase, locked `spec_sha`, and per-ticket progress without mutating code. |
+| `/epure status` | <span class="epure-badge epure-badge--optional">Optional Override</span> | *(Read-only)* | Reads `refs/epure/state/<issue>` and posts a fresh summary of the current phase, locked `spec_sha`, per-ticket progress, and LLM token usage (epic total, planning & integration, each ticket; cost when [`pricing`](./configuration.md#pricing-token-cost-display-adr-0035) is set) without mutating code. |
 | `/epure cancel` (alias `/epure stop`) | <span class="epure-badge epure-badge--optional">Optional Override</span> | `cancelled` | Marks the mandate as `cancelled` in `refs/epure/state/<issue>`, stops any new ticket execution, and preserves existing branches and audit logs. |
 
 > **Contextual `/epure` Command Cheat-Sheet Spoiler (`<details>`)**: Every issue comment, sub-issue body, and pull request description posted by EPURE automatically includes a collapsible `<details>` block at the bottom (`⌨️ Commandes /epure disponibles`) summarizing the available slash commands and highlighting the recommended next action for the current lifecycle phase (`grilling`, `spec`, `tickets`, `implementation`, `suspended`, `cancelled`, or `completed`).
@@ -710,6 +710,31 @@ Always loaded at runtime from the trusted `dev` branch so an untrusted `task/*` 
 | `web_tools.max_fetch_bytes` | `integer` | `16384` | Maximum UTF-8 byte budget returned per `web_fetch` call after HTML stripping. |
 | `web_tools.timeout_ms` | `integer` | `10000` | Per-request HTTP timeout in milliseconds for Web exploration calls. |
 
+### `pricing` (Token Cost Display — ADR-0035)
+
+EPURE records the tokens spent by the epic and by each ticket, per phase and per model, in `refs/epure/state/<issue>`, whether `LLMClient` or an agent session behind the sandbox LLM proxy made the call. `/epure status`, the line of each finished ticket, and the `## LLM Usage` section of the `feature/* -> dev` PR and of the final comment show these tokens. With an optional `pricing:` section they also show a cost, computed when the text is rendered and never stored. EPURE never fetches prices; `setup-repo` keeps an existing `pricing:` section when it rewrites the file.
+
+```yaml
+pricing:
+  google/gemini-3.8-flash:
+    inputPerMTok: 0.75
+    cachedInputPerMTok: 0.075
+    outputPerMTok: 3.75
+    source: https://ai.google.dev/gemini-api/docs/pricing
+    read_on: 2026-11-08
+```
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `pricing.<provider>/<model>` | map | *(Optional)* | One entry per model, keyed as in the state and in the `epure-llm-usage` job-log lines: the provider family (`google`, `anthropic`, `openai`, `azure`, `azure_ai`, `openrouter`, `vertex`) and the model sent to the API, not the `providers:` alias. |
+| `pricing.<model>.inputPerMTok` | `number` | *(Required)* | USD per million input tokens. |
+| `pricing.<model>.cachedInputPerMTok` | `number` | `inputPerMTok` | USD per million cached input tokens. |
+| `pricing.<model>.outputPerMTok` | `number` | *(Required)* | USD per million output tokens. Thinking tokens are billed at this price. |
+| `pricing.<model>.source` | `string` | *(Required)* | URL of the price page, shown by `/epure status`. |
+| `pricing.<model>.read_on` | `string` | *(Required)* | Date the price was read, shown by `/epure status`. |
+
+A missing or negative price, a missing `source` or `read_on` makes `.github/agents.yml` invalid, like any other key. A line that involves a model without a price shows tokens only: a partial sum would read as the full cost. The cost is an estimate: Anthropic cache writes count at the input price, and requests whose engine reported no usage are not in it (their number is shown as "without usage data").
+
 ### `security_invariants` & Sensitive Paths
 
 Any attempt in `.github/agents.yml` to weaken `security_invariants` (`require_write_permission: false`, `sandbox_isolation: false`, `allow_agent_release: true`, `auto_merge_dev: true`, `auto_merge_main: true`) is rejected fail-closed with `SECURITY_INVARIANT_VIOLATION`. Furthermore, any modification to `.github/workflows/**`, `.github/agents.yml`, the reviewer roster directory (the configured `reviewers_dir/**` and the default `.agents/reviewers/**`), or `CODEOWNERS` on a `task/*` branch triggers a **Sensitive Path Escalation** (`needs-human`) unless a maintainer explicitly adds the `approved-sensitive-change` label (Q81, Q93).
@@ -755,7 +780,7 @@ EPURE is built from the ground up around **Defense-in-Depth**, **Least Privilege
    - When EPURE runs `npm test`, `npm run build`, or `pytest` on a `task/*` branch, the child process environment is scrubbed of `LLM_API_KEY`, `EPURE_AGENT_APP_PRIVATE_KEY`, and `EPURE_RELEASE_APP_PRIVATE_KEY`.
    - A malicious or compromised test script cannot exfiltrate credentials. If sandbox isolation fails, EPURE aborts **fail-closed**.
 3. **Out-of-Branch CAS State (`refs/epure/state/<issue>`, Q76)**:
-   - State transitions (`last_processed_comment_id`, signed `spec_sha`, retry counters, ticket status table, and active CI continuation subphases) are stored as the JSON message of an empty-tree commit chained under `refs/epure/state/<issue-number>`, updated by Compare-And-Swap through the GraphQL `updateRefs` mutation (`beforeOid` precondition): a concurrent write is rejected, then EPURE re-reads the state and retries. Legacy refs pointing at a JSON blob are read and migrated on the next write.
+   - State transitions (`last_processed_comment_id`, signed `spec_sha`, retry counters, ticket status table, active CI continuation subphases, and the token usage per ticket, phase and model, written with each of these updates — ADR-0035) are stored as the JSON message of an empty-tree commit chained under `refs/epure/state/<issue-number>`, updated by Compare-And-Swap through the GraphQL `updateRefs` mutation (`beforeOid` precondition): a concurrent write is rejected, then EPURE re-reads the state and retries. Legacy refs pointing at a JSON blob are read and migrated on the next write.
    - `dev` and `main` remain 100% free of machine-state commit noise.
 
 ---
@@ -1236,6 +1261,13 @@ This page provides the aligned **English <-> French** ubiquitous language refere
 | **Schema-Enforced Structured Output (`ResponseSchemaSpec<T>`)** | *Sortie structurée par schéma* | Contract pairing a strict JSON Schema (`responseSchema`, `response_format.json_schema`, or `output_config.format`) with a runtime TypeScript validator, executing a 2-phase tool loop + schema-locked final turn on Google Gemini. |
 | **Contextual `/epure` Command Cheat-Sheet (`formatEpureCommandsSpoiler`)** | *Aide-mémoire contextuel des commandes `/epure`* | Collapsible `<details>` block appended to every EPURE issue comment, sub-issue body, and PR description summarizing available commands and highlighting the recommended next action for the current phase. |
 
+## 5. Token Usage & Displayed Cost (ADR-0035)
+
+| English Term | French Canonical Term (`GLOSSARY.md`) | Definition & Invariant |
+| --- | --- | --- |
+| **Token Usage (`token_usage`)** | *Usage des jetons* | Tokens spent by the epic and by each ticket, per phase and per `<provider>/<model>`, kept in `refs/epure/state/<issue>` and written with the existing state updates. Fed in the same format by `LLMClient` and the sandbox LLM proxy. A request whose engine reports no usage counts as `usage_unavailable`, never as zero tokens. |
+| **Pricing Table (`pricing`)** | *Table de prix* | Optional `.github/agents.yml` section: USD per million input, cached-input and output tokens per model, with source URL and read-on date. Cost is computed at display time and never stored; thinking tokens bill as output. |
+
 ---
 ## [FR] Introduction & Nom (L'Épure)
 URL: https://giskard-ai.github.io/epure/fr/introduction
@@ -1676,7 +1708,7 @@ Toutes les commandes `/epure` se postent sous forme de commentaires sur une Issu
 | `/epure approve` | <span class="epure-badge epure-badge--human">Jalon Humain Obligatoire 2</span> | `implementation` | Intègre directement les artefacts de `plan/*` (`GLOSSARY.md` en fusion additive, réconciliation monotone et sémantique des ADRs en collision, `docs/specs/<slug>.md`, `DESIGN.md`) dans `feature/<issue>-<slug>` sans PR intermédiaire `plan/* -> dev` (ADR-0031, ADR-0032), scelle le mandat signé `spec_sha` dans `refs/epure/state/<issue>` et exécute le DAG de tickets (`task/* -> feature/*`). |
 | `/epure continue` | <span class="epure-badge epure-badge--optional">Reprise d'Exécution</span> | `implementation`, `review` (ou la phase interrompue par une annulation) | Reprend l'orchestration après la résolution d'une suspension `needs-human`, d'un conflit Git 3-way ou à l'issue de la CI externe (`waiting_ticket_ci` / `waiting_feature_ci`, ADR-0031). Après une escalade `remediation_exhausted` (y compris enregistrée avant une annulation), `continue` ou `approve` accorde au ticket ou à la PR de fonctionnalité un nouveau budget de remédiation, consigné sous la forme `{actor, comment_id, scope, ticket}` dans l'état et annoncé dans le commentaire de reprise. Les commentaires publiés après la dernière commande traitée (`last_processed_comment_id`, donc y compris ceux postés juste avant l'escalade) par des humains `write`/`admin` sont transmis à la session reprise (les 10 derniers, 8 000 caractères au plus ; seuls les auteurs `OWNER`/`MEMBER`/`COLLABORATOR` font l'objet d'une vérification de permission, 10 auteurs distincts au plus) ; les commandes `/epure`, les commentaires publiés via une GitHub App et ceux d'EPURE en sont exclus. `/epure cancel` puis `/epure continue` est pris en charge dans toutes les phases : le plan revient à l'état d'où il a été annulé (attente du grill, de la revue de spécification ou des tickets, ou suspension qui exige toujours la commande de la phase). Une phase de planification suspendue reprend avec sa propre commande (`/epure plan`, `/epure to-spec`, `/epure to-tickets`), indiquée dans le commentaire d'escalade. Un plan annulé par la fermeture de l'issue ne reprend qu'une fois l'issue rouverte ; sinon EPURE répond en demandant de la rouvrir et le plan reste `cancelled`. |
 | `/epure sync` (alias `/epure rebase`) | <span class="epure-badge epure-badge--optional">Synchronisation Git</span> | `implementation` | Synchronise `dev -> feature/<issue>-<slug>` (et propage `feature/* -> active_task_branch`) avec fusion additive de `GLOSSARY.md`, réconciliation monotone des ADRs, résolution 3-way assistée par LLM et validation **Sandbox Stage 1** avant commit (ADR-0031, ADR-0032). |
-| `/epure status` | <span class="epure-badge epure-badge--optional">Commande Facultative</span> | *(Lecture seule)* | Lit `refs/epure/state/<issue>` et publie un rapport à jour de la phase courante, du `spec_sha` verrouillé et de l'état de chaque ticket sans modifier le code. |
+| `/epure status` | <span class="epure-badge epure-badge--optional">Commande Facultative</span> | *(Lecture seule)* | Lit `refs/epure/state/<issue>` et publie un rapport à jour de la phase courante, du `spec_sha` verrouillé, de l'état de chaque ticket et de l'usage des jetons LLM (total de l'epic, planification et intégration, chaque ticket ; coût si [`pricing`](./configuration.md#pricing-affichage-du-cout-des-jetons-adr-0035) est renseigné) sans modifier le code. |
 | `/epure cancel` (alias `/epure stop`) | <span class="epure-badge epure-badge--optional">Commande Facultative</span> | `cancelled` | Marque le mandat comme `cancelled` dans `refs/epure/state/<issue>`, bloque toute nouvelle exécution de ticket et conserve les branches et traces d'audit existantes. |
 
 > **Aide-mémoire contextuel repliable (`<details>`)** : Chaque commentaire d'issue, corps de sous-issue de ticket et description de Pull Request publié par EPURE intègre automatiquement en pied de message un bloc repliable `<details>` (`⌨️ Commandes /epure disponibles`) récapitulant les commandes disponibles et mettant en évidence la prochaine action recommandée selon la phase courante (`grilling`, `spec`, `tickets`, `implementation`, `suspended`, `cancelled` ou `completed`).
@@ -1943,6 +1975,31 @@ Toujours chargé à l'exécution depuis la branche de confiance `dev` afin qu'un
 | `web_tools.max_fetch_bytes` | `integer` | `16384` | Volume maximal en octets UTF-8 retourné par appel `web_fetch` après nettoyage HTML. |
 | `web_tools.timeout_ms` | `integer` | `10000` | Délai d'expiration HTTP en millisecondes par requête d'exploration Web. |
 
+### `pricing` (Affichage du Coût des Jetons — ADR-0035)
+
+EPURE relève dans `refs/epure/state/<issue>` les jetons consommés par l'epic et par chaque ticket, par phase et par modèle, que l'appel vienne du `LLMClient` ou d'une session d'agent derrière le proxy LLM de sandbox. `/epure status`, la ligne de chaque ticket terminé et la section `## LLM Usage` de la PR `feature/* -> dev` et du commentaire final affichent ces jetons. Avec la section facultative `pricing:`, ils affichent aussi un coût, calculé au moment de l'affichage et jamais stocké. EPURE ne récupère jamais de prix ; `setup-repo` conserve une section `pricing:` existante quand il réécrit le fichier.
+
+```yaml
+pricing:
+  google/gemini-3.8-flash:
+    inputPerMTok: 0.75
+    cachedInputPerMTok: 0.075
+    outputPerMTok: 3.75
+    source: https://ai.google.dev/gemini-api/docs/pricing
+    read_on: 2026-11-08
+```
+
+| Clé | Type | Défaut | Description |
+| --- | --- | --- | --- |
+| `pricing.<fournisseur>/<modèle>` | map | *(Facultatif)* | Une entrée par modèle, avec la clé de l'état et des lignes `epure-llm-usage` des journaux de job : la famille de fournisseur (`google`, `anthropic`, `openai`, `azure`, `azure_ai`, `openrouter`, `vertex`) puis le modèle envoyé à l'API, pas l'alias de `providers:`. |
+| `pricing.<modèle>.inputPerMTok` | `number` | *(Obligatoire)* | Dollars par million de jetons d'entrée. |
+| `pricing.<modèle>.cachedInputPerMTok` | `number` | `inputPerMTok` | Dollars par million de jetons d'entrée en cache. |
+| `pricing.<modèle>.outputPerMTok` | `number` | *(Obligatoire)* | Dollars par million de jetons de sortie. Les jetons de réflexion sont facturés à ce prix. |
+| `pricing.<modèle>.source` | `string` | *(Obligatoire)* | URL de la page de prix, affichée par `/epure status`. |
+| `pricing.<modèle>.read_on` | `string` | *(Obligatoire)* | Date de lecture du prix, affichée par `/epure status`. |
+
+Un prix absent ou négatif, une `source` ou un `read_on` manquant rendent `.github/agents.yml` invalide, comme toute autre clé. Une ligne qui comprend un modèle sans prix n'affiche que les jetons : une somme partielle passerait pour le coût complet. Le coût est une estimation : l'écriture en cache d'Anthropic est comptée au prix d'entrée, et les requêtes dont le moteur n'a pas rendu d'usage n'y figurent pas (leur nombre est affiché, « without usage data »).
+
 ### `security_invariants` & Chemins Sensibles
 
 Toute tentative dans `.github/agents.yml` d'abaisser `security_invariants` (`require_write_permission: false`, `sandbox_isolation: false`, `allow_agent_release: true`, `auto_merge_dev: true`, `auto_merge_main: true`) est rejetée en mode *fail-closed* avec l'erreur `SECURITY_INVARIANT_VIOLATION`. De plus, toute modification de `.github/workflows/**`, `.github/agents.yml`, du répertoire du roster de reviewers (le `reviewers_dir/**` configuré ainsi que `.agents/reviewers/**` par défaut) ou `CODEOWNERS` sur une branche `task/*` déclenche une **Escalade sur Chemin Sensible** (`needs-human`) tant qu'un mainteneur n'a pas explicitement accordé le label `approved-sensitive-change` (Q81, Q93).
@@ -1988,7 +2045,7 @@ EPURE a été conçu dès l'origine autour de trois principes d'ingénierie : **
    - Lorsqu'EPURE exécute `npm test`, `npm run build` ou `pytest` sur une branche `task/*`, l'environnement des sous-processus est intégralement purgé de `LLM_API_KEY`, `EPURE_AGENT_APP_PRIVATE_KEY` et `EPURE_RELEASE_APP_PRIVATE_KEY`.
    - Un test ou une dépendance compromise ne peut exfiltrer aucun secret. Si l'isolation de la sandbox ne peut être garantie, EPURE s'arrête immédiatement en mode **fail-closed**.
 3. **État Atomique Hors-Branches (`refs/epure/state/<issue>`, Q76)** :
-   - Les transitions d'état (`last_processed_comment_id`, `spec_sha` signé, compteurs de tentatives, table des tickets et sous-phases de continuation CI) sont stockées dans le message JSON d'un commit à arbre vide chaîné sous `refs/epure/state/<issue-number>`, mis à jour par Compare-And-Swap via la mutation GraphQL `updateRefs` (précondition `beforeOid`) : une écriture concurrente est rejetée, puis EPURE relit l'état et réessaie. Les anciennes références pointant vers un blob JSON sont lues puis migrées à l'écriture suivante.
+   - Les transitions d'état (`last_processed_comment_id`, `spec_sha` signé, compteurs de tentatives, table des tickets, sous-phases de continuation CI et usage des jetons par ticket, phase et modèle, écrit avec chacune de ces mises à jour — ADR-0035) sont stockées dans le message JSON d'un commit à arbre vide chaîné sous `refs/epure/state/<issue-number>`, mis à jour par Compare-And-Swap via la mutation GraphQL `updateRefs` (précondition `beforeOid`) : une écriture concurrente est rejetée, puis EPURE relit l'état et réessaie. Les anciennes références pointant vers un blob JSON sont lues puis migrées à l'écriture suivante.
    - Les branches `dev` et `main` restent 100 % exemptes de commits techniques d'état machine.
 
 ---
