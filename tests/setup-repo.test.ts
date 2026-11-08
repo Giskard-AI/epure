@@ -1045,8 +1045,29 @@ describe("5. Pre-bundled CLI (dist/cli/setup-repo.mjs) & skill (.agents/skills/s
       expect(sandboxSteps).toContain("# renovate: datasource=github-releases depName=rtk-ai/rtk");
       expect(sandboxSteps).toContain(PINNED_RTK_VERSION);
       expect(sandboxSteps).toContain("sha256sum --check --ignore-missing");
-      expect(sandboxSteps).toContain("RTK_TELEMETRY_DISABLED=1");
-      expect(sandboxSteps).toContain("RTK_RECALL=0");
+      expect(sandboxSteps).toContain("sudo install -m 0755 /tmp/rtk /usr/local/bin/rtk");
+    }
+  );
+
+  it.each([
+    { id: "no-github-env-write", forbidden: "$GITHUB_ENV" },
+    { id: "no-github-path-write", forbidden: "$GITHUB_PATH" }
+  ])(
+    "caller workflows pass zizmor's github-env audit under issue_comment and workflow_run [$id]",
+    ({ forbidden }) => {
+      const tempRepoDir = mkdtempSync(join(tmpdir(), "epure-setup-zizmor-"));
+      try {
+        const result = planAndApplyRepoSetup({
+          repository: "acme-org/payments",
+          repoRootDir: tempRepoDir,
+          dryRun: true
+        });
+        for (const workflow of result.planned_workflows) {
+          expect(workflow.content, workflow.path).not.toContain(forbidden);
+        }
+      } finally {
+        rmSync(tempRepoDir, { recursive: true, force: true });
+      }
     }
   );
 
