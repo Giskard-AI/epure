@@ -3392,6 +3392,8 @@ function buildGitHubRulesetApiPayload(spec, appIntegrationIds) {
         // Not strict: bringing a feature/* head up to date is a push epure-feature-governance refuses to humans,
         // so a strict dev rule would leave the feature PR unmergeable each time dev moves.
         strict_required_status_checks_policy: false,
+        // A new feature/* branch starts on a dev commit that never ran the PR-only checks.
+        do_not_enforce_on_create: true,
         required_status_checks: spec.requiredStatusChecks.map((context) => ({
           context,
           integration_id: GITHUB_ACTIONS_INTEGRATION_ID
@@ -3429,7 +3431,12 @@ function ruleFingerprint(rule) {
     return rule.type;
   }
   const checks = (rule.parameters?.required_status_checks ?? []).map((c) => `${c.context}@${c.integration_id ?? "any"}`).sort();
-  return JSON.stringify([rule.type, rule.parameters?.strict_required_status_checks_policy === true, checks]);
+  return JSON.stringify([
+    rule.type,
+    rule.parameters?.strict_required_status_checks_policy === true,
+    rule.parameters?.do_not_enforce_on_create === true,
+    checks
+  ]);
 }
 function rulesetFingerprint(ruleset) {
   return JSON.stringify({

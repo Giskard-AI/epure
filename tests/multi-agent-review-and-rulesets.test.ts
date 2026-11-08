@@ -292,7 +292,7 @@ describe("EPURE v1.2.0 — Repository Rulesets, Multi-Agent Review Roster & Sema
           conditions: { ref_name: { include: ["refs/heads/feature/*"], exclude: [] } },
           rules: existingFeature.rules.map((type) =>
             type === "required_status_checks"
-              ? { type, parameters: { ...featureRequiredChecks?.parameters, do_not_enforce_on_create: false } }
+              ? { type, parameters: featureRequiredChecks?.parameters }
               : { type, parameters: { extra_github_default: true } }
           ),
           bypass_actors: [{ actor_id: 2888446, actor_type: "Integration", bypass_mode: existingFeature.bypassMode }]
@@ -404,12 +404,16 @@ describe("EPURE v1.2.0 — Repository Rulesets, Multi-Agent Review Roster & Sema
     ])("$id", ({ ruleset, branchPattern }) => {
       const spec = buildGovernanceRulesets({ agentAppName: "a", releaseAppName: "r" })[ruleset];
       const payload = buildGitHubRulesetApiPayload(spec, {}) as {
-        rules: Array<{ type: string; parameters?: { strict_required_status_checks_policy: boolean; required_status_checks: Array<{ context: string; integration_id: number }> } }>;
+        rules: Array<{
+          type: string;
+          parameters?: { strict_required_status_checks_policy: boolean; do_not_enforce_on_create: boolean; required_status_checks: Array<{ context: string; integration_id: number }> };
+        }>;
       };
       const rule = payload.rules.find((r) => r.type === "required_status_checks");
       const reported = checksReportedOnPullRequestsInto(branchPattern);
 
       expect(rule?.parameters?.strict_required_status_checks_policy).toBe(false);
+      expect(rule?.parameters?.do_not_enforce_on_create).toBe(true);
       expect(rule?.parameters?.required_status_checks.map((c) => c.context).sort()).toEqual([...reported].sort());
       expect(new Set(rule?.parameters?.required_status_checks.map((c) => c.integration_id))).toEqual(new Set([GITHUB_ACTIONS_INTEGRATION_ID]));
     });
@@ -420,24 +424,34 @@ describe("EPURE v1.2.0 — Repository Rulesets, Multi-Agent Review Roster & Sema
       {
         id: "dev-ruleset-without-required-status-checks-from-the-previous-version-is-reported-as-update",
         checks: undefined,
+        doNotEnforceOnCreate: true,
         expected: "update"
       },
       {
         id: "dev-ruleset-requiring-the-previous-verify-contract-check-name-is-reported-as-update",
         checks: pinnedDevChecks.map((c) => (c.context.startsWith("Verify EPURE") ? { ...c, context: "verify-contract / Verify EPURE Consumer Contract" } : c)),
+        doNotEnforceOnCreate: true,
         expected: "update"
       },
       {
         id: "dev-ruleset-accepting-the-checks-from-any-app-is-reported-as-update",
         checks: pinnedDevChecks.map(({ context }) => ({ context })),
+        doNotEnforceOnCreate: true,
+        expected: "update"
+      },
+      {
+        id: "dev-ruleset-enforcing-the-checks-on-branch-creation-is-reported-as-update",
+        checks: pinnedDevChecks,
+        doNotEnforceOnCreate: false,
         expected: "update"
       },
       {
         id: "dev-ruleset-generated-by-this-version-with-checks-listed-in-another-order-is-noop",
         checks: [...pinnedDevChecks].reverse(),
+        doNotEnforceOnCreate: true,
         expected: "noop"
       }
-    ])("$id", async ({ checks, expected }) => {
+    ])("$id", async ({ checks, doNotEnforceOnCreate, expected }) => {
       const otherRules = (buildGitHubRulesetApiPayload(devSpec, {}) as { rules: Array<{ type: string }> }).rules.filter(
         (r) => r.type !== "required_status_checks"
       );
@@ -447,7 +461,7 @@ describe("EPURE v1.2.0 — Repository Rulesets, Multi-Agent Review Roster & Sema
           target: "branch",
           conditions: { ref_name: { include: ["refs/heads/dev"], exclude: [] } },
           rules: checks
-            ? [...otherRules, { type: "required_status_checks", parameters: { strict_required_status_checks_policy: false, do_not_enforce_on_create: false, required_status_checks: checks } }]
+            ? [...otherRules, { type: "required_status_checks", parameters: { strict_required_status_checks_policy: false, do_not_enforce_on_create: doNotEnforceOnCreate, required_status_checks: checks } }]
             : otherRules,
           bypass_actors: []
         }

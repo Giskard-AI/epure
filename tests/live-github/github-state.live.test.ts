@@ -1156,6 +1156,23 @@ describeLive(
         }
       }, HOOK_TIMEOUT_MS);
 
+      it("feature-rulesets-let-a-non-bypass-actor-create-a-feature-branch-on-a-commit-without-the-required-checks", async () => {
+        const generated = buildGovernanceRulesets({ agentAppName: "agent", releaseAppName: "release" });
+        for (const spec of [generated.featureIntegrity, generated.featureGovernance]) {
+          const created = await adminApi<{ id: number }>(
+            "POST",
+            `${R}/rulesets`,
+            buildGitHubRulesetApiPayload({ ...spec, name: `${spec.name}-${RUN_ID}-create`, targetRefs: [`refs/heads/${NS}/create/feature/*`] }, {})
+          );
+          expect(created.status).toBe(201);
+          rulesetIds.push(created.data.id);
+        }
+
+        const created = await api<{ message?: string }>("POST", `${R}/git/refs`, { ref: `refs/heads/${NS}/create/feature/1-new`, sha: baseSha });
+
+        expect({ status: created.status, message: created.data?.message }).toEqual({ status: 201, message: undefined });
+      });
+
       it.for([
         { id: "dev-ruleset-refuses-a-squash-merge-while-the-required-check-is-red", ruleset: "devGovernance" as const, ciPasses: false, expectedMerge: 405 },
         { id: "dev-ruleset-lets-a-squash-merge-through-once-the-required-check-is-green", ruleset: "devGovernance" as const, ciPasses: true, expectedMerge: 200 },
