@@ -218,6 +218,13 @@ Options:
                                     GEMINI_API_KEY, AZURE_OPENAI_API_KEY, AZURE_AI_API_KEY).
   --manual                          Force Fallback Approach 1 (manual guided mode)
                                     without starting the local 127.0.0.1 HTTP server.
+  --app-name-prefix <prefix>        App names become <prefix>-agent and <prefix>-release
+                                    (default: <owner>-epure). App names are unique on
+                                    GitHub: give dedicated Apps their own prefix.
+  --llm-api-key-file <path>         Read the LLM API key from a file instead of prompting.
+  --e2e-config <path>               Also write repository, llmEnvironment, agentAppId and
+                                    releaseAppId to this e2e harness config (no secrets),
+                                    e.g. epure.e2e.json for `npm run test:e2e`.
   -h, --help                        Print this help documentation and exit 0.
 
 Provisioning Modes:
@@ -280,9 +287,33 @@ set_env_secret() {
   return 0
 }
 
+# write_e2e_config PATH REPO LLM_ENV AGENT_ID RELEASE_ID upserts the non-secret App
+# identity into the e2e harness config, starting from epure.e2e.example.json.
+write_e2e_config() {
+  local path="$1" repo="$2" llm_env="$3" agent_id="$4" release_id="$5"
+  local example
+  example="$(dirname "${BASH_SOURCE[0]}")/../../epure.e2e.example.json"
+  if [[ ! -f "$path" ]]; then
+    if [[ -f "$example" ]]; then cp "$example" "$path"; else printf '{}\n' > "$path"; fi
+  fi
+  E2E_PATH="$path" REPO_SLUG="$repo" LLM_ENV="$llm_env" AGENT_ID="$agent_id" RELEASE_ID="$release_id" node -e '
+const fs = require("node:fs");
+const path = process.env.E2E_PATH;
+const config = JSON.parse(fs.readFileSync(path, "utf8"));
+Object.assign(config, {
+  repository: process.env.REPO_SLUG,
+  llmEnvironment: process.env.LLM_ENV,
+  agentAppId: Number(process.env.AGENT_ID),
+  releaseAppId: Number(process.env.RELEASE_ID)
+});
+fs.writeFileSync(path, JSON.stringify(config, null, 2) + "\n");
+' || { SKIPPED+=("agentAppId=${agent_id} and releaseAppId=${release_id} in ${path}"); warn "could not update ${path}"; return 0; }
+  printf '  %s✓ wrote%s App IDs → %s\n' "$GREEN" "$RESET" "$path"
+}
+
 # summary prints the closing summary and next-step command.
 summary() {
-  local repo="$1" llm_env="$2" agent_id="$3" release_id="$4"
+  local repo="$1" llm_env="$2" agent_id="$3" release_id="$4" e2e_config="${5:-}"
   finish
   printf '%s%s   Stage 5 Verification & Next Command%s\n' "$BOLD" "$BLUE" "$RESET"
   say "Environment secrets configured for ${repo}:"
@@ -293,6 +324,12 @@ summary() {
     gh secret list -R "$repo" --env release 2>/dev/null | sed 's/^/    /' || warn "Could not list secrets for --env release"
   else
     note "Run 'gh secret list -R ${repo} --env ${llm_env}' and 'gh secret list -R ${repo} --env release' to verify."
+  fi
+  if [[ -n "$e2e_config" ]]; then
+    printf '\n  %sThe e2e harness runs setup-repo itself. Check epureRef and model in %s, then run:%s\n\n' "$BOLD" "$e2e_config" "$RESET"
+    printf '    gh auth refresh -h github.com -s workflow   # once: the reset writes .github/workflows\n'
+    printf '    EPURE_E2E_CONFIG=%s npm run test:e2e\n\n' "$e2e_config"
+    return
   fi
   printf '\n  %sRun this command next to apply repository files, rulesets, and bypass actors:%s\n\n' "$BOLD" "$RESET"
   printf '    node dist/cli/setup-repo.mjs --repo %s --agent-app-id %s --release-app-id %s --apply --apply-github-settings\n\n' \
@@ -580,6 +617,9 @@ run_wizard() {
   local LLM_ENV=""
   local LLM_SECRET_NAME="LLM_API_KEY"
   local FORCE_MANUAL=0
+  local APP_NAME_PREFIX=""
+  local LLM_KEY_FILE=""
+  local E2E_CONFIG=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -615,6 +655,18 @@ run_wizard() {
         FORCE_MANUAL=1
         shift
         ;;
+      --app-name-prefix)
+        APP_NAME_PREFIX="${2:-}"
+        shift 2
+        ;;
+      --llm-api-key-file)
+        LLM_KEY_FILE="${2:-}"
+        shift 2
+        ;;
+      --e2e-config)
+        E2E_CONFIG="${2:-}"
+        shift 2
+        ;;
       *)
         warn "Unknown option: $1"
         print_usage
@@ -646,8 +698,8 @@ run_wizard() {
   local OWNER="${REPO%%/*}"
   local CLEAN_OWNER
   CLEAN_OWNER=$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
-  local AGENT_APP_NAME="${CLEAN_OWNER}-epure-agent"
-  local RELEASE_APP_NAME="${CLEAN_OWNER}-epure-release"
+  local AGENT_APP_NAME="${APP_NAME_PREFIX:-${CLEAN_OWNER}-epure}-agent"
+  local RELEASE_APP_NAME="${APP_NAME_PREFIX:-${CLEAN_OWNER}-epure}-release"
 
   if [[ -z "$LLM_ENV" ]]; then
     say "Choose the GitHub Environment name that scopes Agent App & LLM secrets."
@@ -768,7 +820,12 @@ run_wizard() {
   note "  OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, AZURE_OPENAI_API_KEY, AZURE_AI_API_KEY"
 
   local LLM_KEY_VALUE=""
-  ask_secret LLM_KEY_VALUE "Enter LLM API key (hidden input, stored in --env ${LLM_ENV}):"
+  if [[ -n "$LLM_KEY_FILE" ]]; then
+    LLM_KEY_VALUE=$(<"$LLM_KEY_FILE")
+    note "Read the LLM API key from ${LLM_KEY_FILE}."
+  else
+    ask_secret LLM_KEY_VALUE "Enter LLM API key (hidden input, stored in --env ${LLM_ENV}):"
+  fi
   set_env_secret "$REPO" "$LLM_ENV" "LLM_API_KEY" "$LLM_KEY_VALUE"
 
   if [[ "$LLM_SECRET_NAME" != "LLM_API_KEY" && -n "$LLM_SECRET_NAME" ]]; then
@@ -784,7 +841,8 @@ run_wizard() {
 
   # ── Stage 5: Verification & Ready Command ─────────────────────────────────
   stage "Verification & Ready Command"
-  summary "$REPO" "$LLM_ENV" "$AGENT_APP_ID" "$RELEASE_APP_ID"
+  [[ -n "$E2E_CONFIG" ]] && write_e2e_config "$E2E_CONFIG" "$REPO" "$LLM_ENV" "$AGENT_APP_ID" "$RELEASE_APP_ID"
+  summary "$REPO" "$LLM_ENV" "$AGENT_APP_ID" "$RELEASE_APP_ID" "$E2E_CONFIG"
 }
 
 run_wizard "$@"; exit
