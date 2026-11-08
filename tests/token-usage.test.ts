@@ -4,12 +4,15 @@ import { reportLLMUsage } from "../src/llm/usage.js";
 import {
   createInMemoryGitRefStateStore,
   formatIssueStateMarker,
-  updateIssueStateWithCas
+  updateIssueStateWithCas,
+  type GitRefStateStore
 } from "../src/state/git-ref-state.js";
 import { meterTokenUsage } from "../src/state/metered-state-store.js";
 import {
   addRequestUsage,
   currentTokenUsage,
+  MAX_MODELS_PER_RUN,
+  OVERFLOW_MODEL,
   runWithTokenUsageLedger,
   TokenUsageLedger,
   totalTokensByModel,
@@ -130,7 +133,8 @@ describe("meterTokenUsage", () => {
     const ledger = new TokenUsageLedger();
     const store = meterTokenUsage(
       createInMemoryGitRefStateStore({ simulateConflictOnFirstWrite: simulateConflict }),
-      ledger
+      ledger,
+      "refs/epure/state/1"
     );
     for (const usage of recorded) {
       ledger.record({ phase: "plan" }, usage);
@@ -142,9 +146,43 @@ describe("meterTokenUsage", () => {
     expect(ledger.pendingCount()).toBe(0);
   });
 
+  it.each([
+    { id: "write-that-landed-before-the-connection-failed-is-not-pending-anymore", landsBeforeThrowing: true, expectedPending: 0 },
+    { id: "write-that-never-landed-stays-pending", landsBeforeThrowing: false, expectedPending: 1 }
+  ])("$id", async ({ landsBeforeThrowing, expectedPending }) => {
+    const ledger = new TokenUsageLedger();
+    const inner = createInMemoryGitRefStateStore();
+    const flaky: GitRefStateStore = {
+      readRef: (refName) => inner.readRef(refName),
+      compareAndSwapRef: async (refName, expectedOldSha, nextState) => {
+        if (landsBeforeThrowing) {
+          await inner.compareAndSwapRef(refName, expectedOldSha, nextState);
+        }
+        throw new Error("socket hang up");
+      }
+    };
+    const store = meterTokenUsage(flaky, ledger, "refs/epure/state/1");
+    ledger.record({ phase: "plan" }, known(10, 2));
+
+    await expect(updateIssueStateWithCas({ issueNumber: 1, store, mutator: (prev) => prev })).rejects.toThrow("socket hang up");
+
+    expect(ledger.pendingCount()).toBe(expectedPending);
+  });
+
+  it("leaves usage pending on writes to another issue's ref", async () => {
+    const ledger = new TokenUsageLedger();
+    const store = meterTokenUsage(createInMemoryGitRefStateStore(), ledger, "refs/epure/state/1");
+    ledger.record({ phase: "plan" }, known(10, 2));
+
+    await updateIssueStateWithCas({ issueNumber: 2, store, mutator: (prev) => prev });
+
+    expect((await store.readRef("refs/epure/state/2")).state?.token_usage).toBeUndefined();
+    expect(ledger.pendingCount()).toBe(1);
+  });
+
   it("does not count written usage twice on later updates", async () => {
     const ledger = new TokenUsageLedger();
-    const store = meterTokenUsage(createInMemoryGitRefStateStore(), ledger);
+    const store = meterTokenUsage(createInMemoryGitRefStateStore(), ledger, "refs/epure/state/1");
     const update = () => updateIssueStateWithCas({ issueNumber: 1, store, mutator: (prev) => prev });
 
     ledger.record({ phase: "plan" }, known(10, 2));
@@ -157,6 +195,24 @@ describe("meterTokenUsage", () => {
       epic: { plan: { "anthropic/claude-x": counts(1, 10, 2) }, spec: { "anthropic/claude-x": counts(1, 1, 1) } }
     });
     expect(ledger.current()).toEqual((await store.readRef("refs/epure/state/1")).state?.token_usage);
+  });
+});
+
+describe("TokenUsageLedger model cap", () => {
+  it.each([
+    { id: "models-up-to-the-cap-keep-their-own-key", distinct: MAX_MODELS_PER_RUN, expectedOther: undefined },
+    { id: "models-past-the-cap-share-the-overflow-key", distinct: MAX_MODELS_PER_RUN + 3, expectedOther: counts(3, 3, 3) }
+  ])("$id", ({ distinct, expectedOther }) => {
+    const ledger = new TokenUsageLedger();
+    for (let i = 0; i < distinct; i += 1) {
+      ledger.record({ phase: "implementation" }, { ...known(1, 1), model: `m-${i}` });
+    }
+    ledger.record({ phase: "implementation" }, { ...known(1, 1), model: "m-0" });
+
+    const models = ledger.current().epic?.implementation ?? {};
+    expect(Object.keys(models)).toHaveLength(Math.min(distinct, MAX_MODELS_PER_RUN) + (expectedOther ? 1 : 0));
+    expect(models["anthropic/m-0"]).toEqual(counts(2, 2, 2));
+    expect(models[`anthropic/${OVERFLOW_MODEL}`]).toEqual(expectedOther);
   });
 });
 

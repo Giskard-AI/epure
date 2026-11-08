@@ -860,7 +860,7 @@ describe("Token usage is written with the run's existing state updates (#125)", 
 
   it.each([
     {
-      id: "plan-round-usage-lands-in-its-only-state-update",
+      id: "plan-round-usage-after-the-last-state-update-is-written-by-one-end-of-run-commit",
       llmBody: { ...GRILL, usage: { prompt_tokens: 120, completion_tokens: 30, prompt_tokens_details: { cached_tokens: 20 } } },
       expected: { requests: 1, input_tokens: 120, cached_input_tokens: 20, output_tokens: 30, thinking_tokens: 0 }
     },
@@ -885,7 +885,40 @@ describe("Token usage is written with the run's existing state updates (#125)", 
     }
 
     expect(router.unmatched).toEqual([]);
-    expect(writes.map((w) => w.token_usage)).toEqual([{ epic: { plan: { "openai/gpt-test": expected } } }]);
+    expect(writes.map((w) => w.token_usage)).toEqual([undefined, { epic: { plan: { "openai/gpt-test": expected } } }]);
+    expect(writes[1]).toEqual({ ...writes[0], version: writes[0]!.version + 1, updated_at: expect.any(String), token_usage: expect.anything() });
+  });
+
+  it("usage-still-pending-when-the-plan-was-cancelled-during-the-run-is-reported-on-stdout-not-written", async () => {
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const seeded = await seedState({ phase: "idle", status: "active", subphase: "idle", active_branch: "" });
+    let cancelled = false;
+    const store: GitRefStateStore = {
+      readRef: (refName) => seeded.readRef(refName),
+      compareAndSwapRef: async (refName, expectedOldSha, nextState) => {
+        const result = await seeded.compareAndSwapRef(refName, expectedOldSha, nextState);
+        if (result.swapped && !cancelled) {
+          cancelled = true;
+          await seeded.compareAndSwapRef(refName, result.newSha, { ...nextState, version: nextState.version + 1, status: "cancelled" });
+        }
+        return result;
+      }
+    };
+    const router = declareIssueWrites(declareIssueReads(createGitHubMockRouter()))
+      .on("GET", /\/git\/ref\/heads\//, json({ object: { sha: "branch-sha" } }))
+      .on("POST", `${R}/git/refs`, json({ object: { sha: "branch-sha" } }, 201))
+      .onHost("api.openai.com", "POST", "/v1/chat/completions", json({ ...GRILL, usage: { prompt_tokens: 120, completion_tokens: 30 } }));
+
+    try {
+      await run(router, store, { command: "plan", actor: "maintainer", issueNumber: ISSUE, commentId: 900 });
+    } finally {
+      vi.restoreAllMocks();
+    }
+
+    expect(stdout.mock.calls.map(([chunk]) => String(chunk)).filter((line) => line.includes("LLM usage of"))).toEqual([
+      `[EPURE] LLM usage of 1 response(s) not written to refs/epure/state/${ISSUE}: the plan became \`cancelled\` while this run was working\n`
+    ]);
+    expect((await readState(seeded)).token_usage).toBeUndefined();
   });
 
   const SEEDED_USAGE = {

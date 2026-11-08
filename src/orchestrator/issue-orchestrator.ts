@@ -437,15 +437,13 @@ async function runMeteredIssueCommand(
           publishCheckRun: async (run) => (run.name === "PR title" ? undefined : restHelper.publishCheckRun(run))
         };
 
-    const rawStore = meterTokenUsage(
+    const stateStore =
       input.stateStore ??
-        createGitHubApiRefStateStore({
-          repository: input.repository,
-          githubToken: activeToken,
-          fetchImpl: githubFetch
-        }),
-      ledger
-    );
+      createGitHubApiRefStateStore({
+        repository: input.repository,
+        githubToken: activeToken,
+        fetchImpl: githubFetch
+      });
 
     const isAutomaticEntry =
       input.command === "continue" && (input.commentId ?? 0) <= 0;
@@ -457,8 +455,8 @@ async function runMeteredIssueCommand(
     let resolvedIssueNumber = input.issueNumber;
     if (resolvedIssueNumber <= 0 && input.command === "continue") {
       const allStates =
-        triggerHeadSha && rawStore.listIssueStates
-          ? await rawStore.listIssueStates()
+        triggerHeadSha && stateStore.listIssueStates
+          ? await stateStore.listIssueStates()
           : [];
       const matched = allStates.find(
         (s) => resumableByCiEvent(s) && s.active_head_sha === triggerHeadSha
@@ -484,6 +482,7 @@ async function runMeteredIssueCommand(
         : input;
 
     const refName = buildIssueStateRefName(effectiveInput.issueNumber);
+    const rawStore = meterTokenUsage(stateStore, ledger, refName);
     let planBranch = `plan/${effectiveInput.issueNumber}`;
     let featureBranch = `feature/${effectiveInput.issueNumber}`;
     let leaseExpiresAt: string | undefined;
@@ -496,13 +495,19 @@ async function runMeteredIssueCommand(
     let allowedTerminalSha: string | null = null;
     let store: GitRefStateStore = guardTerminalStates(rawStore, null);
     writePendingTokenUsage = async () => {
-      if (ledger.pendingCount() === 0) {
+      const pending = ledger.pendingCount();
+      if (pending === 0) {
         return;
       }
       try {
         await updateIssueStateWithCas({ issueNumber: effectiveInput.issueNumber, store, mutator: (prev) => prev });
-      } catch {
-        // Best effort: the run's outcome is already decided.
+      } catch (err) {
+        // The run's outcome is already decided: say what is lost instead of failing it.
+        const reason =
+          err instanceof StateTransitionAbortedError ? err.reason : err instanceof Error ? err.message : String(err);
+        process.stdout.write(
+          `[EPURE] LLM usage of ${pending} response(s) not written to ${refName}: ${redactSecrets(reason, [activeToken, effectiveInput.llmApiKey]).replace(/\s+/g, " ")}\n`
+        );
       }
     };
 
@@ -2335,7 +2340,8 @@ async function runMeteredIssueCommand(
                   githubToken: activeToken,
                   fetchImpl: recordFetch
                 }),
-                ledger
+                ledger,
+                refName
               ),
               allowedTerminalSha
             )

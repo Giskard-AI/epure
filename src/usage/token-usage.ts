@@ -131,13 +131,24 @@ interface PendingUsage {
   readonly usage: LLMRequestUsage;
 }
 
+// A sandboxed agent names its own models: past this many per run, they share one key.
+export const MAX_MODELS_PER_RUN = 16;
+export const OVERFLOW_MODEL = "other";
+
 /** Usage of one run: recorded per request, written to the plan state with its next update. */
 export class TokenUsageLedger {
   private pending: PendingUsage[] = [];
   private lastKnown: TokenUsageRecord = {};
+  private readonly models = new Set<string>();
 
   record(attribution: UsageAttribution, usage: LLMRequestUsage): void {
-    this.pending.push({ attribution, usage });
+    const model = `${usage.provider}/${usage.model}`;
+    if (this.models.has(model) || this.models.size < MAX_MODELS_PER_RUN) {
+      this.models.add(model);
+      this.pending.push({ attribution, usage });
+    } else {
+      this.pending.push({ attribution, usage: { ...usage, model: OVERFLOW_MODEL } });
+    }
   }
 
   /** The state's record plus the usage this run has not written yet. */

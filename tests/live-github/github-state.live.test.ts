@@ -469,7 +469,7 @@ describeLive(
 
         const result = await updateIssueStateWithCas({
           issueNumber,
-          store: meterTokenUsage(racingStore, ledger),
+          store: meterTokenUsage(racingStore, ledger, stateRef),
           mutator: (prev) => ({ ...prev, phase: "review" })
         });
 
