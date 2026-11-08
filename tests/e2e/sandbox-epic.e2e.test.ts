@@ -1,15 +1,25 @@
-import { describe, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { loadE2eConfig, resolveGitHubToken } from "./config.js";
+import { runSandboxEpic } from "./driver.js";
 import { createGitHubApi } from "./github.js";
 import { resetSandbox } from "./reset.js";
 
 const MODE = process.env.EPURE_E2E;
-const describeE2e = MODE === "reset" ? describe : describe.skip;
 const log = (line: string) => console.log(line);
 
-describeE2e(`EPURE e2e sandbox (EPURE_E2E=${MODE ?? "unset"})`, () => {
+describe.runIf(MODE === "reset")("EPURE e2e sandbox reset", () => {
   it("resets the sandbox repository to the seed", { timeout: 600_000 }, async () => {
     const config = loadE2eConfig();
     await resetSandbox(createGitHubApi(resolveGitHubToken(), config.repository), log);
+  });
+});
+
+describe.runIf(MODE === "run")("EPURE e2e sandbox epic", () => {
+  it("drives a scripted epic to an open feature pull request", { timeout: 8 * 3_600_000 }, async () => {
+    const config = loadE2eConfig();
+    const token = resolveGitHubToken();
+    const { result, dir } = await runSandboxEpic(config, createGitHubApi(token, config.repository), token, log);
+    log(`[e2e] ${result.success ? "PASS" : "FAIL"}: report in ${dir}/report.md`);
+    expect(result.checks.filter((c) => !c.passed), result.error ?? "").toEqual([]);
   });
 });
