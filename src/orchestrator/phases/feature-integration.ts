@@ -40,7 +40,11 @@ import {
   type GitRefStateStore
 } from "../../state/git-ref-state.js";
 import { currentTokenUsage, withUsageAttribution } from "../../usage/token-usage.js";
-import { formatEpicUsageSection } from "../../usage/usage-report.js";
+import {
+  formatEpicUsageSection,
+  formatPrUsageSection,
+  replacePrUsageSection
+} from "../../usage/usage-report.js";
 import { appendEpureCommandsSpoiler } from "../formatting/comments.js";
 import { callLlmJson } from "../llm-helper.js";
 import {
@@ -241,7 +245,8 @@ export async function runFeatureIntegrationPhase(
             `- **Summary**: ${params.epicConvergenceSummary}`
           ]
         : []),
-      ...formatEpicUsageSection(currentTokenUsage(), params.parsedDevAgentsConfig?.pricing),
+      "",
+      formatPrUsageSection(currentTokenUsage(), params.parsedDevAgentsConfig?.pricing),
       "",
       "## Governance",
       "- Requires human review and squash-merge into `dev` in the GitHub UI (ADR-0001, ADR-0027, Q45, Q91, Q95)."
@@ -267,6 +272,19 @@ export async function runFeatureIntegrationPhase(
         title: featureSquashPreview.pr_title,
         body: featurePrBody
       });
+  const refreshFeaturePrUsage = async (pr: { number: number; body: string } | null): Promise<void> => {
+    if (!pr) {
+      return;
+    }
+    const body = replacePrUsageSection(
+      pr.body,
+      formatPrUsageSection(currentTokenUsage(), params.parsedDevAgentsConfig?.pricing)
+    );
+    if (body !== pr.body) {
+      await params.gh.updatePullRequest(pr.number, { body });
+    }
+  };
+  await refreshFeaturePrUsage(existingFeaturePr);
 
   if (params.featureChangedFilesMap.size === 0) {
     const existingFeaturePrFiles = await params.gh.listPullRequestFiles(
@@ -1031,6 +1049,9 @@ export async function runFeatureIntegrationPhase(
     });
   }
 
+  await refreshFeaturePrUsage(
+    await params.gh.findOpenPullRequestByHead(params.featureBranch, "dev")
+  );
   const updatedDone = await updateIssueStateWithCas({
     issueNumber: params.issueNumber,
     store: params.store,

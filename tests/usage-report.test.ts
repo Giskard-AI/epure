@@ -3,8 +3,11 @@ import { costOfModels, costUsd, type ModelPricing } from "../src/usage/pricing.j
 import type { TokenCounts, TokenUsageRecord } from "../src/usage/token-usage.js";
 import {
   formatEpicUsageSection,
+  formatPrUsageSection,
+  formatStatusUsageLines,
   formatTicketUsageSuffix,
-  formatTokenUsage
+  formatTokenUsage,
+  replacePrUsageSection
 } from "../src/usage/usage-report.js";
 
 const tokens = (input: number, cached: number, output: number, thinking = 0, requests = 1): TokenCounts => ({
@@ -76,6 +79,12 @@ describe("formatTokenUsage", () => {
       models: { "a/x": { ...tokens(10, 0, 5, 0, 3), usage_unavailable: 2 } },
       pricing: undefined,
       expected: "10 input tokens (0 cached) · 5 output (0 thinking) · 3 requests · 2 without usage data"
+    },
+    {
+      id: "cost-with-requests-without-usage-data-is-a-lower-bound",
+      models: { "a/x": { ...tokens(1_000_000, 0, 1_000_000, 0, 3), usage_unavailable: 1 } },
+      pricing: { "a/x": PRICE },
+      expected: "1,000,000 input tokens (0 cached) · 1,000,000 output (0 thinking) · 3 requests · 1 without usage data · ≥ $10.00"
     }
   ])("$id", ({ models, pricing, expected }) => {
     expect(formatTokenUsage(models, pricing)).toBe(expected);
@@ -110,5 +119,48 @@ describe("formatEpicUsageSection", () => {
     { id: "no-usage-recorded-adds-no-section", record: undefined, expected: [] }
   ])("$id", ({ record, expected }) => {
     expect(formatEpicUsageSection(record, undefined)).toEqual(expected);
+  });
+});
+
+describe("replacePrUsageSection", () => {
+  const section = formatPrUsageSection(RECORD, undefined);
+
+  it.each([
+    {
+      id: "section-between-the-markers-is-replaced-and-the-rest-kept",
+      body: "## Summary\nhuman edit\n\n<!-- epure-llm-usage:start -->\n## LLM Usage\n- **Epic total**: old\n<!-- epure-llm-usage:end -->\n\n## Governance",
+      expected: `## Summary\nhuman edit\n\n${section}\n\n## Governance`
+    },
+    {
+      id: "body-without-the-markers-gets-the-section-appended",
+      body: "## Summary",
+      expected: `## Summary\n\n${section}`
+    },
+    {
+      id: "start-marker-without-an-end-marker-gets-the-section-appended",
+      body: "## Summary\n<!-- epure-llm-usage:start -->",
+      expected: `## Summary\n<!-- epure-llm-usage:start -->\n\n${section}`
+    }
+  ])("$id", ({ body, expected }) => {
+    expect(replacePrUsageSection(body, section)).toBe(expected);
+  });
+});
+
+describe("formatStatusUsageLines", () => {
+  it.each([
+    {
+      id: "price-source-shown-with-a-cost",
+      pricing: { "a/x": PRICE },
+      expectedPriceLine: true
+    },
+    {
+      id: "no-price-source-when-no-line-shows-a-cost",
+      pricing: { "b/y": PRICE },
+      expectedPriceLine: false
+    }
+  ])("$id", ({ pricing, expectedPriceLine }) => {
+    const lines = formatStatusUsageLines(RECORD, pricing);
+
+    expect(lines.some((line) => line.includes("Prices from"))).toBe(expectedPriceLine);
   });
 });

@@ -11,7 +11,10 @@ import {
 const count = (n: number): string => n.toLocaleString("en-US");
 const usd = (n: number): string => (n > 0 && n < 0.01 ? "< $0.01" : `$${n.toFixed(2)}`);
 
-/** One line of tokens (and cost when every model has a price), or undefined when nothing was spent. */
+/**
+ * One line of tokens (and cost when every model has a price, as a lower bound when some requests
+ * have no usage data), or undefined when nothing was spent.
+ */
 export function formatTokenUsage(models: ModelTokenCounts, pricing: PricingTable | undefined): string | undefined {
   const t = Object.values(models).reduce(addTokenCounts, NO_TOKENS);
   if (t.requests === 0) {
@@ -23,7 +26,7 @@ export function formatTokenUsage(models: ModelTokenCounts, pricing: PricingTable
     `${count(t.output_tokens)} output (${count(t.thinking_tokens)} thinking)`,
     `${count(t.requests)} ${t.requests === 1 ? "request" : "requests"}`,
     ...(t.usage_unavailable ? [`${count(t.usage_unavailable)} without usage data`] : []),
-    ...(cost === null ? [] : [usd(cost)])
+    ...(cost === null ? [] : [t.usage_unavailable ? `≥ ${usd(cost)}` : usd(cost)])
   ].join(" · ");
 }
 
@@ -37,13 +40,34 @@ export function formatTicketUsageSuffix(
   return line ? ` — LLM usage: ${line}` : "";
 }
 
-/** The feature PR body's section: the epic total so far. */
+/** The epic total so far, for the final comment. */
 export function formatEpicUsageSection(
   record: TokenUsageRecord | undefined,
   pricing: PricingTable | undefined
 ): string[] {
   const line = formatTokenUsage(totalTokensByModel(record ?? {}), pricing);
   return line ? ["", "## LLM Usage", `- **Epic total**: ${line}`] : [];
+}
+
+const PR_USAGE_START = "<!-- epure-llm-usage:start -->";
+const PR_USAGE_END = "<!-- epure-llm-usage:end -->";
+
+/** The feature PR body's section, between markers so each feature-integration pass rewrites it in place. */
+export function formatPrUsageSection(
+  record: TokenUsageRecord | undefined,
+  pricing: PricingTable | undefined
+): string {
+  return [PR_USAGE_START, ...formatEpicUsageSection(record, pricing).slice(1), PR_USAGE_END].join("\n");
+}
+
+/** Replaces the section between the markers; a body without them gets the section appended. */
+export function replacePrUsageSection(body: string, section: string): string {
+  const start = body.indexOf(PR_USAGE_START);
+  const end = start < 0 ? -1 : body.indexOf(PR_USAGE_END, start);
+  if (end < 0) {
+    return `${body}\n\n${section}`;
+  }
+  return `${body.slice(0, start)}${section}${body.slice(end + PR_USAGE_END.length)}`;
 }
 
 /** `/epure status`: the epic total, then planning and integration, then each ticket. */
@@ -64,12 +88,15 @@ export function formatStatusUsageLines(
     const label = scope === EPIC_USAGE_SCOPE ? "Planning & integration" : `#${scope}`;
     return line ? [`  - ${label}: ${line}`] : [];
   });
+  const costShown = [total, ...scopes.map((scope) => totalTokensByModel(record ?? {}, scope))].some(
+    (models) => costOfModels(models, pricing) !== null
+  );
   const priced = Object.keys(total)
     .filter((model) => pricing?.[model])
     .map((model) => `\`${model}\` read on ${pricing![model]!.read_on} (${pricing![model]!.source})`);
   return [
     `- **LLM Usage**: ${totalLine}`,
     ...scopeLines,
-    ...(priced.length > 0 ? [`  - Prices from \`.github/agents.yml\`: ${priced.join("; ")}`] : [])
+    ...(costShown ? [`  - Prices from \`.github/agents.yml\`: ${priced.join("; ")}`] : [])
   ];
 }

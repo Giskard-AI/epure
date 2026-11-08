@@ -942,9 +942,9 @@ describe("Token usage is written with the run's existing state updates (#125)", 
       id: "status-shows-the-epic-total-each-scope-and-the-cost-with-its-price-source",
       agentsYml: base64File(PRICING_YAML),
       expectedLines: [
-        "- **LLM Usage**: 4,000,000 input tokens (1,200,000 cached) · 600,000 output (10,000 thinking) · 5 requests · 1 without usage data · $11.00",
+        "- **LLM Usage**: 4,000,000 input tokens (1,200,000 cached) · 600,000 output (10,000 thinking) · 5 requests · 1 without usage data · ≥ $11.00",
         "  - Planning & integration: 1,000,000 input tokens (200,000 cached) · 100,000 output (10,000 thinking) · 2 requests · $2.50",
-        "  - #78: 3,000,000 input tokens (1,000,000 cached) · 500,000 output (0 thinking) · 3 requests · 1 without usage data · $8.50",
+        "  - #78: 3,000,000 input tokens (1,000,000 cached) · 500,000 output (0 thinking) · 3 requests · 1 without usage data · ≥ $8.50",
         "  - Prices from `.github/agents.yml`: `openai/gpt-test` read on 2026-11-08 (https://example.test/pricing)"
       ]
     },
@@ -972,9 +972,9 @@ describe("Token usage is written with the run's existing state updates (#125)", 
   it.each([
     {
       id: "feature-pr-body-shows-the-total-at-opening-and-the-final-comment-the-total-after-review",
-      expectedTicketLine: "3,000,000 input tokens (1,000,000 cached) · 500,000 output (0 thinking) · 3 requests · 1 without usage data · $8.50",
-      expectedAtPrOpening: "4,000,000 input tokens (1,200,000 cached) · 600,000 output (10,000 thinking) · 6 requests · 2 without usage data · $11.00",
-      expectedFinal: "4,000,000 input tokens (1,200,000 cached) · 600,000 output (10,000 thinking) · 8 requests · 4 without usage data · $11.00"
+      expectedTicketLine: "3,000,000 input tokens (1,000,000 cached) · 500,000 output (0 thinking) · 3 requests · 1 without usage data · ≥ $8.50",
+      expectedAtPrOpening: "4,000,000 input tokens (1,200,000 cached) · 600,000 output (10,000 thinking) · 6 requests · 2 without usage data · ≥ $11.00",
+      expectedFinal: "4,000,000 input tokens (1,200,000 cached) · 600,000 output (10,000 thinking) · 8 requests · 4 without usage data · ≥ $11.00"
     }
   ])("$id", async ({ expectedTicketLine, expectedAtPrOpening, expectedFinal }) => {
     vi.spyOn(process.stdout, "write").mockImplementation(() => true);
@@ -995,6 +995,37 @@ describe("Token usage is written with the run's existing state updates (#125)", 
     expect(prBody).toContain(`## LLM Usage\n- **Epic total**: ${expectedAtPrOpening}\n`);
     expect(postedComments(router).at(-1)).toContain(`\n- **#${ISSUE}** (Async CI Feature) — PR [#106](pr106) already merged into \`${FEATURE_BRANCH}\` — LLM usage: ${expectedTicketLine}\n`);
     expect(postedComments(router).at(-1)).toContain(`## LLM Usage\n- **Epic total**: ${expectedFinal}\n`);
+  });
+
+  it("resumed-pass-rewrites-only-the-usage-section-of-the-existing-feature-pr-at-its-start-and-end", async () => {
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const before = "## Summary\nEdited by a human.\n\n";
+    const after = "\n\n## Governance\nUnchanged.";
+    const section = (total: string) => `<!-- epure-llm-usage:start -->\n## LLM Usage\n- **Epic total**: ${total}\n<!-- epure-llm-usage:end -->`;
+    const store = await seedState({ ...FEATURE_INTEGRATION_PENDING_STATE, token_usage: { epic: SEEDED_USAGE.epic, [String(ISSUE)]: SEEDED_USAGE["78"] } });
+    const router = declareImplementationFlow(createGitHubMockRouter(), "success", { taskPr: false, featurePr: true })
+      .on("GET", `${R}/contents/.github/agents.yml?ref=dev`, base64File(PRICING_YAML))
+      .on(
+        "GET",
+        new RegExp(`/pulls\\?state=open&head=${encodeURIComponent(`${OWNER}:${FEATURE_BRANCH}`)}`),
+        json([{ number: 105, html_url: "pr105", title: "feat: y", body: `${before}${section("stale")}${after}`, head: { sha: HEAD_SHA } }])
+      );
+
+    try {
+      await run(router, store, { command: "approve", actor: "maintainer", issueNumber: ISSUE, commentId: 900 });
+    } finally {
+      vi.restoreAllMocks();
+    }
+
+    expect(router.unmatched).toEqual([]);
+    const patchedBodies = router.requests
+      .filter((r) => r.method === "PATCH" && r.path === `${R}/pulls/105` && (r.body as { body?: string }).body !== undefined)
+      .map((r) => (r.body as { body: string }).body);
+    const finalTotal = /## LLM Usage\n- \*\*Epic total\*\*: (.*)\n/.exec(postedComments(router).at(-1) ?? "")?.[1];
+    expect(patchedBodies).toEqual([
+      `${before}${section("4,000,000 input tokens (1,200,000 cached) · 600,000 output (10,000 thinking) · 6 requests · 2 without usage data · ≥ $11.00")}${after}`,
+      `${before}${section(finalTotal!)}${after}`
+    ]);
   });
 });
 
