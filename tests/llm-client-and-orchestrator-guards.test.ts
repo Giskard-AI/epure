@@ -369,6 +369,71 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
         assertRequestBody: (body: Record<string, unknown>) => {
           expect(body.model).toBe("gpt-5.4-mini");
         }
+      },
+      {
+        scenario:
+          "openrouter/anthropic/claude-sonnet-5 keeps the routed model id and requires providers that honour json_schema",
+        model: "openrouter/anthropic/claude-sonnet-5",
+        apiKey: "sk-or-test-key",
+        providers: undefined as Record<string, ProviderConfig> | undefined,
+        envVars: {} as Record<string, string>,
+        mockResponseBody: {
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  summary: "openrouter-ok",
+                  nested: { count: 5 }
+                })
+              }
+            }
+          ]
+        },
+        expectedProvider: "openrouter",
+        expectedUrl: "https://openrouter.ai/api/v1/chat/completions",
+        expectedHeaders: {
+          Authorization: "Bearer sk-or-test-key",
+          "Content-Type": "application/json"
+        },
+        assertRequestBody: (body: Record<string, unknown>) => {
+          expect(body.model).toBe("anthropic/claude-sonnet-5");
+          expect(body.provider).toEqual({ require_parameters: true });
+          expect((body.response_format as { type: string }).type).toBe("json_schema");
+        }
+      },
+      {
+        scenario:
+          "vertex/gemini-3-flash-preview routes to the Vertex AI express endpoint with the API key",
+        model: "vertex/gemini-3-flash-preview",
+        apiKey: "AQ-vertex-key",
+        providers: undefined as Record<string, ProviderConfig> | undefined,
+        envVars: {} as Record<string, string>,
+        mockResponseBody: {
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: JSON.stringify({
+                      summary: "vertex-ok",
+                      nested: { count: 13 }
+                    })
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        expectedProvider: "vertex",
+        expectedUrl:
+          "https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-3-flash-preview:generateContent?key=AQ-vertex-key",
+        expectedHeaders: {
+          "Content-Type": "application/json"
+        },
+        assertRequestBody: (body: Record<string, unknown>) => {
+          const genCfg = body.generationConfig as { responseMimeType?: string };
+          expect(genCfg.responseMimeType).toBe("application/json");
+        }
       }
     ])(
       "$scenario",
@@ -433,6 +498,70 @@ describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bu
               process.env[k] = prev;
             }
           }
+        }
+      }
+    );
+  });
+
+  describe("1b. OpenAI-compatible endpoints without structured output support", () => {
+    it.each([
+      {
+        id: "alias-base-url-rejects-response-format",
+        model: "local-llm/qwen-coder",
+        providers: {
+          "local-llm": { provider: "openai", base_url: "https://llm.corp.internal/v1" }
+        } as Record<string, ProviderConfig>,
+        withSchema: true,
+        status: 400,
+        upstreamBody: '{"error":{"message":"response_format type json_schema is not supported"}}',
+        expectedClearError: true
+      },
+      {
+        id: "openrouter-has-no-endpoint-for-the-requested-parameters",
+        model: "openrouter/meta-llama/llama-4-scout",
+        providers: undefined as Record<string, ProviderConfig> | undefined,
+        withSchema: true,
+        status: 404,
+        upstreamBody:
+          '{"error":{"message":"No endpoints found that can handle the requested parameters.","code":404}}',
+        expectedClearError: true
+      },
+      {
+        id: "plain-text-call-keeps-the-provider-error",
+        model: "local-llm/qwen-coder",
+        providers: {
+          "local-llm": { provider: "openai", base_url: "https://llm.corp.internal/v1" }
+        } as Record<string, ProviderConfig>,
+        withSchema: false,
+        status: 400,
+        upstreamBody: '{"error":{"message":"response_format is invalid"}}',
+        expectedClearError: false
+      }
+    ])(
+      "[$id] names the endpoint when it rejects structured output (clear error: $expectedClearError)",
+      async ({ model, providers, withSchema, status, upstreamBody, expectedClearError }) => {
+        const client = new LLMClient(providers);
+        const error = await client
+          .complete({
+            model,
+            apiKey: "sk-test",
+            systemInstruction: "System",
+            userPrompt: "User",
+            ...(withSchema ? { responseSchema: sampleNestedSchema } : {}),
+            fetchImpl: async () => new Response(upstreamBody, { status }),
+            maxTransientRetries: 0
+          })
+          .catch((err: unknown) => err);
+
+        expect(error).toBeInstanceOf(LLMError);
+        expect((error as Error).message.includes("rejected structured output")).toBe(
+          expectedClearError
+        );
+        if (expectedClearError) {
+          expect(error).toBeInstanceOf(BadRequestError);
+          expect((error as Error).message).toContain(
+            model.startsWith("openrouter/") ? "openrouter.ai" : "llm.corp.internal"
+          );
         }
       }
     );

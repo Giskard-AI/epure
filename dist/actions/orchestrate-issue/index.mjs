@@ -2147,13 +2147,18 @@ var GEMINI_SKIP_THOUGHT_SIGNATURE_SENTINEL = "c2tpcF90aG91Z2h0X3NpZ25hdHVyZV92YW
 function buildGoogleGenerateContentUrl(params) {
   const modelEncoded = encodeURIComponent(params.model.trim());
   const keyEncoded = encodeURIComponent(params.apiKey.trim());
-  const rawBase = (params.baseUrl ?? "https://generativelanguage.googleapis.com/v1beta").trim().replace(/\/+$/, "");
+  const isVertex = params.provider === "vertex";
+  const rawBase = (params.baseUrl ?? (isVertex ? "https://aiplatform.googleapis.com/v1" : "https://generativelanguage.googleapis.com/v1beta")).trim().replace(/\/+$/, "");
   if (rawBase.includes(":generateContent")) {
     const sep2 = rawBase.includes("?") ? "&" : "?";
     return rawBase.includes("key=") ? rawBase : `${rawBase}${sep2}key=${keyEncoded}`;
   }
   if (rawBase.endsWith("/models")) {
     return `${rawBase}/${modelEncoded}:generateContent?key=${keyEncoded}`;
+  }
+  if (isVertex) {
+    const versioned = /\/v1(?:beta1)?$/i.test(rawBase) ? rawBase : `${rawBase}/v1`;
+    return `${versioned}/publishers/google/models/${modelEncoded}:generateContent?key=${keyEncoded}`;
   }
   if (/\/v1(?:beta)?$/i.test(rawBase)) {
     return `${rawBase}/models/${modelEncoded}:generateContent?key=${keyEncoded}`;
@@ -2182,7 +2187,8 @@ async function executeGoogleProvider(input) {
   const url = buildGoogleGenerateContentUrl({
     model,
     apiKey,
-    baseUrl
+    baseUrl,
+    provider: input.provider
   });
   const headers = {
     "Content-Type": "application/json",
@@ -2510,6 +2516,16 @@ Output ONLY a corrected, complete JSON object strictly matching the required sch
 }
 
 // src/llm/providers/openai.ts
+var STRUCTURED_OUTPUT_REJECTION_PATTERN = /response_format|json_schema|structured output|can handle the requested parameters/i;
+function explainStructuredOutputRejection(err, provider, model, url) {
+  if (err instanceof LLMError && (err.status === 400 || err.status === 404 || err.status === 422) && STRUCTURED_OUTPUT_REJECTION_PATTERN.test(err.message)) {
+    return new BadRequestError(
+      `The OpenAI-compatible endpoint ${new URL(url).host} rejected structured output (response_format json_schema) for '${provider}/${model}'. EPURE needs JSON-schema structured outputs for this call: pick a model or base_url that supports them. ${err.message}`,
+      { provider, status: err.status }
+    );
+  }
+  return err;
+}
 function buildOpenAICompatibleEndpointAndHeaders(params) {
   const env = params.env ?? process.env;
   const cfg = params.providerConfig;
@@ -2563,7 +2579,7 @@ function buildOpenAICompatibleEndpointAndHeaders(params) {
       }
     };
   }
-  const openAiBase = (rawBaseUrl ?? env.OPENAI_BASE_URL ?? "https://api.openai.com/v1").trim().replace(/\/+$/, "");
+  const openAiBase = (rawBaseUrl ?? (params.provider === "openrouter" ? "https://openrouter.ai/api/v1" : env.OPENAI_BASE_URL ?? "https://api.openai.com/v1")).trim().replace(/\/+$/, "");
   let url;
   if (openAiBase.endsWith("/chat/completions")) {
     url = openAiBase;
@@ -2592,6 +2608,17 @@ async function executeOpenAIProvider(input) {
   const effectiveSystemInstruction = buildProtectedSystemInstruction(
     options.systemInstruction
   );
+  const send = async (body) => {
+    try {
+      return await executeRequest(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body)
+      });
+    } catch (err) {
+      throw options.responseSchema ? explainStructuredOutputRejection(err, provider, model, url) : err;
+    }
+  };
   const messages = [
     {
       role: "system",
@@ -2639,16 +2666,15 @@ async function executeOpenAIProvider(input) {
           schema: closeObjectSchemasForOpenAI(options.responseSchema.schema)
         }
       };
+      if (provider === "openrouter") {
+        body.provider = { require_parameters: true };
+      }
     } else if (options.responseMimeType === "application/json") {
       body.response_format = {
         type: "json_object"
       };
     }
-    const response = await executeRequest(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body)
-    });
+    const response = await send(body);
     if (!response.ok) {
       const errText = await response.text();
       throw classifyHttpError({
@@ -2739,11 +2765,7 @@ Output ONLY a corrected, complete JSON object strictly matching the required sch
               messages,
               ...openAiTools ? { tools: openAiTools, tool_choice: "none" } : {}
             };
-            const retryResponse = await executeRequest(url, {
-              method: "POST",
-              headers,
-              body: JSON.stringify(retryBody)
-            });
+            const retryResponse = await send(retryBody);
             if (!retryResponse.ok) {
               const errText = await retryResponse.text();
               throw classifyHttpError({
@@ -2781,7 +2803,7 @@ function asCounts(value) {
 }
 function extractLLMTokenUsage(provider, model, body) {
   const root = asCounts(body);
-  if (provider === "google") {
+  if (provider === "google" || provider === "vertex") {
     const u2 = asCounts(root?.usageMetadata);
     if (!u2) {
       return null;
@@ -2869,6 +2891,12 @@ function mapKnownProviderPrefix(prefix) {
   }
   if (lower === "anthropic" || lower === "claude") {
     return "anthropic";
+  }
+  if (lower === "openrouter") {
+    return "openrouter";
+  }
+  if (lower === "vertex" || lower === "vertex_ai") {
+    return "vertex";
   }
   return void 0;
 }
@@ -2962,6 +2990,10 @@ function resolveProviderApiKey(params) {
     providerEnvKey = env.AZURE_AI_API_KEY?.trim() || env.AZURE_AI_KEY?.trim();
   } else if (params.provider === "anthropic") {
     providerEnvKey = env.ANTHROPIC_API_KEY?.trim();
+  } else if (params.provider === "openrouter") {
+    providerEnvKey = env.OPENROUTER_API_KEY?.trim();
+  } else if (params.provider === "vertex") {
+    providerEnvKey = env.GOOGLE_API_KEY?.trim();
   }
   if (providerEnvKey) {
     return providerEnvKey;
@@ -3102,8 +3134,9 @@ var LLMClient = class {
       await sleepMs(backoffSec * 1e3);
     } : void 0;
     const invokeProvider = async () => {
-      if (provider === "google") {
+      if (provider === "google" || provider === "vertex") {
         return await executeGoogleProvider({
+          provider,
           model,
           apiKey,
           providerConfig,

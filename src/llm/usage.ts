@@ -30,7 +30,7 @@ export function extractLLMTokenUsage(
   body: unknown
 ): LLMTokenUsage | null {
   const root = asCounts(body);
-  if (provider === "google") {
+  if (provider === "google" || provider === "vertex") {
     const u = asCounts(root?.usageMetadata);
     if (!u) {
       return null;

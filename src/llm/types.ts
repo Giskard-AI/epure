@@ -66,7 +66,9 @@ export type ProviderKind =
   | "openai"
   | "azure"
   | "azure_ai"
-  | "anthropic";
+  | "anthropic"
+  | "openrouter"
+  | "vertex";
 
 export const PROVIDER_EFFORTS = [
   "low",

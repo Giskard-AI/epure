@@ -40,6 +40,12 @@ describe("extractLLMTokenUsage", () => {
       expected: { input_tokens: 800, cached_input_tokens: 600, output_tokens: 120, thinking_tokens: 80 }
     },
     {
+      id: "vertex-reads-the-gemini-usage-metadata",
+      provider: "vertex",
+      body: { usageMetadata: { promptTokenCount: 30, candidatesTokenCount: 5 } },
+      expected: { input_tokens: 30, cached_input_tokens: 0, output_tokens: 5, thinking_tokens: 0 }
+    },
+    {
       id: "missing-fields-count-as-zero",
       provider: "google",
       body: { usageMetadata: { promptTokenCount: 10 } },

@@ -69,6 +69,12 @@ function mapKnownProviderPrefix(prefix: string): ProviderKind | undefined {
   if (lower === "anthropic" || lower === "claude") {
     return "anthropic";
   }
+  if (lower === "openrouter") {
+    return "openrouter";
+  }
+  if (lower === "vertex" || lower === "vertex_ai") {
+    return "vertex";
+  }
   return undefined;
 }
 
@@ -222,6 +228,10 @@ export function resolveProviderApiKey(params: {
     providerEnvKey = env.AZURE_AI_API_KEY?.trim() || env.AZURE_AI_KEY?.trim();
   } else if (params.provider === "anthropic") {
     providerEnvKey = env.ANTHROPIC_API_KEY?.trim();
+  } else if (params.provider === "openrouter") {
+    providerEnvKey = env.OPENROUTER_API_KEY?.trim();
+  } else if (params.provider === "vertex") {
+    providerEnvKey = env.GOOGLE_API_KEY?.trim();
   }
 
   if (providerEnvKey) {
@@ -429,8 +439,9 @@ export class LLMClient {
       readonly text: string;
       readonly data?: T | undefined;
     }> => {
-      if (provider === "google") {
+      if (provider === "google" || provider === "vertex") {
         return await executeGoogleProvider({
+          provider,
           model,
           apiKey,
           providerConfig,

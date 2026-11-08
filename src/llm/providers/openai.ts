@@ -15,7 +15,34 @@ import {
   normalizeToolParametersForJsonSchema
 } from "./schema-utils.js";
 
-export type OpenAICompatibleProviderKind = "openai" | "azure" | "azure_ai";
+export type OpenAICompatibleProviderKind =
+  | "openai"
+  | "azure"
+  | "azure_ai"
+  | "openrouter";
+
+// OpenRouter answers 404 "No endpoints found that can handle the requested parameters" under require_parameters.
+const STRUCTURED_OUTPUT_REJECTION_PATTERN =
+  /response_format|json_schema|structured output|can handle the requested parameters/i;
+
+function explainStructuredOutputRejection(
+  err: unknown,
+  provider: OpenAICompatibleProviderKind,
+  model: string,
+  url: string
+): unknown {
+  if (
+    err instanceof LLMError &&
+    (err.status === 400 || err.status === 404 || err.status === 422) &&
+    STRUCTURED_OUTPUT_REJECTION_PATTERN.test(err.message)
+  ) {
+    return new BadRequestError(
+      `The OpenAI-compatible endpoint ${new URL(url).host} rejected structured output (response_format json_schema) for '${provider}/${model}'. EPURE needs JSON-schema structured outputs for this call: pick a model or base_url that supports them. ${err.message}`,
+      { provider, status: err.status }
+    );
+  }
+  return err;
+}
 
 export interface OpenAIProviderExecutionInput<T = unknown> {
   readonly provider: OpenAICompatibleProviderKind;
@@ -128,11 +155,12 @@ export function buildOpenAICompatibleEndpointAndHeaders(params: {
     };
   }
 
-  // Standard OpenAI or OpenAI-compatible custom endpoint
+  // Standard OpenAI, OpenRouter or OpenAI-compatible custom endpoint
   const openAiBase = (
     rawBaseUrl ??
-    env.OPENAI_BASE_URL ??
-    "https://api.openai.com/v1"
+    (params.provider === "openrouter"
+      ? "https://openrouter.ai/api/v1"
+      : (env.OPENAI_BASE_URL ?? "https://api.openai.com/v1"))
   )
     .trim()
     .replace(/\/+$/, "");
@@ -187,6 +215,20 @@ export async function executeOpenAIProvider<T = unknown>(
   const effectiveSystemInstruction = buildProtectedSystemInstruction(
     options.systemInstruction
   );
+
+  const send = async (body: Record<string, unknown>): Promise<Response> => {
+    try {
+      return await executeRequest(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body)
+      });
+    } catch (err) {
+      throw options.responseSchema
+        ? explainStructuredOutputRejection(err, provider, model, url)
+        : err;
+    }
+  };
 
   const messages: OpenAIChatMessage[] = [
     {
@@ -247,17 +289,16 @@ export async function executeOpenAIProvider<T = unknown>(
           schema: closeObjectSchemasForOpenAI(options.responseSchema.schema)
         }
       };
+      if (provider === "openrouter") {
+        body.provider = { require_parameters: true };
+      }
     } else if (options.responseMimeType === "application/json") {
       body.response_format = {
         type: "json_object"
       };
     }
 
-    const response = await executeRequest(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body)
-    });
+    const response = await send(body);
 
     if (!response.ok) {
       const errText = await response.text();
@@ -376,11 +417,7 @@ export async function executeOpenAIProvider<T = unknown>(
                 ? { tools: openAiTools, tool_choice: "none" }
                 : {})
             };
-            const retryResponse = await executeRequest(url, {
-              method: "POST",
-              headers,
-              body: JSON.stringify(retryBody)
-            });
+            const retryResponse = await send(retryBody);
             if (!retryResponse.ok) {
               const errText = await retryResponse.text();
               throw classifyHttpError({

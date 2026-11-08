@@ -38,6 +38,7 @@ interface GeminiContentTurn {
 }
 
 export interface GoogleProviderExecutionInput<T = unknown> {
+  readonly provider?: "google" | "vertex" | undefined;
   readonly model: string;
   readonly apiKey: string;
   readonly providerConfig?: ProviderConfig | undefined;
@@ -60,11 +61,16 @@ export function buildGoogleGenerateContentUrl(params: {
   readonly model: string;
   readonly apiKey: string;
   readonly baseUrl?: string | undefined;
+  readonly provider?: "google" | "vertex" | undefined;
 }): string {
   const modelEncoded = encodeURIComponent(params.model.trim());
   const keyEncoded = encodeURIComponent(params.apiKey.trim());
+  const isVertex = params.provider === "vertex";
   const rawBase = (
-    params.baseUrl ?? "https://generativelanguage.googleapis.com/v1beta"
+    params.baseUrl ??
+    (isVertex
+      ? "https://aiplatform.googleapis.com/v1"
+      : "https://generativelanguage.googleapis.com/v1beta")
   )
     .trim()
     .replace(/\/+$/, "");
@@ -78,6 +84,11 @@ export function buildGoogleGenerateContentUrl(params: {
 
   if (rawBase.endsWith("/models")) {
     return `${rawBase}/${modelEncoded}:generateContent?key=${keyEncoded}`;
+  }
+
+  if (isVertex) {
+    const versioned = /\/v1(?:beta1)?$/i.test(rawBase) ? rawBase : `${rawBase}/v1`;
+    return `${versioned}/publishers/google/models/${modelEncoded}:generateContent?key=${keyEncoded}`;
   }
 
   if (/\/v1(?:beta)?$/i.test(rawBase)) {
@@ -122,7 +133,8 @@ export async function executeGoogleProvider<T = unknown>(
   const url = buildGoogleGenerateContentUrl({
     model,
     apiKey,
-    baseUrl
+    baseUrl,
+    provider: input.provider
   });
 
   const headers: Record<string, string> = {
