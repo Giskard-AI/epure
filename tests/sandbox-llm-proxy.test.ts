@@ -1,4 +1,5 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createConnection, createServer, type Server } from "node:net";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveProviderUpstream, type ProviderKind } from "../src/llm/index.js";
@@ -565,30 +566,43 @@ describe("Sandbox LLM proxy & untrusted code credential isolation (#98)", () => 
 
   it.each([
     {
-      id: "https-only-install-uses-landrun-with-port-443-only-and-excludes-proxy-port",
+      id: "https-only-install-runs-landrun-with-port-443-only-inside-a-bubblewrap-namespace-hiding-run",
       networkPolicy: "https_only" as SandboxNetworkPolicy,
       proxyPort: 43120,
       capabilities: {
         landrunAvailable: true,
         bubblewrapAvailable: true
       } satisfies KernelSandboxCapabilities,
-      expectedBackend: "landrun" as const,
-      expectedCommand: "landrun",
-      requiredArgs: ["--connect-tcp", "443", "--rwx", "--rox"],
+      expectedBackend: "bubblewrap+landrun" as const,
+      expectedCommand: "bwrap",
+      requiredArgs: ["--unshare-pid", "/run", "landrun", "--connect-tcp", "443", "--rwx", "--rox"],
       forbiddenArgs: ["43120", "--unshare-net"]
     },
     {
-      id: "proxy-only-harness-uses-landrun-with-ephemeral-proxy-port-only",
+      id: "proxy-only-harness-runs-landrun-with-the-proxy-port-only-inside-a-bubblewrap-namespace",
       networkPolicy: "proxy_only" as SandboxNetworkPolicy,
       proxyPort: 43120,
       capabilities: {
         landrunAvailable: true,
         bubblewrapAvailable: true
       } satisfies KernelSandboxCapabilities,
+      expectedBackend: "bubblewrap+landrun" as const,
+      expectedCommand: "bwrap",
+      requiredArgs: ["--unshare-pid", "/run", "landrun", "--connect-tcp", "43120", "--rwx", "--rox"],
+      forbiddenArgs: ["443", "--unshare-net"]
+    },
+    {
+      id: "proxy-only-falls-back-to-bare-landrun-without-bubblewrap",
+      networkPolicy: "proxy_only" as SandboxNetworkPolicy,
+      proxyPort: 43120,
+      capabilities: {
+        landrunAvailable: true,
+        bubblewrapAvailable: false
+      } satisfies KernelSandboxCapabilities,
       expectedBackend: "landrun" as const,
       expectedCommand: "landrun",
-      requiredArgs: ["--connect-tcp", "43120", "--rwx", "--rox"],
-      forbiddenArgs: ["443", "--unshare-net"]
+      requiredArgs: ["--connect-tcp", "43120"],
+      forbiddenArgs: ["--unshare-pid"]
     },
     {
       id: "offline-verification-uses-bubblewrap-unshare-net-and-tmpfs-when-available",
@@ -606,9 +620,10 @@ describe("Sandbox LLM proxy & untrusted code credential isolation (#98)", () => 
         "--unshare-ipc",
         "--die-with-parent",
         "--tmpfs",
-        "/tmp"
+        "/tmp",
+        "/run"
       ],
-      forbiddenArgs: ["--connect-tcp"]
+      forbiddenArgs: ["--connect-tcp", "landrun"]
     },
     {
       id: "offline-verification-falls-back-to-landrun-with-zero-tcp-ports-when-bwrap-unavailable",
@@ -677,6 +692,11 @@ describe("Sandbox LLM proxy & untrusted code credential isolation (#98)", () => 
         [
           "--tmpfs",
           "/tmp",
+          "--tmpfs",
+          "/run",
+          "--ro-bind-try",
+          "/run/systemd/resolve",
+          "/run/systemd/resolve",
           "--ro-bind",
           "/opt/epure/engine",
           "/opt/epure/engine",
@@ -741,6 +761,14 @@ describe("Sandbox LLM proxy & untrusted code credential isolation (#98)", () => 
       id: "fails-closed-in-ci-when-only-bubblewrap-exists-for-a-networked-session",
       env: { GITHUB_ACTIONS: "true" },
       capabilities: { landrunAvailable: false, bubblewrapAvailable: true },
+      networkPolicy: "proxy_only" as SandboxNetworkPolicy,
+      installCommands: undefined,
+      expectedErrorCode: "SANDBOX_ISOLATION_UNAVAILABLE"
+    },
+    {
+      id: "fails-closed-in-ci-with-bare-landrun-because-host-sockets-stay-reachable",
+      env: { GITHUB_ACTIONS: "true" },
+      capabilities: { landrunAvailable: true, bubblewrapAvailable: false },
       networkPolicy: "proxy_only" as SandboxNetworkPolicy,
       installCommands: undefined,
       expectedErrorCode: "SANDBOX_ISOLATION_UNAVAILABLE"
@@ -922,7 +950,7 @@ describe("Kernel confinement of sandboxed runs (#98)", () => {
   const PROBE = [
     "const fs = require('node:fs');",
     "const r = {};",
-    "const t = (k, f) => { try { f(); r[k] = 'ok'; } catch (e) { r[k] = e.code; } };",
+    "const t = (k, f) => { try { f(); r[k] = 'ok'; } catch { r[k] = 'denied'; } };",
     "t('writeHome', () => fs.writeFileSync(process.env.HOME + '/state', '1'));",
     "t('writeOutside', () => fs.writeFileSync(process.env.ESCAPE_FILE, '1'));",
     "t('readEngine', () => fs.readFileSync(process.env.ENGINE_FILE));",
@@ -930,34 +958,36 @@ describe("Kernel confinement of sandboxed runs (#98)", () => {
     "console.log(JSON.stringify(r));"
   ].join("\n");
 
+  const DECLARED = { writeHome: "ok", writeOutside: "denied", readEngine: "ok", writeEngine: "denied" };
+  const UNDECLARED = { ...DECLARED, readEngine: "denied" };
   it.for([
     {
       id: "landrun-session-reads-the-declared-engine-and-writes-only-its-tmp-home",
-      backend: "landrun",
+      backend: "bubblewrap+landrun",
       networkPolicy: "proxy_only",
       declareEngine: true,
-      expected: { writeHome: "ok", writeOutside: "EACCES", readEngine: "ok", writeEngine: "EACCES" }
+      expected: DECLARED
     },
     {
       id: "landrun-session-cannot-read-an-undeclared-engine",
-      backend: "landrun",
+      backend: "bubblewrap+landrun",
       networkPolicy: "proxy_only",
       declareEngine: false,
-      expected: { writeHome: "ok", writeOutside: "EACCES", readEngine: "EACCES", writeEngine: "EACCES" }
+      expected: UNDECLARED
     },
     {
       id: "bubblewrap-offline-run-sees-the-declared-engine-read-only",
       backend: "bubblewrap",
       networkPolicy: "offline",
       declareEngine: true,
-      expected: { writeHome: "ok", writeOutside: "ENOENT", readEngine: "ok", writeEngine: "EROFS" }
+      expected: DECLARED
     },
     {
       id: "bubblewrap-offline-run-cannot-see-an-undeclared-engine-under-tmp",
       backend: "bubblewrap",
       networkPolicy: "offline",
       declareEngine: false,
-      expected: { writeHome: "ok", writeOutside: "ENOENT", readEngine: "ENOENT", writeEngine: "ENOENT" }
+      expected: UNDECLARED
     }
   ] as const)(
     "runInUntrustedCodeSandbox [$id]",
@@ -993,11 +1023,89 @@ describe("Kernel confinement of sandboxed runs (#98)", () => {
     }
   );
 
+  const SOCKET_PROBE = [
+    "const net = require('node:net');",
+    "const fs = require('node:fs');",
+    "const connect = (p) => new Promise((r) => { const s = net.connect(p); s.on('connect', () => { s.destroy(); r('connected'); }); s.on('error', () => r('unreachable')); });",
+    "(async () => {",
+    "  const out = {};",
+    "  for (const p of JSON.parse(process.env.SOCKETS)) out[p] = await connect(p);",
+    "  try { fs.readFileSync('/proc/' + process.env.PARENT_PID + '/environ'); out.parentEnviron = 'read'; } catch { out.parentEnviron = 'unreadable'; }",
+    "  console.log(JSON.stringify(out));",
+    "})();"
+  ].join("\n");
+  const hostConnect = (path: string): Promise<boolean> =>
+    new Promise((resolveConnect) => {
+      const socket = createConnection(path);
+      socket.on("connect", () => {
+        socket.destroy();
+        resolveConnect(true);
+      });
+      socket.on("error", () => resolveConnect(false));
+    });
+
+  it.for([
+    { id: "bubblewrap-offline-run", backend: "bubblewrap", networkPolicy: "offline" },
+    { id: "landrun-session-inside-bubblewrap", backend: "bubblewrap+landrun", networkPolicy: "proxy_only" }
+  ] as const)(
+    "runInUntrustedCodeSandbox [$id]: cannot reach docker.sock, /run/user sockets or the orchestrator's environ",
+    async ({ backend, networkPolicy }, { skip }) => {
+      if (selectKernelBackend(networkPolicy, capabilities) !== backend) {
+        skip(`${backend} is not usable on this host`);
+      }
+      const sockets: string[] = [];
+      // GitHub-hosted runners put the runner user in the docker group: this is the escape to close.
+      if (await hostConnect("/var/run/docker.sock")) {
+        sockets.push("/var/run/docker.sock");
+      }
+      const runtimeDir = process.env.XDG_RUNTIME_DIR ?? `/run/user/${process.getuid?.() ?? 0}`;
+      let server: Server | undefined;
+      if (existsSync(runtimeDir)) {
+        const path = join(runtimeDir, `epure-probe-${process.pid}.sock`);
+        server = createServer((socket) => socket.end());
+        await new Promise<void>((resolveListen, rejectListen) => {
+          server?.once("error", rejectListen);
+          server?.listen(path, () => resolveListen());
+        });
+        sockets.push(path);
+      }
+      try {
+        for (const path of sockets) {
+          expect(await hostConnect(path)).toBe(true);
+        }
+        const result = await runInUntrustedCodeSandbox({
+          isolationAvailable: true,
+          runnerEnv: {
+            PATH: process.env.PATH,
+            SOCKETS: JSON.stringify(sockets),
+            PARENT_PID: String(process.pid)
+          },
+          command: process.execPath,
+          args: ["-e", SOCKET_PROBE],
+          cwd: scratch("epure-work-"),
+          networkPolicy,
+          enforceKernelSandbox: true,
+          agentSession: {}
+        });
+
+        expect(result.kernel_backend).toBe(backend);
+        expect(JSON.parse(result.stdout)).toEqual({
+          ...Object.fromEntries(sockets.map((path) => [path, "unreachable"])),
+          parentEnviron: "unreadable"
+        });
+      } finally {
+        await new Promise<void>((resolveClose) =>
+          server ? server.close(() => resolveClose()) : resolveClose()
+        );
+      }
+    }
+  );
+
   it.for([
     { id: "landrun-proxy-only-session-reaches-the-proxy-but-not-the-upstream-directly" }
   ])("runInUntrustedCodeSandbox [$id]", async (_row, { skip }) => {
-    if (selectKernelBackend("proxy_only", capabilities) !== "landrun") {
-      skip("landrun is not usable on this host");
+    if (selectKernelBackend("proxy_only", capabilities) !== "bubblewrap+landrun") {
+      skip("landrun inside bubblewrap is not usable on this host");
     }
     const upstream = await sseUpstream();
     const script = [
@@ -1031,7 +1139,7 @@ describe("Kernel confinement of sandboxed runs (#98)", () => {
       agentSession: {}
     });
 
-    expect(result.kernel_backend).toBe("landrun");
+    expect(result.kernel_backend).toBe("bubblewrap+landrun");
     expect(JSON.parse(result.stdout)).toEqual({ viaProxy: 200, direct: "blocked" });
     expect(upstream.requests).toHaveLength(1);
   });

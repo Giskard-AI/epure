@@ -7554,11 +7554,11 @@ function buildBubblewrapInvocation(params) {
     ...params.agentDir ? ["--bind", resolve(params.agentDir), resolve(params.agentDir)] : []
   ];
   return [
-    "--unshare-net",
+    ...params.underLandrun ? [] : ["--unshare-net"],
     "--unshare-pid",
     "--unshare-ipc",
     "--die-with-parent",
-    "--ro-bind",
+    params.underLandrun ? "--bind" : "--ro-bind",
     "/",
     "/",
     "--dev",
@@ -7567,6 +7567,11 @@ function buildBubblewrapInvocation(params) {
     "/proc",
     "--tmpfs",
     "/tmp",
+    "--tmpfs",
+    "/run",
+    "--ro-bind-try",
+    "/run/systemd/resolve",
+    "/run/systemd/resolve",
     ...extraBinds,
     "--bind",
     resolvedCwd,
@@ -7582,44 +7587,44 @@ function selectKernelBackend(networkPolicy, capabilities) {
   if (networkPolicy === "offline" && capabilities.bubblewrapAvailable) {
     return "bubblewrap";
   }
-  return capabilities.landrunAvailable ? "landrun" : "none";
+  if (capabilities.landrunAvailable) {
+    return capabilities.bubblewrapAvailable ? "bubblewrap+landrun" : "landrun";
+  }
+  return "none";
+}
+function hidesHostSockets(backend) {
+  return backend === "bubblewrap" || backend === "bubblewrap+landrun";
 }
 function buildKernelSandboxedCommand(input) {
   const backend = selectKernelBackend(input.networkPolicy, input.capabilities);
-  if (backend === "bubblewrap") {
-    return {
-      backend,
-      command: "bwrap",
-      args: buildBubblewrapInvocation({
-        command: input.command,
-        args: input.args,
-        cwd: input.cwd,
-        readOnlyPaths: input.readOnlyPaths,
-        agentDir: input.agentDir
-      })
-    };
-  }
-  if (backend === "landrun") {
-    return {
-      backend,
-      command: "landrun",
-      args: buildLandrunInvocation({
-        command: input.command,
-        args: input.args,
-        cwd: input.cwd,
-        sanitizedEnv: input.sanitizedEnv,
-        networkPolicy: input.networkPolicy,
-        proxyPort: input.proxyPort,
-        readOnlyPaths: input.readOnlyPaths,
-        agentDir: input.agentDir
-      })
-    };
-  }
-  return {
-    backend,
+  const landrun = () => buildLandrunInvocation({
     command: input.command,
-    args: input.args
-  };
+    args: input.args,
+    cwd: input.cwd,
+    sanitizedEnv: input.sanitizedEnv,
+    networkPolicy: input.networkPolicy,
+    proxyPort: input.proxyPort,
+    readOnlyPaths: input.readOnlyPaths,
+    agentDir: input.agentDir
+  });
+  const bubblewrap = (command, args) => buildBubblewrapInvocation({
+    command,
+    args,
+    cwd: input.cwd,
+    readOnlyPaths: input.readOnlyPaths,
+    agentDir: input.agentDir,
+    underLandrun: backend === "bubblewrap+landrun"
+  });
+  switch (backend) {
+    case "bubblewrap":
+      return { backend, command: "bwrap", args: bubblewrap(input.command, input.args) };
+    case "bubblewrap+landrun":
+      return { backend, command: "bwrap", args: bubblewrap("landrun", landrun()) };
+    case "landrun":
+      return { backend, command: "landrun", args: landrun() };
+    case "none":
+      return { backend, command: input.command, args: input.args };
+  }
 }
 var cachedDefaultCapabilities = null;
 var cachedDefaultCapabilitiesPath = "";
@@ -7651,11 +7656,11 @@ function probeKernelSandboxCapabilities(runnerEnv = process.env) {
   }
   let bubblewrapAvailable = false;
   try {
-    const res = spawnSync("bwrap", ["--version"], {
-      env: probeEnv,
-      stdio: "ignore",
-      timeout: 3e3
-    });
+    const res = spawnSync(
+      "bwrap",
+      buildBubblewrapInvocation({ command: "/bin/true", args: [], cwd: "/", underLandrun: true }),
+      { env: probeEnv, stdio: "ignore", timeout: 3e3 }
+    );
     bubblewrapAvailable = res.status === 0;
   } catch {
     bubblewrapAvailable = false;
@@ -7891,11 +7896,11 @@ async function runInUntrustedCodeSandbox(input) {
     ...installCommands.length > 0 ? ["https_only"] : [],
     networkPolicy
   ];
-  if (enforceKernelSandbox && policies.some((policy) => selectKernelBackend(policy, capabilities) === "none")) {
+  if (enforceKernelSandbox && policies.some((policy) => !hidesHostSockets(selectKernelBackend(policy, capabilities)))) {
     return {
       isolated: false,
       error_code: "SANDBOX_ISOLATION_UNAVAILABLE",
-      error_message: "Fail-closed: no kernel sandbox backend (landrun/bubblewrap) works on this runner, and kernel confinement is mandatory in CI or with EPURE_ENFORCE_KERNEL_SANDBOX=true (ADR-0030).",
+      error_message: "Fail-closed: kernel confinement is mandatory in CI or with EPURE_ENFORCE_KERNEL_SANDBOX=true, and this runner lacks a working bubblewrap (plus landrun for networked phases) (ADR-0034).",
       exit_code: 1,
       stdout: "",
       stderr: "",

@@ -22,7 +22,7 @@ export type SandboxErrorCode =
 
 export type SandboxNetworkPolicy = "proxy_only" | "https_only" | "offline";
 
-export type KernelSandboxBackend = "landrun" | "bubblewrap" | "none";
+export type KernelSandboxBackend = "landrun" | "bubblewrap" | "bubblewrap+landrun" | "none";
 
 export interface KernelSandboxCapabilities {
   readonly landrunAvailable: boolean;
@@ -260,12 +260,17 @@ export function buildLandrunInvocation(params: {
   return landrunArgs;
 }
 
+// Landlock does not mediate connect() on pathname Unix sockets, so the namespace must hide them:
+// /run (docker.sock, containerd, D-Bus, /run/user/<uid>) and /tmp become empty tmpfs, and a fresh
+// pid namespace and /proc keep the orchestrator's /proc/<pid>/environ out of reach.
 export function buildBubblewrapInvocation(params: {
   readonly command: string;
   readonly args: readonly string[];
   readonly cwd: string;
   readonly readOnlyPaths?: readonly string[] | undefined;
   readonly agentDir?: string | undefined;
+  // Host network kept, and the root bound writable: landrun inside enforces ports and writes.
+  readonly underLandrun?: boolean | undefined;
 }): readonly string[] {
   const resolvedCwd = resolve(params.cwd);
   // Mounted after the /tmp tmpfs so paths under /tmp stay visible.
@@ -276,11 +281,11 @@ export function buildBubblewrapInvocation(params: {
       : [])
   ];
   return [
-    "--unshare-net",
+    ...(params.underLandrun ? [] : ["--unshare-net"]),
     "--unshare-pid",
     "--unshare-ipc",
     "--die-with-parent",
-    "--ro-bind",
+    params.underLandrun ? "--bind" : "--ro-bind",
     "/",
     "/",
     "--dev",
@@ -289,6 +294,11 @@ export function buildBubblewrapInvocation(params: {
     "/proc",
     "--tmpfs",
     "/tmp",
+    "--tmpfs",
+    "/run",
+    "--ro-bind-try",
+    "/run/systemd/resolve",
+    "/run/systemd/resolve",
     ...extraBinds,
     "--bind",
     resolvedCwd,
@@ -301,7 +311,7 @@ export function buildBubblewrapInvocation(params: {
   ];
 }
 
-// bubblewrap only isolates offline runs: it cannot allow one TCP port, landrun can.
+// bubblewrap alone isolates offline runs; networked runs need landrun (one TCP port) inside it.
 export function selectKernelBackend(
   networkPolicy: SandboxNetworkPolicy,
   capabilities: KernelSandboxCapabilities
@@ -309,47 +319,52 @@ export function selectKernelBackend(
   if (networkPolicy === "offline" && capabilities.bubblewrapAvailable) {
     return "bubblewrap";
   }
-  return capabilities.landrunAvailable ? "landrun" : "none";
+  if (capabilities.landrunAvailable) {
+    return capabilities.bubblewrapAvailable ? "bubblewrap+landrun" : "landrun";
+  }
+  return "none";
+}
+
+// landrun alone leaves host sockets and other processes' /proc entries reachable.
+function hidesHostSockets(backend: KernelSandboxBackend): boolean {
+  return backend === "bubblewrap" || backend === "bubblewrap+landrun";
 }
 
 export function buildKernelSandboxedCommand(
   input: BuildKernelSandboxedCommandInput
 ): BuiltKernelSandboxedCommand {
   const backend = selectKernelBackend(input.networkPolicy, input.capabilities);
-  if (backend === "bubblewrap") {
-    return {
-      backend,
-      command: "bwrap",
-      args: buildBubblewrapInvocation({
-        command: input.command,
-        args: input.args,
-        cwd: input.cwd,
-        readOnlyPaths: input.readOnlyPaths,
-        agentDir: input.agentDir
-      })
-    };
+  const landrun = (): readonly string[] =>
+    buildLandrunInvocation({
+      command: input.command,
+      args: input.args,
+      cwd: input.cwd,
+      sanitizedEnv: input.sanitizedEnv,
+      networkPolicy: input.networkPolicy,
+      proxyPort: input.proxyPort,
+      readOnlyPaths: input.readOnlyPaths,
+      agentDir: input.agentDir
+    });
+  const bubblewrap = (command: string, args: readonly string[]): readonly string[] =>
+    buildBubblewrapInvocation({
+      command,
+      args,
+      cwd: input.cwd,
+      readOnlyPaths: input.readOnlyPaths,
+      agentDir: input.agentDir,
+      underLandrun: backend === "bubblewrap+landrun"
+    });
+
+  switch (backend) {
+    case "bubblewrap":
+      return { backend, command: "bwrap", args: bubblewrap(input.command, input.args) };
+    case "bubblewrap+landrun":
+      return { backend, command: "bwrap", args: bubblewrap("landrun", landrun()) };
+    case "landrun":
+      return { backend, command: "landrun", args: landrun() };
+    case "none":
+      return { backend, command: input.command, args: input.args };
   }
-  if (backend === "landrun") {
-    return {
-      backend,
-      command: "landrun",
-      args: buildLandrunInvocation({
-        command: input.command,
-        args: input.args,
-        cwd: input.cwd,
-        sanitizedEnv: input.sanitizedEnv,
-        networkPolicy: input.networkPolicy,
-        proxyPort: input.proxyPort,
-        readOnlyPaths: input.readOnlyPaths,
-        agentDir: input.agentDir
-      })
-    };
-  }
-  return {
-    backend,
-    command: input.command,
-    args: input.args
-  };
 }
 
 let cachedDefaultCapabilities: KernelSandboxCapabilities | null = null;
@@ -393,11 +408,11 @@ export function probeKernelSandboxCapabilities(
 
   let bubblewrapAvailable = false;
   try {
-    const res = spawnSync("bwrap", ["--version"], {
-      env: probeEnv,
-      stdio: "ignore",
-      timeout: 3000
-    });
+    const res = spawnSync(
+      "bwrap",
+      buildBubblewrapInvocation({ command: "/bin/true", args: [], cwd: "/", underLandrun: true }),
+      { env: probeEnv, stdio: "ignore", timeout: 3000 }
+    );
     bubblewrapAvailable = res.status === 0;
   } catch {
     bubblewrapAvailable = false;
@@ -685,13 +700,13 @@ export async function runInUntrustedCodeSandbox(
   ];
   if (
     enforceKernelSandbox &&
-    policies.some((policy) => selectKernelBackend(policy, capabilities) === "none")
+    policies.some((policy) => !hidesHostSockets(selectKernelBackend(policy, capabilities)))
   ) {
     return {
       isolated: false,
       error_code: "SANDBOX_ISOLATION_UNAVAILABLE",
       error_message:
-        "Fail-closed: no kernel sandbox backend (landrun/bubblewrap) works on this runner, and kernel confinement is mandatory in CI or with EPURE_ENFORCE_KERNEL_SANDBOX=true (ADR-0030).",
+        "Fail-closed: kernel confinement is mandatory in CI or with EPURE_ENFORCE_KERNEL_SANDBOX=true, and this runner lacks a working bubblewrap (plus landrun for networked phases) (ADR-0034).",
       exit_code: 1,
       stdout: "",
       stderr: "",
