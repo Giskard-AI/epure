@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { assertE2eSandboxRepository } from "./config.js";
-import type { GitHubApi } from "./github.js";
+import { GitHubGraphQLError, type GitHubApi } from "./github.js";
 
 export const SEED_PATH = "tests/e2e/seed";
 
@@ -147,14 +147,24 @@ export async function commitTree(
   return { commitSha: commit.sha, treeSha: created.sha };
 }
 
+// A replayed request finds its work done: the ref already created (422), the target already deleted (404).
 export async function forceBranches(gh: GitHubApi, branches: readonly string[], sha: string): Promise<void> {
   const R = `/repos/${gh.repository}`;
   for (const branch of branches) {
     const exists = (await gh.status("GET", `${R}/git/ref/heads/${branch}`)) === 200;
-    if (exists) {
+    const created = !exists && (await gh.status("POST", `${R}/git/refs`, { ref: `refs/heads/${branch}`, sha })) === 201;
+    if (!created) {
       await gh.call("PATCH", `${R}/git/refs/heads/${branch}`, { sha, force: true });
-    } else {
-      await gh.call("POST", `${R}/git/refs`, { ref: `refs/heads/${branch}`, sha });
+    }
+  }
+}
+
+export async function deleteIssue(gh: GitHubApi, nodeId: string): Promise<void> {
+  try {
+    await gh.graphql("mutation($id: ID!) { deleteIssue(input: {issueId: $id}) { clientMutationId } }", { id: nodeId });
+  } catch (err) {
+    if (!(err instanceof GitHubGraphQLError && err.errors.every((e) => e.type === "NOT_FOUND"))) {
+      throw err;
     }
   }
 }
@@ -221,7 +231,7 @@ export async function resetSandbox(gh: GitHubApi, log: (line: string) => void): 
   }
   await waitForNoActiveRuns(gh, 180_000);
   for (const id of plan.deleteRulesetIds) {
-    await gh.call("DELETE", `${R}/rulesets/${id}`);
+    await gh.call("DELETE", `${R}/rulesets/${id}`, undefined, [204, 404]);
   }
   const { commitSha, treeSha } = await commitTree(gh, seed.files, "chore: seed the EPURE e2e sandbox", []);
   if (treeSha !== seed.treeSha) {
@@ -233,10 +243,10 @@ export async function resetSandbox(gh: GitHubApi, log: (line: string) => void): 
     await gh.call("PATCH", `${R}/pulls/${number}`, { state: "closed" });
   }
   for (const issue of plan.deleteIssues) {
-    await gh.graphql("mutation($id: ID!) { deleteIssue(input: {issueId: $id}) { clientMutationId } }", { id: issue.node_id });
+    await deleteIssue(gh, issue.node_id);
   }
   for (const ref of plan.deleteRefs) {
-    await gh.call("DELETE", `${R}/git/${encodeRefPath(ref)}`);
+    await gh.call("DELETE", `${R}/git/${encodeRefPath(ref)}`, undefined, [204, 404]);
   }
   log(`[reset] main and dev at seed ${commitSha} (tree ${treeSha})`);
   return { seedCommitSha: commitSha, seedTreeSha: treeSha, plan };

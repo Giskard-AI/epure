@@ -26,8 +26,10 @@ import {
   type UsageRecord
 } from "./e2e/report.js";
 import {
+  deleteIssue,
   destructiveTargetProblems,
   encodeRefPath,
+  forceBranches,
   parseLsTree,
   planSandboxReset,
   readSeedFromGit,
@@ -228,6 +230,44 @@ describe("planSandboxReset", () => {
     }
   ])("$id", ({ snapshot, expected }) => {
     expect(planSandboxReset(snapshot)).toMatchObject(expected);
+  });
+});
+
+describe("reset replays", () => {
+  const sandbox = (answers: Response[]) => {
+    const calls: string[] = [];
+    const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push(`${init?.method} ${String(url).replace("https://api.github.com/repos/o/sandbox", "")}`);
+      return answers.shift() ?? new Response("", { status: 500 });
+    }) as typeof fetch;
+    return { calls, gh: createGitHubApi("t", "o/sandbox", { fetchImpl, sleep: async () => undefined }) };
+  };
+  const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status });
+
+  it.each<{ id: string; answers: Response[]; calls: string[] }>([
+    { id: "existing-branch-is-force-moved", answers: [json(200, {}), json(200, {})], calls: ["GET /git/ref/heads/main", "PATCH /git/refs/heads/main"] },
+    { id: "missing-branch-is-created", answers: [json(404, {}), json(201, {})], calls: ["GET /git/ref/heads/main", "POST /git/refs"] },
+    {
+      id: "creation-replayed-after-it-landed-moves-the-ref",
+      answers: [json(404, {}), json(502, {}), json(422, { message: "Reference already exists" }), json(200, {})],
+      calls: ["GET /git/ref/heads/main", "POST /git/refs", "POST /git/refs", "PATCH /git/refs/heads/main"]
+    }
+  ])("forceBranches: $id", async ({ answers, calls }) => {
+    const { gh, calls: made } = sandbox(answers);
+
+    await forceBranches(gh, ["main"], "a".repeat(40));
+    expect(made).toEqual(calls);
+  });
+
+  it.each<{ id: string; answer: Response; error: RegExp | null }>([
+    { id: "deleted", answer: json(200, { data: { deleteIssue: { clientMutationId: null } } }), error: null },
+    { id: "already-deleted-by-a-replay", answer: json(200, { errors: [{ type: "NOT_FOUND", message: "Could not resolve to a node" }] }), error: null },
+    { id: "refused", answer: json(200, { errors: [{ type: "FORBIDDEN", message: "Resource not accessible" }] }), error: /Resource not accessible/ }
+  ])("deleteIssue: $id", async ({ answer, error }) => {
+    const { gh } = sandbox([answer]);
+    const deleted = deleteIssue(gh, "I_1");
+
+    await (error ? expect(deleted).rejects.toThrow(error) : expect(deleted).resolves.toBeUndefined());
   });
 });
 
