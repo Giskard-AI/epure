@@ -235,6 +235,7 @@ export function decideEscalation(
 
 export interface SuccessCheck {
   readonly id:
+    | "reached-end-state"
     | "feature-pr-open"
     | "no-internal-escalation"
     | "at-most-one-escalation-per-ticket"
@@ -249,15 +250,40 @@ export interface PullRequestRef {
   readonly url: string;
 }
 
+export interface EndState {
+  readonly phase: string;
+  readonly status: string;
+  readonly subphase: string | null;
+}
+
+// Gate 3 waits for the human merge after the feature CI passed. completed/done opens the feature PR without that wait
+// (synchronous feature integration, feature PR already merged), so such a run is not comparable.
+const ACCEPTED_END_STATES = [
+  { phase: "review", status: "awaiting_human_approval", label: "Gate 3" },
+  { phase: "completed", status: "done", label: "done without the feature CI wait" }
+] as const;
+
+export function acceptedEndState(state: Pick<EndState, "phase" | "status"> | null): (typeof ACCEPTED_END_STATES)[number] | null {
+  return ACCEPTED_END_STATES.find((s) => s.phase === state?.phase && s.status === state.status) ?? null;
+}
+
+const describeState = (s: EndState) => `${s.phase}/${s.status}${s.subphase && s.subphase !== "idle" ? ` (${s.subphase})` : ""}`;
+
+// Result fields that are null because reading them failed, with the error.
+export type Unknowns = Readonly<Partial<Record<"end_state" | "feature_pr" | "usage" | "actions" | "reviewed_task_prs" | "comments" | "host_clock", string>>>;
+
 export function evaluateRun(input: {
+  readonly endState: EndState | null;
+  readonly error: string | null;
   readonly featurePr: PullRequestRef | null;
   readonly escalations: readonly EscalationEvent[];
   readonly jobFailures: readonly JobFailure[];
   readonly usageRecords: number;
   readonly unavailableJobLogs: readonly number[];
-  readonly evidenceError: string | null;
+  readonly unknown: Unknowns;
 }): { readonly success: boolean; readonly checks: readonly SuccessCheck[] } {
-  const { featurePr, escalations, jobFailures, usageRecords, unavailableJobLogs, evidenceError } = input;
+  const { endState, error, featurePr, escalations, jobFailures, usageRecords, unavailableJobLogs, unknown } = input;
+  const accepted = acceptedEndState(endState);
   const internal = escalations.filter((e) => e.class !== "legitimate");
   const perTicket = new Map<number, number>();
   for (const e of escalations) {
@@ -266,9 +292,24 @@ export function evaluateRun(input: {
   const repeated = [...perTicket].filter(([, n]) => n > 1);
   const checks: SuccessCheck[] = [
     {
+      id: "reached-end-state",
+      passed: accepted !== null && error === null,
+      detail: error
+        ? `harness stopped${endState ? ` at ${describeState(endState)}` : ""}: ${error}`
+        : endState === null
+          ? `EPURE state unknown${unknown.end_state ? `: ${unknown.end_state}` : ""}`
+          : accepted
+            ? `${describeState(endState)} (${accepted.label})`
+            : `${describeState(endState)} is not an accepted end state`
+    },
+    {
       id: "feature-pr-open",
       passed: featurePr !== null,
-      detail: featurePr ? `#${featurePr.number} ${featurePr.url}` : "no open feature/* -> dev pull request"
+      detail: featurePr
+        ? `#${featurePr.number} ${featurePr.url}`
+        : unknown.feature_pr
+          ? `pull requests unknown: ${unknown.feature_pr}`
+          : "no open feature/* -> dev pull request"
     },
     {
       id: "no-internal-escalation",
@@ -287,9 +328,9 @@ export function evaluateRun(input: {
     },
     {
       id: "llm-usage-recorded",
-      passed: usageRecords > 0 && unavailableJobLogs.length === 0 && evidenceError === null,
-      detail: evidenceError
-        ? `evidence collection failed: ${evidenceError}`
+      passed: usageRecords > 0 && unavailableJobLogs.length === 0 && !unknown.usage,
+      detail: unknown.usage
+        ? `evidence collection failed: ${unknown.usage}`
         : unavailableJobLogs.length
           ? `no log for orchestrator jobs ${unavailableJobLogs.join(", ")}: cost incomplete`
           : usageRecords > 0
@@ -305,28 +346,63 @@ export interface Comparability {
   readonly unmet: readonly string[];
 }
 
-// Timer drift and short pauses of the WSL VM stay below this.
-const HOST_ASLEEP_TOLERANCE_MS = 60_000;
+export interface HostClock {
+  // Real time the harness process did not run: a sleeping host. null when it cannot be told from a clock jump.
+  readonly asleep_ms: number | null;
+  // How far the local wall clock moved against real time (NTP step, manual change). null without GitHub's time.
+  readonly clock_jump_ms: number | null;
+}
 
-// A run compares with another only when both did the same work (two tickets, CI on a task branch, a review) on an awake host.
+// Timer drift, the 1 s resolution of GitHub's Date header and short pauses of the WSL VM stay below this.
+const HOST_CLOCK_TOLERANCE_MS = 60_000;
+
+// Real elapsed time comes from GitHub's Date header; the monotonic clock stops while the host sleeps.
+export function hostClock(elapsed: { readonly wallMs: number; readonly monotonicMs: number; readonly githubMs: number | null }): HostClock {
+  if (elapsed.githubMs === null) {
+    const drift = Math.round(elapsed.wallMs - elapsed.monotonicMs);
+    // Without GitHub's time a wall clock ahead of the monotonic one may be sleep or a jump; behind it can only be a jump.
+    return drift < -HOST_CLOCK_TOLERANCE_MS ? { asleep_ms: null, clock_jump_ms: drift } : { asleep_ms: Math.max(0, drift), clock_jump_ms: null };
+  }
+  return {
+    asleep_ms: Math.max(0, Math.round(elapsed.githubMs - elapsed.monotonicMs)),
+    clock_jump_ms: Math.round(elapsed.wallMs - elapsed.githubMs)
+  };
+}
+
+// A run compares with another only when both reached Gate 3 after the same work (two tickets, CI on a task branch,
+// a review) on an awake host with a steady clock.
 export function assessComparability(input: {
-  readonly tickets: number;
+  readonly endState: EndState | null;
+  readonly error: string | null;
+  // null when the EPURE state could not be read.
+  readonly tickets: number | null;
   // null when the workflow runs could not be read.
   readonly taskBranchCiRuns: number | null;
-  readonly reviewedTaskPrs: number;
-  readonly hostAsleepMs: number;
+  readonly reviewedTaskPrs: number | null;
+  readonly hostClock: HostClock;
 }): Comparability {
+  const { asleep_ms: asleep, clock_jump_ms: jump } = input.hostClock;
   const unmet = [
-    ...(input.hostAsleepMs > HOST_ASLEEP_TOLERANCE_MS
-      ? [`the host slept ${(input.hostAsleepMs / 60_000).toFixed(1)} min during the run: durations are inflated`]
+    ...(input.error === null ? [] : [`the harness stopped: ${input.error}`]),
+    ...(input.endState === null ? ["EPURE end state unknown"] : []),
+    ...(input.endState?.phase === "completed" ? ["EPURE ended at completed/done: the feature CI wait was skipped"] : []),
+    ...(asleep !== null && asleep > HOST_CLOCK_TOLERANCE_MS
+      ? [`the host slept ${(asleep / 60_000).toFixed(1)} min during the run: durations are inflated`]
       : []),
-    ...(input.tickets === 2 ? [] : [`${input.tickets} tickets instead of 2`]),
+    ...(jump !== null && Math.abs(jump) > HOST_CLOCK_TOLERANCE_MS
+      ? [`the local clock jumped ${(jump / 60_000).toFixed(1)} min during the run: durations are wrong`]
+      : []),
+    ...(input.tickets === null ? ["ticket count unknown"] : input.tickets === 2 ? [] : [`${input.tickets} tickets instead of 2`]),
     ...(input.taskBranchCiRuns === null
       ? ["CI runs on task/* branches unknown: evidence collection failed"]
       : input.taskBranchCiRuns > 0
         ? []
         : ["no CI run on a task/* branch"]),
-    ...(input.reviewedTaskPrs > 0 ? [] : ["no review on a task pull request"])
+    ...(input.reviewedTaskPrs === null
+      ? ["reviews on task pull requests unknown"]
+      : input.reviewedTaskPrs > 0
+        ? []
+        : ["no review on a task pull request"])
   ];
   return { comparable: unmet.length === 0, unmet };
 }
@@ -363,7 +439,7 @@ export interface HarnessSettings {
 }
 
 export interface E2eRunResult {
-  readonly schema_version: 2;
+  readonly schema_version: 3;
   readonly run_id: string;
   readonly repository: string;
   readonly code_under_test: {
@@ -380,24 +456,30 @@ export interface E2eRunResult {
   readonly started_at: string;
   readonly ended_at: string;
   readonly duration_ms: number;
-  // Wall-clock time the harness process did not run: a sleeping laptop.
-  readonly host_asleep_ms: number;
+  // start_skew_ms: local clock minus GitHub's at preflight.
+  readonly host_clock: HostClock & { readonly start_skew_ms: number | null };
   readonly issue: PullRequestRef | null;
-  readonly tickets: readonly number[];
+  // accepted: which accepted end state EPURE reached, null for none.
+  readonly end_state: (EndState & { readonly accepted: string | null }) | null;
+  readonly tickets: readonly number[] | null;
   readonly feature_pr: PullRequestRef | null;
   readonly phases: readonly PhaseTiming[];
-  readonly usage: UsageSummary & {
-    readonly by_phase: Readonly<Record<string, UsageTotals>>;
-    // Orchestrator jobs that ran but whose log GitHub no longer serves: their requests are missing.
-    readonly unavailable_job_logs: readonly number[];
-    readonly records: readonly UsageRecord[];
-  };
-  readonly actions: ActionsMinutes;
+  readonly usage:
+    | (UsageSummary & {
+        readonly by_phase: Readonly<Record<string, UsageTotals>>;
+        // Orchestrator jobs that ran but whose log GitHub no longer serves: their requests are missing.
+        readonly unavailable_job_logs: readonly number[];
+        readonly records: readonly UsageRecord[];
+      })
+    | null;
+  readonly actions: ActionsMinutes | null;
+  readonly reviewed_task_prs: number | null;
   readonly escalations: readonly EscalationEvent[];
   readonly resumes: readonly ResumeEvent[];
   readonly job_failures: readonly JobFailure[];
   readonly comparable: Comparability;
-  readonly evidence_error: string | null;
+  // Why a null field above is null.
+  readonly unknown: Unknowns;
   readonly success: boolean;
   readonly checks: readonly SuccessCheck[];
   readonly error: string | null;
@@ -418,11 +500,13 @@ export function renderMarkdownReport(r: E2eRunResult): string {
     `- Seed tree: ${short(r.seed.tree_sha)}; install commit: ${short(r.install_commit_sha)}`,
     `- Engine: ${r.engine ? `${r.engine.executed} (agents.yml harness: ${r.engine.agents_yml_harness ?? "unset"})` : "not installed"}`,
     `- Model: \`${r.settings.model}\`, thinking ${r.settings.thinking_level}`,
-    `- Epic: ${r.issue ? r.issue.url : "not created"}; tickets: ${r.tickets.length ? r.tickets.map((t) => `#${t}`).join(", ") : "none"}`,
-    `- Feature PR: ${r.feature_pr ? r.feature_pr.url : "none"}`,
-    `- Duration: ${minutes(r.duration_ms)}; Actions: ${r.actions.minutes} min over ${r.actions.jobs} jobs (${r.actions.billable_minutes} billable)`,
+    `- Epic: ${r.issue ? r.issue.url : "not created"}; tickets: ${r.tickets === null ? "unknown" : r.tickets.length ? r.tickets.map((t) => `#${t}`).join(", ") : "none"}`,
+    `- End state: ${r.end_state ? `${describeState(r.end_state)}${r.end_state.accepted ? ` (${r.end_state.accepted})` : " (not accepted)"}` : "unknown"}`,
+    `- Feature PR: ${r.feature_pr ? r.feature_pr.url : r.unknown.feature_pr ? "unknown" : "none"}`,
+    `- Duration: ${minutes(r.duration_ms)}; Actions: ${r.actions ? `${r.actions.minutes} min over ${r.actions.jobs} jobs (${r.actions.billable_minutes} billable)` : "unknown"}`,
     `- Comparable: ${r.comparable.comparable ? "yes" : `no (${r.comparable.unmet.join("; ")})`}`,
     ...(r.error ? [`- Harness stopped: ${r.error}`] : []),
+    ...Object.entries(r.unknown).map(([field, why]) => `- Unknown ${field}: ${why}`),
     "",
     "## Success checks",
     "",
@@ -436,7 +520,7 @@ export function renderMarkdownReport(r: E2eRunResult): string {
     "",
     `## LLM usage (pricing: ${r.pricing.source || "no source recorded"})`,
     "",
-    ...(r.usage.records.length === 0
+    ...(r.usage === null || r.usage.records.length === 0
       ? ["No usage records: the cost of this run is unknown."]
       : [
           "| Model / phase | Requests | Input (cached) | Output (thinking) | Cost |",

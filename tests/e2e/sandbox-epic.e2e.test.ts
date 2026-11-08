@@ -21,7 +21,7 @@ describe.runIf(MODE === "reset")("EPURE e2e sandbox reset", () => {
 });
 
 describe.runIf(MODE === "run")("EPURE e2e sandbox epic", () => {
-  it("drives a scripted epic to an open feature pull request", { timeout: 8 * 3_600_000 }, async () => {
+  it("drives a scripted epic to Gate 3 with an open feature pull request", { timeout: 8 * 3_600_000 }, async () => {
     const { config, token, gh } = connect();
     const { result, dir } = await runSandboxEpic(config, gh, token, log);
     log(`[e2e] ${result.success ? "PASS" : "FAIL"}: report in ${dir}/report.md`);

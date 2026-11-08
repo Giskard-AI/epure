@@ -13,6 +13,7 @@ import { EPIC_BODY, EPIC_TITLE, GRILL_ANSWERS } from "./epic.js";
 import { classifyEscalation } from "./escalations.js";
 import { createOnce, type GitHubApi } from "./github.js";
 import {
+  acceptedEndState,
   actionsMinutes,
   assessComparability,
   attributeUsage,
@@ -20,6 +21,7 @@ import {
   deriveEngine,
   escalationReasonFromComment,
   evaluateRun,
+  hostClock,
   parseUsageLines,
   PhaseClock,
   renderMarkdownReport,
@@ -34,6 +36,7 @@ import {
   type JobFailure,
   type PullRequestRef,
   type ResumeEvent,
+  type Unknowns,
   type UsageLine
 } from "./report.js";
 import { commitTree, forceBranches, resetSandbox, SEED_PATH, verifyDestructiveTarget, type TreeFile } from "./reset.js";
@@ -268,6 +271,27 @@ function expectState(state: EpureIssueState, phase: EpureIssueState["phase"], st
   }
 }
 
+interface ClockSample {
+  readonly wallMs: number;
+  readonly monotonicMs: number;
+  readonly githubMs: number;
+}
+
+// GitHub's Date header has a 1 s resolution: the local times are the midpoint of the request.
+async function sampleClock(gh: GitHubApi): Promise<ClockSample> {
+  const wallBefore = Date.now();
+  const monotonicBefore = performance.now();
+  const resp = await gh.fetch("https://api.github.com/rate_limit");
+  await resp.body?.cancel();
+  const githubMs = Date.parse(resp.headers.get("date") ?? "");
+  if (Number.isNaN(githubMs)) {
+    throw new Error("GitHub answered without a Date header");
+  }
+  return { wallMs: (wallBefore + Date.now()) / 2, monotonicMs: (monotonicBefore + performance.now()) / 2, githubMs };
+}
+
+const MAX_CLOCK_SKEW_MS = 30_000;
+
 async function resolveEpureSha(gh: GitHubApi, ref: string): Promise<string> {
   const { sha } = await gh.call<{ sha: string }>("GET", `/repos/${EPURE_REPOSITORY}/commits/${encodeURIComponent(ref)}`);
   const bundle = `/repos/${EPURE_REPOSITORY}/contents/actions/orchestrate-issue/action.yml?ref=${sha}`;
@@ -298,7 +322,16 @@ function verifyCodeUnderTest(pinnedSha: string): string {
   return headSha;
 }
 
-async function preflight(config: E2eConfig, gh: GitHubApi): Promise<{ readonly epureSha: string; readonly harnessCommit: string }> {
+async function preflight(
+  config: E2eConfig,
+  gh: GitHubApi,
+  clock: ClockSample
+): Promise<{ readonly epureSha: string; readonly harnessCommit: string }> {
+  // The run window (created>=started_at) and the phase timings compare local time with GitHub's.
+  const skewMs = clock.wallMs - clock.githubMs;
+  if (Math.abs(skewMs) > MAX_CLOCK_SKEW_MS) {
+    throw new Error(`the local clock is ${(skewMs / 1000).toFixed(0)} s off GitHub's: sync it (e.g. \`sudo hwclock -s\` in WSL)`);
+  }
   if (!config.agentAppId || !config.releaseAppId) {
     throw new Error("agentAppId and releaseAppId are missing from the e2e config: run the GitHub Apps wizard with --e2e-config");
   }
@@ -403,9 +436,7 @@ export interface RunEvidence {
   readonly usage: ReadonlyArray<UsageLine & { readonly run_id: number; readonly job_id: number }>;
   readonly jobs: readonly ActionsJob[];
   readonly unavailableJobLogs: readonly number[];
-  // null when the evidence could not be collected.
-  readonly taskBranchCiRuns: number | null;
-  readonly error: string | null;
+  readonly taskBranchCiRuns: number;
 }
 
 export interface WorkflowJob {
@@ -448,8 +479,7 @@ export async function collectEvidence(run: Pick<Run, "gh" | "startedAt">): Promi
     usage,
     jobs,
     unavailableJobLogs,
-    taskBranchCiRuns: runs.filter((r) => r.path === CI_WORKFLOW && r.head_branch?.startsWith("task/")).length,
-    error: null
+    taskBranchCiRuns: runs.filter((r) => r.path === CI_WORKFLOW && r.head_branch?.startsWith("task/")).length
   };
 }
 
@@ -486,8 +516,8 @@ export async function runSandboxEpic(
   log: (line: string) => void
 ): Promise<{ readonly result: E2eRunResult; readonly dir: string }> {
   const startedMs = Date.now();
-  // The monotonic clock stops while the host sleeps; the wall clock does not.
-  const startedMonotonicMs = performance.now();
+  // The monotonic clock stops while the host sleeps; the wall clock does not; GitHub's tells which one moved.
+  let clockStart: ClockSample = { wallMs: startedMs, monotonicMs: performance.now(), githubMs: Number.NaN };
   const runId = new Date(startedMs).toISOString().replace(/[:.]/g, "-");
   const run: Run = {
     config,
@@ -519,7 +549,10 @@ export async function runSandboxEpic(
   let error: string | null = null;
 
   try {
-    code = await clock.time("preflight", () => preflight(config, gh));
+    code = await clock.time("preflight", async () => {
+      clockStart = await sampleClock(gh);
+      return preflight(config, gh, clockStart);
+    });
     const reset = await clock.time("reset", () => resetSandbox(gh, log));
     seed = { commitSha: reset.seedCommitSha, treeSha: reset.seedTreeSha };
     install = await clock.time("setup_repo", () => installEpure(run, seed, code.epureSha, token));
@@ -551,7 +584,9 @@ export async function runSandboxEpic(
     state = await clock.time("implementation", () =>
       drive(run, token, "/epure approve", RESUME_POLICY.resume_command, config.implementationTimeoutMinutes)
     );
-    expectState(state, "review", "awaiting_human_approval");
+    if (!acceptedEndState(state)) {
+      throw new Error(`expected review/awaiting_human_approval (Gate 3) or completed/done, EPURE is at ${state.phase}/${state.status}`);
+    }
   } catch (err) {
     error = err instanceof Error ? err.message : String(err);
     log(`[e2e] stopped: ${error}`);
@@ -559,37 +594,57 @@ export async function runSandboxEpic(
 
   const dir = resolve(config.outputDir, runId);
   mkdirSync(dir, { recursive: true });
-  const finalState = run.issue ? await readState(run, token).catch(() => null) : null;
-  const featurePr = run.issue ? await findFeaturePr(run, finalState) : null;
-  const evidence = await collectEvidence(run).catch((err: unknown): RunEvidence => {
-    const message = err instanceof Error ? err.message : String(err);
-    log(`[e2e] usage and job collection failed: ${message}`);
-    return { usage: [], jobs: [], unavailableJobLogs: [], taskBranchCiRuns: null, error: message };
-  });
-  if (evidence.unavailableJobLogs.length) {
+  const unknown: Partial<Record<keyof Unknowns, string>> = {};
+  // A failed read leaves its result field null and says why, so result.json is always written.
+  const attempt = async <T>(field: keyof Unknowns, read: () => Promise<T>): Promise<T | null> => {
+    try {
+      return await read();
+    } catch (err) {
+      unknown[field] = err instanceof Error ? err.message : String(err);
+      log(`[e2e] ${field} unknown: ${unknown[field]}`);
+      return null;
+    }
+  };
+  const finalState = run.issue ? await attempt("end_state", () => readState(run, token)) : null;
+  const featurePr = run.issue ? await attempt("feature_pr", () => findFeaturePr(run, finalState)) : null;
+  const evidence = await attempt("usage", () => collectEvidence(run));
+  if (!evidence) {
+    unknown.actions = unknown.usage!;
+  } else if (evidence.unavailableJobLogs.length) {
     log(`[e2e] no log for orchestrator jobs ${evidence.unavailableJobLogs.join(", ")}: their LLM usage is missing`);
   }
-  const reviewedTaskPrs = run.issue ? await countReviewedTaskPrs(gh).catch(() => 0) : 0;
+  const reviewedTaskPrs = run.issue ? await attempt("reviewed_task_prs", () => countReviewedTaskPrs(gh)) : 0;
   if (run.issue) {
-    const comments = await gh.paginate<unknown>(`/repos/${gh.repository}/issues/${run.issue}/comments`);
-    writeFileSync(join(dir, "comments.json"), `${JSON.stringify(comments, null, 2)}\n`);
+    const comments = await attempt("comments", () => gh.paginate<unknown>(`/repos/${gh.repository}/issues/${run.issue}/comments`));
+    if (comments) {
+      writeFileSync(join(dir, "comments.json"), `${JSON.stringify(comments, null, 2)}\n`);
+    }
   }
-  const records = attributeUsage(evidence.usage, clock.phases, run.resumes);
+  const records = evidence ? attributeUsage(evidence.usage, clock.phases, run.resumes) : [];
   writeFileSync(join(dir, "usage.jsonl"), records.map((r) => JSON.stringify(r)).join("\n"));
 
-  const tickets = finalState?.plan_manifest?.tickets.map((t) => t.ticketIssueNumber) ?? [];
+  const endState = finalState ? { phase: finalState.phase, status: finalState.status, subphase: finalState.subphase ?? null } : null;
+  const tickets = unknown.end_state ? null : (finalState?.plan_manifest?.tickets.map((t) => t.ticketIssueNumber) ?? []);
   const { success, checks } = evaluateRun({
+    endState,
+    error,
     featurePr,
     escalations: run.escalations,
     jobFailures: run.jobFailures,
     usageRecords: records.length,
-    unavailableJobLogs: evidence.unavailableJobLogs,
-    evidenceError: evidence.error
+    unavailableJobLogs: evidence?.unavailableJobLogs ?? [],
+    unknown
   });
-  const endedMs = Date.now();
-  const hostAsleepMs = Math.max(0, Math.round(endedMs - startedMs - (performance.now() - startedMonotonicMs)));
+  const clockEnd = await attempt("host_clock", () => sampleClock(gh));
+  const endedMs = clockEnd?.wallMs ?? Date.now();
+  const githubElapsedMs = clockEnd && !Number.isNaN(clockStart.githubMs) ? clockEnd.githubMs - clockStart.githubMs : null;
+  const host = hostClock({
+    wallMs: endedMs - clockStart.wallMs,
+    monotonicMs: (clockEnd?.monotonicMs ?? performance.now()) - clockStart.monotonicMs,
+    githubMs: githubElapsedMs
+  });
   const result: E2eRunResult = {
-    schema_version: 2,
+    schema_version: 3,
     run_id: runId,
     repository: gh.repository,
     code_under_test: { epure_ref: config.epureRef, epure_sha: code.epureSha, harness_commit: code.harnessCommit },
@@ -602,28 +657,32 @@ export async function runSandboxEpic(
     started_at: run.startedAt,
     ended_at: new Date(endedMs).toISOString(),
     duration_ms: endedMs - startedMs,
-    host_asleep_ms: hostAsleepMs,
+    host_clock: { ...host, start_skew_ms: Number.isNaN(clockStart.githubMs) ? null : Math.round(clockStart.wallMs - clockStart.githubMs) },
     issue,
+    end_state: endState && { ...endState, accepted: acceptedEndState(endState)?.label ?? null },
     tickets,
     feature_pr: featurePr,
     phases: clock.phases,
-    usage: {
+    usage: evidence && {
       ...summarizeUsage(records, config.pricing),
       by_phase: summarizeUsageByPhase(records, config.pricing),
       unavailable_job_logs: evidence.unavailableJobLogs,
       records
     },
-    actions: actionsMinutes(evidence.jobs),
+    actions: evidence && actionsMinutes(evidence.jobs),
+    reviewed_task_prs: reviewedTaskPrs,
     escalations: run.escalations,
     resumes: run.resumes,
     job_failures: run.jobFailures,
     comparable: assessComparability({
-      tickets: tickets.length,
-      taskBranchCiRuns: evidence.taskBranchCiRuns,
+      endState,
+      error,
+      tickets: tickets?.length ?? null,
+      taskBranchCiRuns: evidence?.taskBranchCiRuns ?? null,
       reviewedTaskPrs,
-      hostAsleepMs
+      hostClock: host
     }),
-    evidence_error: evidence.error,
+    unknown,
     success,
     checks,
     error

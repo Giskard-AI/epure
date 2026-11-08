@@ -15,6 +15,7 @@ import {
   deriveEngine,
   escalationReasonFromComment,
   evaluateRun,
+  hostClock,
   parseUsageLines,
   PhaseClock,
   renderMarkdownReport,
@@ -22,7 +23,10 @@ import {
   summarizeUsage,
   summarizeUsageByPhase,
   type E2eRunResult,
+  type EndState,
   type EscalationEvent,
+  type HostClock,
+  type Unknowns,
   type UsageRecord
 } from "./e2e/report.js";
 import {
@@ -833,98 +837,134 @@ describe("evaluateRun", () => {
   const pr = { number: 9, url: "https://github.com/o/sandbox/pull/9" };
   const failure = { run_id: 1, url: "https://github.com/o/sandbox/actions/runs/1", conclusion: "failure", phase: "spec", at: "" };
 
-  it.each([
-    { id: "open-pr-and-one-escalation-per-ticket-passes", pr, escalations: [escalation(3), escalation(4)], jobFailures: [], usage: 5, failed: [] },
-    { id: "no-feature-pr-fails", pr: null, escalations: [], jobFailures: [], usage: 5, failed: ["feature-pr-open"] },
+  const gate3: EndState = { phase: "review", status: "awaiting_human_approval", subphase: "idle" };
+  const passing = {
+    endState: gate3,
+    error: null,
+    featurePr: pr,
+    escalations: [],
+    jobFailures: [],
+    usageRecords: 5,
+    unavailableJobLogs: [],
+    unknown: {}
+  } satisfies Parameters<typeof evaluateRun>[0];
+
+  it.each<{ id: string; patch: Partial<Parameters<typeof evaluateRun>[0]>; failed: string[] }>([
+    { id: "gate-3-with-one-escalation-per-ticket-passes", patch: { escalations: [escalation(3), escalation(4)] }, failed: [] },
+    { id: "completed-done-passes", patch: { endState: { phase: "completed", status: "done", subphase: "idle" } }, failed: [] },
     {
-      id: "internal-escalation-fails",
-      pr,
-      escalations: [escalation(1, "branch_update_conflict")],
-      jobFailures: [],
-      usage: 5,
-      failed: ["no-internal-escalation"]
+      id: "feature-pr-open-while-waiting-for-feature-ci-fails",
+      patch: { endState: { phase: "review", status: "active", subphase: "waiting_feature_ci" } },
+      failed: ["reached-end-state"]
     },
-    { id: "unclassified-escalation-fails", pr, escalations: [escalation(1, "unrecorded")], jobFailures: [], usage: 5, failed: ["no-internal-escalation"] },
-    {
-      id: "two-escalations-on-one-ticket-fail",
-      pr,
-      escalations: [escalation(3), escalation(3)],
-      jobFailures: [],
-      usage: 5,
-      failed: ["at-most-one-escalation-per-ticket"]
-    },
-    { id: "failed-orchestrator-run-fails", pr, escalations: [], jobFailures: [failure], usage: 5, failed: ["no-orchestrator-job-failure"] },
-    { id: "zero-usage-records-fail", pr, escalations: [], jobFailures: [], usage: 0, failed: ["llm-usage-recorded"] }
-  ])("$id", ({ pr: featurePr, escalations, jobFailures, usage, failed }) => {
-    const { success, checks } = evaluateRun({
-      featurePr,
-      escalations,
-      jobFailures,
-      usageRecords: usage,
-      unavailableJobLogs: [],
-      evidenceError: null
-    });
+    { id: "harness-error-at-gate-3-fails", patch: { error: "EPURE stalled in review/idle with nothing running" }, failed: ["reached-end-state"] },
+    { id: "unknown-end-state-fails", patch: { endState: null, unknown: { end_state: "GET ref: HTTP 502" } }, failed: ["reached-end-state"] },
+    { id: "no-feature-pr-fails", patch: { featurePr: null }, failed: ["feature-pr-open"] },
+    { id: "internal-escalation-fails", patch: { escalations: [escalation(1, "branch_update_conflict")] }, failed: ["no-internal-escalation"] },
+    { id: "unclassified-escalation-fails", patch: { escalations: [escalation(1, "unrecorded")] }, failed: ["no-internal-escalation"] },
+    { id: "two-escalations-on-one-ticket-fail", patch: { escalations: [escalation(3), escalation(3)] }, failed: ["at-most-one-escalation-per-ticket"] },
+    { id: "failed-orchestrator-run-fails", patch: { jobFailures: [failure] }, failed: ["no-orchestrator-job-failure"] },
+    { id: "zero-usage-records-fail", patch: { usageRecords: 0 }, failed: ["llm-usage-recorded"] }
+  ])("$id", ({ patch, failed }) => {
+    const { success, checks } = evaluateRun({ ...passing, ...patch });
 
     expect(checks.filter((c) => !c.passed).map((c) => c.id)).toEqual(failed);
     expect(success).toBe(failed.length === 0);
   });
 
-  it.each([
-    { id: "every-orchestrator-log-read", unavailable: [], error: null, passed: true, detail: "5 requests" },
+  it.each<{ id: string; patch: Partial<Parameters<typeof evaluateRun>[0]>; detail: string }>([
+    { id: "gate-3", patch: {}, detail: "review/awaiting_human_approval (Gate 3)" },
+    { id: "completed-done", patch: { endState: { phase: "completed", status: "done", subphase: "idle" } }, detail: "completed/done (done without the feature CI wait)" },
+    {
+      id: "waiting-for-feature-ci",
+      patch: { endState: { phase: "review", status: "active", subphase: "waiting_feature_ci" } },
+      detail: "review/active (waiting_feature_ci) is not an accepted end state"
+    },
+    { id: "stopped-by-a-timeout", patch: { error: "timed out after 240 min" }, detail: "harness stopped at review/awaiting_human_approval: timed out after 240 min" },
+    { id: "state-unreadable", patch: { endState: null, unknown: { end_state: "GET ref: HTTP 502" } }, detail: "EPURE state unknown: GET ref: HTTP 502" }
+  ])("reached-end-state detail: $id", ({ patch, detail }) => {
+    expect(evaluateRun({ ...passing, ...patch }).checks.find((c) => c.id === "reached-end-state")?.detail).toBe(detail);
+  });
+
+  it.each<{ id: string; unavailable: number[]; unknown: Unknowns; passed: boolean; detail: string }>([
+    { id: "every-orchestrator-log-read", unavailable: [], unknown: {}, passed: true, detail: "5 requests" },
     {
       id: "orchestrator-job-without-log-leaves-the-cost-incomplete",
       unavailable: [128711902545],
-      error: null,
+      unknown: {},
       passed: false,
       detail: "no log for orchestrator jobs 128711902545: cost incomplete"
     },
     {
       id: "failed-collection-is-reported-not-shown-as-zero",
       unavailable: [],
-      error: "GET /runs: HTTP 502",
+      unknown: { usage: "GET /runs: HTTP 502" },
       passed: false,
       detail: "evidence collection failed: GET /runs: HTTP 502"
     }
-  ])("$id", ({ unavailable, error, passed, detail }) => {
-    const { checks } = evaluateRun({
-      featurePr: pr,
-      escalations: [],
-      jobFailures: [],
-      usageRecords: 5,
-      unavailableJobLogs: unavailable,
-      evidenceError: error
-    });
+  ])("$id", ({ unavailable, unknown, passed, detail }) => {
+    const { checks } = evaluateRun({ ...passing, unavailableJobLogs: unavailable, unknown });
 
     expect(checks.find((c) => c.id === "llm-usage-recorded")).toEqual({ id: "llm-usage-recorded", passed, detail });
   });
 });
 
 describe("assessComparability", () => {
-  it.each([
-    { id: "two-tickets-ci-and-review", input: { tickets: 2, taskBranchCiRuns: 3, reviewedTaskPrs: 2 }, expected: { comparable: true, unmet: [] } },
+  const steady = { asleep_ms: 0, clock_jump_ms: 0 };
+  const comparable = {
+    endState: { phase: "review", status: "awaiting_human_approval", subphase: "idle" },
+    error: null,
+    tickets: 2,
+    taskBranchCiRuns: 3,
+    reviewedTaskPrs: 2,
+    hostClock: steady
+  } satisfies Parameters<typeof assessComparability>[0];
+
+  it.each<{ id: string; patch: Partial<Parameters<typeof assessComparability>[0]>; unmet: string[] }>([
+    { id: "two-tickets-ci-and-review-at-gate-3", patch: {}, unmet: [] },
+    { id: "three-tickets", patch: { tickets: 3 }, unmet: ["3 tickets instead of 2"] },
+    { id: "no-task-ci-and-no-review", patch: { taskBranchCiRuns: 0, reviewedTaskPrs: 0 }, unmet: ["no CI run on a task/* branch", "no review on a task pull request"] },
+    { id: "unread-workflow-runs-are-unknown-not-absent", patch: { taskBranchCiRuns: null }, unmet: ["CI runs on task/* branches unknown: evidence collection failed"] },
+    { id: "unread-reviews-are-unknown-not-absent", patch: { reviewedTaskPrs: null }, unmet: ["reviews on task pull requests unknown"] },
+    { id: "unread-state", patch: { endState: null, tickets: null }, unmet: ["EPURE end state unknown", "ticket count unknown"] },
     {
-      id: "three-tickets",
-      input: { tickets: 3, taskBranchCiRuns: 3, reviewedTaskPrs: 2 },
-      expected: { comparable: false, unmet: ["3 tickets instead of 2"] }
+      id: "completed-done-skipped-the-feature-ci-wait",
+      patch: { endState: { phase: "completed", status: "done", subphase: "idle" } },
+      unmet: ["EPURE ended at completed/done: the feature CI wait was skipped"]
     },
+    { id: "harness-error", patch: { error: "timed out after 240 min" }, unmet: ["the harness stopped: timed out after 240 min"] },
+    { id: "short-vm-pause-is-tolerated", patch: { hostClock: { asleep_ms: 20_000, clock_jump_ms: 0 } }, unmet: [] },
+    { id: "sleep-at-the-tolerance-is-tolerated", patch: { hostClock: { asleep_ms: 60_000, clock_jump_ms: 0 } }, unmet: [] },
     {
-      id: "no-task-ci-and-no-review",
-      input: { tickets: 2, taskBranchCiRuns: 0, reviewedTaskPrs: 0 },
-      expected: { comparable: false, unmet: ["no CI run on a task/* branch", "no review on a task pull request"] }
+      id: "sleep-past-the-tolerance-inflates-durations",
+      patch: { hostClock: { asleep_ms: 60_001, clock_jump_ms: 0 } },
+      unmet: ["the host slept 1.0 min during the run: durations are inflated"]
     },
-    {
-      id: "unread-workflow-runs-are-unknown-not-absent",
-      input: { tickets: 2, taskBranchCiRuns: null, reviewedTaskPrs: 2 },
-      expected: { comparable: false, unmet: ["CI runs on task/* branches unknown: evidence collection failed"] }
-    },
-    { id: "short-vm-pause-is-tolerated", input: { tickets: 2, taskBranchCiRuns: 3, reviewedTaskPrs: 2, hostAsleepMs: 20_000 }, expected: { comparable: true, unmet: [] } },
     {
       id: "host-asleep-inflates-durations",
-      input: { tickets: 2, taskBranchCiRuns: 3, reviewedTaskPrs: 2, hostAsleepMs: 3_533_000 },
-      expected: { comparable: false, unmet: ["the host slept 58.9 min during the run: durations are inflated"] }
+      patch: { hostClock: { asleep_ms: 3_533_000, clock_jump_ms: 0 } },
+      unmet: ["the host slept 58.9 min during the run: durations are inflated"]
+    },
+    {
+      id: "clock-jump-makes-durations-wrong",
+      patch: { hostClock: { asleep_ms: 0, clock_jump_ms: -600_000 } },
+      unmet: ["the local clock jumped -10.0 min during the run: durations are wrong"]
     }
-  ])("$id", ({ input, expected }) => {
-    expect(assessComparability({ hostAsleepMs: 0, ...input })).toEqual(expected);
+  ])("$id", ({ patch, unmet }) => {
+    expect(assessComparability({ ...comparable, ...patch })).toEqual({ comparable: unmet.length === 0, unmet });
+  });
+});
+
+describe("hostClock", () => {
+  it.each<{ id: string; elapsed: Parameters<typeof hostClock>[0]; expected: HostClock }>([
+    { id: "awake-host-steady-clock", elapsed: { wallMs: 3_600_000, monotonicMs: 3_600_000, githubMs: 3_600_000 }, expected: { asleep_ms: 0, clock_jump_ms: 0 } },
+    { id: "host-slept-an-hour", elapsed: { wallMs: 7_200_000, monotonicMs: 3_600_000, githubMs: 7_200_000 }, expected: { asleep_ms: 3_600_000, clock_jump_ms: 0 } },
+    { id: "wall-clock-stepped-forward", elapsed: { wallMs: 4_200_000, monotonicMs: 3_600_000, githubMs: 3_600_000 }, expected: { asleep_ms: 0, clock_jump_ms: 600_000 } },
+    { id: "sleep-and-a-jump-back", elapsed: { wallMs: 6_600_000, monotonicMs: 3_600_000, githubMs: 7_200_000 }, expected: { asleep_ms: 3_600_000, clock_jump_ms: -600_000 } },
+    { id: "without-github-time-a-gap-counts-as-sleep", elapsed: { wallMs: 7_200_000, monotonicMs: 3_600_000, githubMs: null }, expected: { asleep_ms: 3_600_000, clock_jump_ms: null } },
+    { id: "without-github-time-a-backward-wall-is-a-jump", elapsed: { wallMs: 3_000_000, monotonicMs: 3_600_000, githubMs: null }, expected: { asleep_ms: null, clock_jump_ms: -600_000 } }
+  ])("$id", ({ elapsed, expected }) => {
+    expect(hostClock(elapsed)).toEqual(expected);
   });
 });
 
@@ -1083,8 +1123,9 @@ describe("stepProgress", () => {
 describe("renderMarkdownReport", () => {
   const baseResult = (patch: Partial<E2eRunResult>): E2eRunResult => {
     const escalations = [escalation(3)];
+    const endState = { phase: "review", status: "active", subphase: "waiting_feature_ci" };
     return {
-      schema_version: 2,
+      schema_version: 3,
       run_id: "r1",
       repository: "Giskard-AI/epure-e2e-sandbox",
       code_under_test: { epure_ref: "dev", epure_sha: "0123456789abcdef", harness_commit: "0123456789abcdef" },
@@ -1107,19 +1148,21 @@ describe("renderMarkdownReport", () => {
       started_at: "2026-11-08T10:00:00.000Z",
       ended_at: "2026-11-08T11:00:00.000Z",
       duration_ms: 3_600_000,
-      host_asleep_ms: 0,
+      host_clock: { asleep_ms: 0, clock_jump_ms: 0, start_skew_ms: 120 },
       issue: { number: 1, url: "https://github.com/o/sandbox/issues/1" },
+      end_state: { ...endState, accepted: null },
       tickets: [3, 4],
       feature_pr: null,
       phases: [{ name: "plan", started_at: "", ended_at: "", duration_ms: 90_000, outcome: "ok" }],
       usage: { ...summarizeUsage([], {}), by_phase: {}, unavailable_job_logs: [], records: [] },
       actions: { jobs: 4, minutes: 12.5, billable_minutes: 14, by_workflow: {} },
+      reviewed_task_prs: 0,
       escalations,
       resumes: [],
       job_failures: [],
       comparable: { comparable: false, unmet: ["no review on a task pull request"] },
-      evidence_error: null,
-      ...evaluateRun({ featurePr: null, escalations, jobFailures: [], usageRecords: 0, unavailableJobLogs: [], evidenceError: null }),
+      unknown: {},
+      ...evaluateRun({ endState, error: "timed out", featurePr: null, escalations, jobFailures: [], usageRecords: 0, unavailableJobLogs: [], unknown: {} }),
       error: "timed out",
       ...patch
     };
@@ -1127,6 +1170,8 @@ describe("renderMarkdownReport", () => {
 
   it.each([
     { id: "verdict", expected: "# EPURE e2e run r1: FAIL" },
+    { id: "end-state", expected: "- End state: review/active (waiting_feature_ci) (not accepted)" },
+    { id: "failed-end-state-check", expected: "- [ ] reached-end-state: harness stopped at review/active (waiting_feature_ci): timed out" },
     { id: "failed-check", expected: "- [ ] feature-pr-open: no open feature/* -> dev pull request" },
     { id: "both-shas", expected: "- EPURE under test: `dev` (0123456789ab); harness commit 0123456789ab" },
     { id: "seed-tree", expected: "- Seed tree: feedfacecafe; install commit: deadbeef" },
@@ -1147,5 +1192,17 @@ describe("renderMarkdownReport", () => {
     );
 
     expect(report).toContain("## Orchestrator job failures (1)\n\n- failure in spec at 2026-11-08T10:30:00.000Z: https://x/runs/1");
+  });
+
+  it("states unknown values as unknown with their reason, not as zero", () => {
+    const report = renderMarkdownReport(
+      baseResult({ usage: null, actions: null, tickets: null, end_state: null, unknown: { usage: "GET /runs: HTTP 502", end_state: "GET ref: HTTP 502" } })
+    );
+
+    expect(
+      ["Actions: unknown", "tickets: unknown", "- End state: unknown", "- Unknown usage: GET /runs: HTTP 502", "- Unknown end_state: GET ref: HTTP 502"].filter(
+        (line) => !report.includes(line)
+      )
+    ).toEqual([]);
   });
 });
