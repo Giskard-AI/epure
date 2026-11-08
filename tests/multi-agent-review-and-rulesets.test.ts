@@ -1,9 +1,12 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   applyGitHubRepositoryGovernance,
   buildGitHubRulesetApiPayload,
   buildGovernanceRulesets,
   CONVENTIONAL_COMMIT_PATTERN_REGEX,
+  GITHUB_ACTIONS_INTEGRATION_ID,
+  planAndApplyRepoSetup,
   planGitHubRulesetChanges,
   type RepositoryRulesetSpec,
   type ResourcePlanAction
@@ -166,14 +169,14 @@ describe("EPURE v1.2.0 — Repository Rulesets, Multi-Agent Review Roster & Sema
         id: "feature-governance-ruleset-lets-the-agent-app-push-directly-and-allows-merge-commits",
         ruleset: "epure-feature-governance",
         expectedTarget: "branch",
-        expectedRules: ["pull_request", "commit_message_pattern"],
+        expectedRules: ["pull_request", "required_status_checks", "commit_message_pattern"],
         expectedBypass: [{ actor_id: 2888446, actor_type: "Integration", bypass_mode: "always" }]
       },
       {
-        id: "dev-ruleset-keeps-linear-history-and-no-bypass",
+        id: "dev-ruleset-keeps-linear-history-requires-ci-and-has-no-bypass",
         ruleset: "epure-dev-governance",
         expectedTarget: "branch",
-        expectedRules: ["deletion", "non_fast_forward", "required_linear_history", "pull_request", "commit_message_pattern"],
+        expectedRules: ["deletion", "non_fast_forward", "required_linear_history", "pull_request", "required_status_checks", "commit_message_pattern"],
         expectedBypass: []
       },
       {
@@ -247,9 +250,23 @@ describe("EPURE v1.2.0 — Repository Rulesets, Multi-Agent Review Roster & Sema
         }
       },
       {
-        id: "feature-governance-ruleset-already-generated-by-this-version-is-noop",
+        id: "feature-governance-ruleset-without-required-status-checks-from-the-previous-version-is-reported-as-update",
         existingFeature: {
           rules: ["commit_message_pattern", "pull_request"],
+          bypassMode: "always"
+        },
+        expected: {
+          "epure-feature-integrity": "create",
+          "epure-feature-governance": "update",
+          "epure-dev-governance": "noop",
+          "epure-release-immutability": "create",
+          "epure-release-tags": "create"
+        }
+      },
+      {
+        id: "feature-governance-ruleset-already-generated-by-this-version-is-noop",
+        existingFeature: {
+          rules: ["commit_message_pattern", "pull_request", "required_status_checks"],
           bypassMode: "always"
         },
         expected: {
@@ -262,7 +279,9 @@ describe("EPURE v1.2.0 — Repository Rulesets, Multi-Agent Review Roster & Sema
       }
     ])("$id", async ({ existingFeature, expected }) => {
       const rulesets = buildGovernanceRulesets({ agentAppName: "a", releaseAppName: "r" });
-      const devRules = ["deletion", "non_fast_forward", "required_linear_history", "pull_request", "commit_message_pattern"];
+      const generatedRules = (spec: RepositoryRulesetSpec) =>
+        (buildGitHubRulesetApiPayload(spec, {}) as { rules: Array<{ type: string; parameters?: object }> }).rules;
+      const featureRequiredChecks = generatedRules(rulesets.featureGovernance).find((r) => r.type === "required_status_checks");
       const remote: Record<string, unknown> = {
         "/rulesets": [
           { id: 1, name: "epure-feature-governance" },
@@ -271,13 +290,17 @@ describe("EPURE v1.2.0 — Repository Rulesets, Multi-Agent Review Roster & Sema
         "/rulesets/1": {
           target: "branch",
           conditions: { ref_name: { include: ["refs/heads/feature/*"], exclude: [] } },
-          rules: existingFeature.rules.map((type) => ({ type, parameters: { extra_github_default: true } })),
+          rules: existingFeature.rules.map((type) =>
+            type === "required_status_checks"
+              ? { type, parameters: { ...featureRequiredChecks?.parameters, do_not_enforce_on_create: false } }
+              : { type, parameters: { extra_github_default: true } }
+          ),
           bypass_actors: [{ actor_id: 2888446, actor_type: "Integration", bypass_mode: existingFeature.bypassMode }]
         },
         "/rulesets/2": {
           target: "branch",
           conditions: { ref_name: { include: ["refs/heads/dev"], exclude: [] } },
-          rules: devRules.map((type) => ({ type })),
+          rules: generatedRules(rulesets.devGovernance),
           bypass_actors: []
         }
       };
@@ -352,6 +375,96 @@ describe("EPURE v1.2.0 — Repository Rulesets, Multi-Agent Review Roster & Sema
       });
 
       expect(Object.fromEntries(plan.map((p) => [p.name, p.action]))).toEqual(expected);
+    });
+
+    // Check names as GitHub reports them: the job name, prefixed by the caller job name for a reusable workflow.
+    function reportedJobNames(workflow: string): string[] {
+      const jobs = workflow.split(/^jobs:\n/m)[1] ?? "";
+      return jobs.split(/^(?= {2}[a-z][\w-]*:$)/m).flatMap((block) => {
+        const id = /^ {2}([a-z][\w-]*):$/m.exec(block)?.[1];
+        if (!id) {
+          return [];
+        }
+        const name = /^ {4}name: "(.+)"$/m.exec(block)?.[1] ?? id;
+        const reusable = /^ {4}uses: Giskard-AI\/epure\/(\.github\/workflows\/[\w.-]+)@/m.exec(block)?.[1];
+        return reusable ? reportedJobNames(readFileSync(reusable, "utf8")).map((called) => `${name} / ${called}`) : [name];
+      });
+    }
+
+    function checksReportedOnPullRequestsInto(branchPattern: string): string[] {
+      return planAndApplyRepoSetup({ repository: "Hartorn-Inc/trame", dryRun: true }).planned_workflows.flatMap((wf) => {
+        const branches = / {2}pull_request:\n(?: {4}.*\n)*? {4}branches: \[(.*)\]/.exec(wf.content)?.[1] ?? "";
+        return branches.split(",").map((b) => b.trim().replace(/'/g, "")).includes(branchPattern) ? reportedJobNames(wf.content) : [];
+      });
+    }
+
+    it.each([
+      { id: "dev-ruleset-requires-exactly-the-github-actions-checks-the-generated-workflows-report-on-a-pr-into-dev", ruleset: "devGovernance" as const, branchPattern: "dev" },
+      { id: "feature-ruleset-requires-exactly-the-github-actions-checks-the-generated-workflows-report-on-a-pr-into-feature", ruleset: "featureGovernance" as const, branchPattern: "feature/**" }
+    ])("$id", ({ ruleset, branchPattern }) => {
+      const spec = buildGovernanceRulesets({ agentAppName: "a", releaseAppName: "r" })[ruleset];
+      const payload = buildGitHubRulesetApiPayload(spec, {}) as {
+        rules: Array<{ type: string; parameters?: { strict_required_status_checks_policy: boolean; required_status_checks: Array<{ context: string; integration_id: number }> } }>;
+      };
+      const rule = payload.rules.find((r) => r.type === "required_status_checks");
+      const reported = checksReportedOnPullRequestsInto(branchPattern);
+
+      expect(rule?.parameters?.strict_required_status_checks_policy).toBe(false);
+      expect(rule?.parameters?.required_status_checks.map((c) => c.context).sort()).toEqual([...reported].sort());
+      expect(new Set(rule?.parameters?.required_status_checks.map((c) => c.integration_id))).toEqual(new Set([GITHUB_ACTIONS_INTEGRATION_ID]));
+    });
+
+    const devSpec = buildGovernanceRulesets({ agentAppName: "a", releaseAppName: "r" }).devGovernance;
+    const pinnedDevChecks = (devSpec.requiredStatusChecks ?? []).map((context) => ({ context, integration_id: GITHUB_ACTIONS_INTEGRATION_ID }));
+    it.each([
+      {
+        id: "dev-ruleset-without-required-status-checks-from-the-previous-version-is-reported-as-update",
+        checks: undefined,
+        expected: "update"
+      },
+      {
+        id: "dev-ruleset-requiring-the-previous-verify-contract-check-name-is-reported-as-update",
+        checks: pinnedDevChecks.map((c) => (c.context.startsWith("Verify EPURE") ? { ...c, context: "verify-contract / Verify EPURE Consumer Contract" } : c)),
+        expected: "update"
+      },
+      {
+        id: "dev-ruleset-accepting-the-checks-from-any-app-is-reported-as-update",
+        checks: pinnedDevChecks.map(({ context }) => ({ context })),
+        expected: "update"
+      },
+      {
+        id: "dev-ruleset-generated-by-this-version-with-checks-listed-in-another-order-is-noop",
+        checks: [...pinnedDevChecks].reverse(),
+        expected: "noop"
+      }
+    ])("$id", async ({ checks, expected }) => {
+      const otherRules = (buildGitHubRulesetApiPayload(devSpec, {}) as { rules: Array<{ type: string }> }).rules.filter(
+        (r) => r.type !== "required_status_checks"
+      );
+      const remote: Record<string, unknown> = {
+        "/rulesets": [{ id: 2, name: devSpec.name }],
+        "/rulesets/2": {
+          target: "branch",
+          conditions: { ref_name: { include: ["refs/heads/dev"], exclude: [] } },
+          rules: checks
+            ? [...otherRules, { type: "required_status_checks", parameters: { strict_required_status_checks_policy: false, do_not_enforce_on_create: false, required_status_checks: checks } }]
+            : otherRules,
+          bypass_actors: []
+        }
+      };
+      const mockFetch: typeof fetch = async (input) => {
+        const path = new URL(String(input)).pathname.replace("/repos/Hartorn-Inc/trame", "");
+        return new Response(JSON.stringify(remote[path]), { status: 200 });
+      };
+
+      const plan = await planGitHubRulesetChanges({
+        repository: "Hartorn-Inc/trame",
+        githubToken: "ghs_testToken",
+        governanceRulesets: [devSpec],
+        fetchImpl: mockFetch
+      });
+
+      expect(plan).toEqual([{ name: devSpec.name, action: expected }]);
     });
 
     it.each([

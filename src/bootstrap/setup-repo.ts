@@ -1792,6 +1792,19 @@ function computeFilePlanAction(
   return existing === desiredContent ? "noop" : "update";
 }
 
+// Job names the generated pull_request workflows report. `ai-review` is left out: only EPURE publishes it,
+// so a Renovate or human PR into dev would wait for it forever.
+const REQUIRED_CI_CHECKS = [
+  "Verify EPURE Consumer Contract / Verify EPURE Consumer Contract",
+  "PR title",
+  "Quality (Format, Lint, Typecheck, Test & Build)",
+  "Zizmor"
+] as const;
+
+// GitHub Actions' App id on github.com. Pinning a required check to it keeps a check run another App publishes
+// under the same name (EPURE's own "PR title") from satisfying the rule.
+export const GITHUB_ACTIONS_INTEGRATION_ID = 15368;
+
 export function buildGovernanceRulesets(params: {
   readonly agentAppName: string;
   readonly releaseAppName: string;
@@ -1804,13 +1817,7 @@ export function buildGovernanceRulesets(params: {
   readonly releaseTags: RepositoryRulesetSpec;
   readonly all: readonly RepositoryRulesetSpec[];
 } {
-  const requiredChecks = [
-    "verify-contract / Verify EPURE Consumer Contract",
-    "PR title",
-    "ai-review",
-    "Quality (Format, Lint, Typecheck, Test & Build)",
-    "Zizmor"
-  ] as const;
+  const requiredChecks = REQUIRED_CI_CHECKS;
 
   // Nobody, the agent App included, deletes or force-pushes a feature/* branch.
   const featureIntegrity: RepositoryRulesetSpec = {
@@ -1940,7 +1947,7 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
       pattern: "dev",
       requirePullRequest: true,
       requireStatusChecks: true,
-      requiredChecks: ["verify-contract", "PR title", "ai-review", "Quality (Format, Lint, Typecheck, Test & Build)", "Zizmor"],
+      requiredChecks: REQUIRED_CI_CHECKS,
       requireHumanApproval: true,
       allowedMergeMethods: ["squash"],
       allowMergeCommit: false,
@@ -1950,7 +1957,7 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
       pattern: "feature/*",
       requirePullRequest: true,
       requireStatusChecks: true,
-      requiredChecks: ["verify-contract", "PR title", "ai-review", "Quality (Format, Lint, Typecheck, Test & Build)", "Zizmor"],
+      requiredChecks: REQUIRED_CI_CHECKS,
       requireHumanApproval: false,
       allowedMergeMethods: ["squash"],
       allowMergeCommit: false,
@@ -2439,6 +2446,20 @@ export function buildGitHubRulesetApiPayload(
       }
     });
   }
+  if (spec.requiredStatusChecks && spec.requiredStatusChecks.length > 0) {
+    rules.push({
+      type: "required_status_checks",
+      parameters: {
+        // Not strict: bringing a feature/* head up to date is a push epure-feature-governance refuses to humans,
+        // so a strict dev rule would leave the feature PR unmergeable each time dev moves.
+        strict_required_status_checks_policy: false,
+        required_status_checks: spec.requiredStatusChecks.map((context) => ({
+          context,
+          integration_id: GITHUB_ACTIONS_INTEGRATION_ID
+        }))
+      }
+    });
+  }
   if (spec.commitMessagePattern) {
     rules.push({
       type: "commit_message_pattern",
@@ -2469,7 +2490,16 @@ export function buildGitHubRulesetApiPayload(
 interface GitHubRulesetShape {
   readonly target?: string;
   readonly conditions?: { readonly ref_name?: { readonly include?: readonly string[] } };
-  readonly rules?: ReadonlyArray<{ readonly type: string }>;
+  readonly rules?: ReadonlyArray<{
+    readonly type: string;
+    readonly parameters?: {
+      readonly strict_required_status_checks_policy?: boolean;
+      readonly required_status_checks?: ReadonlyArray<{
+        readonly context: string;
+        readonly integration_id?: number;
+      }>;
+    };
+  }>;
   readonly bypass_actors?: ReadonlyArray<{
     readonly actor_id: number | null;
     readonly actor_type: string;
@@ -2477,12 +2507,22 @@ interface GitHubRulesetShape {
   }>;
 }
 
-// Rule parameters are not compared: GitHub fills in defaults the payload never sends.
+// Only the required checks are compared among rule parameters: GitHub fills in defaults the payload never sends.
+function ruleFingerprint(rule: NonNullable<GitHubRulesetShape["rules"]>[number]): string {
+  if (rule.type !== "required_status_checks") {
+    return rule.type;
+  }
+  const checks = (rule.parameters?.required_status_checks ?? [])
+    .map((c) => `${c.context}@${c.integration_id ?? "any"}`)
+    .sort();
+  return JSON.stringify([rule.type, rule.parameters?.strict_required_status_checks_policy === true, checks]);
+}
+
 function rulesetFingerprint(ruleset: GitHubRulesetShape): string {
   return JSON.stringify({
     target: ruleset.target,
     include: [...(ruleset.conditions?.ref_name?.include ?? [])].sort(),
-    rules: (ruleset.rules ?? []).map((r) => r.type).sort(),
+    rules: (ruleset.rules ?? []).map(ruleFingerprint).sort(),
     bypass: (ruleset.bypass_actors ?? [])
       .map((a) => `${a.actor_type}:${a.actor_id}:${a.bypass_mode}`)
       .sort()
