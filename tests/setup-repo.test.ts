@@ -109,12 +109,10 @@ describe("1. Dry-run simulation & guided application (planAndApplyRepoSetup)", (
         "epure-feature-integrity",
         "epure-feature-governance",
         "epure-dev-governance",
-        "epure-release-immutability"
+        "epure-release-immutability",
+        "epure-release-tags"
       ]);
-      expect(result.ruleset_spec.targetRefs).toEqual([
-        "refs/heads/main",
-        "refs/tags/v*"
-      ]);
+      expect(result.ruleset_spec.targetRefs).toEqual(["refs/heads/main"]);
       expect(result.ruleset_spec.blockDirectPushes).toBe(true);
       expect(result.ruleset_spec.blockForcePushes).toBe(true);
       expect(result.ruleset_spec.blockDeletions).toBe(true);
@@ -864,10 +862,7 @@ describe("5. Pre-bundled CLI (dist/cli/setup-repo.mjs) & skill (.agents/skills/s
     };
     expect(parsed.status).toBe("dry_run");
     expect(parsed.dry_run).toBe(true);
-    expect(parsed.ruleset_spec.targetRefs).toEqual([
-      "refs/heads/main",
-      "refs/tags/v*"
-    ]);
+    expect(parsed.ruleset_spec.targetRefs).toEqual(["refs/heads/main"]);
   });
 
   it.each([

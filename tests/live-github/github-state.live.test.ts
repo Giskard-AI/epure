@@ -9,7 +9,9 @@ import {
 } from "../../src/auth/github-app-jwt.js";
 import {
   buildGitHubRulesetApiPayload,
-  buildGovernanceRulesets
+  buildGovernanceRulesets,
+  planGitHubRulesetChanges,
+  type RepositoryRulesetSpec
 } from "../../src/bootstrap/setup-repo.js";
 import { syncBranchWithBase } from "../../src/orchestrator/github/branch-sync.js";
 import { createGitHubRateLimitedFetch } from "../../src/orchestrator/github/rate-limit.js";
@@ -88,7 +90,7 @@ const HOOK_TIMEOUT_MS = 120_000;
 const STALE_NAMESPACE_AGE_MS = 24 * 60 * 60 * 1000;
 const RUN_ID = `${Date.now().toString(36)}-${randomBytes(3).toString("hex")}`;
 const NS = `live/${RUN_ID}`;
-const NAMESPACE_IN_REF = /^refs\/(?:heads|epure\/state)\/(live\/([0-9a-z]+)-[0-9a-f]{6})\//;
+const NAMESPACE_IN_REF = /^refs\/(?:heads|tags|epure\/state)\/(live\/([0-9a-z]+)-[0-9a-f]{6})\//;
 
 interface ApiResult<T> {
   readonly status: number;
@@ -219,7 +221,7 @@ describeLive(
         await attempt(`PR#${n}`, async () => (await api("PATCH", `${R}/pulls/${n}`, { state: "closed" })).status === 200);
       }
       for (const ns of namespaces) {
-        for (const prefix of [`heads/${ns}/`, `epure/state/${ns}/`]) {
+        for (const prefix of [`heads/${ns}/`, `tags/${ns}/`, `epure/state/${ns}/`]) {
           let refs: string[] = [];
           await attempt(`refs/${prefix}*`, async () => {
             refs = await listRefs(prefix);
@@ -235,7 +237,7 @@ describeLive(
 
     async function findStaleNamespaces(): Promise<string[]> {
       const stale = new Set<string>();
-      for (const prefix of ["heads/live/", "epure/state/live/"]) {
+      for (const prefix of ["heads/live/", "tags/live/", "epure/state/live/"]) {
         for (const ref of await listRefs(prefix)) {
           const match = NAMESPACE_IN_REF.exec(ref);
           if (match && match[1] !== NS && Date.now() - parseInt(match[2]!, 36) > STALE_NAMESPACE_AGE_MS) {
@@ -843,18 +845,89 @@ describeLive(
 
     // The sandbox App has no `administration` permission: an admin token only creates and deletes rulesets scoped to this run.
     const ADMIN_TOKEN = process.env.EPURE_LIVE_GITHUB_ADMIN_TOKEN?.trim() ?? "";
+
+    async function adminApi<T>(method: string, path: string, body?: unknown): Promise<ApiResult<T>> {
+      return await api<T>(method, path, body, ADMIN_TOKEN);
+    }
+
+    function scopeToRun(spec: RepositoryRulesetSpec, slug: string): RepositoryRulesetSpec {
+      return {
+        ...spec,
+        name: `${spec.name}-${RUN_ID}-${slug}`,
+        targetRefs: spec.targetRefs.map((ref) => ref.replace(/^refs\/(heads|tags)\//, `refs/$1/${NS}/`))
+      };
+    }
+
+    (ADMIN_TOKEN ? describe : describe.skip)("setup-repo generated rulesets on GitHub", () => {
+      const rulesetIds: number[] = [];
+      const generated = buildGovernanceRulesets({ agentAppName: "agent", releaseAppName: "release" });
+
+      async function createRuleset(spec: RepositoryRulesetSpec, appIds: { releaseAppIntegrationId?: number }): Promise<ApiResult<{ id: number; target: string }>> {
+        const created = await adminApi<{ id: number; target: string }>("POST", `${R}/rulesets`, buildGitHubRulesetApiPayload(spec, appIds));
+        if (created.status === 201) {
+          rulesetIds.push(created.data.id);
+        }
+        return created;
+      }
+
+      afterEach(async () => {
+        for (const id of rulesetIds.splice(0)) {
+          await adminApi("DELETE", `${R}/rulesets/${id}`);
+        }
+      });
+
+      it("every-generated-ruleset-is-accepted-with-its-target-and-a-rerun-changes-nothing", async () => {
+        const appIds = { agentAppIntegrationId: Number(cfg.appId), releaseAppIntegrationId: Number(cfg.appId) };
+        const specs = generated.all.map((spec) => scopeToRun(spec, "all"));
+
+        for (const spec of specs) {
+          const created = await createRuleset(spec, appIds);
+          expect({ name: spec.name, status: created.status, target: created.data.target }).toEqual({
+            name: spec.name,
+            status: 201,
+            target: spec.target
+          });
+        }
+        const plan = await planGitHubRulesetChanges({ repository: cfg.repository, githubToken: ADMIN_TOKEN, governanceRulesets: specs, ...appIds });
+        const reapplied = await Promise.all(
+          specs.map(async (spec, i) => (await adminApi("PUT", `${R}/rulesets/${rulesetIds[i]}`, buildGitHubRulesetApiPayload(spec, appIds))).status)
+        );
+
+        expect(plan.map((p) => p.action)).toEqual(specs.map(() => "noop"));
+        expect(reapplied).toEqual(specs.map(() => 200));
+      });
+
+      it("previous-main-and-v-tags-branch-ruleset-is-rejected-with-422", async () => {
+        const previous = scopeToRun({ ...generated.releaseImmutability, targetRefs: ["refs/heads/main", "refs/tags/v*"] }, "previous");
+
+        const created = await createRuleset(previous, { releaseAppIntegrationId: Number(cfg.appId) });
+
+        expect(created.status).toBe(422);
+      });
+
+      it.each([
+        { id: "tag-ruleset-refuses-creating-moving-and-deleting-a-v-tag-without-bypass", bypass: false, expected: { create: 422, move: 422, remove: 422 } },
+        { id: "tag-ruleset-lets-the-release-app-bypass-create-move-and-delete-a-v-tag", bypass: true, expected: { create: 201, move: 200, remove: 204 } }
+      ])("$id", async ({ bypass, expected }) => {
+        const slug = bypass ? "tags-bypass" : "tags-locked";
+        const tagSpec = scopeToRun(generated.releaseTags, slug);
+        const tagPrefix = `refs/tags/${NS}/${slug}`;
+        const spec = { ...tagSpec, targetRefs: [`${tagPrefix}/v*`] };
+        const moved = await commitOnTop([baseSha], `${NS}/${slug}.txt`, "tag target\n");
+        const existing = await api("POST", `${R}/git/refs`, { ref: `${tagPrefix}/v1.0.0`, sha: baseSha });
+        expect(existing.status).toBe(201);
+        expect((await createRuleset(spec, bypass ? { releaseAppIntegrationId: Number(cfg.appId) } : {})).status).toBe(201);
+
+        const create = await api("POST", `${R}/git/refs`, { ref: `${tagPrefix}/v1.1.0`, sha: baseSha });
+        const move = await api("PATCH", `${R}/git/${tagPrefix}/v1.0.0`, { sha: moved, force: true });
+        const remove = await api("DELETE", `${R}/git/${tagPrefix}/v1.0.0`);
+
+        expect({ create: create.status, move: move.status, remove: remove.status }).toEqual(expected);
+      });
+    });
+
     (ADMIN_TOKEN ? describe : describe.skip)("setup-repo feature/* rulesets vs EPURE direct writes (#108)", () => {
       const rulesetIds: number[] = [];
-
-      async function adminApi<T>(method: string, path: string, body?: unknown): Promise<ApiResult<T>> {
-        const resp = await fetch(`https://api.github.com${path}`, {
-          method,
-          headers: { Authorization: `Bearer ${ADMIN_TOKEN}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" },
-          ...(body !== undefined ? { body: JSON.stringify(body) } : {})
-        });
-        const text = await resp.text();
-        return { status: resp.status, headers: resp.headers, data: (text ? JSON.parse(text) : null) as T };
-      }
 
       async function installFeatureRulesets(slug: string, legacy: boolean): Promise<void> {
         const generated = buildGovernanceRulesets({ agentAppName: "agent", releaseAppName: "release" });

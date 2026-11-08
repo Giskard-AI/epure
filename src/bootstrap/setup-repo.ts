@@ -188,8 +188,12 @@ export interface RulesetBypassActorSpec {
 
 export interface RepositoryRulesetSpec {
   readonly name: string;
+  // GitHub accepts one target per ruleset: branch rulesets match refs/heads/*, tag rulesets refs/tags/*.
+  readonly target: "branch" | "tag";
   readonly enforcement: "active";
   readonly targetRefs: readonly string[];
+  readonly blockCreations?: boolean | undefined;
+  readonly blockUpdates?: boolean | undefined;
   readonly blockDirectPushes: boolean;
   readonly blockForcePushes: boolean;
   readonly blockDeletions: boolean;
@@ -1797,6 +1801,7 @@ export function buildGovernanceRulesets(params: {
   readonly featureGovernance: RepositoryRulesetSpec;
   readonly devGovernance: RepositoryRulesetSpec;
   readonly releaseImmutability: RepositoryRulesetSpec;
+  readonly releaseTags: RepositoryRulesetSpec;
   readonly all: readonly RepositoryRulesetSpec[];
 } {
   const requiredChecks = [
@@ -1810,6 +1815,7 @@ export function buildGovernanceRulesets(params: {
   // Nobody, the agent App included, deletes or force-pushes a feature/* branch.
   const featureIntegrity: RepositoryRulesetSpec = {
     name: "epure-feature-integrity",
+    target: "branch",
     enforcement: "active",
     targetRefs: ["refs/heads/feature/*"],
     blockDirectPushes: false,
@@ -1822,6 +1828,7 @@ export function buildGovernanceRulesets(params: {
   // resolutions), so the agent App bypasses the PR and commit rules there and linear history stays off.
   const featureGovernance: RepositoryRulesetSpec = {
     name: "epure-feature-governance",
+    target: "branch",
     enforcement: "active",
     targetRefs: ["refs/heads/feature/*"],
     blockDirectPushes: true,
@@ -1842,6 +1849,7 @@ export function buildGovernanceRulesets(params: {
 
   const devGovernance: RepositoryRulesetSpec = {
     name: "epure-dev-governance",
+    target: "branch",
     enforcement: "active",
     targetRefs: ["refs/heads/dev"],
     blockDirectPushes: true,
@@ -1857,10 +1865,30 @@ export function buildGovernanceRulesets(params: {
 
   const releaseImmutability: RepositoryRulesetSpec = {
     name: "epure-release-immutability",
+    target: "branch",
     enforcement: "active",
-    targetRefs: ["refs/heads/main", "refs/tags/v*"],
+    targetRefs: ["refs/heads/main"],
     blockDirectPushes: true,
     blockForcePushes: true,
+    blockDeletions: true,
+    bypassActors: [
+      {
+        appRole: "release",
+        appName: params.releaseAppName,
+        mode: "always"
+      }
+    ]
+  };
+
+  const releaseTags: RepositoryRulesetSpec = {
+    name: "epure-release-tags",
+    target: "tag",
+    enforcement: "active",
+    targetRefs: ["refs/tags/v*"],
+    blockCreations: true,
+    blockUpdates: true,
+    blockDirectPushes: false,
+    blockForcePushes: false,
     blockDeletions: true,
     bypassActors: [
       {
@@ -1876,7 +1904,8 @@ export function buildGovernanceRulesets(params: {
     featureGovernance,
     devGovernance,
     releaseImmutability,
-    all: [featureIntegrity, featureGovernance, devGovernance, releaseImmutability]
+    releaseTags,
+    all: [featureIntegrity, featureGovernance, devGovernance, releaseImmutability, releaseTags]
   };
 }
 
@@ -2293,8 +2322,8 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
     },
     {
       id: "apply_branch_protections_and_release_ruleset",
-      title: "Confirm 4 Repository Rulesets (feature/* integrity and governance, dev, main+v*) and squash-only merge settings",
-      details: `Run 'setup-repo --apply --apply-github-settings' to enforce squash-only merges and provision 'epure-feature-integrity', 'epure-feature-governance', 'epure-dev-governance', and '${rulesetSpec.name}'.`
+      title: "Confirm 5 Repository Rulesets (feature/* integrity and governance, dev, main, v* tags) and squash-only merge settings",
+      details: `Run 'setup-repo --apply --apply-github-settings' to enforce squash-only merges and provision ${governanceRulesets.map((r) => `'${r.name}'`).join(", ")}.`
     }
   ];
 
@@ -2381,6 +2410,12 @@ export function buildGitHubRulesetApiPayload(
   }
 
   const rules: Array<Record<string, unknown>> = [];
+  if (spec.blockCreations) {
+    rules.push({ type: "creation" });
+  }
+  if (spec.blockUpdates) {
+    rules.push({ type: "update" });
+  }
   if (spec.blockDeletions) {
     rules.push({ type: "deletion" });
   }
@@ -2417,7 +2452,7 @@ export function buildGitHubRulesetApiPayload(
 
   return {
     name: spec.name,
-    target: "branch",
+    target: spec.target,
     enforcement: spec.enforcement,
     bypass_actors: bypassActors,
     conditions: {
@@ -2431,6 +2466,7 @@ export function buildGitHubRulesetApiPayload(
 }
 
 interface GitHubRulesetShape {
+  readonly target?: string;
   readonly conditions?: { readonly ref_name?: { readonly include?: readonly string[] } };
   readonly rules?: ReadonlyArray<{ readonly type: string }>;
   readonly bypass_actors?: ReadonlyArray<{
@@ -2443,6 +2479,7 @@ interface GitHubRulesetShape {
 // Rule parameters are not compared: GitHub fills in defaults the payload never sends.
 function rulesetFingerprint(ruleset: GitHubRulesetShape): string {
   return JSON.stringify({
+    target: ruleset.target,
     include: [...(ruleset.conditions?.ref_name?.include ?? [])].sort(),
     rules: (ruleset.rules ?? []).map((r) => r.type).sort(),
     bypass: (ruleset.bypass_actors ?? [])

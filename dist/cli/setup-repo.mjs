@@ -2863,6 +2863,7 @@ function buildGovernanceRulesets(params) {
   ];
   const featureIntegrity = {
     name: "epure-feature-integrity",
+    target: "branch",
     enforcement: "active",
     targetRefs: ["refs/heads/feature/*"],
     blockDirectPushes: false,
@@ -2872,6 +2873,7 @@ function buildGovernanceRulesets(params) {
   };
   const featureGovernance = {
     name: "epure-feature-governance",
+    target: "branch",
     enforcement: "active",
     targetRefs: ["refs/heads/feature/*"],
     blockDirectPushes: true,
@@ -2891,6 +2893,7 @@ function buildGovernanceRulesets(params) {
   };
   const devGovernance = {
     name: "epure-dev-governance",
+    target: "branch",
     enforcement: "active",
     targetRefs: ["refs/heads/dev"],
     blockDirectPushes: true,
@@ -2905,10 +2908,29 @@ function buildGovernanceRulesets(params) {
   };
   const releaseImmutability = {
     name: "epure-release-immutability",
+    target: "branch",
     enforcement: "active",
-    targetRefs: ["refs/heads/main", "refs/tags/v*"],
+    targetRefs: ["refs/heads/main"],
     blockDirectPushes: true,
     blockForcePushes: true,
+    blockDeletions: true,
+    bypassActors: [
+      {
+        appRole: "release",
+        appName: params.releaseAppName,
+        mode: "always"
+      }
+    ]
+  };
+  const releaseTags = {
+    name: "epure-release-tags",
+    target: "tag",
+    enforcement: "active",
+    targetRefs: ["refs/tags/v*"],
+    blockCreations: true,
+    blockUpdates: true,
+    blockDirectPushes: false,
+    blockForcePushes: false,
     blockDeletions: true,
     bypassActors: [
       {
@@ -2923,7 +2945,8 @@ function buildGovernanceRulesets(params) {
     featureGovernance,
     devGovernance,
     releaseImmutability,
-    all: [featureIntegrity, featureGovernance, devGovernance, releaseImmutability]
+    releaseTags,
+    all: [featureIntegrity, featureGovernance, devGovernance, releaseImmutability, releaseTags]
   };
 }
 function planAndApplyRepoSetup(input) {
@@ -3262,8 +3285,8 @@ function planAndApplyRepoSetup(input) {
     },
     {
       id: "apply_branch_protections_and_release_ruleset",
-      title: "Confirm 4 Repository Rulesets (feature/* integrity and governance, dev, main+v*) and squash-only merge settings",
-      details: `Run 'setup-repo --apply --apply-github-settings' to enforce squash-only merges and provision 'epure-feature-integrity', 'epure-feature-governance', 'epure-dev-governance', and '${rulesetSpec.name}'.`
+      title: "Confirm 5 Repository Rulesets (feature/* integrity and governance, dev, main, v* tags) and squash-only merge settings",
+      details: `Run 'setup-repo --apply --apply-github-settings' to enforce squash-only merges and provision ${governanceRulesets.map((r) => `'${r.name}'`).join(", ")}.`
     }
   ];
   const deferredWorkflowsList = effectiveVerification.deferred_external_workflows ?? [];
@@ -3333,6 +3356,12 @@ function buildGitHubRulesetApiPayload(spec, appIntegrationIds) {
     }
   }
   const rules = [];
+  if (spec.blockCreations) {
+    rules.push({ type: "creation" });
+  }
+  if (spec.blockUpdates) {
+    rules.push({ type: "update" });
+  }
   if (spec.blockDeletions) {
     rules.push({ type: "deletion" });
   }
@@ -3368,7 +3397,7 @@ function buildGitHubRulesetApiPayload(spec, appIntegrationIds) {
   }
   return {
     name: spec.name,
-    target: "branch",
+    target: spec.target,
     enforcement: spec.enforcement,
     bypass_actors: bypassActors,
     conditions: {
@@ -3382,6 +3411,7 @@ function buildGitHubRulesetApiPayload(spec, appIntegrationIds) {
 }
 function rulesetFingerprint(ruleset) {
   return JSON.stringify({
+    target: ruleset.target,
     include: [...ruleset.conditions?.ref_name?.include ?? []].sort(),
     rules: (ruleset.rules ?? []).map((r) => r.type).sort(),
     bypass: (ruleset.bypass_actors ?? []).map((a) => `${a.actor_type}:${a.actor_id}:${a.bypass_mode}`).sort()
