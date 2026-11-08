@@ -219,6 +219,13 @@ describe("Sandbox LLM proxy & untrusted code credential isolation (#98)", () => 
       return false;
     }
   };
+  // A killed orphan stays visible to kill(pid, 0) until init reaps it, which lags under load.
+  const exitsWithin = async (pid: number, ms: number): Promise<boolean> => {
+    for (const deadline = Date.now() + ms; isAlive(pid) && Date.now() < deadline; ) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    return !isAlive(pid);
+  };
   it.each([
     {
       id: "a-background-process-left-by-the-phase-dies-with-it",
@@ -247,7 +254,7 @@ describe("Sandbox LLM proxy & untrusted code credential isolation (#98)", () => 
 
     expect(Date.now() - started).toBeLessThan(15_000);
     expect(result.exit_code).toBe(expectedExitCode);
-    expect(isAlive(Number(result.stdout.trim()))).toBe(false);
+    expect(await exitsWithin(Number(result.stdout.trim()), 2_000)).toBe(true);
   });
 
   const RUNNER_KEYS = {
