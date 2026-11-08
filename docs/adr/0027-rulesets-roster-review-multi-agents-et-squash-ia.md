@@ -62,3 +62,12 @@ La décision 1.3 plaçait `main` et `refs/tags/v*` dans un seul Ruleset. GitHub 
 `setup-repo` applique `epure-release-tags` avant `epure-release-immutability` : une application interrompue ne laisse jamais les tags `v*` sans protection. `--apply-github-settings` et son dry-run s'arrêtent avant tout appel GitHub si l'ID d'une App déclarée en Bypass Actor manque (`--release-app-id`, `--agent-app-id`) : le Ruleset serait sinon installé sans Bypass Actor, ou perdrait celui déjà installé, et bloquerait l'App.
 
 Conséquence opérationnelle : le hotfix manuel sur `main` prévu par l'[ADR-0005](0005-release-fast-forward-et-synchronisation-des-adr.md) exige qu'un administrateur désactive temporairement `epure-release-immutability`, puis le réactive.
+
+## Amendement (v3.0.0, #123)
+
+Les checks des décisions 1.1 et 1.2 n'étaient jamais envoyés à GitHub : une PR `feature/* -> dev` pouvait être fusionnée avec la CI en échec. `epure-feature-governance` et `epure-dev-governance` envoient désormais une règle `required_status_checks` avec les noms que les workflows générés publient réellement : `Verify EPURE Consumer Contract / Verify EPURE Consumer Contract` (nom du job appelant suivi du job du workflow réutilisable), `PR title`, `Quality (Format, Lint, Typecheck, Test & Build)` et `Zizmor`.
+
+- Chaque check est rattaché à l'App GitHub Actions (`integration_id` 15368). L'`Agent App` publie aussi un check run `PR title` toujours vert ; sans ce rattachement, il pourrait satisfaire la règle à la place du workflow.
+- `ai-review` n'est plus exigé. Seul EPURE le publie, sur ses propres PRs : une PR Renovate (qui cible `dev`) ou humaine l'attendrait indéfiniment, et `dev` n'a aucun Bypass Actor.
+- `strict_required_status_checks_policy` reste à `false`. Mettre à jour la branche de tête d'une PR `feature/* -> dev` est un push sur `feature/*` qu'`epure-feature-governance` refuse aux humains ; une règle stricte bloquerait la PR à chaque avancée de `dev`. La CI `pull_request` s'exécute déjà sur le commit de merge avec `dev`.
+- Sur `feature/*`, l'`Agent App` reste en bypass `always` : ses squash-merges `task/* -> feature/*` dépendent de la porte CI d'EPURE, pas du Ruleset.
