@@ -16,6 +16,19 @@ import type {
   ProviderKind,
   ResponseSchemaSpec
 } from "./types.js";
+import { extractLLMTokenUsage, formatLLMUsageLogLine } from "./usage.js";
+
+// One stdout line per successful request: the e2e harness sums them from the job logs.
+async function logTokenUsage(res: Response, provider: string, model: string): Promise<void> {
+  try {
+    const usage = extractLLMTokenUsage(provider, model, await res.clone().json());
+    if (usage) {
+      process.stdout.write(`${formatLLMUsageLogLine(usage)}\n`);
+    }
+  } catch {
+    // A body that is not JSON has no usage; the provider still reads the original response.
+  }
+}
 
 export function resolveConfigValue(
   val: string | undefined,
@@ -331,6 +344,7 @@ export class LLMClient {
               : { ...reqInit, signal: AbortSignal.timeout(requestTimeoutMs) };
           const res = await fetchFn(reqUrl, effectiveInit);
           if (res.ok) {
+            await logTokenUsage(res, provider, model);
             return res;
           }
 

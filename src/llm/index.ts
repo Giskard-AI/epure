@@ -62,3 +62,9 @@ export {
   type ToolParameterProperty,
   type ToolParameterType
 } from "./types.js";
+export {
+  extractLLMTokenUsage,
+  formatLLMUsageLogLine,
+  LLM_USAGE_LOG_PREFIX,
+  type LLMTokenUsage
+} from "./usage.js";
