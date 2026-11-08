@@ -1439,17 +1439,49 @@ async function createLlmSandboxProxy(options) {
     })
   };
 }
+var LOOPBACK_HOSTS = /* @__PURE__ */ new Set(["127.0.0.1", "localhost", "[::1]"]);
 function resolveLlmProxyTarget(llm, runnerEnv) {
-  const { provider, providerConfig } = parseModelIdentifier(
-    llm.model,
-    llm.providers,
-    runnerEnv
-  );
-  const apiKey = resolveProviderApiKey({ provider, providerConfig, env: runnerEnv });
-  if (!apiKey) {
-    return { missingKeyFor: provider };
+  const model = llm.model.trim();
+  if (!model) {
+    return {
+      error_code: "LLM_MODEL_MISSING",
+      message: "Fail-closed: the sandbox LLM route has no model; set the 'model' input to '<provider>/<model>'."
+    };
   }
-  return { upstream: resolveProviderUpstream(provider, providerConfig, runnerEnv), apiKey };
+  const slash = model.indexOf("/");
+  const prefix = slash > 0 ? model.slice(0, slash).trim() : "";
+  const isKnownProvider = prefix !== "" && mapKnownProviderPrefix(prefix) !== void 0;
+  const isAlias = prefix !== "" && !isKnownProvider && llm.providers?.[prefix] !== void 0;
+  if (!isKnownProvider && !isAlias) {
+    return {
+      error_code: "LLM_ROUTE_INVALID",
+      message: `Fail-closed: model '${model}' must start with a provider (openai/, anthropic/, google/, azure/, azure_ai/, openrouter/, vertex/) or a provider alias declared in .github/agents.yml; the sandbox proxy does not infer providers.`
+    };
+  }
+  const { provider, providerConfig } = parseModelIdentifier(model, llm.providers, runnerEnv);
+  const apiKey = isAlias ? providerConfig?.apiKey?.trim() : resolveProviderApiKey({ provider, providerConfig, env: runnerEnv });
+  if (!apiKey) {
+    return {
+      error_code: "LLM_API_KEY_MISSING",
+      message: isAlias ? `Fail-closed: provider alias '${prefix}' must declare its own api_key in .github/agents.yml (e.g. os.environ/${prefix.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY) and the runner must have it.` : `Fail-closed: runner has no API key for LLM provider '${provider}' (model '${model}') to hold in the sandbox proxy.`
+    };
+  }
+  try {
+    const upstream = resolveProviderUpstream(provider, providerConfig, runnerEnv);
+    const base = new URL(upstream.baseUrl);
+    if (base.protocol !== "https:" && !(base.protocol === "http:" && LOOPBACK_HOSTS.has(base.hostname))) {
+      return {
+        error_code: "LLM_ROUTE_INVALID",
+        message: `Fail-closed: the sandbox proxy only sends keys over https, not to '${base.origin}' (model '${model}').`
+      };
+    }
+    return { upstream, apiKey };
+  } catch (err) {
+    return {
+      error_code: "LLM_ROUTE_INVALID",
+      message: `Fail-closed: ${err instanceof Error ? err.message : String(err)}`
+    };
+  }
 }
 function collectRunnerSecretValues(runnerEnv) {
   const values = [];
@@ -1488,11 +1520,11 @@ async function runInUntrustedCodeSandbox(input) {
     };
   }
   const llmTarget = input.llm ? resolveLlmProxyTarget(input.llm, input.runnerEnv) : void 0;
-  if (llmTarget && "missingKeyFor" in llmTarget) {
+  if (llmTarget && "error_code" in llmTarget) {
     return {
       isolated: false,
-      error_code: "LLM_API_KEY_MISSING",
-      error_message: `Fail-closed: runner has no API key for LLM provider '${llmTarget.missingKeyFor}' (model '${input.llm?.model ?? ""}') to hold in the sandbox proxy.`,
+      error_code: llmTarget.error_code,
+      error_message: llmTarget.message,
       exit_code: 1,
       stdout: "",
       stderr: "",

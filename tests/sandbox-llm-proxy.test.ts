@@ -187,6 +187,64 @@ describe("Sandbox LLM proxy & untrusted code credential isolation (#98)", () => 
     }
   );
 
+  const RUNNER_KEYS = {
+    PATH: "/usr/bin",
+    OPENAI_API_KEY: REAL_KEY,
+    GEMINI_API_KEY: REAL_KEY,
+    LLM_API_KEY: REAL_KEY,
+    AZURE_OPENAI_API_KEY: REAL_KEY,
+    AZURE_AI_API_KEY: REAL_KEY
+  };
+  it.each([
+    { id: "empty-model", model: "", providers: undefined, expectedErrorCode: "LLM_MODEL_MISSING" },
+    { id: "whitespace-model", model: "   ", providers: undefined, expectedErrorCode: "LLM_MODEL_MISSING" },
+    { id: "unprefixed-model-is-not-inferred", model: "gpt-5.4", providers: undefined, expectedErrorCode: "LLM_ROUTE_INVALID" },
+    {
+      id: "unknown-prefix-without-a-declared-alias-is-not-inferred",
+      model: "corp-gateway/qwen-coder",
+      providers: undefined,
+      expectedErrorCode: "LLM_ROUTE_INVALID"
+    },
+    {
+      id: "alias-without-its-own-api-key-gets-no-fallback-key",
+      model: "corp-gateway/qwen-coder",
+      providers: { "corp-gateway": { provider: "openai", base_url: "https://llm.corp.example/v1" } },
+      expectedErrorCode: "LLM_API_KEY_MISSING"
+    },
+    {
+      id: "alias-over-plain-http-is-refused",
+      model: "corp-gateway/qwen-coder",
+      providers: {
+        "corp-gateway": { provider: "openai", base_url: "http://llm.corp.example/v1", api_key: "os.environ/LLM_API_KEY" }
+      },
+      expectedErrorCode: "LLM_ROUTE_INVALID"
+    },
+    {
+      id: "known-provider-overridden-to-plain-http-is-refused",
+      model: "openai/gpt-5.4",
+      providers: { openai: { base_url: "http://api.example/v1" } },
+      expectedErrorCode: "LLM_ROUTE_INVALID"
+    },
+    { id: "azure-without-endpoint", model: "azure/gpt-4o", providers: undefined, expectedErrorCode: "LLM_ROUTE_INVALID" },
+    { id: "azure-ai-without-endpoint", model: "azure_ai/phi-5", providers: undefined, expectedErrorCode: "LLM_ROUTE_INVALID" }
+  ] as const)(
+    "runInUntrustedCodeSandbox [$id]: refuses the LLM route before starting anything",
+    async ({ model, providers, expectedErrorCode }) => {
+      const result = await runInUntrustedCodeSandbox({
+        isolationAvailable: true,
+        runnerEnv: RUNNER_KEYS,
+        command: process.execPath,
+        args: ["-e", "console.log('should-never-run')"],
+        llm: { model, providers }
+      });
+
+      expect(result.error_code).toBe(expectedErrorCode);
+      expect(result.isolated).toBe(false);
+      expect(result.stdout).toBe("");
+      expect(result.error_message).not.toContain(REAL_KEY);
+    }
+  );
+
   it.each([
     {
       id: "openai-bearer",

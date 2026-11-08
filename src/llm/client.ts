@@ -52,7 +52,7 @@ export function resolveConfigValue(
   return trimmed;
 }
 
-function mapKnownProviderPrefix(prefix: string): ProviderKind | undefined {
+export function mapKnownProviderPrefix(prefix: string): ProviderKind | undefined {
   const lower = prefix.trim().toLowerCase();
   if (lower === "google" || lower === "gemini") {
     return "google";
