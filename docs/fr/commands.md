@@ -114,8 +114,8 @@ node dist/cli/setup-repo.mjs \
 | `--planning-model <fournisseur/modèle>` | `anthropic/claude-sonnet-4-20250514` | Définit `models.planning`. |
 | `--implementation-model <fournisseur/modèle>` | `anthropic/claude-sonnet-4-20250514` | Définit `models.implementation`. |
 | `--review-model <fournisseur/modèle>` | `openai/gpt-4.1` | Définit `models.review`. |
-| `--agent-app-id <id>` | Optionnel | ID numérique de `<owner>-epure-agent` ajouté en Bypass Actor (`always`) sur `epure-feature-governance` (`feature/*`), pour qu'EPURE pousse directement les intégrations de plan, synchronisations depuis `dev` et résolutions de conflits. `epure-feature-integrity` n'a aucun Bypass Actor : personne, l'App comprise, ne peut forcer un push ni supprimer une branche `feature/*`. |
-| `--release-app-id <id>` | Optionnel | ID numérique de `<owner>-epure-release` ajouté comme unique Bypass Actor sur `epure-release-immutability` (`main`) et `epure-release-tags` (`v*`). |
+| `--agent-app-id <id>` | Obligatoire avec `--apply-github-settings` | ID numérique de `<owner>-epure-agent` ajouté en Bypass Actor (`always`) sur `epure-feature-governance` (`feature/*`), pour qu'EPURE pousse directement les intégrations de plan, synchronisations depuis `dev` et résolutions de conflits. `epure-feature-integrity` n'a aucun Bypass Actor : personne, l'App comprise, ne peut forcer un push ni supprimer une branche `feature/*`. |
+| `--release-app-id <id>` | Obligatoire avec `--apply-github-settings` | ID numérique de `<owner>-epure-release` ajouté comme unique Bypass Actor sur `epure-release-immutability` (`main`) et `epure-release-tags` (`v*`). Sans l'un des deux ID, `--apply-github-settings` (et son dry-run) s'arrête en erreur avant tout appel GitHub : le ruleset bloquerait sinon l'App. |
 | `--require-pr-approvals <N>` | `0` | Nombre d'approbations humaines requises sur `dev` (`0` pour compatibilité mainteneur solo ; `>=1` en équipe). |
 | `--json` | `false` | Affiche le résultat structuré complet `SetupRepoResult` au format JSON sur la sortie standard au lieu du résumé Markdown. |
 

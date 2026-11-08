@@ -3417,7 +3417,24 @@ function rulesetFingerprint(ruleset) {
     bypass: (ruleset.bypass_actors ?? []).map((a) => `${a.actor_type}:${a.actor_id}:${a.bypass_mode}`).sort()
   });
 }
+function assertBypassAppIds(input) {
+  const missing = [];
+  for (const spec of input.governanceRulesets) {
+    for (const actor of spec.bypassActors) {
+      const id = actor.appRole === "agent" ? input.agentAppIntegrationId : input.releaseAppIntegrationId;
+      if (!(Number.isInteger(id) && (id ?? 0) > 0)) {
+        missing.push(`'${spec.name}' needs the ${actor.appRole} App ID (--${actor.appRole}-app-id)`);
+      }
+    }
+  }
+  if (missing.length > 0) {
+    throw new Error(
+      `Refusing to apply GitHub settings on ${input.repository}: ${missing.join("; ")}. Without it GitHub installs the ruleset with no bypass actor (or removes the bypass from the installed one) and the App is locked out.`
+    );
+  }
+}
 async function planGitHubRulesetChanges(input) {
+  assertBypassAppIds(input);
   const fetchFn = input.fetchImpl ?? fetch;
   const baseUrl = `https://api.github.com/repos/${input.repository.trim()}`;
   const headers = {
@@ -3456,6 +3473,7 @@ async function applyGitHubRepositoryGovernance(input) {
   if (!owner || !repo) {
     throw new Error(`Invalid repository slug '${input.repository}'.`);
   }
+  assertBypassAppIds(input);
   const fetchFn = input.fetchImpl ?? fetch;
   const baseUrl = "https://api.github.com";
   const headers = {
@@ -3736,4 +3754,8 @@ ${githubRulesetsPlan.map((p) => `- \`${p.name}\`: \`${p.action}\``).join("\n")}
     process.exitCode = 1;
   }
 }
-void main();
+main().catch((error) => {
+  process.stderr.write(`setup-repo: ${error instanceof Error ? error.message : String(error)}
+`);
+  process.exitCode = 1;
+});

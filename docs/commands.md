@@ -114,8 +114,8 @@ node dist/cli/setup-repo.mjs \
 | `--planning-model <provider/model>` | `anthropic/claude-sonnet-4-20250514` | Sets `models.planning`. |
 | `--implementation-model <provider/model>` | `anthropic/claude-sonnet-4-20250514` | Sets `models.implementation`. |
 | `--review-model <provider/model>` | `openai/gpt-4.1` | Sets `models.review`. |
-| `--agent-app-id <id>` | Optional | Numeric GitHub App ID of `<owner>-epure-agent` added as Bypass Actor (`always`) on `epure-feature-governance` (`feature/*`), so EPURE can push plan integrations, `dev` syncs and conflict resolutions directly. `epure-feature-integrity` has no bypass actor: nobody, the App included, can force-push or delete a `feature/*` branch. |
-| `--release-app-id <id>` | Optional | Numeric GitHub App ID of `<owner>-epure-release` added as sole Bypass Actor on `epure-release-immutability` (`main`) and `epure-release-tags` (`v*`). |
+| `--agent-app-id <id>` | Required with `--apply-github-settings` | Numeric GitHub App ID of `<owner>-epure-agent` added as Bypass Actor (`always`) on `epure-feature-governance` (`feature/*`), so EPURE can push plan integrations, `dev` syncs and conflict resolutions directly. `epure-feature-integrity` has no bypass actor: nobody, the App included, can force-push or delete a `feature/*` branch. |
+| `--release-app-id <id>` | Required with `--apply-github-settings` | Numeric GitHub App ID of `<owner>-epure-release` added as sole Bypass Actor on `epure-release-immutability` (`main`) and `epure-release-tags` (`v*`). Without one of the two IDs, `--apply-github-settings` (and its dry-run) stops with an error before any GitHub call: the ruleset would otherwise lock the App out. |
 | `--require-pr-approvals <N>` | `0` | Number of human PR review approvals required on `dev` (`0` for solo-maintainer compatibility; `>=1` for teams). |
 | `--json` | `false` | Emits the full structured `SetupRepoResult` JSON payload to stdout instead of the Markdown summary. |
 

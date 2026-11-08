@@ -2488,10 +2488,30 @@ function rulesetFingerprint(ruleset: GitHubRulesetShape): string {
   });
 }
 
+// buildGitHubRulesetApiPayload drops a bypass actor without an App ID: GitHub would then create the
+// ruleset with nobody able to bypass it, or strip the bypass from an installed one.
+function assertBypassAppIds(input: ApplyGitHubRepositoryGovernanceInput): void {
+  const missing: string[] = [];
+  for (const spec of input.governanceRulesets) {
+    for (const actor of spec.bypassActors) {
+      const id = actor.appRole === "agent" ? input.agentAppIntegrationId : input.releaseAppIntegrationId;
+      if (!(Number.isInteger(id) && (id ?? 0) > 0)) {
+        missing.push(`'${spec.name}' needs the ${actor.appRole} App ID (--${actor.appRole}-app-id)`);
+      }
+    }
+  }
+  if (missing.length > 0) {
+    throw new Error(
+      `Refusing to apply GitHub settings on ${input.repository}: ${missing.join("; ")}. Without it GitHub installs the ruleset with no bypass actor (or removes the bypass from the installed one) and the App is locked out.`
+    );
+  }
+}
+
 /** Read-only counterpart of `applyGitHubRepositoryGovernance` for `--dry-run`. */
 export async function planGitHubRulesetChanges(
   input: ApplyGitHubRepositoryGovernanceInput
 ): Promise<ReadonlyArray<{ readonly name: string; readonly action: ResourcePlanAction }>> {
+  assertBypassAppIds(input);
   const fetchFn = input.fetchImpl ?? fetch;
   const baseUrl = `https://api.github.com/repos/${input.repository.trim()}`;
   const headers = {
@@ -2535,6 +2555,7 @@ export async function applyGitHubRepositoryGovernance(
   if (!owner || !repo) {
     throw new Error(`Invalid repository slug '${input.repository}'.`);
   }
+  assertBypassAppIds(input);
 
   const fetchFn = input.fetchImpl ?? fetch;
   const baseUrl = "https://api.github.com";
