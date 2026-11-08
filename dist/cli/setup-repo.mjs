@@ -2730,7 +2730,7 @@ function buildCallerWorkflows(pinnedSha, stack, jobTimeoutMinutes = DEFAULT_AGEN
         "      contents: write # push task/feature branches and update refs/epure/state/*",
         "      issues: write # create child tickets and post state mirror comments",
         "      pull-requests: write # open, review, and squash-merge task PRs",
-        "      checks: write # publish ai-review, impeccable-gate, and PR title check runs",
+        "      checks: read # the GITHUB_TOKEN fallback reads CI check runs; the Agent App publishes EPURE's with its own permissions",
         "    steps:",
         ...buildSandboxToolingSetupSteps(),
         "      - name: Run pre-bundled EPURE issue orchestrator",

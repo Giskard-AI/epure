@@ -17799,11 +17799,15 @@ async function runIssueCommand(input) {
       fetchImpl: countedFetch,
       sleepFn: input.sleepFn
     });
-    const gh = createGitHubRestHelper({
+    const restHelper = createGitHubRestHelper({
       repository: input.repository,
       token: activeToken,
       fetchImpl: githubFetch
     });
+    const gh = mintedAppToken ? restHelper : {
+      ...restHelper,
+      publishCheckRun: async (run2) => run2.name === "PR title" ? void 0 : restHelper.publishCheckRun(run2)
+    };
     const rawStore = input.stateStore ?? createGitHubApiRefStateStore({
       repository: input.repository,
       githubToken: activeToken,

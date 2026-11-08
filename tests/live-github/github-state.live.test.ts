@@ -9,9 +9,9 @@ import {
   revokeGitHubInstallationToken
 } from "../../src/auth/github-app-jwt.js";
 import {
+  GITHUB_ACTIONS_INTEGRATION_ID,
   buildGitHubRulesetApiPayload,
   buildGovernanceRulesets,
-  GITHUB_ACTIONS_INTEGRATION_ID,
   planGitHubRulesetChanges,
   type RepositoryRulesetSpec
 } from "../../src/bootstrap/setup-repo.js";
@@ -1174,14 +1174,14 @@ describeLive(
       });
 
       it.for([
-        { id: "dev-ruleset-refuses-a-squash-merge-while-the-required-check-is-red", ruleset: "devGovernance" as const, ciPasses: false, expectedMerge: 405 },
-        { id: "dev-ruleset-lets-a-squash-merge-through-once-the-required-check-is-green", ruleset: "devGovernance" as const, ciPasses: true, expectedMerge: 200 },
-        { id: "feature-ruleset-lets-the-agent-app-merge-a-task-pr-with-green-ci", ruleset: "featureGovernance" as const, ciPasses: true, expectedMerge: 200 }
-      ])("$id", { timeout: RUN_TIMEOUT_MS + 60_000 }, async ({ ruleset, ciPasses, expectedMerge }, ctx) => {
+        { id: "dev-ruleset-refuses-a-squash-merge-while-the-required-check-is-red", ruleset: "devGovernance" as const, ciPasses: false, bypass: false, expectedMerge: 405 },
+        { id: "dev-ruleset-lets-a-squash-merge-through-once-the-required-check-is-green", ruleset: "devGovernance" as const, ciPasses: true, bypass: false, expectedMerge: 200 },
+        { id: "feature-ruleset-lets-the-agent-app-merge-a-task-pr-with-green-ci", ruleset: "featureGovernance" as const, ciPasses: true, bypass: true, expectedMerge: 200 }
+      ])("$id", { timeout: RUN_TIMEOUT_MS + 60_000 }, async ({ ruleset, ciPasses, bypass, expectedMerge }, ctx) => {
         if (missingPermission) {
           ctx.skip(missingPermission);
         }
-        const slug = `${ruleset === "devGovernance" ? "dev" : "feature"}-${ciPasses ? "green" : "red"}`;
+        const slug = `${ruleset === "devGovernance" ? "dev" : "feature"}-${ciPasses ? "green" : "red"}-${bypass ? "bypass" : "writer"}`;
         const workflowPath = `.github/workflows/live-${RUN_ID}-${slug}.yml`;
         const workflow = [
           `name: live-${RUN_ID}-${slug}`,
@@ -1206,7 +1206,7 @@ describeLive(
           `${R}/rulesets`,
           buildGitHubRulesetApiPayload(
             { ...spec, name: `${spec.name}-${RUN_ID}-${slug}`, targetRefs: [`refs/heads/${base}`], requiredStatusChecks: [CHECK] },
-            { agentAppIntegrationId: Number(cfg.appId) }
+            bypass ? { agentAppIntegrationId: Number(cfg.appId) } : {}
           )
         );
         expect(created.status).toBe(201);
@@ -1229,6 +1229,52 @@ describeLive(
         );
 
         expect({ ci: run?.conclusion, merge: merge.status }).toEqual({ ci: ciPasses ? "success" : "failure", merge: expectedMerge });
+      });
+
+      it("dev-ruleset-refuses-a-squash-merge-whose-only-green-pr-title-check-run-comes-from-the-agent-app", async (ctx) => {
+        let appChecksToken: string;
+        try {
+          appChecksToken = (
+            await mintRepositoryInstallationToken({
+              appId: cfg.appId,
+              privateKeyPem: cfg.privateKey,
+              repository: cfg.repository,
+              permissions: { contents: "write", pull_requests: "write", checks: "write" }
+            })
+          ).token;
+        } catch (err: unknown) {
+          if (!(err instanceof Error && /HTTP 422/.test(err.message))) {
+            throw err;
+          }
+          return ctx.skip("the sandbox App lacks checks: write; grant it and rerun");
+        }
+        try {
+          const base = await createBranch("app-pr-title-base", baseSha, appChecksToken);
+          const headSha = await commitOnTop([baseSha], `${NS}/app-pr-title.txt`, "title\n", appChecksToken);
+          const head = await createBranch("app-pr-title-head", headSha, appChecksToken);
+          const spec = buildGovernanceRulesets({ agentAppName: "agent", releaseAppName: "release" }).devGovernance;
+          const created = await adminApi<{ id: number }>(
+            "POST",
+            `${R}/rulesets`,
+            buildGitHubRulesetApiPayload({ ...spec, name: `${spec.name}-${RUN_ID}-app-pr-title`, targetRefs: [`refs/heads/${base}`], requiredStatusChecks: ["PR title"] }, {})
+          );
+          expect(created.status).toBe(201);
+          rulesetIds.push(created.data.id);
+          const pr = await api<{ number: number }>("POST", `${R}/pulls`, { title: `test(${NS}): app PR title`, head, base }, appChecksToken);
+          expect(pr.status).toBe(201);
+          const check = await api(
+            "POST",
+            `${R}/check-runs`,
+            { name: "PR title", head_sha: headSha, status: "completed", conclusion: "success", output: { title: "PR title", summary: "synthetic" } },
+            appChecksToken
+          );
+
+          const merge = await api("PUT", `${R}/pulls/${pr.data.number}/merge`, { merge_method: "squash", sha: headSha }, appChecksToken);
+
+          expect({ check: check.status, merge: merge.status }).toEqual({ check: 201, merge: 405 });
+        } finally {
+          await revokeGitHubInstallationToken({ token: appChecksToken });
+        }
       });
     });
 

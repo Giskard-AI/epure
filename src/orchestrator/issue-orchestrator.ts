@@ -385,11 +385,19 @@ async function runIssueCommand(
       fetchImpl: countedFetch,
       sleepFn: input.sleepFn
     });
-    const gh = createGitHubRestHelper({
+    const restHelper = createGitHubRestHelper({
       repository: input.repository,
       token: activeToken,
       fetchImpl: githubFetch
     });
+    // The rulesets require a "PR title" check from GitHub Actions: published with GITHUB_TOKEN, EPURE's
+    // unconditional green run would stand in for the real pr-title.yml check.
+    const gh: GitHubRestHelper = mintedAppToken
+      ? restHelper
+      : {
+          ...restHelper,
+          publishCheckRun: async (run) => (run.name === "PR title" ? undefined : restHelper.publishCheckRun(run))
+        };
 
     const rawStore =
       input.stateStore ??
