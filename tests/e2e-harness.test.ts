@@ -301,6 +301,14 @@ describe("createGitHubApi", () => {
       id: "rides-out-five-transient-failures",
       steps: [new TypeError("fetch failed"), json(502, {}), json(503, {}), json(504, {}), new TypeError("fetch failed"), json(200, { ok: 1 })],
       calls: 6
+    },
+    {
+      id: "retries-a-get-whose-body-breaks-off",
+      steps: [
+        new Response(new ReadableStream({ start: (controller) => controller.error(new TypeError("terminated")) }), { status: 200 }),
+        json(200, { ok: 1 })
+      ],
+      calls: 2
     }
   ])("$id", async ({ steps, calls }) => {
     const { api, calls: made } = fake(steps);
@@ -371,25 +379,60 @@ describe("createGitHubApi", () => {
     expect(calls[1]?.init?.headers).toBeUndefined();
   });
 
-  it.each([
-    { id: "storage-network-error", failure: new TypeError("fetch failed") },
-    { id: "storage-503", failure: new Response("", { status: 503 }) }
-  ])("asks for a fresh log URL after a $id", async ({ failure }) => {
-    const redirect = () => new Response("", { status: 302, headers: { location: "https://logs.example/job.txt?sig=1" } });
-    const { api, calls } = fake([redirect(), failure, redirect(), new Response("log", { status: 200 })]);
+  const logRedirect = () => new Response("", { status: 302, headers: { location: "https://logs.example/job.txt?sig=1" } });
 
-    await expect(api.text("/repos/o/sandbox/actions/jobs/1/logs")).resolves.toBe("log");
-    expect(calls).toHaveLength(4);
+  it.each<{ id: string; steps: Step[]; expected: string | null | RegExp; calls: number }>([
+    { id: "fresh-log-url-after-a-storage-network-error", steps: [logRedirect(), new TypeError("fetch failed"), logRedirect(), new Response("log")], expected: "log", calls: 4 },
+    { id: "fresh-log-url-after-a-storage-503", steps: [logRedirect(), new Response("", { status: 503 }), logRedirect(), new Response("log")], expected: "log", calls: 4 },
+    {
+      id: "storage-failing-until-the-retries-run-out-throws",
+      steps: Array.from({ length: 6 }, () => [logRedirect(), new TypeError("fetch failed")]).flat(),
+      expected: /fetch failed/,
+      calls: 12
+    },
+    { id: "storage-answering-404-is-a-missing-log", steps: [logRedirect(), new Response("", { status: 404 })], expected: null, calls: 2 }
+  ])("$id", async ({ steps, expected, calls }) => {
+    const { api, calls: made } = fake(steps);
+    const read = api.text("/repos/o/sandbox/actions/jobs/1/logs");
+
+    await (expected instanceof RegExp ? expect(read).rejects.toThrow(expected) : expect(read).resolves.toBe(expected));
+    expect(made).toHaveLength(calls);
   });
 
   it("retries the reads of a fetch consumer such as the state store", async () => {
     const { api, calls } = fake([json(502, {}), json(200, { object: { sha: "a" } })]);
 
-    const resp = await api.fetch("https://api.github.com/repos/o/sandbox/git/ref/epure/state/12", { method: "GET", headers: { Accept: "x" } });
+    const resp = await api.fetch("https://api.github.com/repos/o/sandbox/git/ref/epure/state/12", { method: "GET" });
 
     await expect(resp.json()).resolves.toEqual({ object: { sha: "a" } });
     expect(calls).toHaveLength(2);
-    expect(calls[0]?.init?.headers).toMatchObject({ Authorization: "Bearer t" });
+  });
+
+  it.each<{ id: string; input: string | Request; init?: RequestInit; method: string; body: string | null }>([
+    { id: "plain-object-headers", input: "https://api.github.com/repos/o/sandbox/git/refs", init: { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }, method: "POST", body: "{}" },
+    { id: "headers-instance", input: "https://api.github.com/repos/o/sandbox/git/refs", init: { method: "POST", headers: new Headers({ "Content-Type": "application/json" }), body: "{}" }, method: "POST", body: "{}" },
+    { id: "header-pairs", input: "https://api.github.com/repos/o/sandbox/git/refs", init: { method: "POST", headers: [["Content-Type", "application/json"]], body: "{}" }, method: "POST", body: "{}" },
+    {
+      id: "request-object",
+      input: new Request("https://api.github.com/repos/o/sandbox/git/refs", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }),
+      method: "POST",
+      body: "{}"
+    }
+  ])("fetch keeps the method, body and headers of $id next to the token", async ({ input, init, method, body }) => {
+    const { api, calls } = fake([json(201, {})]);
+
+    await api.fetch(input, init);
+    const sent = calls[0]!;
+    const headers = new Headers(sent.init?.headers);
+    const sentBody = sent.init?.body;
+
+    expect({
+      url: sent.url,
+      method: sent.init?.method,
+      body: sentBody === undefined || sentBody === null ? null : typeof sentBody === "string" ? sentBody : new TextDecoder().decode(sentBody as ArrayBuffer),
+      contentType: headers.get("content-type"),
+      authorization: headers.get("authorization")
+    }).toEqual({ url: "https://api.github.com/repos/o/sandbox/git/refs", method, body, contentType: "application/json", authorization: "Bearer t" });
   });
 
   it.each([
@@ -417,22 +460,38 @@ describe("createGitHubApi", () => {
 describe("createOnce", () => {
   const lost = () => new GitHubOutcomeUnknownError("POST", "/repos/o/sandbox/issues/1/comments", "fetch failed");
 
-  it.each([
-    { id: "created-at-once", outcomes: ["ok"], landed: [], expected: "created", posts: 1, probes: 0 },
-    { id: "lost-response-but-the-comment-landed", outcomes: ["lost"], landed: ["landed"], expected: "landed", posts: 1, probes: 1 },
-    { id: "lost-response-and-nothing-landed-posts-again", outcomes: ["lost", "ok"], landed: [null], expected: "created", posts: 2, probes: 1 },
-    { id: "definite-refusal-is-not-retried", outcomes: ["422"], landed: [], expected: /HTTP 422/, posts: 1, probes: 0 },
+  type Outcome = "ok" | "lost" | "422";
+  type Listing = "landed" | null | "throws";
+
+  it.each<{ id: string; outcomes: Outcome[]; landed: Listing[]; expected: string | RegExp | typeof GitHubOutcomeUnknownError; posts: number; probes: number; logs: number }>([
+    { id: "created-at-once", outcomes: ["ok"], landed: [], expected: "created", posts: 1, probes: 0, logs: 0 },
+    { id: "lost-response-but-the-comment-landed", outcomes: ["lost"], landed: ["landed"], expected: "landed", posts: 1, probes: 1, logs: 0 },
+    { id: "comment-listed-only-after-the-listing-lag", outcomes: ["lost"], landed: [null, "landed"], expected: "landed", posts: 1, probes: 2, logs: 0 },
+    { id: "lost-response-and-nothing-landed-posts-again", outcomes: ["lost", "ok"], landed: [null, null], expected: "created", posts: 2, probes: 2, logs: 0 },
+    { id: "definite-refusal-is-not-retried", outcomes: ["422"], landed: [], expected: /HTTP 422/, posts: 1, probes: 0, logs: 0 },
+    { id: "landed-probe-throwing-stops-without-posting-again", outcomes: ["lost", "ok"], landed: ["throws"], expected: /listing failed/, posts: 1, probes: 1, logs: 0 },
     {
-      id: "gives-up-after-four-lost-responses",
+      id: "last-lost-response-found-by-the-final-probe",
       outcomes: ["lost", "lost", "lost", "lost"],
-      landed: [null, null, null],
+      landed: [null, null, null, null, null, null, null, "landed"],
+      expected: "landed",
+      posts: 4,
+      probes: 8,
+      logs: 0
+    },
+    {
+      id: "gives-up-and-logs-after-four-lost-responses",
+      outcomes: ["lost", "lost", "lost", "lost"],
+      landed: [null, null, null, null, null, null, null, null],
       expected: GitHubOutcomeUnknownError,
       posts: 4,
-      probes: 3
+      probes: 8,
+      logs: 1
     }
-  ])("$id", async ({ outcomes, landed, expected, posts, probes }) => {
+  ])("$id", async ({ outcomes, landed, expected, posts, probes, logs }) => {
     let posted = 0;
     let probed = 0;
+    const logged: string[] = [];
     const create = async () => {
       const outcome = outcomes[posted++];
       if (outcome === "lost") {
@@ -443,12 +502,18 @@ describe("createOnce", () => {
       }
       return "created";
     };
-    const probe = async () => (landed[probed++] ?? null) as string | null;
+    const probe = async () => {
+      const listing = landed[probed++] ?? null;
+      if (listing === "throws") {
+        throw new Error("GET comments: listing failed");
+      }
+      return listing;
+    };
 
-    const result = createOnce(create, probe, async () => undefined);
+    const result = createOnce(create, probe, { sleep: async () => undefined, log: (line) => logged.push(line) });
 
     await (typeof expected === "string" ? expect(result).resolves.toBe(expected) : expect(result).rejects.toThrow(expected));
-    expect({ posted, probed }).toEqual({ posted: posts, probed: probes });
+    expect({ posted, probed, logged: logged.length }).toEqual({ posted: posts, probed: probes, logged: logs });
   });
 });
 

@@ -25,8 +25,23 @@ const MAX_ATTEMPTS = 6;
 // A connection that died while the host slept must not hold the run until the OS gives up on it.
 const REQUEST_TIMEOUT_MS = 60_000;
 const CREATE_ATTEMPTS = 4;
+// GitHub lists a new issue or comment a few seconds after creating it.
+const LISTING_LAG_MS = 5_000;
 
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+// Reading the body under the request timeout: a body that stalls fails the attempt instead of the caller.
+async function buffered(resp: Response): Promise<Response> {
+  const body = await resp.arrayBuffer();
+  return new Response(body.byteLength > 0 ? body : null, { status: resp.status, statusText: resp.statusText, headers: resp.headers });
+}
+
+export class GitHubGraphQLError extends Error {
+  constructor(readonly errors: ReadonlyArray<{ readonly message: string; readonly type?: string | undefined }>) {
+    super(`GraphQL: ${errors.map((e) => e.message).join("; ")}`);
+    this.name = "GitHubGraphQLError";
+  }
+}
 
 // Creating an issue or a comment twice would change the scripted epic.
 const isReplayable = (method: string, path: string) =>
@@ -40,24 +55,33 @@ export class GitHubOutcomeUnknownError extends Error {
   }
 }
 
-// After a lost response, `landed` looks for the creation before it is posted again.
+// After a lost response, `landed` looks for the creation (twice, for the listing lag) before it is posted again.
 export async function createOnce<T>(
   create: () => Promise<T>,
   landed: () => Promise<T | null>,
-  sleep: (ms: number) => Promise<void> = defaultSleep
+  options: { readonly sleep?: ((ms: number) => Promise<void>) | undefined; readonly log?: ((line: string) => void) | undefined } = {}
 ): Promise<T> {
+  const sleep = options.sleep ?? defaultSleep;
   for (let attempt = 1; ; attempt += 1) {
     try {
       return await create();
     } catch (err) {
-      if (!(err instanceof GitHubOutcomeUnknownError) || attempt >= CREATE_ATTEMPTS) {
+      if (!(err instanceof GitHubOutcomeUnknownError)) {
         throw err;
       }
-    }
-    await sleep(5_000 * 2 ** attempt);
-    const found = await landed();
-    if (found !== null) {
-      return found;
+      await sleep(5_000 * 2 ** attempt);
+      let found = await landed();
+      if (found === null) {
+        await sleep(LISTING_LAG_MS);
+        found = await landed();
+      }
+      if (found !== null) {
+        return found;
+      }
+      if (attempt >= CREATE_ATTEMPTS) {
+        options.log?.(`[github] ${err.message}: still not listed after ${attempt} attempts, giving up`);
+        throw err;
+      }
     }
   }
 }
@@ -83,22 +107,25 @@ export function createGitHubApi(token: string, repository: string, options: GitH
 
   // A redirect (a renamed or transferred repository) surfaces as its 3xx status instead of being followed.
   const send = async (method: string, path: string, init: RequestInit = {}): Promise<Response> => {
+    const requestHeaders = new Headers(init.headers);
+    for (const [name, value] of Object.entries(headers)) {
+      requestHeaders.set(name, value);
+    }
     for (let attempt = 1; ; attempt += 1) {
       // A fresh wrapper per request: one shared wait budget would run out during an hours-long run.
       const rateLimited = createGitHubRateLimitedFetch({ fetchImpl, sleepFn: sleep });
       let resp: Response | null = null;
       let failure: unknown = null;
       try {
-        resp = await rateLimited(url(path), {
-          ...init,
-          method,
-          headers: { ...(init.headers as Record<string, string> | undefined), ...headers },
-          redirect: "manual"
-        });
+        resp = await rateLimited(url(path), { ...init, method, headers: requestHeaders, redirect: "manual" });
+        if (method === "GET" && !TRANSIENT_STATUSES.has(resp.status)) {
+          resp = await buffered(resp);
+        }
       } catch (err) {
         if (err instanceof GitHubRateLimitError) {
           throw err;
         }
+        resp = null;
         failure = err;
       }
       if (resp !== null && !TRANSIENT_STATUSES.has(resp.status)) {
@@ -147,9 +174,9 @@ export function createGitHubApi(token: string, repository: string, options: GitH
       }
     },
     async graphql<T>(query: string, variables: Record<string, unknown>): Promise<T> {
-      const res = await api.call<{ data?: T; errors?: Array<{ message: string }> }>("POST", "/graphql", { query, variables });
+      const res = await api.call<{ data?: T; errors?: Array<{ message: string; type?: string }> }>("POST", "/graphql", { query, variables });
       if (res.errors?.length) {
-        throw new Error(`GraphQL: ${res.errors.map((e) => e.message).join("; ")}`);
+        throw new GitHubGraphQLError(res.errors);
       }
       return res.data as T;
     },
@@ -158,22 +185,21 @@ export function createGitHubApi(token: string, repository: string, options: GitH
         let resp: Response | null = await send("GET", path);
         const location = resp.headers.get("location");
         if (resp.status === 302 && location) {
-          await resp.body?.cancel();
           // A fresh signed URL on each attempt: the storage host fails on its own.
-          resp = await fetchImpl(location, { redirect: "error" }).catch((err: unknown) => {
-            if (attempt >= MAX_ATTEMPTS) {
-              throw err;
-            }
-            return null;
-          });
+          resp = await fetchImpl(location, { redirect: "error" })
+            .then(buffered)
+            .catch((err: unknown) => {
+              if (attempt >= MAX_ATTEMPTS) {
+                throw err;
+              }
+              return null;
+            });
           if (resp === null || (TRANSIENT_STATUSES.has(resp.status) && attempt < MAX_ATTEMPTS)) {
-            await resp?.body?.cancel();
             await sleep(1_000 * 2 ** attempt);
             continue;
           }
         }
         if (resp.status === 404) {
-          await resp.body?.cancel();
           return null;
         }
         if (!resp.ok) {
@@ -188,8 +214,17 @@ export function createGitHubApi(token: string, repository: string, options: GitH
       const header = resp.headers.get("x-oauth-scopes");
       return header === null ? null : header.split(",").map((s) => s.trim()).filter(Boolean);
     },
-    fetch: (input, init) =>
-      send((init?.method ?? "GET").toUpperCase(), input instanceof Request ? input.url : String(input), init ?? {})
+    fetch: async (input, init) => {
+      const request = input instanceof Request ? input : null;
+      const requestHeaders = new Headers(request?.headers);
+      new Headers(init?.headers).forEach((value, name) => requestHeaders.set(name, value));
+      const body = init?.body ?? (request?.body ? await request.arrayBuffer() : undefined);
+      return send((init?.method ?? request?.method ?? "GET").toUpperCase(), request ? request.url : String(input), {
+        ...init,
+        headers: requestHeaders,
+        ...(body !== undefined ? { body } : {})
+      });
+    }
   };
   return api;
 }
