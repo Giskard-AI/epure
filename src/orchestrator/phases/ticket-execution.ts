@@ -45,6 +45,7 @@ import {
   withTicketCodeFixAttempts,
   type GitRefStateStore
 } from "../../state/git-ref-state.js";
+import { withUsageAttribution } from "../../usage/token-usage.js";
 import { appendEpureCommandsSpoiler } from "../formatting/comments.js";
 import { callLlmJson } from "../llm-helper.js";
 import {
@@ -240,6 +241,7 @@ function isLikelyTestTargetPath(filePath: string): boolean {
 
 interface GenerateTicketImplementationWithFallbackParams {
   readonly ticket: TrackedTicketCommentMetadata;
+  readonly usagePhase: "implementation" | "fixes";
   readonly branch: string;
   readonly featureBranch: string;
   readonly systemInstruction: string;
@@ -258,7 +260,16 @@ interface GenerateTicketImplementationWithFallbackParams {
   readonly fetchImpl?: typeof fetch | undefined;
 }
 
-async function generateTicketImplementationWithFallback(
+function generateTicketImplementationWithFallback(
+  params: GenerateTicketImplementationWithFallbackParams
+): Promise<GeneratedTicketImplementation> {
+  return withUsageAttribution(
+    { phase: params.usagePhase, ticket: params.ticket.ticketIssueNumber },
+    () => generateTicketImplementation(params)
+  );
+}
+
+async function generateTicketImplementation(
   params: GenerateTicketImplementationWithFallbackParams
 ): Promise<GeneratedTicketImplementation> {
   const stagedBuffer: StagedTicketImplementationBuffer =
@@ -668,7 +679,7 @@ export async function runTicketExecutionLoop(
     }
     const syncWithBase = await params.baseSyncGuard.needsSync();
     if (syncWithBase) {
-      const featureSync = await syncBranchWithBase({
+      const featureSync = await withUsageAttribution({ phase: "integration" }, () => syncBranchWithBase({
         gh: params.gh,
         targetBranch: params.featureBranch,
         baseBranch: "dev",
@@ -683,7 +694,7 @@ export async function runTicketExecutionLoop(
         requestTimeoutMs: params.phaseModels.requestTimeoutMs,
         sandboxRunner: params.sandboxRunner,
         reviewersDir
-      });
+      }));
       if (featureSync.status === "escalated") {
         const escalated = await params.escalateToNeedsHuman({
           reason: featureSync.escalationReason ?? "merge_conflict_unresolved",
@@ -703,7 +714,7 @@ export async function runTicketExecutionLoop(
     await params.gh.ensureBranch(taskBranch, params.featureBranch);
 
     const syncTaskBranchWithFeature = () =>
-      syncBranchWithBase({
+      withUsageAttribution({ phase: "integration", ticket: ticket.ticketIssueNumber }, () => syncBranchWithBase({
         gh: params.gh,
         targetBranch: taskBranch,
         baseBranch: params.featureBranch,
@@ -718,7 +729,7 @@ export async function runTicketExecutionLoop(
         requestTimeoutMs: params.phaseModels.requestTimeoutMs,
         sandboxRunner: params.sandboxRunner,
         reviewersDir
-      });
+      }));
 
     if (syncWithBase) {
       const taskSync = await syncTaskBranchWithFeature();
@@ -1062,6 +1073,7 @@ export async function runTicketExecutionLoop(
 
         const parsedImpl = await generateTicketImplementationWithFallback({
           ticket,
+          usagePhase: "implementation",
           branch: params.featureBranch,
           featureBranch: params.featureBranch,
           systemInstruction: tddSystemInstruction,
@@ -1194,6 +1206,7 @@ export async function runTicketExecutionLoop(
 
           const fixedImpl = await generateTicketImplementationWithFallback({
             ticket,
+            usagePhase: "fixes",
             branch: params.featureBranch,
             featureBranch: params.featureBranch,
             systemInstruction: fixSystemInstruction,
@@ -1392,7 +1405,7 @@ export async function runTicketExecutionLoop(
           targetBranch: params.featureBranch
         });
 
-        const reviewRes = await runMultiAgentPrReviewPass({
+        const reviewRes = await withUsageAttribution({ phase: "review", ticket: ticket.ticketIssueNumber }, () => runMultiAgentPrReviewPass({
           repository: params.repository,
           prNumber: openTaskPr.number,
           headBranch: taskBranch,
@@ -1419,7 +1432,7 @@ export async function runTicketExecutionLoop(
           onTransientRetriesUsed: (used) =>
             params.addTransientRetriesUsed(used),
           fetchImpl: params.fetchImpl
-        });
+        }));
 
         await params.gh.postPullRequestReview(openTaskPr.number, {
           commitId: passParams.headSha,
@@ -1693,6 +1706,7 @@ export async function runTicketExecutionLoop(
 
         const reviewFixedImpl = await generateTicketImplementationWithFallback({
           ticket,
+          usagePhase: "fixes",
           branch: taskBranch,
           featureBranch: params.featureBranch,
           thinkingLevel: "HIGH",
@@ -1790,6 +1804,7 @@ export async function runTicketExecutionLoop(
           });
           const retryImpl = await generateTicketImplementationWithFallback({
             ticket,
+            usagePhase: "fixes",
             branch: taskBranch,
             featureBranch: params.featureBranch,
             thinkingLevel: "HIGH",
@@ -2023,8 +2038,9 @@ export async function runTicketExecutionLoop(
         };
       }
 
-      const squashCommit = await generateSemanticSquashCommitFromDiff({
-        prNumber: taskPr.number,
+      const taskPrNumber = taskPr.number;
+      const squashCommit = await withUsageAttribution({ phase: "integration", ticket: ticket.ticketIssueNumber }, () => generateSemanticSquashCommitFromDiff({
+        prNumber: taskPrNumber,
         targetBranch: params.featureBranch,
         defaultBranch: "dev",
         planIssueNumber: params.issueNumber,
@@ -2041,7 +2057,7 @@ export async function runTicketExecutionLoop(
         onTransientRetriesUsed: (used) =>
           params.addTransientRetriesUsed(used),
         fetchImpl: params.fetchImpl
-      });
+      }));
 
       const featureMergedBeforeTaskMerge = await params.stopIfFeaturePrMerged();
       if (featureMergedBeforeTaskMerge) {

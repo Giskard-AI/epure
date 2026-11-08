@@ -770,6 +770,33 @@ describe("Resume context: comments after the last processed command reach the re
   );
 
   it.each([
+    {
+      id: "ticket-pr-review-usage-is-recorded-under-the-ticket-and-a-failed-request-is-not",
+      reviewUsage: { prompt_tokens: 900, completion_tokens: 40 },
+      expected: { "77": { review: { "openai/gpt-test": { requests: 2, input_tokens: 1800, cached_input_tokens: 0, output_tokens: 80, thinking_tokens: 0 } } } }
+    }
+  ])("$id", async ({ reviewUsage, expected }) => {
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const store = await seedState({ status: "suspended", subphase: "idle", last_processed_comment_id: ESCALATED_AT_CURSOR });
+    const router = declareImplementationFlow(createGitHubMockRouter(), "failure", { taskPr: true, featurePr: true })
+      .on("POST", `${R}/issues/${TICKET}/labels`, json([]))
+      .on("GET", `${R}/issues/${ISSUE}/comments?per_page=100`, json([]))
+      .onHost("api.openai.com", "POST", "/v1/chat/completions", (req) =>
+        schemaName(req.body) === "generated_ticket_implementation"
+          ? json({ error: { message: "stop after the review" } }, 400)
+          : json({ choices: [{ message: { content: JSON.stringify({ summary: "ok", findings: [] }) } }], usage: reviewUsage })
+      );
+
+    try {
+      await run(router, store, { command: "continue", actor: "maintainer", issueNumber: ISSUE, commentId: RESUME_COMMENT });
+    } finally {
+      vi.restoreAllMocks();
+    }
+
+    expect((await readState(store)).token_usage).toEqual(expected);
+  });
+
+  it.each([
     { id: "continue-without-new-comments-injects-no-context-section", command: "continue" },
     { id: "approve-without-new-comments-injects-no-context-section", command: "approve" }
   ] as const)("$id", async ({ command }) => {
@@ -805,6 +832,40 @@ describe("Planning LLM rounds can always read the repository", () => {
 
     expect(router.unmatched).toEqual([]);
     expect(JSON.stringify(llmRequest?.body)).toContain("read_repo_file");
+  });
+});
+
+describe("Token usage is written with the run's existing state updates (#125)", () => {
+  const GRILL = { choices: [{ message: { role: "assistant", content: "❓ **Q1** - **Scope** : ?" } }] };
+
+  it.each([
+    {
+      id: "plan-round-usage-lands-in-its-only-state-update",
+      llmBody: { ...GRILL, usage: { prompt_tokens: 120, completion_tokens: 30, prompt_tokens_details: { cached_tokens: 20 } } },
+      expected: { requests: 1, input_tokens: 120, cached_input_tokens: 20, output_tokens: 30, thinking_tokens: 0 }
+    },
+    {
+      id: "response-without-usage-is-recorded-as-unavailable-not-zero",
+      llmBody: GRILL,
+      expected: { requests: 1, input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, thinking_tokens: 0, usage_unavailable: 1 }
+    }
+  ])("$id", async ({ llmBody, expected }) => {
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const seeded = await seedState({ phase: "idle", status: "active", subphase: "idle", active_branch: "" });
+    const { store, writes } = captureWrites(seeded);
+    const router = declareIssueWrites(declareIssueReads(createGitHubMockRouter()))
+      .on("GET", /\/git\/ref\/heads\//, json({ object: { sha: "branch-sha" } }))
+      .on("POST", `${R}/git/refs`, json({ object: { sha: "branch-sha" } }, 201))
+      .onHost("api.openai.com", "POST", "/v1/chat/completions", json(llmBody));
+
+    try {
+      await run(router, store, { command: "plan", actor: "maintainer", issueNumber: ISSUE, commentId: 900 });
+    } finally {
+      vi.restoreAllMocks();
+    }
+
+    expect(router.unmatched).toEqual([]);
+    expect(writes.map((w) => w.token_usage)).toEqual([{ epic: { plan: { "openai/gpt-test": expected } } }]);
   });
 });
 

@@ -39,6 +39,7 @@ import {
   withFeatureCodeFixAttempts,
   type GitRefStateStore
 } from "../../state/git-ref-state.js";
+import { withUsageAttribution } from "../../usage/token-usage.js";
 import { appendEpureCommandsSpoiler } from "../formatting/comments.js";
 import { callLlmJson } from "../llm-helper.js";
 import {
@@ -350,7 +351,7 @@ export async function runFeatureIntegrationPhase(
       targetBranch: "dev"
     });
 
-    const reviewRes = await runMultiAgentPrReviewPass({
+    const reviewRes = await withUsageAttribution({ phase: "review" }, () => runMultiAgentPrReviewPass({
       repository: params.repository,
       prNumber: featurePr.number,
       headBranch: params.featureBranch,
@@ -377,7 +378,7 @@ export async function runFeatureIntegrationPhase(
       requestTimeoutMs: params.phaseModels.requestTimeoutMs,
       onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
       fetchImpl: params.fetchImpl
-    });
+    }));
 
     await params.gh.postPullRequestReview(featurePr.number, {
       commitId: passParams.headSha,
@@ -659,7 +660,7 @@ export async function runFeatureIntegrationPhase(
       );
 
       const parsedFeatureFix =
-        await callLlmJson<GeneratedTicketImplementation>({
+        await withUsageAttribution({ phase: "fixes" }, () => callLlmJson<GeneratedTicketImplementation>({
           apiKey: params.llmApiKey,
           model: params.phaseModels.implementationModel,
           providers: params.phaseModels.providers,
@@ -685,7 +686,7 @@ export async function runFeatureIntegrationPhase(
           }),
           responseSchema: GENERATED_TICKET_IMPLEMENTATION_SCHEMA,
           fetchImpl: params.fetchImpl
-        });
+        }));
 
       const featureFixPreCheck = validateWorkspaceFileOperations({
         workDir: featureSandbox.workDir,
@@ -759,7 +760,7 @@ export async function runFeatureIntegrationPhase(
           .map(([p, c]) => `--- FILE: ${p} ---\n${c}`)
           .join("\n\n");
         const retryParsed =
-          await callLlmJson<GeneratedTicketImplementation>({
+          await withUsageAttribution({ phase: "fixes" }, () => callLlmJson<GeneratedTicketImplementation>({
             apiKey: params.llmApiKey,
             model: params.phaseModels.implementationModel,
             providers: params.phaseModels.providers,
@@ -807,7 +808,7 @@ export async function runFeatureIntegrationPhase(
             }),
             responseSchema: GENERATED_TICKET_IMPLEMENTATION_SCHEMA,
             fetchImpl: params.fetchImpl
-          });
+          }));
 
         const retryPreCheck = validateWorkspaceFileOperations({
           workDir: featureSandbox.workDir,

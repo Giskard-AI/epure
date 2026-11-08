@@ -55,6 +55,13 @@ import {
   formatResumeContextMarkdown,
   selectResumeContextComments
 } from "../state/comment-batch-cursor.js";
+import {
+  meterTokenUsage,
+  runWithTokenUsageLedger,
+  TokenUsageLedger,
+  withUsageAttribution,
+  type UsagePhase
+} from "../usage/token-usage.js";
 import { appendEpureCommandsSpoiler } from "./formatting/comments.js";
 import {
   createBaseSyncGuard,
@@ -343,11 +350,40 @@ export async function orchestrateIssueCommand(
   return result;
 }
 
-async function runIssueCommand(
-  input: OrchestrateIssueInput
+// LLM usage outside review, fixes and integration belongs to the phase the command runs.
+function usagePhaseOfCommand(command: OrchestrateIssueInput["command"]): UsagePhase {
+  switch (command) {
+    case "plan":
+      return "plan";
+    case "reply":
+      return "grilling";
+    case "to-spec":
+      return "spec";
+    case "to-tickets":
+      return "tickets";
+    case "sync":
+    case "rebase":
+      return "integration";
+    default:
+      return "implementation";
+  }
+}
+
+function runIssueCommand(input: OrchestrateIssueInput): Promise<OrchestrateIssueResult> {
+  const ledger = new TokenUsageLedger();
+  return runWithTokenUsageLedger(ledger, { phase: usagePhaseOfCommand(input.command) }, () =>
+    runMeteredIssueCommand(input, ledger)
+  );
+}
+
+async function runMeteredIssueCommand(
+  input: OrchestrateIssueInput,
+  ledger: TokenUsageLedger
 ): Promise<OrchestrateIssueResult> {
   let mintedAppToken: string | null = null;
   let githubRequestCount = 0;
+  // Normally a no-op: every LLM call is followed by a state update that writes its usage.
+  let writePendingTokenUsage = async (): Promise<void> => undefined;
 
   try {
     let activeToken = (input.fallbackGithubToken ?? "").trim();
@@ -399,13 +435,15 @@ async function runIssueCommand(
           publishCheckRun: async (run) => (run.name === "PR title" ? undefined : restHelper.publishCheckRun(run))
         };
 
-    const rawStore =
+    const rawStore = meterTokenUsage(
       input.stateStore ??
-      createGitHubApiRefStateStore({
-        repository: input.repository,
-        githubToken: activeToken,
-        fetchImpl: githubFetch
-      });
+        createGitHubApiRefStateStore({
+          repository: input.repository,
+          githubToken: activeToken,
+          fetchImpl: githubFetch
+        }),
+      ledger
+    );
 
     const isAutomaticEntry =
       input.command === "continue" && (input.commentId ?? 0) <= 0;
@@ -455,6 +493,16 @@ async function runIssueCommand(
     // Only an explicit human command may move a plan out of the `cancelled`/`done` state it read at start.
     let allowedTerminalSha: string | null = null;
     let store: GitRefStateStore = guardTerminalStates(rawStore, null);
+    writePendingTokenUsage = async () => {
+      if (ledger.pendingCount() === 0) {
+        return;
+      }
+      try {
+        await updateIssueStateWithCas({ issueNumber: effectiveInput.issueNumber, store, mutator: (prev) => prev });
+      } catch {
+        // Best effort: the run's outcome is already decided.
+      }
+    };
 
     const commandPhase: EpureIssueState["phase"] =
       effectiveInput.command === "to-tickets"
@@ -1106,23 +1154,28 @@ async function runIssueCommand(
         }
 
         if (currentState?.active_task_branch) {
-          const taskSyncRes = await syncBranchWithBase({
-            gh,
-            targetBranch: currentState.active_task_branch,
-            baseBranch: targetBranch,
-            issueNumber:
-              currentState.active_ticket_number ?? effectiveInput.issueNumber,
-            llmApiKey: effectiveInput.llmApiKey,
-            fetchImpl: effectiveInput.fetchImpl,
-            model: phaseModels.implementationModel,
-            providers: phaseModels.providers,
-            maxTransientRetries: phaseModels.maxTransientRetries,
-            transientRetryBackoffSeconds:
-              phaseModels.transientRetryBackoffSeconds,
-            requestTimeoutMs: phaseModels.requestTimeoutMs,
-            sandboxRunner: effectiveInput.sandboxRunner,
-            reviewersDir
-          });
+          const activeTaskBranch = currentState.active_task_branch;
+          const activeTicketNumber = currentState.active_ticket_number;
+          const taskSyncRes = await withUsageAttribution(
+            { ticket: activeTicketNumber },
+            () =>
+              syncBranchWithBase({
+                gh,
+                targetBranch: activeTaskBranch,
+                baseBranch: targetBranch,
+                issueNumber: activeTicketNumber ?? effectiveInput.issueNumber,
+                llmApiKey: effectiveInput.llmApiKey,
+                fetchImpl: effectiveInput.fetchImpl,
+                model: phaseModels.implementationModel,
+                providers: phaseModels.providers,
+                maxTransientRetries: phaseModels.maxTransientRetries,
+                transientRetryBackoffSeconds:
+                  phaseModels.transientRetryBackoffSeconds,
+                requestTimeoutMs: phaseModels.requestTimeoutMs,
+                sandboxRunner: effectiveInput.sandboxRunner,
+                reviewersDir
+              })
+          );
           if (taskSyncRes.status === "escalated") {
             return await escalateSuspension({
               reason:
@@ -1378,25 +1431,29 @@ async function runIssueCommand(
               );
 
               const phaseModels = requirePhaseModels();
-              const squashCommit = await generateSemanticSquashCommitFromDiff({
-                prNumber: prNumberToMerge,
-                targetBranch: targetFeatureBranch,
-                defaultBranch: "dev",
-                planIssueNumber: effectiveInput.issueNumber,
-                ticketNumbers: [ticketNum],
-                fallbackTitle:
-                  openTaskPr?.title ||
-                  `feat(ticket-${ticketNum}): complete ticket #${ticketNum}`,
-                changedFiles: changedFilesForSquash,
-                llmApiKey: effectiveInput.llmApiKey,
-                model: phaseModels.reviewModel,
-                providers: phaseModels.providers,
-                maxTransientRetries: phaseModels.maxTransientRetries,
-                transientRetryBackoffSeconds:
-                  phaseModels.transientRetryBackoffSeconds,
-                requestTimeoutMs: phaseModels.requestTimeoutMs,
-                fetchImpl: effectiveInput.fetchImpl
-              });
+              const squashCommit = await withUsageAttribution(
+                { phase: "integration", ticket: ticketNum },
+                () =>
+                  generateSemanticSquashCommitFromDiff({
+                    prNumber: prNumberToMerge,
+                    targetBranch: targetFeatureBranch,
+                    defaultBranch: "dev",
+                    planIssueNumber: effectiveInput.issueNumber,
+                    ticketNumbers: [ticketNum],
+                    fallbackTitle:
+                      openTaskPr?.title ||
+                      `feat(ticket-${ticketNum}): complete ticket #${ticketNum}`,
+                    changedFiles: changedFilesForSquash,
+                    llmApiKey: effectiveInput.llmApiKey,
+                    model: phaseModels.reviewModel,
+                    providers: phaseModels.providers,
+                    maxTransientRetries: phaseModels.maxTransientRetries,
+                    transientRetryBackoffSeconds:
+                      phaseModels.transientRetryBackoffSeconds,
+                    requestTimeoutMs: phaseModels.requestTimeoutMs,
+                    fetchImpl: effectiveInput.fetchImpl
+                  })
+              );
 
               await gh.updatePullRequest(prNumberToMerge, {
                 title: squashCommit.pr_title
@@ -1448,22 +1505,26 @@ async function runIssueCommand(
                   );
                 }
                 // A refused merge gets one re-sync; external CI then re-verifies the new head before the next merge.
-                const resync = await syncBranchWithBase({
-                  gh,
-                  targetBranch: taskBranchToMerge,
-                  baseBranch: targetFeatureBranch,
-                  issueNumber: ticketNum,
-                  llmApiKey: effectiveInput.llmApiKey,
-                  fetchImpl: effectiveInput.fetchImpl,
-                  model: phaseModels.implementationModel,
-                  providers: phaseModels.providers,
-                  maxTransientRetries: phaseModels.maxTransientRetries,
-                  transientRetryBackoffSeconds:
-                    phaseModels.transientRetryBackoffSeconds,
-                  requestTimeoutMs: phaseModels.requestTimeoutMs,
-                  sandboxRunner: effectiveInput.sandboxRunner,
-                  reviewersDir
-                });
+                const resync = await withUsageAttribution(
+                  { phase: "integration", ticket: ticketNum },
+                  () =>
+                    syncBranchWithBase({
+                      gh,
+                      targetBranch: taskBranchToMerge,
+                      baseBranch: targetFeatureBranch,
+                      issueNumber: ticketNum,
+                      llmApiKey: effectiveInput.llmApiKey,
+                      fetchImpl: effectiveInput.fetchImpl,
+                      model: phaseModels.implementationModel,
+                      providers: phaseModels.providers,
+                      maxTransientRetries: phaseModels.maxTransientRetries,
+                      transientRetryBackoffSeconds:
+                        phaseModels.transientRetryBackoffSeconds,
+                      requestTimeoutMs: phaseModels.requestTimeoutMs,
+                      sandboxRunner: effectiveInput.sandboxRunner,
+                      reviewersDir
+                    })
+                );
                 if (resync.status === "escalated") {
                   return await escalateRefusedMerge(
                     resync.escalationReason ?? "merge_conflict_unresolved",
@@ -2135,7 +2196,7 @@ async function runIssueCommand(
       }
 
       try {
-        return await runFeatureIntegrationPhase({
+        return await withUsageAttribution({ phase: "integration" }, () => runFeatureIntegrationPhase({
           repository: effectiveInput.repository,
           issueNumber: effectiveInput.issueNumber,
           commentId: effectiveInput.commentId,
@@ -2181,7 +2242,7 @@ async function runIssueCommand(
           baseSyncGuard,
           resumeContextMarkdown,
           stopIfFeaturePrMerged
-        });
+        }));
       } catch (err) {
         if (err instanceof LLMError) {
           return await escalateToNeedsHuman({
@@ -2255,11 +2316,14 @@ async function runIssueCommand(
       const recordStore =
         rateLimited && !input.stateStore
           ? guardTerminalStates(
-              createGitHubApiRefStateStore({
-                repository: input.repository,
-                githubToken: activeToken,
-                fetchImpl: recordFetch
-              }),
+              meterTokenUsage(
+                createGitHubApiRefStateStore({
+                  repository: input.repository,
+                  githubToken: activeToken,
+                  fetchImpl: recordFetch
+                }),
+                ledger
+              ),
               allowedTerminalSha
             )
           : store;
@@ -2295,6 +2359,7 @@ async function runIssueCommand(
       }
     }
   } finally {
+    await writePendingTokenUsage();
     process.stdout.write(
       `[EPURE] GitHub API requests this run: ${githubRequestCount}\n`
     );

@@ -414,19 +414,6 @@ export async function runGrillAndPlanPhase(params: {
   });
 
   if (command === "plan") {
-    const updated = await updateIssueStateWithCas({
-      issueNumber,
-      store,
-      mutator: (prev) => ({
-        ...prev,
-        phase: "grilling",
-        status: "active",
-        active_branch: planBranch,
-        plan_branch: prev.plan_branch ?? planBranch,
-        last_processed_comment_id: advanceCommentCursor(prev, commentId)
-      })
-    });
-
     const grillSystemInstruction = [
       "Tu es l'architecte EPURE conduisant un entretien multi-tours `/grill-with-docs` sur une GitHub Issue.",
       PROMPT_INJECTION_IMMUNITY_CLAUSE,
@@ -463,6 +450,20 @@ export async function runGrillAndPlanPhase(params: {
       maxToolRounds: 8,
       logLabel: `grill-round-1#${issueNumber}`,
       fetchImpl
+    });
+
+    // Written after the call, so the state update also records its token usage.
+    const updated = await updateIssueStateWithCas({
+      issueNumber,
+      store,
+      mutator: (prev) => ({
+        ...prev,
+        phase: "grilling",
+        status: "active",
+        active_branch: planBranch,
+        plan_branch: prev.plan_branch ?? planBranch,
+        last_processed_comment_id: advanceCommentCursor(prev, commentId)
+      })
     });
 
     const commentBody = appendEpureCommandsSpoiler(
