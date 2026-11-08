@@ -2963,8 +2963,8 @@ function planAndApplyRepoSetup(input) {
     releaseAppName: manifests.releaseApp.name,
     requirePrApprovalsOnDev: input.requirePrApprovalsOnDev
   });
-  const rulesetSpec = rulesetBundle.releaseImmutability;
   const governanceRulesets = rulesetBundle.all;
+  const releaseRulesets = governanceRulesets.filter((r) => r.bypassActors.some((a) => a.appRole === "release"));
   const releaseEnvironment = {
     name: "release",
     requiredReviewers: true,
@@ -3033,9 +3033,9 @@ function planAndApplyRepoSetup(input) {
       expected_secrets: expectedSecrets,
       repository_merge_settings: DEFAULT_REPOSITORY_MERGE_SETTINGS,
       branch_protections: branchProtections,
-      ruleset_spec: rulesetSpec,
+      release_rulesets: releaseRulesets,
       governance_rulesets: governanceRulesets,
-      ruleset_action: "noop",
+      release_rulesets_action: "noop",
       apps_action: "noop",
       release_environment: releaseEnvironment,
       task_auto_merge_enabled: false,
@@ -3059,9 +3059,9 @@ function planAndApplyRepoSetup(input) {
       expected_secrets: expectedSecrets,
       repository_merge_settings: DEFAULT_REPOSITORY_MERGE_SETTINGS,
       branch_protections: branchProtections,
-      ruleset_spec: rulesetSpec,
+      release_rulesets: releaseRulesets,
       governance_rulesets: governanceRulesets,
-      ruleset_action: "noop",
+      release_rulesets_action: "noop",
       apps_action: "noop",
       release_environment: releaseEnvironment,
       task_auto_merge_enabled: false,
@@ -3234,9 +3234,7 @@ function planAndApplyRepoSetup(input) {
   const existingRulesets = new Set(
     input.existingState?.existingRulesetNames ?? []
   );
-  const rulesetAction = existingRulesets.has(
-    rulesetSpec.name
-  ) ? "noop" : "create";
+  const releaseRulesetsAction = releaseRulesets.every((r) => existingRulesets.has(r.name)) ? "noop" : "create";
   const mutatedFiles = [];
   if (!dryRun && input.repoRootDir) {
     if (agentsConfigAction !== "noop") {
@@ -3287,7 +3285,7 @@ function planAndApplyRepoSetup(input) {
     },
     {
       id: "apply_branch_protections_and_release_ruleset",
-      title: "Confirm 5 Repository Rulesets (feature/* integrity and governance, dev, main, v* tags) and squash-only merge settings",
+      title: `Confirm ${governanceRulesets.length} Repository Rulesets and squash-only merge settings`,
       details: `Run 'setup-repo --apply --apply-github-settings' to enforce squash-only merges and provision ${governanceRulesets.map((r) => `'${r.name}'`).join(", ")}.`
     }
   ];
@@ -3333,9 +3331,9 @@ function planAndApplyRepoSetup(input) {
     expected_secrets: expectedSecrets,
     repository_merge_settings: DEFAULT_REPOSITORY_MERGE_SETTINGS,
     branch_protections: branchProtections,
-    ruleset_spec: rulesetSpec,
+    release_rulesets: releaseRulesets,
     governance_rulesets: governanceRulesets,
-    ruleset_action: rulesetAction,
+    release_rulesets_action: releaseRulesetsAction,
     apps_action: appsAction,
     release_environment: releaseEnvironment,
     task_auto_merge_enabled: taskAutoMergeEnabled,

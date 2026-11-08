@@ -112,17 +112,15 @@ describe("1. Dry-run simulation & guided application (planAndApplyRepoSetup)", (
         "epure-release-tags",
         "epure-release-immutability"
       ]);
-      expect(result.ruleset_spec.targetRefs).toEqual(["refs/heads/main"]);
-      expect(result.ruleset_spec.blockDirectPushes).toBe(true);
-      expect(result.ruleset_spec.blockForcePushes).toBe(true);
-      expect(result.ruleset_spec.blockDeletions).toBe(true);
-      expect(result.ruleset_spec.bypassActors).toEqual([
-        {
-          appRole: "release",
-          appName: "acme-org-epure-release",
-          mode: "always"
-        }
-      ]);
+      expect(result.release_rulesets.map((r) => ({ name: r.name, targetRefs: r.targetRefs, bypassActors: r.bypassActors }))).toEqual(
+        [
+          { name: "epure-release-tags", targetRefs: ["refs/tags/v*"] },
+          { name: "epure-release-immutability", targetRefs: ["refs/heads/main"] }
+        ].map((r) => ({ ...r, bypassActors: [{ appRole: "release", appName: "acme-org-epure-release", mode: "always" }] }))
+      );
+      expect(result.human_interventions.find((h) => h.id === "apply_branch_protections_and_release_ruleset")?.title).toBe(
+        "Confirm 5 Repository Rulesets and squash-only merge settings"
+      );
       expect(result.release_environment.name).toBe("release");
       expect(result.release_environment.requiredReviewers).toBe(true);
       expect(result.branch_protections.map((b) => b.pattern)).toEqual([
@@ -729,7 +727,7 @@ describe("3. Idempotent second pass & fail-safe auto-merge disabling", () => {
             "acme-org-epure-agent",
             "acme-org-epure-release"
           ],
-          existingRulesetNames: ["epure-release-immutability"]
+          existingRulesetNames: ["epure-release-immutability", "epure-release-tags"]
         }
       });
 
@@ -737,7 +735,7 @@ describe("3. Idempotent second pass & fail-safe auto-merge disabling", () => {
       expect(secondPass.planned_workflows.every((w) => w.action === "noop")).toBe(true);
       expect(secondPass.planned_reviewer_roster.every((r) => r.action === "noop")).toBe(true);
       expect(secondPass.agents_config_action).toBe("noop");
-      expect(secondPass.ruleset_action).toBe("noop");
+      expect(secondPass.release_rulesets_action).toBe("noop");
       expect(secondPass.apps_action).toBe("noop");
     } finally {
       rmSync(tempRepoDir, { recursive: true, force: true });
@@ -780,6 +778,15 @@ describe("3. Idempotent second pass & fail-safe auto-merge disabling", () => {
     });
     expect(result.task_auto_merge_enabled).toBe(expectedAutoMerge);
     expect(result.auto_merge_warning_code).toBe(expectedWarningCode);
+  });
+
+  it.each([
+    { id: "no-release-ruleset-installed-plans-create", existingRulesetNames: [], expected: "create" },
+    { id: "main-ruleset-alone-still-plans-create-for-the-v-tag-ruleset", existingRulesetNames: ["epure-release-immutability"], expected: "create" },
+    { id: "both-release-rulesets-installed-is-noop", existingRulesetNames: ["epure-release-tags", "epure-release-immutability"], expected: "noop" }
+  ])("$id", ({ existingRulesetNames, expected }) => {
+    const result = planAndApplyRepoSetup({ repository: "acme-org/payments", dryRun: true, existingState: { existingRulesetNames } });
+    expect(result.release_rulesets_action).toBe(expected);
   });
 });
 
@@ -858,11 +865,11 @@ describe("5. Pre-bundled CLI (dist/cli/setup-repo.mjs) & skill (.agents/skills/s
     const parsed = JSON.parse(output) as {
       status: string;
       dry_run: boolean;
-      ruleset_spec: { targetRefs: string[] };
+      release_rulesets: Array<{ targetRefs: string[] }>;
     };
     expect(parsed.status).toBe("dry_run");
     expect(parsed.dry_run).toBe(true);
-    expect(parsed.ruleset_spec.targetRefs).toEqual(["refs/heads/main"]);
+    expect(parsed.release_rulesets.map((r) => r.targetRefs)).toEqual([["refs/tags/v*"], ["refs/heads/main"]]);
   });
 
   it.each([
