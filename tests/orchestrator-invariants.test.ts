@@ -839,6 +839,26 @@ describe("Token usage is written with the run's existing state updates (#125)", 
   const GRILL = { choices: [{ message: { role: "assistant", content: "❓ **Q1** - **Scope** : ?" } }] };
 
   it.each([
+    { id: "reply-during-grilling-is-grilling-usage", phase: "grilling", expectedPhase: "grilling" },
+    { id: "reply-during-spec-review-is-spec-revision-usage", phase: "spec", expectedPhase: "spec" }
+  ] as const)("$id", async ({ phase, expectedPhase }) => {
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const store = await seedState({ phase, status: "active", subphase: "idle", active_branch: "plan/77-async-ci-feature", plan_branch: "plan/77-async-ci-feature" });
+    const router = declareIssueWrites(declareIssueReads(createGitHubMockRouter()))
+      .on("GET", /\/git\/ref\/heads\//, json({ object: { sha: "branch-sha" } }))
+      .on("POST", `${R}/git/refs`, json({ object: { sha: "branch-sha" } }, 201))
+      .onHost("api.openai.com", "POST", "/v1/chat/completions", json({ choices: [{ message: { role: "assistant", content: "not the expected JSON" } }], usage: { prompt_tokens: 10, completion_tokens: 2 } }));
+
+    try {
+      await run(router, store, { command: "reply", actor: "maintainer", issueNumber: ISSUE, commentId: 900 });
+    } finally {
+      vi.restoreAllMocks();
+    }
+
+    expect(Object.keys((await readState(store)).token_usage?.epic ?? {})).toEqual([expectedPhase]);
+  });
+
+  it.each([
     {
       id: "plan-round-usage-lands-in-its-only-state-update",
       llmBody: { ...GRILL, usage: { prompt_tokens: 120, completion_tokens: 30, prompt_tokens_details: { cached_tokens: 20 } } },

@@ -1006,9 +1006,11 @@ async function runMeteredIssueCommand(
         currentState?.status !== "cancelled")
     ) {
       const phaseModels = requirePhaseModels();
+      const planningCommand = effectiveInput.command;
+      const specRevision = planningCommand === "reply" && currentState?.phase === "spec";
       try {
-        return await runGrillAndPlanPhase({
-          command: effectiveInput.command,
+        return await withUsageAttribution(specRevision ? { phase: "spec" } : {}, () => runGrillAndPlanPhase({
+          command: planningCommand,
           currentPhase: currentState?.phase,
           currentStatus: currentState?.status,
           planManifest:
@@ -1032,7 +1034,7 @@ async function runMeteredIssueCommand(
             totalTransientRetriesUsed += used;
           },
           fetchImpl: effectiveInput.fetchImpl
-        });
+        }));
       } catch (err) {
         if (err instanceof LLMError) {
           return await escalateSuspension({

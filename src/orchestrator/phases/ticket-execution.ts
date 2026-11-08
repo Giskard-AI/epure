@@ -242,7 +242,6 @@ function isLikelyTestTargetPath(filePath: string): boolean {
 
 interface GenerateTicketImplementationWithFallbackParams {
   readonly ticket: TrackedTicketCommentMetadata;
-  readonly usagePhase: "implementation" | "fixes";
   readonly branch: string;
   readonly featureBranch: string;
   readonly systemInstruction: string;
@@ -261,16 +260,7 @@ interface GenerateTicketImplementationWithFallbackParams {
   readonly fetchImpl?: typeof fetch | undefined;
 }
 
-function generateTicketImplementationWithFallback(
-  params: GenerateTicketImplementationWithFallbackParams
-): Promise<GeneratedTicketImplementation> {
-  return withUsageAttribution(
-    { phase: params.usagePhase, ticket: params.ticket.ticketIssueNumber },
-    () => generateTicketImplementation(params)
-  );
-}
-
-async function generateTicketImplementation(
+async function generateTicketImplementationWithFallback(
   params: GenerateTicketImplementationWithFallbackParams
 ): Promise<GeneratedTicketImplementation> {
   const stagedBuffer: StagedTicketImplementationBuffer =
@@ -1074,9 +1064,8 @@ export async function runTicketExecutionLoop(
             : "C'est le premier ticket : inclus un package.json complet (avec scripts 'test': 'vitest run' et 'build': 'vite build', dependencies react/react-dom, devDependencies typescript/vite/vitest/@vitejs/plugin-react/@types/react/@types/react-dom) ainsi que tsconfig.json et vite.config.ts."
         ].join("\n");
 
-        const parsedImpl = await generateTicketImplementationWithFallback({
+        const parsedImpl = await withUsageAttribution({ phase: "implementation", ticket: ticket.ticketIssueNumber }, () => generateTicketImplementationWithFallback({
           ticket,
-          usagePhase: "implementation",
           branch: params.featureBranch,
           featureBranch: params.featureBranch,
           systemInstruction: tddSystemInstruction,
@@ -1092,7 +1081,7 @@ export async function runTicketExecutionLoop(
           phaseModels: params.phaseModels,
           addTransientRetriesUsed: params.addTransientRetriesUsed,
           fetchImpl: params.fetchImpl
-        });
+        }));
 
         const preStage1Check = validateWorkspaceFileOperations({
           workDir: sandboxWorkspace.workDir,
@@ -1207,9 +1196,8 @@ export async function runTicketExecutionLoop(
             )
           ].join("\n");
 
-          const fixedImpl = await generateTicketImplementationWithFallback({
+          const fixedImpl = await withUsageAttribution({ phase: "fixes", ticket: ticket.ticketIssueNumber }, () => generateTicketImplementationWithFallback({
             ticket,
-            usagePhase: "fixes",
             branch: params.featureBranch,
             featureBranch: params.featureBranch,
             systemInstruction: fixSystemInstruction,
@@ -1225,7 +1213,7 @@ export async function runTicketExecutionLoop(
             phaseModels: params.phaseModels,
             addTransientRetriesUsed: params.addTransientRetriesUsed,
             fetchImpl: params.fetchImpl
-          });
+          }));
 
           const fixPreCheck = validateWorkspaceFileOperations({
             workDir: sandboxWorkspace.workDir,
@@ -1707,9 +1695,8 @@ export async function runTicketExecutionLoop(
           wrapUntrustedContent("untrusted_workspace_files", currentFilesContext)
         );
 
-        const reviewFixedImpl = await generateTicketImplementationWithFallback({
+        const reviewFixedImpl = await withUsageAttribution({ phase: "fixes", ticket: ticket.ticketIssueNumber }, () => generateTicketImplementationWithFallback({
           ticket,
-          usagePhase: "fixes",
           branch: taskBranch,
           featureBranch: params.featureBranch,
           thinkingLevel: "HIGH",
@@ -1726,7 +1713,7 @@ export async function runTicketExecutionLoop(
           phaseModels: params.phaseModels,
           addTransientRetriesUsed: params.addTransientRetriesUsed,
           fetchImpl: params.fetchImpl
-        });
+        }));
 
         const remediationPreCheck = validateWorkspaceFileOperations({
           workDir: sandboxWorkspace.workDir,
@@ -1805,9 +1792,8 @@ export async function runTicketExecutionLoop(
               ...reviewResult.must_fix_findings.map((f) => f.path)
             ]
           });
-          const retryImpl = await generateTicketImplementationWithFallback({
+          const retryImpl = await withUsageAttribution({ phase: "fixes", ticket: ticket.ticketIssueNumber }, () => generateTicketImplementationWithFallback({
             ticket,
-            usagePhase: "fixes",
             branch: taskBranch,
             featureBranch: params.featureBranch,
             thinkingLevel: "HIGH",
@@ -1846,7 +1832,7 @@ export async function runTicketExecutionLoop(
             phaseModels: params.phaseModels,
             addTransientRetriesUsed: params.addTransientRetriesUsed,
             fetchImpl: params.fetchImpl
-          });
+          }));
 
           const retryPreCheck = validateWorkspaceFileOperations({
             workDir: sandboxWorkspace.workDir,
