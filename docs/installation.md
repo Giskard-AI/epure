@@ -105,6 +105,8 @@ git commit -m "chore(epure): bootstrap repository governance and workflows"
 git push origin dev
 ```
 
+**Upgrading an existing setup**: run `--apply` and merge the regenerated workflows into `dev` before, or together with, `--apply-github-settings`. Setups older than v1.2.12 report the contract check as `verify-contract / Verify EPURE Consumer Contract`, a name the new rulesets do not accept, so every PR into `dev` stays blocked until the regenerated `epure-check.yml` reaches `dev`. A PR whose checks already ran with the old names needs a new push to report the new ones.
+
 ---
 
 ## What the `/setup-repo` Skill Configures

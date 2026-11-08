@@ -213,6 +213,8 @@ git commit -m "chore(epure): bootstrap repository governance and workflows"
 git push origin dev
 ```
 
+**Upgrading an existing setup**: run `--apply` and merge the regenerated workflows into `dev` before, or together with, `--apply-github-settings`. Setups older than v1.2.12 report the contract check as `verify-contract / Verify EPURE Consumer Contract`, a name the new rulesets do not accept, so every PR into `dev` stays blocked until the regenerated `epure-check.yml` reaches `dev`. A PR whose checks already ran with the old names needs a new push to report the new ones.
+
 ---
 
 ## What the `/setup-repo` Skill Configures
@@ -1443,6 +1445,8 @@ git add .github/ .agents/reviewers/ renovate.json
 git commit -m "chore(epure): bootstrap repository governance and workflows"
 git push origin dev
 ```
+
+**Mise à jour d'une installation existante** : lancez `--apply` et fusionnez les workflows régénérés dans `dev` avant, ou en même temps que, `--apply-github-settings`. Les installations antérieures à v1.2.12 publient le check du contrat sous le nom `verify-contract / Verify EPURE Consumer Contract`, que les nouveaux Rulesets n'acceptent pas : toute PR vers `dev` reste bloquée jusqu'à ce que le `epure-check.yml` régénéré atteigne `dev`. Une PR dont les checks ont déjà tourné avec les anciens noms a besoin d'un nouveau push pour publier les nouveaux.
 
 ---
 
