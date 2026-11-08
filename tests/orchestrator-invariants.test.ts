@@ -971,7 +971,7 @@ describe("Token usage is written with the run's existing state updates (#125)", 
 
   it.each([
     {
-      id: "feature-pr-body-shows-the-total-at-opening-and-the-final-comment-the-total-after-review",
+      id: "feature-pr-body-shows-the-total-at-opening-the-final-comment-the-total-after-review-and-each-call-lands-under-its-scope-and-phase",
       expectedTicketLine: "3,000,000 input tokens (1,000,000 cached) · 500,000 output (0 thinking) · 3 requests · 1 without usage data · ≥ $8.50",
       expectedAtPrOpening: "4,000,000 input tokens (1,200,000 cached) · 600,000 output (10,000 thinking) · 6 requests · 2 without usage data · ≥ $11.00",
       expectedFinal: "4,000,000 input tokens (1,200,000 cached) · 600,000 output (10,000 thinking) · 8 requests · 4 without usage data · ≥ $11.00"
@@ -995,6 +995,13 @@ describe("Token usage is written with the run's existing state updates (#125)", 
     expect(prBody).toContain(`## LLM Usage\n- **Epic total**: ${expectedAtPrOpening}\n`);
     expect(postedComments(router).at(-1)).toContain(`\n- **#${ISSUE}** (Async CI Feature) — PR [#106](pr106) already merged into \`${FEATURE_BRANCH}\` — LLM usage: ${expectedTicketLine}\n`);
     expect(postedComments(router).at(-1)).toContain(`## LLM Usage\n- **Epic total**: ${expectedFinal}\n`);
+    const requestsByScopeAndPhase = Object.fromEntries(
+      Object.entries((await readState(store)).token_usage ?? {}).map(([scope, phases]) => [
+        scope,
+        Object.fromEntries(Object.entries(phases).map(([phase, models]) => [phase, models?.["openai/gpt-test"]?.requests]))
+      ])
+    );
+    expect(requestsByScopeAndPhase).toEqual({ epic: { plan: 2, integration: 1, review: 2 }, [String(ISSUE)]: { implementation: 3 } });
   });
 
   it("resumed-pass-rewrites-only-the-usage-section-of-the-existing-feature-pr-at-its-start-and-end", async () => {

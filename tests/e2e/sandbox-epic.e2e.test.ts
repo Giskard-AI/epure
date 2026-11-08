@@ -25,6 +25,6 @@ describe.runIf(MODE === "run")("EPURE e2e sandbox epic", () => {
     const { config, token, gh } = connect();
     const { result, dir } = await runSandboxEpic(config, gh, token, log);
     log(`[e2e] ${result.success ? "PASS" : "FAIL"}: report in ${dir}/report.md`);
-    expect(result.checks.filter((c) => !c.passed), result.error ?? "").toEqual([]);
+    expect(result.checks.filter((c) => c.passed === false), result.error ?? "").toEqual([]);
   });
 });

@@ -454,6 +454,7 @@ interface RunEvidence {
   readonly usage: ReadonlyArray<UsageLine & { readonly run_id: number; readonly job_id: number }>;
   readonly jobs: readonly ActionsJob[];
   readonly unavailableJobLogs: readonly number[];
+  readonly cancelledOrchestratorJobs: readonly number[];
   readonly taskBranchCiRuns: number;
 }
 
@@ -477,6 +478,7 @@ export async function collectEvidence(run: Pick<Run, "gh" | "startedAt">): Promi
   const usage: Array<UsageLine & { run_id: number; job_id: number }> = [];
   const jobs: ActionsJob[] = [];
   const unavailableJobLogs: number[] = [];
+  const cancelledOrchestratorJobs: number[] = [];
   for (const wr of runs) {
     // filter=all: the jobs of every attempt, so a re-run job is counted and billed too.
     const ran = (
@@ -487,6 +489,9 @@ export async function collectEvidence(run: Pick<Run, "gh" | "startedAt">): Promi
       continue;
     }
     for (const job of ran) {
+      if (job.conclusion === "cancelled") {
+        cancelledOrchestratorJobs.push(job.id);
+      }
       // One unreadable log loses that job's usage, not the evidence of the whole run.
       const log = job.status === "completed" ? await run.gh.text(`${R}/actions/jobs/${job.id}/logs`).catch(() => null) : null;
       if (log === null) {
@@ -500,6 +505,7 @@ export async function collectEvidence(run: Pick<Run, "gh" | "startedAt">): Promi
     usage,
     jobs,
     unavailableJobLogs,
+    cancelledOrchestratorJobs,
     taskBranchCiRuns: runs.filter((r) => r.path === CI_WORKFLOW && r.head_branch?.startsWith("task/")).length
   };
 }
@@ -660,6 +666,7 @@ export async function runSandboxEpic(
     jobFailures: run.jobFailures,
     usageRecords: records.length,
     unavailableJobLogs: evidence?.unavailableJobLogs ?? [],
+    cancelledOrchestratorJobs: evidence?.cancelledOrchestratorJobs ?? [],
     stateUsageMismatches: stateUsage && evidence ? compareStateUsageWithLogs(stateUsage, records) : null,
     unknown
   });

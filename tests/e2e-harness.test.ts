@@ -907,9 +907,11 @@ describe("evaluateRun", () => {
     jobFailures: [],
     usageRecords: 5,
     unavailableJobLogs: [],
+    cancelledOrchestratorJobs: [],
     stateUsageMismatches: [],
     unknown: {}
   } satisfies Parameters<typeof evaluateRun>[0];
+  const mismatch = ["google/flash: requests 4 in the state, 5 in the logs"];
 
   it.each<{ id: string; patch: Partial<Parameters<typeof evaluateRun>[0]>; failed: string[] }>([
     { id: "gate-3-with-one-escalation-per-ticket-passes", patch: { escalations: [escalation(3), escalation(4)] }, failed: [] },
@@ -928,12 +930,24 @@ describe("evaluateRun", () => {
     { id: "failed-orchestrator-run-fails", patch: { jobFailures: [failure] }, failed: ["no-orchestrator-job-failure"] },
     { id: "zero-usage-records-fail", patch: { usageRecords: 0 }, failed: ["llm-usage-recorded"] },
     { id: "state-without-token-usage-fails", patch: { stateUsageMismatches: null }, failed: ["state-usage-matches-job-logs"] },
-    { id: "state-disagreeing-with-the-logs-fails", patch: { stateUsageMismatches: ["google/flash: requests 4 in the state, 5 in the logs"] }, failed: ["state-usage-matches-job-logs"] }
+    { id: "state-disagreeing-with-the-logs-fails", patch: { stateUsageMismatches: mismatch }, failed: ["state-usage-matches-job-logs"] },
+    { id: "cancelled-job-with-agreeing-totals-passes", patch: { cancelledOrchestratorJobs: [77] }, failed: [] }
   ])("$id", ({ patch, failed }) => {
     const { success, checks } = evaluateRun({ ...passing, ...patch });
 
-    expect(checks.filter((c) => !c.passed).map((c) => c.id)).toEqual(failed);
+    expect(checks.filter((c) => c.passed === false).map((c) => c.id)).toEqual(failed);
     expect(success).toBe(failed.length === 0);
+  });
+
+  it("cancelled-job-with-disagreeing-totals-is-unknown-not-failed", () => {
+    const { success, checks } = evaluateRun({ ...passing, cancelledOrchestratorJobs: [77], stateUsageMismatches: mismatch });
+
+    expect(checks.find((c) => c.id === "state-usage-matches-job-logs")).toEqual({
+      id: "state-usage-matches-job-logs",
+      passed: null,
+      detail: `orchestrator jobs 77 were cancelled and may have logged usage they never wrote: ${mismatch[0]}`
+    });
+    expect(success).toBe(true);
   });
 
   it.each<{ id: string; patch: Partial<Parameters<typeof evaluateRun>[0]>; detail: string }>([
@@ -973,7 +987,7 @@ describe("evaluateRun", () => {
   });
 
   it.each<{ id: string; patch: Partial<Parameters<typeof evaluateRun>[0]>; detail: string }>([
-    { id: "agreeing-state-and-logs", patch: {}, detail: "the state's token usage equals the job-log totals" },
+    { id: "agreeing-state-and-logs", patch: {}, detail: "no loss and no double write: the state's per-model totals equal the job-log totals" },
     { id: "no-usage-in-the-state", patch: { stateUsageMismatches: null }, detail: "no token_usage in the EPURE state" },
     { id: "unreadable-state", patch: { stateUsageMismatches: null, unknown: { end_state: "GET ref: HTTP 502" } }, detail: "EPURE state unknown: GET ref: HTTP 502" },
     { id: "unreadable-job-logs", patch: { stateUsageMismatches: null, unknown: { usage: "GET /runs: HTTP 502" } }, detail: "job logs unknown: GET /runs: HTTP 502" },
@@ -1291,7 +1305,7 @@ describe("renderMarkdownReport", () => {
       job_failures: [],
       comparable: { comparable: false, unmet: ["no review on a task pull request"] },
       unknown: {},
-      ...evaluateRun({ endState, error: "timed out", featurePr: null, escalations, jobFailures: [], usageRecords: 0, unavailableJobLogs: [], stateUsageMismatches: null, unknown: {} }),
+      ...evaluateRun({ endState, error: "timed out", featurePr: null, escalations, jobFailures: [], usageRecords: 0, unavailableJobLogs: [], cancelledOrchestratorJobs: [], stateUsageMismatches: null, unknown: {} }),
       error: "timed out",
       ...patch
     };

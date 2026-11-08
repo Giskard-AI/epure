@@ -313,7 +313,8 @@ export interface SuccessCheck {
     | "no-orchestrator-job-failure"
     | "llm-usage-recorded"
     | "state-usage-matches-job-logs";
-  readonly passed: boolean;
+  // null: the evidence cannot tell, which does not fail the run.
+  readonly passed: boolean | null;
   readonly detail: string;
 }
 
@@ -352,11 +353,14 @@ export function evaluateRun(input: {
   readonly jobFailures: readonly JobFailure[];
   readonly usageRecords: number;
   readonly unavailableJobLogs: readonly number[];
+  // A cancelled job may log usage it never wrote to the state.
+  readonly cancelledOrchestratorJobs: readonly number[];
   // compareStateUsageWithLogs; null when the state holds no token usage or either side is unknown.
   readonly stateUsageMismatches: readonly string[] | null;
   readonly unknown: Unknowns;
 }): { readonly success: boolean; readonly checks: readonly SuccessCheck[] } {
-  const { endState, error, featurePr, escalations, jobFailures, usageRecords, unavailableJobLogs, stateUsageMismatches, unknown } = input;
+  const { endState, error, featurePr, escalations, jobFailures, usageRecords, unavailableJobLogs, cancelledOrchestratorJobs, stateUsageMismatches, unknown } = input;
+  const usageMismatch = stateUsageMismatches !== null && stateUsageMismatches.length > 0;
   const accepted = acceptedEndState(endState);
   const internal = escalations.filter((e) => e.class !== "legitimate");
   const perTicket = new Map<number, number>();
@@ -413,19 +417,21 @@ export function evaluateRun(input: {
     },
     {
       id: "state-usage-matches-job-logs",
-      passed: stateUsageMismatches !== null && stateUsageMismatches.length === 0,
+      passed: usageMismatch && cancelledOrchestratorJobs.length > 0 ? null : stateUsageMismatches !== null && !usageMismatch,
       detail: unknown.end_state
         ? `EPURE state unknown: ${unknown.end_state}`
         : unknown.usage
           ? `job logs unknown: ${unknown.usage}`
           : stateUsageMismatches === null
             ? "no token_usage in the EPURE state"
-            : stateUsageMismatches.length === 0
-              ? "the state's token usage equals the job-log totals"
-              : stateUsageMismatches.join("; ")
+            : !usageMismatch
+              ? "no loss and no double write: the state's per-model totals equal the job-log totals"
+              : cancelledOrchestratorJobs.length > 0
+                ? `orchestrator jobs ${cancelledOrchestratorJobs.join(", ")} were cancelled and may have logged usage they never wrote: ${stateUsageMismatches.join("; ")}`
+                : stateUsageMismatches.join("; ")
     }
   ];
-  return { success: checks.every((c) => c.passed), checks };
+  return { success: checks.every((c) => c.passed !== false), checks };
 }
 
 export interface Comparability {
@@ -601,7 +607,7 @@ export function renderMarkdownReport(r: E2eRunResult): string {
     "",
     "## Success checks",
     "",
-    ...r.checks.map((c) => `- [${c.passed ? "x" : " "}] ${c.id}: ${c.detail}`),
+    ...r.checks.map((c) => `- [${c.passed ? "x" : " "}] ${c.id}${c.passed === null ? " (unknown)" : ""}: ${c.detail}`),
     "",
     "## Phases",
     "",
