@@ -848,17 +848,19 @@ EPURE is built from the ground up around **Defense-in-Depth**, **Least Privilege
 
 ---
 
-## 5. Incremental Workspace Mutation Tools, Inter-Ticket Guard & Multi-Phase Epic Convergence (ADR-0032, ADR-0033)
+## 5. Pi Agent Session, Incremental Workspace Mutation Tools, Inter-Ticket Guard & Multi-Phase Epic Convergence (ADR-0032, ADR-0033, ADR-0036)
 
-1. **Transactional Incremental Workspace Mutation (`StagedTicketImplementationBuffer`)**:
+1. **Pi Agent Session & Two-Step Structured Output (ADR-0036)**:
+   - Ticket implementation, Stage 1 retries and review/CI remediation run as a session of the Pi coding agent (RPC mode, `dist/vendor/pi`) inside the `proxy_only` sandbox, on the Stage 1 checkout: the agent reads, edits and tests the repository with its own tools, with no extensions, MCP, skills or telemetry, and holds only the proxy nonce. The published files are the checkout's diff against a pre-session snapshot; a direct `ticket_session_summary` call then writes the commit message. `validateTicketIntegrityGuard` and Stage 1 still gate the result.
+2. **Transactional Incremental Workspace Mutation (`StagedTicketImplementationBuffer`, fallback path without an agent engine until step 6)**:
    - During ticket implementation and remediation tool loops, the model mutates files incrementally via `write_repo_file`, `patch_repo_file`, and `delete_repo_file` inside an in-memory transactional buffer (`StagedTicketImplementationBuffer`), isolated from `feature/*` until `validateWorkspaceFileOperations`, `validateTicketIntegrityGuard`, and Stage 1 sandbox checks succeed.
    - **Chunked File-by-File Fallback (`ChunkedTicketImplementationFallback`)**: If a multi-file ticket hits `MAX_TOKENS` output truncation, EPURE automatically decomposes the remaining `filesToTouch` entries into file-by-file sub-calls (preserving already staged mutations in the buffer and rolling back atomically if any sub-call fails).
    - **Zero-Truncation Context Catalog (`CompactWorkspaceFilesContext`)**: Injects full, untruncated file contents only for files modified by the ticket or listed in `filesToTouch`, and exposes the rest of the repository as a compact `path (N lines)` index inspectable on demand via `read_repo_file` and `search_in_repo_file`.
-2. **Native GitHub Relational Graph, Inter-Ticket Integrity Guard & Semantic ADR Reconciliation**:
+3. **Native GitHub Relational Graph, Inter-Ticket Integrity Guard & Semantic ADR Reconciliation**:
    - `/epure to-tickets` wires native GitHub `sub_issues` and `dependencies/blocked_by` relationships alongside the Markdown tasklist on the tracking issue.
    - `validateTicketIntegrityGuard` blocks any ticket from deleting or emptying pre-existing test files, truncating >30% of lines/exports on out-of-scope files, or downgrading manifest `build`/`test`/`lint`/`typecheck` scripts into no-op commands.
    - `renumberCollidingAdrs` and `reconcileAdrsWithLlm` deduplicate ADR slugs across concurrent branches, renumber colliding `docs/adr/NNNN-*.md` files monotonically, and align cross-references in specs and `GLOSSARY.md`.
-3. **Zero-Context `EpicConvergenceAudit` & Multi-Phase Remediation (`max_epic_phases`)**:
+4. **Zero-Context `EpicConvergenceAudit` & Multi-Phase Remediation (`max_epic_phases`)**:
    - Before opening the final `feature/* -> dev` PR, an isolated zero-context session (`runEpicConvergenceAudit`) verifies the feature branch against the specification's `EpicGoalContract` (`required_entrypoints`, absence of `forbidden_stubs`, and `end_to_end_verification_criteria`).
    - If unwired modules or stubs are detected (`verdict: "INCOMPLETE"`) and `epic_phase < max_epic_phases` (default `2`), EPURE automatically generates, links, and executes bounded **Phase 2 convergence tickets** (`[Phase 2 - Ticket N]`) before opening the final PR; otherwise it escalates with `epic_convergence_exhausted` (`needs-human`).
 
@@ -1267,6 +1269,13 @@ This page provides the aligned **English <-> French** ubiquitous language refere
 | --- | --- | --- |
 | **Token Usage (`token_usage`)** | *Usage des jetons* | Tokens spent by the epic and by each ticket, per phase and per `<provider>/<model>`, kept in `refs/epure/state/<issue>` and written with the existing state updates. Fed in the same format by `LLMClient` and the sandbox LLM proxy. A request whose engine reports no usage counts as `usage_unavailable`, never as zero tokens. |
 | **Pricing Table (`pricing`)** | *Table de prix* | Optional `.github/agents.yml` section: USD per million input, cached-input and output tokens per model, with source URL and read-on date. Cost is computed at display time and never stored; thinking tokens bill as output. |
+
+## 6. Pi Agent Engine & Two-Step Structured Output (ADR-0036)
+
+| English Term | French Canonical Term (`GLOSSARY.md`) | Definition & Invariant |
+| --- | --- | --- |
+| **Agent Engine Port (`AgentEngine`)** | *Port de moteur d'agent* | Single interface for an agent session: role, tool policy (`write` or `read_only`), instructions, prompt, worktree, timeout and model in; the agent's final message and the worktree diff against a pre-session snapshot out. Usage is not returned: the sandbox LLM proxy reports it through `reportLLMUsage`. Pi (`createPiAgentEngine`) is the default adapter, run in RPC mode inside the sandbox. |
+| **Two-Step Structured Output** | *Sortie structurée en deux temps* | A JSON-producing phase runs the agent session first, then a direct tool-less structured-output call built from the final message and the changed files (`ticket_session_summary` for a ticket). The integrity guard and Stage 1 still gate the diff. |
 
 ---
 ## [FR] Introduction & Nom (L'Épure)
@@ -2113,17 +2122,19 @@ EPURE a été conçu dès l'origine autour de trois principes d'ingénierie : **
 
 ---
 
-## 5. Outils de Mutation Incrémentale, Garde d'Intégrité Inter-Tickets & Convergence Multi-Phases (ADR-0032, ADR-0033)
+## 5. Session d'Agent Pi, Outils de Mutation Incrémentale, Garde d'Intégrité Inter-Tickets & Convergence Multi-Phases (ADR-0032, ADR-0033, ADR-0036)
 
-1. **Mutation Incrémentale Transactionnelle (`StagedTicketImplementationBuffer`)** :
+1. **Session d'Agent Pi & Sortie Structurée en Deux Temps (ADR-0036)** :
+   - L'implémentation, les retries Stage 1 et la remédiation revue/CI d'un ticket s'exécutent comme une session du moteur d'agent Pi (mode RPC, `dist/vendor/pi`) dans la sandbox `proxy_only`, sur le checkout Stage 1 : l'agent lit, modifie et teste le dépôt avec ses propres outils, sans extensions, MCP, skills ni télémétrie, et ne détient que le nonce du proxy. Les fichiers publiés sont le diff du checkout par rapport à un instantané pris avant la session ; un appel direct `ticket_session_summary` rédige ensuite le message de commit. `validateTicketIntegrityGuard` et Stage 1 restent des portes.
+2. **Mutation Incrémentale Transactionnelle (`StagedTicketImplementationBuffer`, chemin de repli sans moteur d'agent jusqu'à l'étape 6)** :
    - Pendant l'implémentation et la remédiation d'un ticket, le modèle modifie les fichiers de manière incrémentale via `write_repo_file`, `patch_repo_file` et `delete_repo_file` dans un tampon transactionnel en mémoire (`StagedTicketImplementationBuffer`), isolé de `feature/*` tant que `validateWorkspaceFileOperations`, `validateTicketIntegrityGuard` et le Sandbox Stage 1 n'ont pas validé l'ensemble.
    - **Repli Segmenté Fichier par Fichier (`ChunkedTicketImplementationFallback`)** : si un ticket multi-fichiers rencontre une troncature `MAX_TOKENS`, EPURE décompose automatiquement les entrées `filesToTouch` restantes en sous-appels fichier par fichier (en conservant les mutations déjà validées dans le tampon et en annulant tout le tampon sans commit partiel si un sous-appel échoue).
    - **Catalogue Compact de Contexte (`CompactWorkspaceFilesContext`)** : injecte le contenu complet (sans aucune troncature au milieu d'un fichier) uniquement pour les fichiers modifiés par le ticket ou listés dans `filesToTouch`, et expose le reste du dépôt sous forme d'un index `chemin (N lignes)` consultable à la demande via `read_repo_file` et `search_in_repo_file`.
-2. **Graphe Relationnel GitHub Natif, Garde d'Intégrité Inter-Tickets & Réconciliation Sémantique des ADRs** :
+3. **Graphe Relationnel GitHub Natif, Garde d'Intégrité Inter-Tickets & Réconciliation Sémantique des ADRs** :
    - `/epure to-tickets` câble nativement les liens `sub_issues` et `dependencies/blocked_by` dans GitHub en complément de la Tasklist Markdown de l'issue de pilotage.
    - `validateTicketIntegrityGuard` interdit à tout ticket de supprimer ou vider des fichiers de test existants, de tronquer plus de 30 % des lignes/symboles d'un fichier hors périmètre, ou de dégrader les scripts `build`/`test`/`lint`/`typecheck` des manifestes en commandes factices.
    - `renumberCollidingAdrs` et `reconcileAdrsWithLlm` dédupliquent les ADRs par slug entre branches concurrentes, renumérotent de façon monotone les fichiers `docs/adr/NNNN-*.md` en collision et alignent les références croisées dans les spécifications et `GLOSSARY.md`.
-3. **Audit de Convergence Zéro-Contexte (`EpicConvergenceAudit`) & Remédiation Multi-Phases (`max_epic_phases`)** :
+4. **Audit de Convergence Zéro-Contexte (`EpicConvergenceAudit`) & Remédiation Multi-Phases (`max_epic_phases`)** :
    - Avant d'ouvrir la PR finale `feature/* -> dev`, une session isolée zéro-contexte (`runEpicConvergenceAudit`) vérifie la branche de fonctionnalité face à l'`EpicGoalContract` de la spécification (`required_entrypoints`, absence de `forbidden_stubs` et `end_to_end_verification_criteria`).
    - Si des points d'entrée non câblés ou des simulacres sont détectés (`verdict: "INCOMPLETE"`) et que `epic_phase < max_epic_phases` (`2` par défaut), EPURE génère, chaîne et exécute automatiquement des **tickets de convergence de Phase 2** (`[Phase 2 - Ticket N]`) avant d'ouvrir la PR finale ; au-delà du plafond, il escalade en `epic_convergence_exhausted` (`needs-human`).
 

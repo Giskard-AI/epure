@@ -60,3 +60,10 @@ This page provides the aligned **English <-> French** ubiquitous language refere
 | **Token Usage (`token_usage`)** | *Usage des jetons* | Tokens spent by the epic and by each ticket, per phase and per `<provider>/<model>`, kept in `refs/epure/state/<issue>` and written with the existing state updates. Fed in the same format by `LLMClient` and the sandbox LLM proxy. A request whose engine reports no usage counts as `usage_unavailable`, never as zero tokens. |
 | **Pricing Table (`pricing`)** | *Table de prix* | Optional `.github/agents.yml` section: USD per million input, cached-input and output tokens per model, with source URL and read-on date. Cost is computed at display time and never stored; thinking tokens bill as output. |
 
+## 6. Pi Agent Engine & Two-Step Structured Output (ADR-0036)
+
+| English Term | French Canonical Term (`GLOSSARY.md`) | Definition & Invariant |
+| --- | --- | --- |
+| **Agent Engine Port (`AgentEngine`)** | *Port de moteur d'agent* | Single interface for an agent session: role, tool policy (`write` or `read_only`), instructions, prompt, worktree, timeout and model in; the agent's final message and the worktree diff against a pre-session snapshot out. Usage is not returned: the sandbox LLM proxy reports it through `reportLLMUsage`. Pi (`createPiAgentEngine`) is the default adapter, run in RPC mode inside the sandbox. |
+| **Two-Step Structured Output** | *Sortie structurée en deux temps* | A JSON-producing phase runs the agent session first, then a direct tool-less structured-output call built from the final message and the changed files (`ticket_session_summary` for a ticket). The integrity guard and Stage 1 still gate the diff. |
+

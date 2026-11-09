@@ -524,6 +524,14 @@ _Éviter_ : « usage des jetons » seul (confusion avec les jetons d'installatio
 **Table de prix** (`pricing`) : section facultative de `.github/agents.yml` donnant, par modèle, les dollars par million de jetons d'entrée, d'entrée en cache et de sortie, avec l'URL de la source et la date de lecture. Le coût est calculé à l'affichage, jamais stocké ; les jetons de réflexion sont facturés au prix de sortie.
 _Éviter_ : budget, plafond de dépense (hors périmètre, ADR-0012).
 
+## Moteur d'agent Pi et sortie structurée en deux temps (ADR-0036)
+
+**Port de moteur d'agent** (`AgentEngine`) : interface unique par laquelle l'orchestrateur lance une **Session d'agent** : rôle, politique d'outils (`write` ou `read_only`), instructions, message, répertoire de travail, délai et modèle en entrée ; message final de l'agent et diff du répertoire de travail par rapport à l'instantané pris avant la session en sortie. L'usage n'en sort pas : le **Proxy LLM de sandbox** le signale par `reportLLMUsage`. Pi en est l'**Adaptateur de moteur d'agent** par défaut (`createPiAgentEngine`).
+_Éviter_ : lire les fichiers produits dans la réponse du modèle plutôt que dans le diff ; rendre l'usage une seconde fois depuis la session.
+
+**Sortie structurée en deux temps** : exécution d'une phase qui doit rendre du JSON en deux appels : la **Session d'agent** modifie le répertoire de travail, puis un appel direct sans outils produit la **Sortie structurée par schéma** à partir du message final et des fichiers changés (`ticket_session_summary` pour un ticket). Les portes `validateTicketIntegrityGuard` et Stage 1 s'appliquent ensuite au diff.
+_Éviter_ : demander à l'agent de recopier les fichiers dans son JSON final.
+
 
 
 

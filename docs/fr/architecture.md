@@ -92,16 +92,18 @@ EPURE a été conçu dès l'origine autour de trois principes d'ingénierie : **
 
 ---
 
-## 5. Outils de Mutation Incrémentale, Garde d'Intégrité Inter-Tickets & Convergence Multi-Phases (ADR-0032, ADR-0033)
+## 5. Session d'Agent Pi, Outils de Mutation Incrémentale, Garde d'Intégrité Inter-Tickets & Convergence Multi-Phases (ADR-0032, ADR-0033, ADR-0036)
 
-1. **Mutation Incrémentale Transactionnelle (`StagedTicketImplementationBuffer`)** :
+1. **Session d'Agent Pi & Sortie Structurée en Deux Temps (ADR-0036)** :
+   - L'implémentation, les retries Stage 1 et la remédiation revue/CI d'un ticket s'exécutent comme une session du moteur d'agent Pi (mode RPC, `dist/vendor/pi`) dans la sandbox `proxy_only`, sur le checkout Stage 1 : l'agent lit, modifie et teste le dépôt avec ses propres outils, sans extensions, MCP, skills ni télémétrie, et ne détient que le nonce du proxy. Les fichiers publiés sont le diff du checkout par rapport à un instantané pris avant la session ; un appel direct `ticket_session_summary` rédige ensuite le message de commit. `validateTicketIntegrityGuard` et Stage 1 restent des portes.
+2. **Mutation Incrémentale Transactionnelle (`StagedTicketImplementationBuffer`, chemin de repli sans moteur d'agent jusqu'à l'étape 6)** :
    - Pendant l'implémentation et la remédiation d'un ticket, le modèle modifie les fichiers de manière incrémentale via `write_repo_file`, `patch_repo_file` et `delete_repo_file` dans un tampon transactionnel en mémoire (`StagedTicketImplementationBuffer`), isolé de `feature/*` tant que `validateWorkspaceFileOperations`, `validateTicketIntegrityGuard` et le Sandbox Stage 1 n'ont pas validé l'ensemble.
    - **Repli Segmenté Fichier par Fichier (`ChunkedTicketImplementationFallback`)** : si un ticket multi-fichiers rencontre une troncature `MAX_TOKENS`, EPURE décompose automatiquement les entrées `filesToTouch` restantes en sous-appels fichier par fichier (en conservant les mutations déjà validées dans le tampon et en annulant tout le tampon sans commit partiel si un sous-appel échoue).
    - **Catalogue Compact de Contexte (`CompactWorkspaceFilesContext`)** : injecte le contenu complet (sans aucune troncature au milieu d'un fichier) uniquement pour les fichiers modifiés par le ticket ou listés dans `filesToTouch`, et expose le reste du dépôt sous forme d'un index `chemin (N lignes)` consultable à la demande via `read_repo_file` et `search_in_repo_file`.
-2. **Graphe Relationnel GitHub Natif, Garde d'Intégrité Inter-Tickets & Réconciliation Sémantique des ADRs** :
+3. **Graphe Relationnel GitHub Natif, Garde d'Intégrité Inter-Tickets & Réconciliation Sémantique des ADRs** :
    - `/epure to-tickets` câble nativement les liens `sub_issues` et `dependencies/blocked_by` dans GitHub en complément de la Tasklist Markdown de l'issue de pilotage.
    - `validateTicketIntegrityGuard` interdit à tout ticket de supprimer ou vider des fichiers de test existants, de tronquer plus de 30 % des lignes/symboles d'un fichier hors périmètre, ou de dégrader les scripts `build`/`test`/`lint`/`typecheck` des manifestes en commandes factices.
    - `renumberCollidingAdrs` et `reconcileAdrsWithLlm` dédupliquent les ADRs par slug entre branches concurrentes, renumérotent de façon monotone les fichiers `docs/adr/NNNN-*.md` en collision et alignent les références croisées dans les spécifications et `GLOSSARY.md`.
-3. **Audit de Convergence Zéro-Contexte (`EpicConvergenceAudit`) & Remédiation Multi-Phases (`max_epic_phases`)** :
+4. **Audit de Convergence Zéro-Contexte (`EpicConvergenceAudit`) & Remédiation Multi-Phases (`max_epic_phases`)** :
    - Avant d'ouvrir la PR finale `feature/* -> dev`, une session isolée zéro-contexte (`runEpicConvergenceAudit`) vérifie la branche de fonctionnalité face à l'`EpicGoalContract` de la spécification (`required_entrypoints`, absence de `forbidden_stubs` et `end_to_end_verification_criteria`).
    - Si des points d'entrée non câblés ou des simulacres sont détectés (`verdict: "INCOMPLETE"`) et que `epic_phase < max_epic_phases` (`2` par défaut), EPURE génère, chaîne et exécute automatiquement des **tickets de convergence de Phase 2** (`[Phase 2 - Ticket N]`) avant d'ouvrir la PR finale ; au-delà du plafond, il escalade en `epic_convergence_exhausted` (`needs-human`).
