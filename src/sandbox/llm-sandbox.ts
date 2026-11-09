@@ -278,6 +278,8 @@ export function buildLandrunInvocation(params: {
   readonly proxyPort?: number | undefined;
   readonly readOnlyPaths?: readonly string[] | undefined;
   readonly agentDir?: string | undefined;
+  // Only under bubblewrap, whose /dev is a private minimal devtmpfs.
+  readonly writableDevNull?: boolean | undefined;
 }): readonly string[] {
   const sanitizeLandrunPath = (p: string): string => p.replace(/,/g, "");
   const resolvedCwd = sanitizeLandrunPath(resolve(params.cwd));
@@ -309,7 +311,8 @@ export function buildLandrunInvocation(params: {
     "--ro",
     "/dev,/proc",
     "--rwx",
-    Array.from(rwxPaths).join(",")
+    Array.from(rwxPaths).join(","),
+    ...(params.writableDevNull ? ["--rw", "/dev/null"] : [])
   ];
 
   if (params.networkPolicy === "proxy_only") {
@@ -426,7 +429,8 @@ export function buildKernelSandboxedCommand(
       networkPolicy: input.networkPolicy,
       proxyPort: input.proxyPort,
       readOnlyPaths: input.readOnlyPaths,
-      agentDir: input.agentDir
+      agentDir: input.agentDir,
+      writableDevNull: backend === "bubblewrap+landrun"
     });
   const bubblewrap = (command: string, args: readonly string[]): readonly string[] =>
     buildBubblewrapInvocation({

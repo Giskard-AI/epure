@@ -1291,6 +1291,23 @@ describe("Sandbox LLM proxy & untrusted code credential isolation (#98)", () => 
     }
   );
 
+  it.each([
+    { id: "landrun-inside-bubblewrap-may-write-dev-null", capabilities: { landrunAvailable: true, bubblewrapAvailable: true }, writable: true },
+    { id: "landrun-alone-keeps-the-host-dev-read-only", capabilities: { landrunAvailable: true, bubblewrapAvailable: false }, writable: false }
+  ])("buildKernelSandboxedCommand [$id]", ({ capabilities, writable }) => {
+    const wrapped = buildKernelSandboxedCommand({
+      command: "pi",
+      args: [],
+      cwd: "/tmp/epure-work",
+      sanitizedEnv: { PATH: "/usr/bin:/bin" },
+      networkPolicy: "proxy_only",
+      proxyPort: 43120,
+      capabilities
+    });
+
+    expect(wrapped.args.join("\u0000").includes(["--rw", "/dev/null"].join("\u0000"))).toBe(writable);
+  });
+
   const NO_BACKEND: KernelSandboxCapabilities = {
     landrunAvailable: false,
     bubblewrapAvailable: false

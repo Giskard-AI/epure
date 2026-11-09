@@ -637,7 +637,7 @@ describe.skipIf(!PI_AVAILABLE)("Pi agent engine in the sandbox, against a fake p
   it("edits the worktree through Pi's tools and reports usage once, through the proxy", async () => {
     const upstream = await scriptedUpstream([
       anthropicStream({ type: "tool_use", id: "toolu_1", name: "write", input: { path: "hello.txt", content: "hello\n" } }, { input: 100, output: 20 }),
-      anthropicStream({ type: "tool_use", id: "toolu_2", name: "bash", input: { command: "rm obsolete.txt" } }, { input: 150, output: 10 }),
+      anthropicStream({ type: "tool_use", id: "toolu_2", name: "bash", input: { command: "rm obsolete.txt 2>/dev/null" } }, { input: 150, output: 10 }),
       anthropicStream({ type: "text", text: "Done: hello.txt created." }, { input: 200, output: 5 })
     ]);
     upstreams.push(upstream);
