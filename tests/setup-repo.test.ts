@@ -11,7 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   PINNED_RTK_VERSION,
   buildRenovateConfigJson,
@@ -330,6 +330,106 @@ describe("2. .github/agents.yml defaults (Q78) and non-weakenable security invar
     expect(() => parseAgentsYaml(yaml)).toThrowError(
       "providers.anthropic.effort"
     );
+  });
+
+  const GEMINI_PRICE = {
+    input_per_mtok: 0.75,
+    cached_input_per_mtok: 0.075,
+    output_per_mtok: 3.75,
+    source: "https://ai.google.dev/gemini-api/docs/pricing#gemini-3.8-flash",
+    read_on: "2026-11-08"
+  };
+  it.each([
+    {
+      id: "no-pricing-section",
+      yaml: "harness: pi\n",
+      expectedPricing: undefined
+    },
+    {
+      id: "unquoted-model-key-with-cached-price",
+      yaml: [
+        "pricing:",
+        "  google/gemini-3.8-flash:",
+        "    input_per_mtok: 0.75",
+        "    cached_input_per_mtok: 0.075 # context caching",
+        "    output_per_mtok: 3.75",
+        "    source: https://ai.google.dev/gemini-api/docs/pricing#gemini-3.8-flash",
+        "    read_on: 2026-11-08",
+        "security_invariants:",
+        "  sandbox_isolation: true",
+        ""
+      ].join("\n"),
+      expectedPricing: { "google/gemini-3.8-flash": GEMINI_PRICE }
+    },
+    {
+      id: "quoted-model-key-with-colon-and-no-cached-price",
+      yaml: [
+        "pricing:",
+        '  "bedrock/anthropic.claude-v5:0":',
+        "    input_per_mtok: 3",
+        "    output_per_mtok: 15",
+        '    source: "https://aws.amazon.com/bedrock/pricing/"',
+        "    read_on: '2026-11-01'",
+        ""
+      ].join("\n"),
+      expectedPricing: {
+        "bedrock/anthropic.claude-v5:0": {
+          input_per_mtok: 3,
+          output_per_mtok: 15,
+          source: "https://aws.amazon.com/bedrock/pricing/",
+          read_on: "2026-11-01"
+        }
+      }
+    }
+  ])("parseAgentsYaml reads the pricing table: $id", ({ yaml, expectedPricing }) => {
+    expect(parseAgentsYaml(yaml).pricing).toEqual(expectedPricing);
+  });
+
+  it("setup-repo serializes the pricing table and parses it back unchanged", () => {
+    const pricing = { "google/gemini-3.8-flash": GEMINI_PRICE };
+    const yaml = serializeAgentsYml({ ...DEFAULT_AGENTS_CONFIG, pricing }, false);
+
+    expect(parseAgentsYaml(yaml).pricing).toEqual(pricing);
+  });
+
+  it.each([
+    { id: "missing-output-price", fields: ["input_per_mtok: 1", "source: s", "read_on: d"], error: "pricing.m/x.output_per_mtok" },
+    { id: "non-numeric-input-price", fields: ["input_per_mtok: $1", "output_per_mtok: 2", "source: s", "read_on: d"], error: "pricing.m/x.input_per_mtok" },
+    { id: "negative-cached-price", fields: ["input_per_mtok: 1", "cached_input_per_mtok: -1", "output_per_mtok: 2", "source: s", "read_on: d"], error: "pricing.m/x.cached_input_per_mtok" },
+    { id: "missing-source", fields: ["input_per_mtok: 1", "output_per_mtok: 2", "read_on: d"], error: "pricing.m/x.source" },
+    { id: "missing-read-on-date", fields: ["input_per_mtok: 1", "output_per_mtok: 2", "source: s"], error: "pricing.m/x.read_on" },
+    { id: "pre-release-camel-case-keys", fields: ["inputPerMTok: 1", "outputPerMTok: 2", "source: s", "read_on: d"], error: "pricing.m/x.input_per_mtok" }
+  ])("parseAgentsYaml drops an incomplete price with one warning and keeps the rest: $id", ({ fields, error }) => {
+    const writes: string[] = [];
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    const yaml = [
+      "pricing:",
+      "  m/x:",
+      ...fields.map((f) => `    ${f}`),
+      "  google/gemini-3.8-flash:",
+      "    input_per_mtok: 0.75",
+      "    cached_input_per_mtok: 0.075",
+      "    output_per_mtok: 3.75",
+      "    source: https://ai.google.dev/gemini-api/docs/pricing#gemini-3.8-flash",
+      "    read_on: 2026-11-08",
+      "harness: codex",
+      ""
+    ].join("\n");
+
+    try {
+      const parsed = parseAgentsYaml(yaml);
+
+      expect(parsed.pricing).toEqual({ "google/gemini-3.8-flash": GEMINI_PRICE });
+      expect(parsed.harness).toBe("codex");
+      expect(writes).toHaveLength(1);
+      expect(writes[0]).toMatch(/^::warning title=EPURE pricing::[^\n]*\n$/);
+      expect(writes[0]).toContain(error);
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 
   it.each([
@@ -688,6 +788,37 @@ describe("2b. Configurable reviewers_dir, llm_environment and models (planAndApp
           r.path.startsWith(".agents/reviewers/")
         )
       ).toBe(true);
+    } finally {
+      rmSync(tempRepoDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps an existing pricing table when it rewrites agents.yml", () => {
+    const tempRepoDir = mkdtempSync(join(tmpdir(), "epure-setup-pricing-"));
+    const pricing = {
+      "anthropic/claude-sonnet-5": {
+        input_per_mtok: 3,
+        cached_input_per_mtok: 0.3,
+        output_per_mtok: 15,
+        source: "https://www.anthropic.com/pricing",
+        read_on: "2026-11-08"
+      }
+    };
+    try {
+      mkdirSync(join(tempRepoDir, ".github"), { recursive: true });
+      writeFileSync(
+        join(tempRepoDir, ".github", "agents.yml"),
+        serializeAgentsYml({ ...DEFAULT_AGENTS_CONFIG, pricing }, false)
+      );
+      const result = planAndApplyRepoSetup({
+        repository: "acme-org/payments",
+        repoRootDir: tempRepoDir,
+        dryRun: false
+      });
+      expect(result.agents_config.pricing).toEqual(pricing);
+      expect(
+        parseAgentsYaml(readFileSync(join(tempRepoDir, ".github", "agents.yml"), "utf8")).pricing
+      ).toEqual(pricing);
     } finally {
       rmSync(tempRepoDir, { recursive: true, force: true });
     }

@@ -300,17 +300,21 @@ describe("feature PR integration — a conflicting feature PR is re-synced with 
   });
 });
 
-describe("a CI run that completes while EPURE holds the lease is not missed when the plan enters waiting_feature_ci", () => {
-  const CI_WORKFLOW = "name: CI\non:\n  pull_request:\n    branches: [dev]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n";
+const CI_WORKFLOW = "name: CI\non:\n  pull_request:\n    branches: [dev]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n";
 
+function declareDevCiWorkflow(router: GitHubMockRouter): GitHubMockRouter {
+  return router
+    .on("GET", `${R}/contents/.github/workflows?ref=dev`, json([{ type: "file", path: ".github/workflows/ci.yml", sha: "wf-ci" }]))
+    .on("GET", `${R}/git/blobs/wf-ci`, json({ encoding: "base64", content: Buffer.from(CI_WORKFLOW).toString("base64") }));
+}
+
+describe("a CI run that completes while EPURE holds the lease is not missed when the plan enters waiting_feature_ci", () => {
   it.each([
     { id: "feature-ci-already-green-moves-to-review-without-a-new-event", ci: "success", expected: { phase: "review", status: "awaiting_human_approval", subphase: "idle" } },
     { id: "feature-ci-still-running-stays-in-waiting_feature_ci", ci: "pending", expected: { phase: "review", status: "active", subphase: "waiting_feature_ci", active_head_sha: HEAD_SHA } }
   ] as const)("$id", async ({ ci, expected }) => {
     const store = await seedState(FEATURE_INTEGRATION_PENDING_STATE);
-    const router = declareImplementationFlow(createGitHubMockRouter(), ci, { taskPr: false, featurePr: true })
-      .on("GET", `${R}/contents/.github/workflows?ref=dev`, json([{ type: "file", path: ".github/workflows/ci.yml", sha: "wf-ci" }]))
-      .on("GET", `${R}/git/blobs/wf-ci`, json({ encoding: "base64", content: Buffer.from(CI_WORKFLOW).toString("base64") }))
+    const router = declareDevCiWorkflow(declareImplementationFlow(createGitHubMockRouter(), ci, { taskPr: false, featurePr: true }))
       .on("GET", new RegExp(`^${R_RX}/labels/[^/]+$`), json({}));
 
     const res = await orchestrateIssueCommand({
@@ -770,6 +774,33 @@ describe("Resume context: comments after the last processed command reach the re
   );
 
   it.each([
+    {
+      id: "ticket-pr-review-usage-is-recorded-under-the-ticket-and-a-failed-request-is-not",
+      reviewUsage: { prompt_tokens: 900, completion_tokens: 40 },
+      expected: { "77": { review: { "openai/gpt-test": { requests: 2, input_tokens: 1800, cached_input_tokens: 0, output_tokens: 80, thinking_tokens: 0 } } } }
+    }
+  ])("$id", async ({ reviewUsage, expected }) => {
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const store = await seedState({ status: "suspended", subphase: "idle", last_processed_comment_id: ESCALATED_AT_CURSOR });
+    const router = declareImplementationFlow(createGitHubMockRouter(), "failure", { taskPr: true, featurePr: true })
+      .on("POST", `${R}/issues/${TICKET}/labels`, json([]))
+      .on("GET", `${R}/issues/${ISSUE}/comments?per_page=100`, json([]))
+      .onHost("api.openai.com", "POST", "/v1/chat/completions", (req) =>
+        schemaName(req.body) === "generated_ticket_implementation"
+          ? json({ error: { message: "stop after the review" } }, 400)
+          : json({ choices: [{ message: { content: JSON.stringify({ summary: "ok", findings: [] }) } }], usage: reviewUsage })
+      );
+
+    try {
+      await run(router, store, { command: "continue", actor: "maintainer", issueNumber: ISSUE, commentId: RESUME_COMMENT });
+    } finally {
+      vi.restoreAllMocks();
+    }
+
+    expect((await readState(store)).token_usage).toEqual(expected);
+  });
+
+  it.each([
     { id: "continue-without-new-comments-injects-no-context-section", command: "continue" },
     { id: "approve-without-new-comments-injects-no-context-section", command: "approve" }
   ] as const)("$id", async ({ command }) => {
@@ -805,6 +836,297 @@ describe("Planning LLM rounds can always read the repository", () => {
 
     expect(router.unmatched).toEqual([]);
     expect(JSON.stringify(llmRequest?.body)).toContain("read_repo_file");
+  });
+});
+
+describe("Token usage is written with the run's existing state updates (#125)", () => {
+  const GRILL = { choices: [{ message: { role: "assistant", content: "❓ **Q1** - **Scope** : ?" } }] };
+
+  it.each([
+    { id: "reply-during-grilling-is-grilling-usage", phase: "grilling", expectedPhase: "grilling" },
+    { id: "reply-during-spec-review-is-spec-revision-usage", phase: "spec", expectedPhase: "spec" }
+  ] as const)("$id", async ({ phase, expectedPhase }) => {
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const store = await seedState({ phase, status: "active", subphase: "idle", active_branch: "plan/77-async-ci-feature", plan_branch: "plan/77-async-ci-feature" });
+    const router = declareIssueWrites(declareIssueReads(createGitHubMockRouter()))
+      .on("GET", /\/git\/ref\/heads\//, json({ object: { sha: "branch-sha" } }))
+      .on("POST", `${R}/git/refs`, json({ object: { sha: "branch-sha" } }, 201))
+      .onHost("api.openai.com", "POST", "/v1/chat/completions", json({ choices: [{ message: { role: "assistant", content: "not the expected JSON" } }], usage: { prompt_tokens: 10, completion_tokens: 2 } }));
+
+    try {
+      await run(router, store, { command: "reply", actor: "maintainer", issueNumber: ISSUE, commentId: 900 });
+    } finally {
+      vi.restoreAllMocks();
+    }
+
+    expect(Object.keys((await readState(store)).token_usage?.epic ?? {})).toEqual([expectedPhase]);
+  });
+
+  it.each([
+    {
+      id: "plan-round-usage-after-the-last-state-update-is-written-by-one-end-of-run-commit",
+      llmBody: { ...GRILL, usage: { prompt_tokens: 120, completion_tokens: 30, prompt_tokens_details: { cached_tokens: 20 } } },
+      expected: { requests: 1, input_tokens: 120, cached_input_tokens: 20, output_tokens: 30, thinking_tokens: 0 }
+    },
+    {
+      id: "response-without-usage-is-recorded-as-unavailable-not-zero",
+      llmBody: GRILL,
+      expected: { requests: 1, input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, thinking_tokens: 0, usage_unavailable: 1 }
+    }
+  ])("$id", async ({ llmBody, expected }) => {
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const seeded = await seedState({ phase: "idle", status: "active", subphase: "idle", active_branch: "" });
+    const { store, writes } = captureWrites(seeded);
+    const router = declareIssueWrites(declareIssueReads(createGitHubMockRouter()))
+      .on("GET", /\/git\/ref\/heads\//, json({ object: { sha: "branch-sha" } }))
+      .on("POST", `${R}/git/refs`, json({ object: { sha: "branch-sha" } }, 201))
+      .onHost("api.openai.com", "POST", "/v1/chat/completions", json(llmBody));
+
+    try {
+      await run(router, store, { command: "plan", actor: "maintainer", issueNumber: ISSUE, commentId: 900 });
+    } finally {
+      vi.restoreAllMocks();
+    }
+
+    expect(router.unmatched).toEqual([]);
+    expect(writes.map((w) => w.token_usage)).toEqual([undefined, { epic: { plan: { "openai/gpt-test": expected } } }]);
+    expect(writes[1]).toEqual({ ...writes[0], version: writes[0]!.version + 1, updated_at: expect.any(String), token_usage: expect.anything() });
+  });
+
+  it("usage-still-pending-when-the-plan-was-cancelled-during-the-run-is-reported-on-stdout-not-written", async () => {
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const seeded = await seedState({ phase: "idle", status: "active", subphase: "idle", active_branch: "" });
+    let cancelled = false;
+    const store: GitRefStateStore = {
+      readRef: (refName) => seeded.readRef(refName),
+      compareAndSwapRef: async (refName, expectedOldSha, nextState) => {
+        const result = await seeded.compareAndSwapRef(refName, expectedOldSha, nextState);
+        if (result.swapped && !cancelled) {
+          cancelled = true;
+          await seeded.compareAndSwapRef(refName, result.newSha, { ...nextState, version: nextState.version + 1, status: "cancelled" });
+        }
+        return result;
+      }
+    };
+    const router = declareIssueWrites(declareIssueReads(createGitHubMockRouter()))
+      .on("GET", /\/git\/ref\/heads\//, json({ object: { sha: "branch-sha" } }))
+      .on("POST", `${R}/git/refs`, json({ object: { sha: "branch-sha" } }, 201))
+      .onHost("api.openai.com", "POST", "/v1/chat/completions", json({ ...GRILL, usage: { prompt_tokens: 120, completion_tokens: 30 } }));
+
+    try {
+      await run(router, store, { command: "plan", actor: "maintainer", issueNumber: ISSUE, commentId: 900 });
+    } finally {
+      vi.restoreAllMocks();
+    }
+
+    expect(stdout.mock.calls.map(([chunk]) => String(chunk)).filter((line) => line.includes("LLM usage of"))).toEqual([
+      `[EPURE] LLM usage of 1 response(s) not written to refs/epure/state/${ISSUE}: the plan became \`cancelled\` while this run was working\n`
+    ]);
+    expect((await readState(seeded)).token_usage).toBeUndefined();
+  });
+
+  const SEEDED_USAGE = {
+    epic: { plan: { "openai/gpt-test": { requests: 2, input_tokens: 1_000_000, cached_input_tokens: 200_000, output_tokens: 100_000, thinking_tokens: 10_000 } } },
+    "78": { implementation: { "openai/gpt-test": { requests: 3, input_tokens: 3_000_000, cached_input_tokens: 1_000_000, output_tokens: 500_000, thinking_tokens: 0, usage_unavailable: 1 } } }
+  };
+  const PRICING_YAML = [
+    "pricing:",
+    "  openai/gpt-test:",
+    "    input_per_mtok: 2",
+    "    cached_input_per_mtok: 0.5",
+    "    output_per_mtok: 8",
+    "    source: https://example.test/pricing",
+    "    read_on: 2026-11-08",
+    ""
+  ].join("\n");
+  const base64File = (text: string) => json({ type: "file", encoding: "base64", content: Buffer.from(text, "utf8").toString("base64") });
+
+  it.each([
+    {
+      id: "status-shows-the-epic-total-each-scope-and-the-cost-with-its-price-source",
+      agentsYml: base64File(PRICING_YAML),
+      expectedLines: [
+        "- **LLM Usage**: 4,000,000 input tokens (1,200,000 cached) · 600,000 output (10,000 thinking) · 5 requests · 1 without usage data · ≥ $11.00",
+        "  - Planning & integration: 1,000,000 input tokens (200,000 cached) · 100,000 output (10,000 thinking) · 2 requests · $2.50",
+        "  - #78: 3,000,000 input tokens (1,000,000 cached) · 500,000 output (0 thinking) · 3 requests · 1 without usage data · ≥ $8.50",
+        "  - Prices from `.github/agents.yml`: `openai/gpt-test` read on 2026-11-08 (https://example.test/pricing)"
+      ]
+    },
+    {
+      id: "status-without-a-pricing-table-shows-tokens-only",
+      agentsYml: notFound(),
+      expectedLines: [
+        "- **LLM Usage**: 4,000,000 input tokens (1,200,000 cached) · 600,000 output (10,000 thinking) · 5 requests · 1 without usage data",
+        "  - Planning & integration: 1,000,000 input tokens (200,000 cached) · 100,000 output (10,000 thinking) · 2 requests",
+        "  - #78: 3,000,000 input tokens (1,000,000 cached) · 500,000 output (0 thinking) · 3 requests · 1 without usage data"
+      ]
+    }
+  ])("$id", async ({ agentsYml, expectedLines }) => {
+    const store = await seedState({ status: "active", subphase: "idle", token_usage: SEEDED_USAGE });
+    const router = declareIssueWrites(createGitHubMockRouter())
+      .on("GET", new RegExp(`^${R_RX}/contents/\\.github/agents\\.ya?ml\\?ref=`), notFound())
+      .on("GET", `${R}/contents/.github/agents.yml?ref=dev`, agentsYml);
+
+    await run(router, store, { command: "status", actor: "maintainer", issueNumber: ISSUE, commentId: 900 });
+
+    expect(router.unmatched).toEqual([]);
+    expect(postedComments(router)).toEqual([expect.stringContaining(`\n${expectedLines.join("\n")}\n`)]);
+  });
+
+  it.each([
+    {
+      id: "feature-pr-body-shows-the-total-at-opening-the-final-comment-the-total-after-review-and-each-call-lands-under-its-scope-and-phase",
+      expectedTicketLine: "3,000,000 input tokens (1,000,000 cached) · 500,000 output (0 thinking) · 3 requests · 1 without usage data · ≥ $8.50",
+      expectedAtPrOpening: "4,000,000 input tokens (1,200,000 cached) · 600,000 output (10,000 thinking) · 6 requests · 2 without usage data · ≥ $11.00",
+      expectedFinal: "4,000,000 input tokens (1,200,000 cached) · 600,000 output (10,000 thinking) · 8 requests · 4 without usage data · ≥ $11.00"
+    }
+  ])("$id", async ({ expectedTicketLine, expectedAtPrOpening, expectedFinal }) => {
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const store = await seedState({ ...FEATURE_INTEGRATION_PENDING_STATE, token_usage: { epic: SEEDED_USAGE.epic, [String(ISSUE)]: SEEDED_USAGE["78"] } });
+    const router = declareImplementationFlow(createGitHubMockRouter(), "success", { taskPr: false, featurePr: false })
+      .on("GET", `${R}/contents/.github/agents.yml?ref=dev`, base64File(PRICING_YAML))
+      .on("GET", new RegExp(`/pulls\\?state=closed&head=${encodeURIComponent(`${OWNER}:${TASK_BRANCH}`)}`), json([{ number: 106, html_url: "pr106", merged_at: "2026-11-08T00:00:00Z", head: { sha: HEAD_SHA } }]))
+      .on("POST", `${R}/pulls`, json({ number: 105, html_url: "pr105", head: { sha: HEAD_SHA } }, 201));
+
+    try {
+      await run(router, store, { command: "approve", actor: "maintainer", issueNumber: ISSUE, commentId: 900 });
+    } finally {
+      vi.restoreAllMocks();
+    }
+
+    expect(router.unmatched).toEqual([]);
+    const prBody = (router.requests.find((r) => r.method === "POST" && r.path === `${R}/pulls`)?.body as { body: string }).body;
+    expect(prBody).toContain(`## LLM Usage\n- **Epic total**: ${expectedAtPrOpening}\n`);
+    expect(postedComments(router).at(-1)).toContain(`\n- **#${ISSUE}** (Async CI Feature) — PR [#106](pr106) already merged into \`${FEATURE_BRANCH}\` — LLM usage: ${expectedTicketLine}\n`);
+    expect(postedComments(router).at(-1)).toContain(`## LLM Usage\n- **Epic total**: ${expectedFinal}\n`);
+    const requestsByScopeAndPhase = Object.fromEntries(
+      Object.entries((await readState(store)).token_usage ?? {}).map(([scope, phases]) => [
+        scope,
+        Object.fromEntries(Object.entries(phases).map(([phase, models]) => [phase, models?.["openai/gpt-test"]?.requests]))
+      ])
+    );
+    expect(requestsByScopeAndPhase).toEqual({ epic: { plan: 2, integration: 1, review: 2 }, [String(ISSUE)]: { implementation: 3 } });
+  });
+
+  const PR_BEFORE = "## Summary\nEdited by a human.\n\n";
+  const PR_AFTER = "\n\n## Governance\nUnchanged.";
+  const prSection = (total: string) => `<!-- epure-llm-usage:start -->\n## LLM Usage\n- **Epic total**: ${total}\n<!-- epure-llm-usage:end -->`;
+  // The open feature PR keeps the body EPURE last wrote, as GitHub does.
+  const declareOpenFeaturePr = (router: GitHubMockRouter, body: string): GitHubMockRouter => {
+    let current = body;
+    return router
+      .on("GET", new RegExp(`/pulls\\?state=open&head=${encodeURIComponent(`${OWNER}:${FEATURE_BRANCH}`)}`), () =>
+        json([{ number: 105, html_url: "pr105", title: "feat: y", body: current, head: { sha: HEAD_SHA } }])
+      )
+      .on("PATCH", `${R}/pulls/105`, (req) => {
+        current = (req.body as { body?: string }).body ?? current;
+        return json({ head: { sha: HEAD_SHA } });
+      });
+  };
+  const patchedFeaturePrBodies = (router: GitHubMockRouter): string[] =>
+    router.requests
+      .filter((r) => r.method === "PATCH" && r.path === `${R}/pulls/105` && (r.body as { body?: string }).body !== undefined)
+      .map((r) => (r.body as { body: string }).body);
+
+  it("resumed-pass-rewrites-only-the-usage-section-of-the-existing-feature-pr-at-its-start-and-after-the-review-pass", async () => {
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const store = await seedState({ ...FEATURE_INTEGRATION_PENDING_STATE, token_usage: { epic: SEEDED_USAGE.epic, [String(ISSUE)]: SEEDED_USAGE["78"] } });
+    const router = declareOpenFeaturePr(
+      declareImplementationFlow(createGitHubMockRouter(), "success", { taskPr: false, featurePr: true }),
+      `${PR_BEFORE}${prSection("stale")}${PR_AFTER}`
+    ).on("GET", `${R}/contents/.github/agents.yml?ref=dev`, base64File(PRICING_YAML));
+
+    try {
+      await run(router, store, { command: "approve", actor: "maintainer", issueNumber: ISSUE, commentId: 900 });
+    } finally {
+      vi.restoreAllMocks();
+    }
+
+    expect(router.unmatched).toEqual([]);
+    const finalTotal = /## LLM Usage\n- \*\*Epic total\*\*: (.*)\n/.exec(postedComments(router).at(-1) ?? "")?.[1];
+    expect(finalTotal).toBe("4,000,000 input tokens (1,200,000 cached) · 600,000 output (10,000 thinking) · 8 requests · 4 without usage data · ≥ $11.00");
+    expect(patchedFeaturePrBodies(router)).toEqual([
+      `${PR_BEFORE}${prSection("4,000,000 input tokens (1,200,000 cached) · 600,000 output (10,000 thinking) · 6 requests · 2 without usage data · ≥ $11.00")}${PR_AFTER}`,
+      `${PR_BEFORE}${prSection(finalTotal!)}${PR_AFTER}`
+    ]);
+    expect(Object.values((await readState(store)).token_usage?.epic?.review ?? {}).map((t) => t.requests)).toEqual([2]);
+  });
+
+  it("feature-pr-body-released-for-async-feature-ci-already-holds-the-review-usage-and-the-state-total", async () => {
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const store = await seedState({ ...FEATURE_INTEGRATION_PENDING_STATE, token_usage: { epic: SEEDED_USAGE.epic, [String(ISSUE)]: SEEDED_USAGE["78"] } });
+    const router = declareOpenFeaturePr(
+      declareDevCiWorkflow(declareImplementationFlow(createGitHubMockRouter(), "pending", { taskPr: false, featurePr: true })),
+      `${PR_BEFORE}${prSection("stale")}${PR_AFTER}`
+    ).on("GET", `${R}/contents/.github/agents.yml?ref=dev`, base64File(PRICING_YAML));
+
+    try {
+      await orchestrateIssueCommand({
+        repository: REPO,
+        issueNumber: ISSUE,
+        command: "approve",
+        commandArgs: "",
+        actor: "maintainer",
+        commentId: 900,
+        fallbackGithubToken: "ghs_test",
+        llmApiKey: "key_test",
+        model: "openai/gpt-test",
+        asyncCiContinuation: true,
+        stateStore: store,
+        fetchImpl: router.fetch
+      });
+    } finally {
+      vi.restoreAllMocks();
+    }
+
+    expect(router.unmatched).toEqual([]);
+    const state = await readState(store);
+    expect(state).toMatchObject({ phase: "review", status: "active", subphase: "waiting_feature_ci" });
+    const stateRequests = Object.values(state.token_usage ?? {})
+      .flatMap((phases) => Object.values(phases))
+      .flatMap((models) => Object.values(models ?? {}))
+      .reduce((sum, counts) => sum + counts.requests, 0);
+    expect(stateRequests).toBe(8);
+    expect(patchedFeaturePrBodies(router).at(-1)).toBe(
+      `${PR_BEFORE}${prSection("4,000,000 input tokens (1,200,000 cached) · 600,000 output (10,000 thinking) · 8 requests · 4 without usage data · ≥ $11.00")}${PR_AFTER}`
+    );
+  });
+
+  it("gate-3-continuation-posts-each-ticket-and-the-epic-total-and-rewrites-the-feature-pr-usage-section", async () => {
+    const store = await seedState({
+      status: "active",
+      subphase: "waiting_feature_ci",
+      active_ticket_number: ISSUE,
+      active_pr_number: 105,
+      active_head_sha: HEAD_SHA,
+      plan_manifest: {
+        planBranch: "plan/77-async-ci-feature",
+        tickets: [{ ticketIssueNumber: 78, slug: "ship", title: "Ship", description: "d", acceptanceCriteria: ["a"], blockedByIssueNumbers: [], filesToTouch: [] }]
+      },
+      token_usage: SEEDED_USAGE
+    });
+    const router = declareOpenFeaturePr(
+      declareIssueWrites(declareCiSnapshot(declareIssueReads(createGitHubMockRouter()), "success")),
+      `${PR_BEFORE}${prSection("stale")}${PR_AFTER}`
+    ).on("GET", `${R}/contents/.github/agents.yml?ref=dev`, base64File(PRICING_YAML));
+    const total = "4,000,000 input tokens (1,200,000 cached) · 600,000 output (10,000 thinking) · 5 requests · 1 without usage data · ≥ $11.00";
+
+    await run(router, store, { command: "continue", actor: "github-actions[bot]", ...TRIGGERS.workflowRunForIssue });
+
+    expect(router.unmatched).toEqual([]);
+    expect((await readState(store)).status).toBe("awaiting_human_approval");
+    expect(postedComments(router)).toEqual([
+      expect.stringContaining(
+        [
+          `Tickets intégrés à \`${FEATURE_BRANCH}\` :`,
+          "- **#78** (Ship) — LLM usage: 3,000,000 input tokens (1,000,000 cached) · 500,000 output (0 thinking) · 3 requests · 1 without usage data · ≥ $8.50",
+          "",
+          "## LLM Usage",
+          `- **Epic total**: ${total}`
+        ].join("\n")
+      )
+    ]);
+    expect(patchedFeaturePrBodies(router)).toEqual([`${PR_BEFORE}${prSection(total)}${PR_AFTER}`]);
   });
 });
 

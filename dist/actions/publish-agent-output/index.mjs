@@ -52,6 +52,10 @@ var PROMPT_INJECTION_IMMUNITY_CLAUSE = [
 var MODEL = String.raw`[\w.@-]+`;
 var GENERATE = String.raw`:(?:generateContent|streamGenerateContent)`;
 
+// src/usage/token-usage.ts
+import { AsyncLocalStorage } from "node:async_hooks";
+var usageContext = new AsyncLocalStorage();
+
 // src/review/reviewers-dir.ts
 var DEFAULT_REVIEWERS_DIR = ".agents/reviewers";
 

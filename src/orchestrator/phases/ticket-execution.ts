@@ -45,6 +45,8 @@ import {
   withTicketCodeFixAttempts,
   type GitRefStateStore
 } from "../../state/git-ref-state.js";
+import { currentTokenUsage, withUsageAttribution } from "../../usage/token-usage.js";
+import { formatTicketUsageSuffix } from "../../usage/usage-report.js";
 import { appendEpureCommandsSpoiler } from "../formatting/comments.js";
 import { callLlmJson } from "../llm-helper.js";
 import {
@@ -638,7 +640,8 @@ export async function runTicketExecutionLoop(
       }
       completedTicketNumbers.add(ticket.ticketIssueNumber);
       params.completedTicketsSummary.push(
-        `- **#${ticket.ticketIssueNumber}** (${ticket.title}) — previously squash-merged into \`${params.featureBranch}\``
+        `- **#${ticket.ticketIssueNumber}** (${ticket.title}) — previously squash-merged into \`${params.featureBranch}\`` +
+          formatTicketUsageSuffix(currentTokenUsage(), ticket.ticketIssueNumber, params.parsedDevAgentsConfig?.pricing)
       );
       continue;
     }
@@ -654,7 +657,8 @@ export async function runTicketExecutionLoop(
       }
       completedTicketNumbers.add(ticket.ticketIssueNumber);
       params.completedTicketsSummary.push(
-        `- **#${ticket.ticketIssueNumber}** (${ticket.title}) — PR [#${mergedTaskPr.number}](${mergedTaskPr.html_url}) already merged into \`${params.featureBranch}\``
+        `- **#${ticket.ticketIssueNumber}** (${ticket.title}) — PR [#${mergedTaskPr.number}](${mergedTaskPr.html_url}) already merged into \`${params.featureBranch}\`` +
+          formatTicketUsageSuffix(currentTokenUsage(), ticket.ticketIssueNumber, params.parsedDevAgentsConfig?.pricing)
       );
       continue;
     }
@@ -668,7 +672,7 @@ export async function runTicketExecutionLoop(
     }
     const syncWithBase = await params.baseSyncGuard.needsSync();
     if (syncWithBase) {
-      const featureSync = await syncBranchWithBase({
+      const featureSync = await withUsageAttribution({ phase: "integration" }, () => syncBranchWithBase({
         gh: params.gh,
         targetBranch: params.featureBranch,
         baseBranch: "dev",
@@ -683,7 +687,7 @@ export async function runTicketExecutionLoop(
         requestTimeoutMs: params.phaseModels.requestTimeoutMs,
         sandboxRunner: params.sandboxRunner,
         reviewersDir
-      });
+      }));
       if (featureSync.status === "escalated") {
         const escalated = await params.escalateToNeedsHuman({
           reason: featureSync.escalationReason ?? "merge_conflict_unresolved",
@@ -703,7 +707,7 @@ export async function runTicketExecutionLoop(
     await params.gh.ensureBranch(taskBranch, params.featureBranch);
 
     const syncTaskBranchWithFeature = () =>
-      syncBranchWithBase({
+      withUsageAttribution({ phase: "integration", ticket: ticket.ticketIssueNumber }, () => syncBranchWithBase({
         gh: params.gh,
         targetBranch: taskBranch,
         baseBranch: params.featureBranch,
@@ -718,7 +722,7 @@ export async function runTicketExecutionLoop(
         requestTimeoutMs: params.phaseModels.requestTimeoutMs,
         sandboxRunner: params.sandboxRunner,
         reviewersDir
-      });
+      }));
 
     if (syncWithBase) {
       const taskSync = await syncTaskBranchWithFeature();
@@ -1060,7 +1064,7 @@ export async function runTicketExecutionLoop(
             : "C'est le premier ticket : inclus un package.json complet (avec scripts 'test': 'vitest run' et 'build': 'vite build', dependencies react/react-dom, devDependencies typescript/vite/vitest/@vitejs/plugin-react/@types/react/@types/react-dom) ainsi que tsconfig.json et vite.config.ts."
         ].join("\n");
 
-        const parsedImpl = await generateTicketImplementationWithFallback({
+        const parsedImpl = await withUsageAttribution({ phase: "implementation", ticket: ticket.ticketIssueNumber }, () => generateTicketImplementationWithFallback({
           ticket,
           branch: params.featureBranch,
           featureBranch: params.featureBranch,
@@ -1077,7 +1081,7 @@ export async function runTicketExecutionLoop(
           phaseModels: params.phaseModels,
           addTransientRetriesUsed: params.addTransientRetriesUsed,
           fetchImpl: params.fetchImpl
-        });
+        }));
 
         const preStage1Check = validateWorkspaceFileOperations({
           workDir: sandboxWorkspace.workDir,
@@ -1192,7 +1196,7 @@ export async function runTicketExecutionLoop(
             )
           ].join("\n");
 
-          const fixedImpl = await generateTicketImplementationWithFallback({
+          const fixedImpl = await withUsageAttribution({ phase: "fixes", ticket: ticket.ticketIssueNumber }, () => generateTicketImplementationWithFallback({
             ticket,
             branch: params.featureBranch,
             featureBranch: params.featureBranch,
@@ -1209,7 +1213,7 @@ export async function runTicketExecutionLoop(
             phaseModels: params.phaseModels,
             addTransientRetriesUsed: params.addTransientRetriesUsed,
             fetchImpl: params.fetchImpl
-          });
+          }));
 
           const fixPreCheck = validateWorkspaceFileOperations({
             workDir: sandboxWorkspace.workDir,
@@ -1392,7 +1396,7 @@ export async function runTicketExecutionLoop(
           targetBranch: params.featureBranch
         });
 
-        const reviewRes = await runMultiAgentPrReviewPass({
+        const reviewRes = await withUsageAttribution({ phase: "review", ticket: ticket.ticketIssueNumber }, () => runMultiAgentPrReviewPass({
           repository: params.repository,
           prNumber: openTaskPr.number,
           headBranch: taskBranch,
@@ -1419,7 +1423,7 @@ export async function runTicketExecutionLoop(
           onTransientRetriesUsed: (used) =>
             params.addTransientRetriesUsed(used),
           fetchImpl: params.fetchImpl
-        });
+        }));
 
         await params.gh.postPullRequestReview(openTaskPr.number, {
           commitId: passParams.headSha,
@@ -1691,7 +1695,7 @@ export async function runTicketExecutionLoop(
           wrapUntrustedContent("untrusted_workspace_files", currentFilesContext)
         );
 
-        const reviewFixedImpl = await generateTicketImplementationWithFallback({
+        const reviewFixedImpl = await withUsageAttribution({ phase: "fixes", ticket: ticket.ticketIssueNumber }, () => generateTicketImplementationWithFallback({
           ticket,
           branch: taskBranch,
           featureBranch: params.featureBranch,
@@ -1709,7 +1713,7 @@ export async function runTicketExecutionLoop(
           phaseModels: params.phaseModels,
           addTransientRetriesUsed: params.addTransientRetriesUsed,
           fetchImpl: params.fetchImpl
-        });
+        }));
 
         const remediationPreCheck = validateWorkspaceFileOperations({
           workDir: sandboxWorkspace.workDir,
@@ -1788,7 +1792,7 @@ export async function runTicketExecutionLoop(
               ...reviewResult.must_fix_findings.map((f) => f.path)
             ]
           });
-          const retryImpl = await generateTicketImplementationWithFallback({
+          const retryImpl = await withUsageAttribution({ phase: "fixes", ticket: ticket.ticketIssueNumber }, () => generateTicketImplementationWithFallback({
             ticket,
             branch: taskBranch,
             featureBranch: params.featureBranch,
@@ -1828,7 +1832,7 @@ export async function runTicketExecutionLoop(
             phaseModels: params.phaseModels,
             addTransientRetriesUsed: params.addTransientRetriesUsed,
             fetchImpl: params.fetchImpl
-          });
+          }));
 
           const retryPreCheck = validateWorkspaceFileOperations({
             workDir: sandboxWorkspace.workDir,
@@ -2023,8 +2027,9 @@ export async function runTicketExecutionLoop(
         };
       }
 
-      const squashCommit = await generateSemanticSquashCommitFromDiff({
-        prNumber: taskPr.number,
+      const taskPrNumber = taskPr.number;
+      const squashCommit = await withUsageAttribution({ phase: "integration", ticket: ticket.ticketIssueNumber }, () => generateSemanticSquashCommitFromDiff({
+        prNumber: taskPrNumber,
         targetBranch: params.featureBranch,
         defaultBranch: "dev",
         planIssueNumber: params.issueNumber,
@@ -2041,7 +2046,7 @@ export async function runTicketExecutionLoop(
         onTransientRetriesUsed: (used) =>
           params.addTransientRetriesUsed(used),
         fetchImpl: params.fetchImpl
-      });
+      }));
 
       const featureMergedBeforeTaskMerge = await params.stopIfFeaturePrMerged();
       if (featureMergedBeforeTaskMerge) {
@@ -2204,7 +2209,8 @@ export async function runTicketExecutionLoop(
 
       completedTicketNumbers.add(ticket.ticketIssueNumber);
       params.completedTicketsSummary.push(
-        `- **#${ticket.ticketIssueNumber}** (${ticket.title}) — PR #${taskPr.number} squash-merged into \`${params.featureBranch}\` as \`${squashCommit.commit_title}\` (Reviewers: ${reviewResult.selected_reviewers.map((r) => `\`${r}\``).join(", ")})`
+        `- **#${ticket.ticketIssueNumber}** (${ticket.title}) — PR #${taskPr.number} squash-merged into \`${params.featureBranch}\` as \`${squashCommit.commit_title}\` (Reviewers: ${reviewResult.selected_reviewers.map((r) => `\`${r}\``).join(", ")})` +
+          formatTicketUsageSuffix(currentTokenUsage(), ticket.ticketIssueNumber, params.parsedDevAgentsConfig?.pricing)
       );
     } catch (err) {
       if (err instanceof LLMError) {

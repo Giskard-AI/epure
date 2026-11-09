@@ -149,6 +149,31 @@ Always loaded at runtime from the trusted `dev` branch so an untrusted `task/*` 
 | `web_tools.max_fetch_bytes` | `integer` | `16384` | Maximum UTF-8 byte budget returned per `web_fetch` call after HTML stripping. |
 | `web_tools.timeout_ms` | `integer` | `10000` | Per-request HTTP timeout in milliseconds for Web exploration calls. |
 
+### `pricing` (Token Cost Display — ADR-0035)
+
+EPURE records the tokens spent by the epic and by each ticket, per phase and per model, in `refs/epure/state/<issue>`, whether `LLMClient` or an agent session behind the sandbox LLM proxy made the call. `/epure status`, the line of each finished ticket, and the `## LLM Usage` section of the `feature/* -> dev` PR and of the final comment show these tokens. With an optional `pricing:` section they also show a cost, computed when the text is rendered and never stored. EPURE never fetches prices; `setup-repo` keeps an existing `pricing:` section when it rewrites the file.
+
+```yaml
+pricing:
+  google/gemini-3.8-flash:
+    input_per_mtok: 0.75
+    cached_input_per_mtok: 0.075
+    output_per_mtok: 3.75
+    source: https://ai.google.dev/gemini-api/docs/pricing
+    read_on: 2026-11-08
+```
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `pricing.<provider>/<model>` | map | *(Optional)* | One entry per model, keyed as in the state and in the `epure-llm-usage` job-log lines: the provider family (`google`, `anthropic`, `openai`, `azure`, `azure_ai`, `openrouter`, `vertex`) and the model sent to the API, not the `providers:` alias. |
+| `pricing.<model>.input_per_mtok` | `number` | *(Required)* | USD per million input tokens. |
+| `pricing.<model>.cached_input_per_mtok` | `number` | `input_per_mtok` | USD per million cached input tokens. |
+| `pricing.<model>.output_per_mtok` | `number` | *(Required)* | USD per million output tokens. Thinking tokens are billed at this price. |
+| `pricing.<model>.source` | `string` | *(Required)* | URL of the price page, shown by `/epure status`. |
+| `pricing.<model>.read_on` | `string` | *(Required)* | Date the price was read, shown by `/epure status`. |
+
+An entry with a missing or negative price, or without `source` or `read_on`, is ignored with one `::warning` line in the job log; the rest of `.github/agents.yml` still applies. A line that involves a model without a price shows tokens only: a partial sum would read as the full cost. The cost is an estimate: Anthropic cache writes count at the input price, and requests whose engine reported no usage are not in it: their number is shown as "without usage data", and the cost then reads `≥ $X`. The e2e harness's `epure.e2e.json` takes the same prices as `inputPerMTok`, `cachedInputPerMTok` and `outputPerMTok`.
+
 ### `security_invariants` & Sensitive Paths
 
 Any attempt in `.github/agents.yml` to weaken `security_invariants` (`require_write_permission: false`, `sandbox_isolation: false`, `allow_agent_release: true`, `auto_merge_dev: true`, `auto_merge_main: true`) is rejected fail-closed with `SECURITY_INVARIANT_VIOLATION`. Furthermore, any modification to `.github/workflows/**`, `.github/agents.yml`, the reviewer roster directory (the configured `reviewers_dir/**` and the default `.agents/reviewers/**`), or `CODEOWNERS` on a `task/*` branch triggers a **Sensitive Path Escalation** (`needs-human`) unless a maintainer explicitly adds the `approved-sensitive-change` label (Q81, Q93).

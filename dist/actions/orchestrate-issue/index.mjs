@@ -2885,6 +2885,125 @@ Output ONLY a corrected, complete JSON object strictly matching the required sch
   );
 }
 
+// src/usage/token-usage.ts
+import { AsyncLocalStorage } from "node:async_hooks";
+var EPIC_USAGE_SCOPE = "epic";
+var NO_TOKENS = {
+  requests: 0,
+  input_tokens: 0,
+  cached_input_tokens: 0,
+  output_tokens: 0,
+  thinking_tokens: 0
+};
+function addTokenCounts(a, b) {
+  const unavailable = (a.usage_unavailable ?? 0) + (b.usage_unavailable ?? 0);
+  return {
+    requests: a.requests + b.requests,
+    input_tokens: a.input_tokens + b.input_tokens,
+    cached_input_tokens: a.cached_input_tokens + b.cached_input_tokens,
+    output_tokens: a.output_tokens + b.output_tokens,
+    thinking_tokens: a.thinking_tokens + b.thinking_tokens,
+    ...unavailable > 0 ? { usage_unavailable: unavailable } : {}
+  };
+}
+function countsOf(usage) {
+  if ("unavailable" in usage) {
+    return { ...NO_TOKENS, requests: 1, usage_unavailable: 1 };
+  }
+  return {
+    requests: 1,
+    input_tokens: usage.input_tokens,
+    cached_input_tokens: usage.cached_input_tokens,
+    output_tokens: usage.output_tokens,
+    thinking_tokens: usage.thinking_tokens
+  };
+}
+function addRequestUsage(record, attribution, usage) {
+  const scope = attribution.ticket === void 0 ? EPIC_USAGE_SCOPE : String(attribution.ticket);
+  const phases = record[scope] ?? {};
+  const models = phases[attribution.phase] ?? {};
+  const model = `${usage.provider}/${usage.model}`;
+  return {
+    ...record,
+    [scope]: {
+      ...phases,
+      [attribution.phase]: { ...models, [model]: addTokenCounts(models[model] ?? NO_TOKENS, countsOf(usage)) }
+    }
+  };
+}
+function totalTokensByModel(record, scope) {
+  const totals = {};
+  const scopes = scope === void 0 ? Object.values(record) : [record[scope] ?? {}];
+  for (const phases of scopes) {
+    for (const models of Object.values(phases)) {
+      for (const [model, counts] of Object.entries(models ?? {})) {
+        totals[model] = addTokenCounts(totals[model] ?? NO_TOKENS, counts);
+      }
+    }
+  }
+  return totals;
+}
+var MAX_MODELS_PER_RUN = 16;
+var OVERFLOW_MODEL = "other";
+var TokenUsageLedger = class {
+  pending = [];
+  lastKnown = {};
+  models = /* @__PURE__ */ new Set();
+  sandboxModels = 0;
+  record(attribution, usage, options = {}) {
+    const model = `${usage.provider}/${usage.model}`;
+    if (!this.models.has(model)) {
+      if (options.labelledBySandbox && this.sandboxModels >= MAX_MODELS_PER_RUN) {
+        this.pending.push({ attribution, usage: { ...usage, model: OVERFLOW_MODEL } });
+        return;
+      }
+      this.models.add(model);
+      if (options.labelledBySandbox) {
+        this.sandboxModels += 1;
+      }
+    }
+    this.pending.push({ attribution, usage });
+  }
+  /** The state's record plus the usage this run has not written yet. */
+  current() {
+    return this.fold(this.lastKnown, this.pending.length);
+  }
+  observe(record) {
+    this.lastKnown = record ?? {};
+  }
+  pendingCount() {
+    return this.pending.length;
+  }
+  fold(record, count3) {
+    return this.pending.slice(0, count3).reduce((acc, entry) => addRequestUsage(acc, entry.attribution, entry.usage), record ?? {});
+  }
+  written(record, count3) {
+    this.pending = this.pending.slice(count3);
+    this.lastKnown = record;
+  }
+};
+var usageContext = new AsyncLocalStorage();
+function runWithTokenUsageLedger(ledger, attribution, fn) {
+  return usageContext.run({ ledger, attribution }, fn);
+}
+function withUsageAttribution(attribution, fn) {
+  const parent = usageContext.getStore();
+  if (!parent) {
+    return fn();
+  }
+  return usageContext.run({ ledger: parent.ledger, attribution: { ...parent.attribution, ...attribution } }, fn);
+}
+function currentTokenUsage() {
+  return usageContext.getStore()?.ledger.current();
+}
+function recordTokenUsage(usage, options) {
+  const context = usageContext.getStore();
+  context?.ledger.record(context.attribution, usage, options);
+}
+function bindToUsageContext() {
+  return AsyncLocalStorage.snapshot();
+}
+
 // src/llm/usage.ts
 var LLM_USAGE_LOG_PREFIX = "epure-llm-usage";
 function count(source, key) {
@@ -2923,7 +3042,17 @@ function extractLLMTokenUsage(provider, model, body) {
       input_tokens: count(u, "input_tokens") + cacheRead + count(u, "cache_creation_input_tokens"),
       cached_input_tokens: cacheRead,
       output_tokens: count(u, "output_tokens"),
-      thinking_tokens: 0
+      thinking_tokens: count(asCounts(u.output_tokens_details), "thinking_tokens")
+    };
+  }
+  if ("input_tokens" in u) {
+    return {
+      provider,
+      model,
+      input_tokens: count(u, "input_tokens"),
+      cached_input_tokens: count(asCounts(u.input_tokens_details), "cached_tokens"),
+      output_tokens: count(u, "output_tokens"),
+      thinking_tokens: count(asCounts(u.output_tokens_details), "reasoning_tokens")
     };
   }
   return {
@@ -2938,17 +3067,26 @@ function extractLLMTokenUsage(provider, model, body) {
 function formatLLMUsageLogLine(usage) {
   return `${LLM_USAGE_LOG_PREFIX} ${JSON.stringify(usage)}`;
 }
+function reportLLMUsage(usage, options) {
+  if (!("unavailable" in usage)) {
+    process.stdout.write(`${formatLLMUsageLogLine(usage)}
+`);
+  }
+  recordTokenUsage(usage, options);
+}
+function usageReporter(options) {
+  const inCallerContext = bindToUsageContext();
+  return (usage) => inCallerContext(() => reportLLMUsage(usage, options));
+}
 
 // src/llm/client.ts
 async function logTokenUsage(res, provider, model) {
+  let body;
   try {
-    const usage = extractLLMTokenUsage(provider, model, await res.clone().json());
-    if (usage) {
-      process.stdout.write(`${formatLLMUsageLogLine(usage)}
-`);
-    }
+    body = await res.clone().json();
   } catch {
   }
+  reportLLMUsage(extractLLMTokenUsage(provider, model, body) ?? { provider, model, unavailable: true });
 }
 function resolveConfigValue(val, env = process.env) {
   if (val === void 0) {
@@ -3516,7 +3654,7 @@ function formatIssueStateMirrorMarkdown(state) {
   ].join("\n");
 }
 function formatIssueStateMarker(state) {
-  const { plan_manifest: _plan, spec_manifest: _spec, ...summary } = state;
+  const { plan_manifest: _plan, spec_manifest: _spec, token_usage: _usage, ...summary } = state;
   return `<!-- epure-state:${JSON.stringify(summary)} -->`;
 }
 async function updateIssueStateWithCas(input) {
@@ -6833,7 +6971,8 @@ function resolveAgentsConfig(overrides = {}) {
     preview_retention_days: overrides.preview_retention_days ?? DEFAULT_AGENTS_CONFIG.preview_retention_days,
     github_pages_previews: pagesPreviews,
     verification,
-    ...webTools ? { web_tools: webTools } : {}
+    ...webTools ? { web_tools: webTools } : {},
+    ...overrides.pricing ? { pricing: overrides.pricing } : {}
   };
   return {
     valid: true,
@@ -6903,6 +7042,32 @@ function parseYamlStringArrayInline(raw) {
   }
   return items;
 }
+function parsePricingEntry(model, fields) {
+  const dollars = (key) => {
+    const raw = fields[key]?.trim();
+    const value = raw ? Number(raw) : Number.NaN;
+    if (!Number.isFinite(value) || value < 0) {
+      throw new Error(
+        `pricing.${model}.${key} must be a non-negative number of dollars per million tokens.`
+      );
+    }
+    return value;
+  };
+  const text = (key) => {
+    const value = fields[key]?.trim();
+    if (!value) {
+      throw new Error(`pricing.${model}.${key} is required.`);
+    }
+    return value;
+  };
+  return {
+    input_per_mtok: dollars("input_per_mtok"),
+    ...fields.cached_input_per_mtok !== void 0 ? { cached_input_per_mtok: dollars("cached_input_per_mtok") } : {},
+    output_per_mtok: dollars("output_per_mtok"),
+    source: text("source"),
+    read_on: text("read_on")
+  };
+}
 function parseAgentsYaml(yamlContent) {
   let harness;
   let reviewers_dir;
@@ -6934,6 +7099,8 @@ function parseAgentsYaml(yamlContent) {
   const targets = [];
   const securityOverrides = {};
   const webToolsOverrides = {};
+  const pricingFields = {};
+  let currentPricingModel = null;
   const lines = yamlContent.split(/\r?\n/);
   let section = "root";
   let inTargets = false;
@@ -6993,6 +7160,7 @@ function parseAgentsYaml(yamlContent) {
       currentTarget = null;
       currentProviderAlias = null;
       inProviderDefaultHeaders = false;
+      currentPricingModel = null;
       const kv = /^([a-zA-Z0-9_]+):\s*(.*)$/.exec(trimmed);
       if (!kv || !kv[1]) {
         continue;
@@ -7013,6 +7181,10 @@ function parseAgentsYaml(yamlContent) {
       }
       if (key === "web_tools" && !val) {
         section = "web_tools";
+        continue;
+      }
+      if (key === "pricing" && !val) {
+        section = "pricing";
         continue;
       }
       if ((key === "security_invariants" || key === "security_overrides") && !val) {
@@ -7182,6 +7354,23 @@ function parseAgentsYaml(yamlContent) {
       }
       continue;
     }
+    if (section === "pricing") {
+      if (indent === 2) {
+        const kv = /^("[^"]+"|'[^']+'|\S+?):(?:\s+.*)?$/.exec(trimmed);
+        currentPricingModel = kv?.[1] ? unquoteYamlScalar(kv[1]) : null;
+        if (currentPricingModel) {
+          pricingFields[currentPricingModel] = {};
+        }
+      } else if (currentPricingModel) {
+        const kv = /^([a-zA-Z0-9_]+):\s*(.+)$/.exec(trimmed);
+        if (kv && kv[1] && kv[2]) {
+          pricingFields[currentPricingModel][kv[1]] = unquoteYamlScalar(
+            kv[2].replace(/\s+#.*$/, "")
+          );
+        }
+      }
+      continue;
+    }
     if (section === "security") {
       const kv = /^([a-zA-Z0-9_]+):\s*(.+)$/.exec(trimmed);
       if (kv && kv[1] && kv[2]) {
@@ -7295,6 +7484,17 @@ function parseAgentsYaml(yamlContent) {
     ...t.build_command ? { build_command: t.build_command } : {}
   }));
   const hasVerificationOverrides = wait_for_external_ci !== void 0 || external_ci_timeout_minutes !== void 0 || grace_window_seconds !== void 0 || deferred_external_workflows !== void 0 || hasTargetsKey || parsedTargets.length > 0;
+  const pricing = {};
+  for (const [model, fields] of Object.entries(pricingFields)) {
+    try {
+      pricing[model] = parsePricingEntry(model, fields);
+    } catch (err) {
+      process.stdout.write(
+        `::warning title=EPURE pricing::${err.message} This price is ignored: costs of ${model} are not shown.
+`
+      );
+    }
+  }
   if (reviewers_dir !== void 0 && reviewers_dir.split(/[\\/]/).some((s) => s === "." || s === "..")) {
     throw new Error(
       `reviewers_dir '${reviewers_dir}' must not contain '.' or '..' path segments.`
@@ -7330,6 +7530,7 @@ function parseAgentsYaml(yamlContent) {
       }
     } : {},
     ...Object.keys(webToolsOverrides).length > 0 ? { web_tools: webToolsOverrides } : {},
+    ...Object.keys(pricing).length > 0 ? { pricing } : {},
     ...Object.keys(securityOverrides).length > 0 ? { security_overrides: securityOverrides } : {}
   };
   const resolved = resolveAgentsConfig(overrides);
@@ -7441,8 +7642,128 @@ import {
 import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 import { spawn, spawnSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
-import { pipeline, Transform } from "node:stream";
+import { pipeline, Transform, Writable } from "node:stream";
+
+// src/sandbox/llm-proxy-usage.ts
 import { brotliDecompressSync, gunzipSync, inflateSync } from "node:zlib";
+function decodeBody(body, contentEncoding) {
+  switch (String(contentEncoding ?? "").trim().toLowerCase()) {
+    case "gzip":
+    case "x-gzip":
+      return gunzipSync(body);
+    case "deflate":
+      return inflateSync(body);
+    case "br":
+      return brotliDecompressSync(body);
+    default:
+      return body;
+  }
+}
+function asObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : void 0;
+}
+function parseJson(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return void 0;
+  }
+}
+var OPENAI_COMPATIBLE = /* @__PURE__ */ new Set(["openai", "openrouter", "azure", "azure_ai"]);
+var MODEL_LABEL = /^[\w.@:/-]{1,128}$/;
+var UNKNOWN_MODEL = "unknown";
+function meterRequest(provider, path, body, contentEncoding) {
+  const json = contentEncoding ? void 0 : asObject(parseJson(body.toString("utf8")));
+  const label = /\/(?:models|deployments)\/([^/:]+)/.exec(path)?.[1] ?? json?.model;
+  const model = typeof label === "string" && MODEL_LABEL.test(label) ? label : UNKNOWN_MODEL;
+  if (!json || !OPENAI_COMPATIBLE.has(provider) || !path.endsWith("/chat/completions") || json.stream !== true) {
+    return { body, model };
+  }
+  const streamOptions = asObject(json.stream_options) ?? {};
+  if (streamOptions.include_usage === true) {
+    return { body, model };
+  }
+  return {
+    body: Buffer.from(JSON.stringify({ ...json, stream_options: { ...streamOptions, include_usage: true } })),
+    model
+  };
+}
+function mergeCounts(into, from) {
+  const merged = { ...into };
+  for (const [key, value] of Object.entries(from)) {
+    const details = asObject(value);
+    if (typeof value === "number") {
+      merged[key] = value;
+    } else if (details) {
+      merged[key] = {
+        ...asObject(merged[key]),
+        ...Object.fromEntries(Object.entries(details).filter(([, v]) => typeof v === "number"))
+      };
+    }
+  }
+  return merged;
+}
+function meterResponse(provider, model, contentType, contentEncoding) {
+  const sse = contentType.includes("text/event-stream");
+  const json = contentType.includes("json");
+  const buffered = json || sse && Boolean(contentEncoding);
+  const raw = [];
+  const decoder = new TextDecoder();
+  let partialLine = "";
+  const found = {};
+  const absorbEvent = (value) => {
+    const event = asObject(value);
+    const usage = asObject(event?.usage) ?? asObject(asObject(event?.message)?.usage) ?? asObject(asObject(event?.response)?.usage);
+    if (usage) {
+      found.usage = mergeCounts(found.usage, usage);
+    }
+    const metadata = asObject(event?.usageMetadata);
+    if (metadata) {
+      found.usageMetadata = metadata;
+    }
+  };
+  const absorb = (value) => {
+    (Array.isArray(value) ? value : [value]).forEach(absorbEvent);
+  };
+  const readLines = (text) => {
+    const lines = (partialLine + text).split(/\r?\n/);
+    partialLine = lines.pop() ?? "";
+    for (const line of lines) {
+      if (line.startsWith("data:")) {
+        absorb(parseJson(line.slice("data:".length).trim()));
+      }
+    }
+  };
+  return {
+    onChunk(chunk) {
+      if (buffered) {
+        raw.push(Buffer.from(chunk));
+      } else if (sse) {
+        readLines(decoder.decode(chunk, { stream: true }));
+      }
+    },
+    onEnd() {
+      if (buffered) {
+        try {
+          const text = decodeBody(Buffer.concat(raw), contentEncoding).toString("utf8");
+          if (sse) {
+            readLines(`${text}
+`);
+          } else {
+            absorb(parseJson(text));
+          }
+        } catch {
+        }
+      } else if (sse) {
+        readLines(`${decoder.decode()}
+`);
+      }
+      return extractLLMTokenUsage(provider, model, found) ?? { provider, model, unavailable: true };
+    }
+  };
+}
+
+// src/sandbox/llm-sandbox.ts
 var SECRET_ENV_NAME_PATTERN = /^(?:.*API_KEY|.*_TOKEN|.*_SECRET|.*PRIVATE_KEY|LLM_API_KEY|GITHUB_TOKEN|GH_TOKEN|GITHUB_PAT|EPURE_.*(?:KEY|TOKEN|SECRET)|AWS_.*|AZURE_.*|GCP_.*|NPM_TOKEN|NODE_AUTH_TOKEN|ACTIONS_RUNTIME_TOKEN|ACTIONS_ID_TOKEN_REQUEST_TOKEN)$/i;
 var NONCE_HEADER = "x-epure-proxy-nonce";
 var CREDENTIAL_HEADERS = [
@@ -7471,6 +7792,7 @@ var DROPPED_REQUEST_HEADERS = /* @__PURE__ */ new Set([
 ]);
 var DROPPED_RESPONSE_HEADERS = new Set(HOP_BY_HOP_HEADERS);
 var MAX_PROXY_REQUEST_BYTES = 20 * 1024 * 1024;
+var MAX_PROXY_IN_FLIGHT_REQUESTS = 4;
 function buildSanitizedSandboxEnv(runnerEnv, proxy) {
   const sanitized = {};
   for (const [key, value] of Object.entries(runnerEnv)) {
@@ -7711,19 +8033,6 @@ function guardObserver(open) {
     }
   };
 }
-function decodeBody(body, contentEncoding) {
-  switch (String(contentEncoding ?? "").trim().toLowerCase()) {
-    case "gzip":
-    case "x-gzip":
-      return gunzipSync(body);
-    case "deflate":
-      return inflateSync(body);
-    case "br":
-      return brotliDecompressSync(body);
-    default:
-      return body;
-  }
-}
 var ProxyRequestTooLargeError = class extends Error {
 };
 function sendProxyError(res, status, errorCode, errorMessage) {
@@ -7759,6 +8068,8 @@ async function createLlmSandboxProxy(options) {
   const agent = target.protocol === "https:" ? new HttpsAgent({ keepAlive: true }) : new HttpAgent({ keepAlive: true });
   const proxyNonce = randomBytes(24).toString("hex");
   const nonceBytes = Buffer.from(proxyNonce);
+  const reportUsage = usageReporter({ labelledBySandbox: true });
+  const requestBodyTimeoutMs = options.requestBodyTimeoutMs ?? DEFAULT_LLM_REQUEST_TIMEOUT_MS;
   const relay = (req, res) => {
     const rawUrl = req.url ?? "/";
     if (!rawUrl.startsWith("/")) {
@@ -7810,14 +8121,14 @@ async function createLlmSandboxProxy(options) {
       headers[name.toLowerCase()] = value;
     }
     headers[upstream.authHeader] = upstream.authHeader === "authorization" ? `Bearer ${apiKey}` : apiKey;
-    let responded = false;
+    let upstreamReq;
     let failed = false;
     const fail = (status, code, message) => {
       if (failed) {
         return;
       }
       failed = true;
-      upstreamReq.destroy();
+      upstreamReq?.destroy();
       if (res.headersSent) {
         res.destroy();
       } else {
@@ -7825,37 +8136,61 @@ async function createLlmSandboxProxy(options) {
         sendProxyError(res, status, code, message);
       }
     };
-    const upstreamReq = send({
-      agent,
-      hostname: target.hostname.replace(/^\[|\]$/g, ""),
-      port: target.port || void 0,
-      method: "POST",
-      path: `${basePath}${url.pathname}${query}`,
-      headers,
-      timeout: DEFAULT_LLM_REQUEST_TIMEOUT_MS
-    });
-    upstreamReq.on("timeout", () => upstreamReq.destroy(new Error("upstream idle timeout")));
-    upstreamReq.on(
-      "error",
-      () => fail(502, "PROXY_UPSTREAM_UNREACHABLE", `Sandbox LLM proxy could not reach ${upstreamHost}.`)
-    );
     res.on("close", () => {
       if (!res.writableFinished) {
-        upstreamReq.destroy();
+        upstreamReq?.destroy();
       }
     });
+    const forward = ({ body, model }) => {
+      headers["content-length"] = String(body.length);
+      const sent = send({
+        agent,
+        hostname: target.hostname.replace(/^\[|\]$/g, ""),
+        port: target.port || void 0,
+        method: "POST",
+        path: `${basePath}${url.pathname}${query}`,
+        headers,
+        timeout: DEFAULT_LLM_REQUEST_TIMEOUT_MS
+      });
+      upstreamReq = sent;
+      sent.on("timeout", () => sent.destroy(new Error("upstream idle timeout")));
+      sent.on(
+        "error",
+        () => fail(502, "PROXY_UPSTREAM_UNREACHABLE", `Sandbox LLM proxy could not reach ${upstreamHost}.`)
+      );
+      sent.on("response", (upstreamRes) => relayResponse(upstreamRes, model));
+      sent.end(body);
+    };
+    const chunks = [];
     let received = 0;
-    const limit = new Transform({
-      transform(chunk, _encoding, callback) {
+    const collect = new Writable({
+      write(chunk, _encoding, callback) {
         received += chunk.length;
-        callback(received > MAX_PROXY_REQUEST_BYTES ? new ProxyRequestTooLargeError() : null, chunk);
+        if (received > MAX_PROXY_REQUEST_BYTES) {
+          callback(new ProxyRequestTooLargeError());
+          return;
+        }
+        chunks.push(chunk);
+        callback();
       }
     });
-    pipeline(req, limit, upstreamReq, (err) => {
-      if (!err || responded) {
-        return;
-      }
-      if (err instanceof ProxyRequestTooLargeError) {
+    const bodyTimer = setTimeout(
+      () => fail(
+        408,
+        "PROXY_REQUEST_TIMEOUT",
+        `Sandbox LLM proxy did not receive the request body within ${requestBodyTimeoutMs} ms.`
+      ),
+      requestBodyTimeoutMs
+    );
+    pipeline(req, collect, (err) => {
+      clearTimeout(bodyTimer);
+      if (!err) {
+        try {
+          forward(meterRequest(upstream.provider, url.pathname, Buffer.concat(chunks), req.headers["content-encoding"]));
+        } catch {
+          fail(400, "PROXY_REQUEST_UNREADABLE", "Sandbox LLM proxy could not read the request body.");
+        }
+      } else if (err instanceof ProxyRequestTooLargeError) {
         fail(
           413,
           "PROXY_REQUEST_TOO_LARGE",
@@ -7865,21 +8200,16 @@ async function createLlmSandboxProxy(options) {
         fail(502, "PROXY_UPSTREAM_UNREACHABLE", `Sandbox LLM proxy could not reach ${upstreamHost}.`);
       }
     });
-    upstreamReq.on("response", (upstreamRes) => {
-      responded = true;
+    const relayResponse = (upstreamRes, model) => {
       const status = upstreamRes.statusCode ?? 502;
+      const contentType = String(upstreamRes.headers["content-type"] ?? "");
       const responseHeaders = forwardedHeaders(upstreamRes.headers, DROPPED_RESPONSE_HEADERS);
       const observer = guardObserver(
-        () => options.observeResponse?.({
-          method: "POST",
-          path: url.pathname,
-          status,
-          contentType: String(upstreamRes.headers["content-type"] ?? "")
-        })
+        () => options.observeResponse?.({ method: "POST", path: url.pathname, status, contentType })
       );
       if (status >= 400) {
-        const chunks = [];
-        upstreamRes.on("data", (chunk) => chunks.push(chunk));
+        const chunks2 = [];
+        upstreamRes.on("data", (chunk) => chunks2.push(chunk));
         upstreamRes.on("error", () => {
           observer.end();
           fail(502, "PROXY_UPSTREAM_UNREACHABLE", `Sandbox LLM proxy lost the response from ${upstreamHost}.`);
@@ -7887,7 +8217,7 @@ async function createLlmSandboxProxy(options) {
         upstreamRes.on("end", () => {
           let body;
           try {
-            body = decodeBody(Buffer.concat(chunks), upstreamRes.headers["content-encoding"]);
+            body = decodeBody(Buffer.concat(chunks2), upstreamRes.headers["content-encoding"]);
           } catch {
             observer.end();
             fail(502, "PROXY_UPSTREAM_UNREACHABLE", `Sandbox LLM proxy could not decode the error from ${upstreamHost}.`);
@@ -7904,30 +8234,55 @@ async function createLlmSandboxProxy(options) {
       }
       res.writeHead(status, responseHeaders);
       res.flushHeaders();
+      const meter = meterResponse(upstream.provider, model, contentType, upstreamRes.headers["content-encoding"]);
       const tap = new Transform({
         transform(chunk, _encoding, callback) {
+          meter.onChunk(chunk);
           observer.chunk(chunk);
           callback(null, chunk);
         }
       });
-      pipeline(upstreamRes, tap, res, () => observer.end());
-    });
+      pipeline(upstreamRes, tap, res, () => {
+        observer.end();
+        reportUsage(meter.onEnd());
+      });
+    };
   };
-  const server = createServer((req, res) => {
-    try {
-      relay(req, res);
-    } catch {
-      if (res.headersSent) {
-        res.destroy();
-      } else {
-        sendProxyError(
-          res,
-          502,
-          "PROXY_UPSTREAM_UNREACHABLE",
-          `Sandbox LLM proxy could not build the request to ${upstreamHost}.`
-        );
+  let inFlight = 0;
+  const waiting = [];
+  const server = createServer({ requestTimeout: 0 }, (req, res) => {
+    const start = () => {
+      inFlight += 1;
+      res.once("close", () => {
+        inFlight -= 1;
+        waiting.shift()?.();
+      });
+      try {
+        relay(req, res);
+      } catch {
+        if (res.headersSent) {
+          res.destroy();
+        } else {
+          sendProxyError(
+            res,
+            502,
+            "PROXY_UPSTREAM_UNREACHABLE",
+            `Sandbox LLM proxy could not build the request to ${upstreamHost}.`
+          );
+        }
       }
+    };
+    if (inFlight < MAX_PROXY_IN_FLIGHT_REQUESTS) {
+      start();
+      return;
     }
+    waiting.push(start);
+    res.once("close", () => {
+      const index = waiting.indexOf(start);
+      if (index >= 0) {
+        waiting.splice(index, 1);
+      }
+    });
   });
   await new Promise((resolve3, reject) => {
     server.once("error", reject);
@@ -10200,6 +10555,127 @@ async function processPendingIssueCommentsBatch(input) {
     cancelled,
     state: latestStateResult.state
   };
+}
+
+// src/state/metered-state-store.ts
+function meterTokenUsage(store, ledger, epicRefName) {
+  return {
+    readRef: async (refName) => {
+      const snapshot = await store.readRef(refName);
+      if (refName === epicRefName) {
+        ledger.observe(snapshot.state?.token_usage);
+      }
+      return snapshot;
+    },
+    compareAndSwapRef: async (refName, expectedOldSha, nextState) => {
+      const count3 = ledger.pendingCount();
+      if (refName !== epicRefName || count3 === 0) {
+        return store.compareAndSwapRef(refName, expectedOldSha, nextState);
+      }
+      const metered = { ...nextState, token_usage: ledger.fold(nextState.token_usage, count3) };
+      let result;
+      try {
+        result = await store.compareAndSwapRef(refName, expectedOldSha, metered);
+      } catch (err) {
+        const landed = await store.readRef(refName).then(
+          (snapshot) => JSON.stringify(snapshot.state) === JSON.stringify(metered),
+          () => false
+        );
+        if (landed) {
+          ledger.written(metered.token_usage, count3);
+        }
+        throw err;
+      }
+      if (result.swapped) {
+        ledger.written(metered.token_usage, count3);
+      }
+      return result;
+    },
+    ...store.listIssueStates ? { listIssueStates: () => store.listIssueStates() } : {}
+  };
+}
+
+// src/usage/pricing.ts
+function costUsd(counts, price) {
+  const uncached = counts.input_tokens - counts.cached_input_tokens;
+  const cachedPrice = price.cached_input_per_mtok ?? price.input_per_mtok;
+  return (uncached * price.input_per_mtok + counts.cached_input_tokens * cachedPrice + counts.output_tokens * price.output_per_mtok) / 1e6;
+}
+function costOfModels(models, pricing) {
+  let total = 0;
+  for (const [model, counts] of Object.entries(models)) {
+    const price = pricing?.[model];
+    if (!price) {
+      return null;
+    }
+    total += costUsd(counts, price);
+  }
+  return total;
+}
+
+// src/usage/usage-report.ts
+var count2 = (n) => n.toLocaleString("en-US");
+var usd = (n) => n > 0 && n < 0.01 ? "< $0.01" : `$${n.toFixed(2)}`;
+function formatTokenUsage(models, pricing) {
+  const t = Object.values(models).reduce(addTokenCounts, NO_TOKENS);
+  if (t.requests === 0) {
+    return void 0;
+  }
+  const cost = costOfModels(models, pricing);
+  return [
+    `${count2(t.input_tokens)} input tokens (${count2(t.cached_input_tokens)} cached)`,
+    `${count2(t.output_tokens)} output (${count2(t.thinking_tokens)} thinking)`,
+    `${count2(t.requests)} ${t.requests === 1 ? "request" : "requests"}`,
+    ...t.usage_unavailable ? [`${count2(t.usage_unavailable)} without usage data`] : [],
+    ...cost === null ? [] : [t.usage_unavailable ? `\u2265 ${usd(cost)}` : usd(cost)]
+  ].join(" \xB7 ");
+}
+function formatTicketUsageSuffix(record, ticket, pricing) {
+  const line = formatTokenUsage(totalTokensByModel(record ?? {}, String(ticket)), pricing);
+  return line ? ` \u2014 LLM usage: ${line}` : "";
+}
+function formatEpicUsageSection(record, pricing) {
+  const line = formatTokenUsage(totalTokensByModel(record ?? {}), pricing);
+  return line ? ["", "## LLM Usage", `- **Epic total**: ${line}`] : [];
+}
+var PR_USAGE_START = "<!-- epure-llm-usage:start -->";
+var PR_USAGE_END = "<!-- epure-llm-usage:end -->";
+function formatPrUsageSection(record, pricing) {
+  return [PR_USAGE_START, ...formatEpicUsageSection(record, pricing).slice(1), PR_USAGE_END].join("\n");
+}
+function replacePrUsageSection(body, section) {
+  const start = body.indexOf(PR_USAGE_START);
+  const end = start < 0 ? -1 : body.indexOf(PR_USAGE_END, start);
+  if (end < 0) {
+    return `${body}
+
+${section}`;
+  }
+  return `${body.slice(0, start)}${section}${body.slice(end + PR_USAGE_END.length)}`;
+}
+function formatStatusUsageLines(record, pricing) {
+  const total = totalTokensByModel(record ?? {});
+  const totalLine = formatTokenUsage(total, pricing);
+  if (!totalLine) {
+    return [];
+  }
+  const scopes = Object.keys(record ?? {}).sort(
+    (a, b) => a === EPIC_USAGE_SCOPE ? -1 : b === EPIC_USAGE_SCOPE ? 1 : Number(a) - Number(b)
+  );
+  const scopeLines = scopes.flatMap((scope) => {
+    const line = formatTokenUsage(totalTokensByModel(record ?? {}, scope), pricing);
+    const label = scope === EPIC_USAGE_SCOPE ? "Planning & integration" : `#${scope}`;
+    return line ? [`  - ${label}: ${line}`] : [];
+  });
+  const costShown = [total, ...scopes.map((scope) => totalTokensByModel(record ?? {}, scope))].some(
+    (models) => costOfModels(models, pricing) !== null
+  );
+  const priced = Object.keys(total).filter((model) => pricing?.[model]).map((model) => `\`${model}\` read on ${pricing[model].read_on} (${pricing[model].source})`);
+  return [
+    `- **LLM Usage**: ${totalLine}`,
+    ...scopeLines,
+    ...costShown ? [`  - Prices from \`.github/agents.yml\`: ${priced.join("; ")}`] : []
+  ];
 }
 
 // src/orchestrator/prompts/code-discipline.ts
@@ -14498,24 +14974,27 @@ ${content}`
       wrapUntrustedContent("untrusted_test_output", params.stage1Summary)
     ] : []
   ].join("\n");
-  return await callLlmJson({
-    apiKey: params.llmApiKey,
-    model: params.phaseModels.reviewModel,
-    providers: params.phaseModels.providers,
-    maxTransientRetries: params.phaseModels.maxTransientRetries,
-    transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
-    requestTimeoutMs: params.phaseModels.requestTimeoutMs,
-    onTransientRetriesUsed: params.onTransientRetriesUsed,
-    systemInstruction,
-    prompt: userPrompt,
-    temperature: 0.1,
-    ...explorationTools.tools ? { tools: explorationTools.tools } : {},
-    ...explorationTools.toolHandlers ? { toolHandlers: explorationTools.toolHandlers } : {},
-    maxToolRounds: 6,
-    logLabel: `epic-convergence-audit#${params.issueNumber}`,
-    responseSchema: EPIC_CONVERGENCE_AUDIT_SCHEMA,
-    fetchImpl: params.fetchImpl
-  });
+  return await withUsageAttribution(
+    { phase: "integration" },
+    () => callLlmJson({
+      apiKey: params.llmApiKey,
+      model: params.phaseModels.reviewModel,
+      providers: params.phaseModels.providers,
+      maxTransientRetries: params.phaseModels.maxTransientRetries,
+      transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
+      requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+      onTransientRetriesUsed: params.onTransientRetriesUsed,
+      systemInstruction,
+      prompt: userPrompt,
+      temperature: 0.1,
+      ...explorationTools.tools ? { tools: explorationTools.tools } : {},
+      ...explorationTools.toolHandlers ? { toolHandlers: explorationTools.toolHandlers } : {},
+      maxToolRounds: 6,
+      logLabel: `epic-convergence-audit#${params.issueNumber}`,
+      responseSchema: EPIC_CONVERGENCE_AUDIT_SCHEMA,
+      fetchImpl: params.fetchImpl
+    })
+  );
 }
 async function spawnPhase2ConvergenceTickets(params) {
   const sourceTickets = params.auditResult.remediation_tickets;
@@ -15349,10 +15828,20 @@ function formatResumeContextPromptLines(resumeContextMarkdown) {
 }
 
 // src/orchestrator/phases/feature-integration.ts
+async function refreshFeaturePrUsage(gh, pr, pricing) {
+  if (!pr) {
+    return;
+  }
+  const body = replacePrUsageSection(pr.body, formatPrUsageSection(currentTokenUsage(), pricing));
+  if (body !== pr.body) {
+    await gh.updatePullRequest(pr.number, { body });
+  }
+}
 async function runFeatureIntegrationPhase(params) {
   const reviewersDir = params.parsedDevAgentsConfig?.reviewers_dir ?? DEFAULT_REVIEWERS_DIR;
   let verificationProfile = params.initialVerificationProfile;
   let verificationGuideMarkdown = params.initialVerificationGuideMarkdown;
+  const pricing = params.parsedDevAgentsConfig?.pricing;
   const escalate = (escalation) => params.escalateToNeedsHuman({ ...escalation, budgetScope: "feature" });
   const featurePrGate = prepareFeatureToDevPullRequest({
     repository: params.repository,
@@ -15454,6 +15943,8 @@ async function runFeatureIntegrationPhase(params) {
         `- **Summary**: ${params.epicConvergenceSummary}`
       ] : [],
       "",
+      formatPrUsageSection(currentTokenUsage(), pricing),
+      "",
       "## Governance",
       "- Requires human review and squash-merge into `dev` in the GitHub UI (ADR-0001, ADR-0027, Q45, Q91, Q95)."
     ].join("\n"),
@@ -15473,6 +15964,12 @@ async function runFeatureIntegrationPhase(params) {
     title: featureSquashPreview.pr_title,
     body: featurePrBody
   });
+  const refreshOpenFeaturePrUsage = async () => refreshFeaturePrUsage(
+    params.gh,
+    await params.gh.findOpenPullRequestByHead(params.featureBranch, "dev"),
+    pricing
+  );
+  await refreshFeaturePrUsage(params.gh, existingFeaturePr, pricing);
   if (params.featureChangedFilesMap.size === 0) {
     const existingFeaturePrFiles = await params.gh.listPullRequestFiles(
       featurePr.number
@@ -15540,7 +16037,7 @@ async function runFeatureIntegrationPhase(params) {
       changedPaths: currentChangedFeatureFiles.map((f) => f.path),
       targetBranch: "dev"
     });
-    const reviewRes = await runMultiAgentPrReviewPass({
+    const reviewRes = await withUsageAttribution({ phase: "review" }, () => runMultiAgentPrReviewPass({
       repository: params.repository,
       prNumber: featurePr.number,
       headBranch: params.featureBranch,
@@ -15566,11 +16063,12 @@ async function runFeatureIntegrationPhase(params) {
       requestTimeoutMs: params.phaseModels.requestTimeoutMs,
       onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
       fetchImpl: params.fetchImpl
-    });
+    }));
     await params.gh.postPullRequestReview(featurePr.number, {
       commitId: passParams.headSha,
       body: reviewRes.review_body_markdown
     });
+    await refreshOpenFeaturePrUsage();
     await params.gh.publishCheckRun({
       name: "PR title",
       headSha: passParams.headSha,
@@ -15795,7 +16293,7 @@ ${c}`).join("\n\n");
         "Fichiers actuels du workspace :",
         wrapUntrustedContent("untrusted_workspace_files", currentFilesContext)
       );
-      const parsedFeatureFix = await callLlmJson({
+      const parsedFeatureFix = await withUsageAttribution({ phase: "fixes" }, () => callLlmJson({
         apiKey: params.llmApiKey,
         model: params.phaseModels.implementationModel,
         providers: params.phaseModels.providers,
@@ -15819,7 +16317,7 @@ ${c}`).join("\n\n");
         }),
         responseSchema: GENERATED_TICKET_IMPLEMENTATION_SCHEMA,
         fetchImpl: params.fetchImpl
-      });
+      }));
       const featureFixPreCheck = validateWorkspaceFileOperations({
         workDir: featureSandbox.workDir,
         files: [
@@ -15884,7 +16382,7 @@ ${c}`).join("\n\n");
           params.accumulatedFiles.entries()
         ).map(([p, c]) => `--- FILE: ${p} ---
 ${c}`).join("\n\n");
-        const retryParsed = await callLlmJson({
+        const retryParsed = await withUsageAttribution({ phase: "fixes" }, () => callLlmJson({
           apiKey: params.llmApiKey,
           model: params.phaseModels.implementationModel,
           providers: params.phaseModels.providers,
@@ -15928,7 +16426,7 @@ ${c}`).join("\n\n");
           }),
           responseSchema: GENERATED_TICKET_IMPLEMENTATION_SCHEMA,
           fetchImpl: params.fetchImpl
-        });
+        }));
         const retryPreCheck = validateWorkspaceFileOperations({
           workDir: featureSandbox.workDir,
           files: [
@@ -16123,6 +16621,7 @@ Refs #${params.issueNumber}`
       diagnosticExcerpt: finalFeatureCiGate.formattedDiagnostics
     });
   }
+  await refreshOpenFeaturePrUsage();
   const updatedDone = await updateIssueStateWithCas({
     issueNumber: params.issueNumber,
     store: params.store,
@@ -16141,6 +16640,7 @@ Refs #${params.issueNumber}`
       "",
       "Tous les tickets du DAG ont \xE9t\xE9 impl\xE9ment\xE9s en TDD sur leurs branches `task/*`, v\xE9rifi\xE9s en sandbox isol\xE9e, audit\xE9s par le roster multi-agents (`ai-review` + `impeccable-gate`) et squash-merg\xE9s dans `" + params.featureBranch + "` :",
       ...params.completedTicketsSummary,
+      ...formatEpicUsageSection(currentTokenUsage(), params.parsedDevAgentsConfig?.pricing),
       "",
       `\u{1F449} **Pull Request finale ouverte vers \`dev\`** : ${featurePr.html_url}`,
       "Conform\xE9ment \xE0 la gouvernance EPURE (Q45, Q91, Q95), la fusion finale `feature/* \u2192 dev` est r\xE9serv\xE9e \xE0 la validation humaine dans l'interface GitHub."
@@ -16647,7 +17147,7 @@ async function runTicketExecutionLoop(params) {
       }
       completedTicketNumbers.add(ticket.ticketIssueNumber);
       params.completedTicketsSummary.push(
-        `- **#${ticket.ticketIssueNumber}** (${ticket.title}) \u2014 previously squash-merged into \`${params.featureBranch}\``
+        `- **#${ticket.ticketIssueNumber}** (${ticket.title}) \u2014 previously squash-merged into \`${params.featureBranch}\`` + formatTicketUsageSuffix(currentTokenUsage(), ticket.ticketIssueNumber, params.parsedDevAgentsConfig?.pricing)
       );
       continue;
     }
@@ -16662,7 +17162,7 @@ async function runTicketExecutionLoop(params) {
       }
       completedTicketNumbers.add(ticket.ticketIssueNumber);
       params.completedTicketsSummary.push(
-        `- **#${ticket.ticketIssueNumber}** (${ticket.title}) \u2014 PR [#${mergedTaskPr.number}](${mergedTaskPr.html_url}) already merged into \`${params.featureBranch}\``
+        `- **#${ticket.ticketIssueNumber}** (${ticket.title}) \u2014 PR [#${mergedTaskPr.number}](${mergedTaskPr.html_url}) already merged into \`${params.featureBranch}\`` + formatTicketUsageSuffix(currentTokenUsage(), ticket.ticketIssueNumber, params.parsedDevAgentsConfig?.pricing)
       );
       continue;
     }
@@ -16677,7 +17177,7 @@ async function runTicketExecutionLoop(params) {
     }
     const syncWithBase = await params.baseSyncGuard.needsSync();
     if (syncWithBase) {
-      const featureSync = await syncBranchWithBase({
+      const featureSync = await withUsageAttribution({ phase: "integration" }, () => syncBranchWithBase({
         gh: params.gh,
         targetBranch: params.featureBranch,
         baseBranch: "dev",
@@ -16691,7 +17191,7 @@ async function runTicketExecutionLoop(params) {
         requestTimeoutMs: params.phaseModels.requestTimeoutMs,
         sandboxRunner: params.sandboxRunner,
         reviewersDir
-      });
+      }));
       if (featureSync.status === "escalated") {
         const escalated = await params.escalateToNeedsHuman({
           reason: featureSync.escalationReason ?? "merge_conflict_unresolved",
@@ -16708,7 +17208,7 @@ async function runTicketExecutionLoop(params) {
       }
     }
     await params.gh.ensureBranch(taskBranch, params.featureBranch);
-    const syncTaskBranchWithFeature = () => syncBranchWithBase({
+    const syncTaskBranchWithFeature = () => withUsageAttribution({ phase: "integration", ticket: ticket.ticketIssueNumber }, () => syncBranchWithBase({
       gh: params.gh,
       targetBranch: taskBranch,
       baseBranch: params.featureBranch,
@@ -16722,7 +17222,7 @@ async function runTicketExecutionLoop(params) {
       requestTimeoutMs: params.phaseModels.requestTimeoutMs,
       sandboxRunner: params.sandboxRunner,
       reviewersDir
-    });
+    }));
     if (syncWithBase) {
       const taskSync = await syncTaskBranchWithFeature();
       if (taskSync.status === "escalated") {
@@ -17022,7 +17522,7 @@ ${params.issue.body}`
           existingFilesContext ? `Fichiers d\xE9j\xE0 pr\xE9sents sur la branche feature :
 ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C'est le premier ticket : inclus un package.json complet (avec scripts 'test': 'vitest run' et 'build': 'vite build', dependencies react/react-dom, devDependencies typescript/vite/vitest/@vitejs/plugin-react/@types/react/@types/react-dom) ainsi que tsconfig.json et vite.config.ts."
         ].join("\n");
-        const parsedImpl = await generateTicketImplementationWithFallback({
+        const parsedImpl = await withUsageAttribution({ phase: "implementation", ticket: ticket.ticketIssueNumber }, () => generateTicketImplementationWithFallback({
           ticket,
           branch: params.featureBranch,
           featureBranch: params.featureBranch,
@@ -17039,7 +17539,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
           phaseModels: params.phaseModels,
           addTransientRetriesUsed: params.addTransientRetriesUsed,
           fetchImpl: params.fetchImpl
-        });
+        }));
         const preStage1Check = validateWorkspaceFileOperations({
           workDir: sandboxWorkspace.workDir,
           files: [
@@ -17144,7 +17644,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
               currentFilesContext
             )
           ].join("\n");
-          const fixedImpl = await generateTicketImplementationWithFallback({
+          const fixedImpl = await withUsageAttribution({ phase: "fixes", ticket: ticket.ticketIssueNumber }, () => generateTicketImplementationWithFallback({
             ticket,
             branch: params.featureBranch,
             featureBranch: params.featureBranch,
@@ -17161,7 +17661,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
             phaseModels: params.phaseModels,
             addTransientRetriesUsed: params.addTransientRetriesUsed,
             fetchImpl: params.fetchImpl
-          });
+          }));
           const fixPreCheck = validateWorkspaceFileOperations({
             workDir: sandboxWorkspace.workDir,
             files: [
@@ -17316,7 +17816,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
           changedPaths,
           targetBranch: params.featureBranch
         });
-        const reviewRes = await runMultiAgentPrReviewPass({
+        const reviewRes = await withUsageAttribution({ phase: "review", ticket: ticket.ticketIssueNumber }, () => runMultiAgentPrReviewPass({
           repository: params.repository,
           prNumber: openTaskPr.number,
           headBranch: taskBranch,
@@ -17341,7 +17841,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
           requestTimeoutMs: params.phaseModels.requestTimeoutMs,
           onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
           fetchImpl: params.fetchImpl
-        });
+        }));
         await params.gh.postPullRequestReview(openTaskPr.number, {
           commitId: passParams.headSha,
           body: reviewRes.review_body_markdown
@@ -17577,7 +18077,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
           "Fichiers actuels du workspace :",
           wrapUntrustedContent("untrusted_workspace_files", currentFilesContext)
         );
-        const reviewFixedImpl = await generateTicketImplementationWithFallback({
+        const reviewFixedImpl = await withUsageAttribution({ phase: "fixes", ticket: ticket.ticketIssueNumber }, () => generateTicketImplementationWithFallback({
           ticket,
           branch: taskBranch,
           featureBranch: params.featureBranch,
@@ -17595,7 +18095,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
           phaseModels: params.phaseModels,
           addTransientRetriesUsed: params.addTransientRetriesUsed,
           fetchImpl: params.fetchImpl
-        });
+        }));
         const remediationPreCheck = validateWorkspaceFileOperations({
           workDir: sandboxWorkspace.workDir,
           files: [
@@ -17665,7 +18165,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
               ...reviewResult.must_fix_findings.map((f) => f.path)
             ]
           });
-          const retryImpl = await generateTicketImplementationWithFallback({
+          const retryImpl = await withUsageAttribution({ phase: "fixes", ticket: ticket.ticketIssueNumber }, () => generateTicketImplementationWithFallback({
             ticket,
             branch: taskBranch,
             featureBranch: params.featureBranch,
@@ -17703,7 +18203,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
             phaseModels: params.phaseModels,
             addTransientRetriesUsed: params.addTransientRetriesUsed,
             fetchImpl: params.fetchImpl
-          });
+          }));
           const retryPreCheck = validateWorkspaceFileOperations({
             workDir: sandboxWorkspace.workDir,
             files: [
@@ -17884,8 +18384,9 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
           verificationGuideMarkdown
         };
       }
-      const squashCommit = await generateSemanticSquashCommitFromDiff({
-        prNumber: taskPr.number,
+      const taskPrNumber = taskPr.number;
+      const squashCommit = await withUsageAttribution({ phase: "integration", ticket: ticket.ticketIssueNumber }, () => generateSemanticSquashCommitFromDiff({
+        prNumber: taskPrNumber,
         targetBranch: params.featureBranch,
         defaultBranch: "dev",
         planIssueNumber: params.issueNumber,
@@ -17900,7 +18401,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
         requestTimeoutMs: params.phaseModels.requestTimeoutMs,
         onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
         fetchImpl: params.fetchImpl
-      });
+      }));
       const featureMergedBeforeTaskMerge = await params.stopIfFeaturePrMerged();
       if (featureMergedBeforeTaskMerge) {
         return {
@@ -18042,7 +18543,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
       }
       completedTicketNumbers.add(ticket.ticketIssueNumber);
       params.completedTicketsSummary.push(
-        `- **#${ticket.ticketIssueNumber}** (${ticket.title}) \u2014 PR #${taskPr.number} squash-merged into \`${params.featureBranch}\` as \`${squashCommit.commit_title}\` (Reviewers: ${reviewResult.selected_reviewers.map((r) => `\`${r}\``).join(", ")})`
+        `- **#${ticket.ticketIssueNumber}** (${ticket.title}) \u2014 PR #${taskPr.number} squash-merged into \`${params.featureBranch}\` as \`${squashCommit.commit_title}\` (Reviewers: ${reviewResult.selected_reviewers.map((r) => `\`${r}\``).join(", ")})` + formatTicketUsageSuffix(currentTokenUsage(), ticket.ticketIssueNumber, params.parsedDevAgentsConfig?.pricing)
       );
     } catch (err) {
       if (err instanceof LLMError) {
@@ -18216,9 +18717,35 @@ async function orchestrateIssueCommand(input) {
   }
   return result;
 }
-async function runIssueCommand(input) {
+function usagePhaseOfCommand(command) {
+  switch (command) {
+    case "plan":
+      return "plan";
+    case "reply":
+      return "grilling";
+    case "to-spec":
+      return "spec";
+    case "to-tickets":
+      return "tickets";
+    case "sync":
+    case "rebase":
+      return "integration";
+    default:
+      return "implementation";
+  }
+}
+function runIssueCommand(input) {
+  const ledger = new TokenUsageLedger();
+  return runWithTokenUsageLedger(
+    ledger,
+    { phase: usagePhaseOfCommand(input.command) },
+    () => runMeteredIssueCommand(input, ledger)
+  );
+}
+async function runMeteredIssueCommand(input, ledger) {
   let mintedAppToken = null;
   let githubRequestCount = 0;
+  let writePendingTokenUsage = async () => void 0;
   try {
     let activeToken = (input.fallbackGithubToken ?? "").trim();
     if (input.agentAppId && input.agentAppId.trim() && input.agentAppPrivateKey && input.agentAppPrivateKey.trim()) {
@@ -18257,7 +18784,7 @@ async function runIssueCommand(input) {
       ...restHelper,
       publishCheckRun: async (run2) => run2.name === "PR title" ? void 0 : restHelper.publishCheckRun(run2)
     };
-    const rawStore = input.stateStore ?? createGitHubApiRefStateStore({
+    const stateStore = input.stateStore ?? createGitHubApiRefStateStore({
       repository: input.repository,
       githubToken: activeToken,
       fetchImpl: githubFetch
@@ -18268,7 +18795,7 @@ async function runIssueCommand(input) {
     const resumableByCiEvent = (state) => isAutomaticallyResumable(state) || isAbandonedCiClaim(state);
     let resolvedIssueNumber = input.issueNumber;
     if (resolvedIssueNumber <= 0 && input.command === "continue") {
-      const allStates = triggerHeadSha && rawStore.listIssueStates ? await rawStore.listIssueStates() : [];
+      const allStates = triggerHeadSha && stateStore.listIssueStates ? await stateStore.listIssueStates() : [];
       const matched = allStates.find(
         (s) => resumableByCiEvent(s) && s.active_head_sha === triggerHeadSha
       );
@@ -18287,6 +18814,7 @@ async function runIssueCommand(input) {
     }
     const effectiveInput = resolvedIssueNumber !== input.issueNumber ? { ...input, issueNumber: resolvedIssueNumber } : input;
     const refName = buildIssueStateRefName(effectiveInput.issueNumber);
+    const rawStore = meterTokenUsage(stateStore, ledger, refName);
     let planBranch = `plan/${effectiveInput.issueNumber}`;
     let featureBranch = `feature/${effectiveInput.issueNumber}`;
     let leaseExpiresAt;
@@ -18296,6 +18824,21 @@ async function runIssueCommand(input) {
     const cumulativeTransientRetriesUsed = () => initialTransientRetriesUsed + totalTransientRetriesUsed;
     let allowedTerminalSha = null;
     let store = guardTerminalStates(rawStore, null);
+    writePendingTokenUsage = async () => {
+      const pending = ledger.pendingCount();
+      if (pending === 0) {
+        return;
+      }
+      try {
+        await updateIssueStateWithCas({ issueNumber: effectiveInput.issueNumber, store, mutator: (prev) => prev });
+      } catch (err) {
+        const reason = err instanceof StateTransitionAbortedError ? err.reason : err instanceof Error ? err.message : String(err);
+        process.stdout.write(
+          `[EPURE] LLM usage of ${pending} response(s) not written to ${refName}: ${redactSecrets(reason, [activeToken, effectiveInput.llmApiKey]).replace(/\s+/g, " ")}
+`
+        );
+      }
+    };
     const commandPhase = effectiveInput.command === "to-tickets" ? "tickets" : effectiveInput.command === "to-spec" ? "spec" : effectiveInput.command === "plan" || effectiveInput.command === "reply" ? "grilling" : "implementation";
     const formatEscalation = (params, context) => formatNeedsHumanEscalationComment({
       reason: params.reason,
@@ -18455,6 +18998,7 @@ async function runIssueCommand(input) {
           })
         });
         const lease = readRunLease(updated.state);
+        const pricing = updated.state.token_usage ? await loadRepoAgentsConfig(gh, "dev").then(async (config) => config ?? await loadRepoAgentsConfig(gh, "main")).then((config) => config?.pricing).catch(() => void 0) : void 0;
         const statusBody = appendEpureCommandsSpoiler(
           [
             updated.issue_mirror_markdown,
@@ -18462,7 +19006,8 @@ async function runIssueCommand(input) {
               `- **Run Lease**: \u26A0\uFE0F stale \u2014 run \`${lease.runId}\` expired at ${lease.expiresAt} without finishing; \`/epure continue\` takes the plan over.`
             ] : [
               `- **Run Lease**: run \`${lease.runId}\` in progress until ${lease.expiresAt}`
-            ]
+            ],
+            ...formatStatusUsageLines(updated.state.token_usage, pricing)
           ].join("\n"),
           {
             phase: updated.state.phase,
@@ -18643,9 +19188,11 @@ async function runIssueCommand(input) {
       const reviewersDir = parsedDevAgentsConfig?.reviewers_dir ?? DEFAULT_REVIEWERS_DIR;
       if (effectiveInput.command === "plan" || effectiveInput.command === "to-spec" || effectiveInput.command === "to-tickets" || effectiveInput.command === "reply" && (currentState?.phase === "grilling" || currentState?.phase === "spec") && currentState?.status !== "cancelled") {
         const phaseModels = requirePhaseModels();
+        const planningCommand = effectiveInput.command;
+        const specRevision = planningCommand === "reply" && currentState?.phase === "spec";
         try {
-          return await runGrillAndPlanPhase({
-            command: effectiveInput.command,
+          return await withUsageAttribution(specRevision ? { phase: "spec" } : {}, () => runGrillAndPlanPhase({
+            command: planningCommand,
             currentPhase: currentState?.phase,
             currentStatus: currentState?.status,
             planManifest: currentState?.plan_manifest ?? parsePlanManifestFromComments(allComments, epureIdentity),
@@ -18667,7 +19214,7 @@ async function runIssueCommand(input) {
               totalTransientRetriesUsed += used;
             },
             fetchImpl: effectiveInput.fetchImpl
-          });
+          }));
         } catch (err) {
           if (err instanceof LLMError) {
             return await escalateSuspension({
@@ -18774,21 +19321,26 @@ async function runIssueCommand(input) {
           });
         }
         if (currentState?.active_task_branch) {
-          const taskSyncRes = await syncBranchWithBase({
-            gh,
-            targetBranch: currentState.active_task_branch,
-            baseBranch: targetBranch,
-            issueNumber: currentState.active_ticket_number ?? effectiveInput.issueNumber,
-            llmApiKey: effectiveInput.llmApiKey,
-            fetchImpl: effectiveInput.fetchImpl,
-            model: phaseModels.implementationModel,
-            providers: phaseModels.providers,
-            maxTransientRetries: phaseModels.maxTransientRetries,
-            transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
-            requestTimeoutMs: phaseModels.requestTimeoutMs,
-            sandboxRunner: effectiveInput.sandboxRunner,
-            reviewersDir
-          });
+          const activeTaskBranch = currentState.active_task_branch;
+          const activeTicketNumber = currentState.active_ticket_number;
+          const taskSyncRes = await withUsageAttribution(
+            { ticket: activeTicketNumber },
+            () => syncBranchWithBase({
+              gh,
+              targetBranch: activeTaskBranch,
+              baseBranch: targetBranch,
+              issueNumber: activeTicketNumber ?? effectiveInput.issueNumber,
+              llmApiKey: effectiveInput.llmApiKey,
+              fetchImpl: effectiveInput.fetchImpl,
+              model: phaseModels.implementationModel,
+              providers: phaseModels.providers,
+              maxTransientRetries: phaseModels.maxTransientRetries,
+              transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+              requestTimeoutMs: phaseModels.requestTimeoutMs,
+              sandboxRunner: effectiveInput.sandboxRunner,
+              reviewersDir
+            })
+          );
           if (taskSyncRes.status === "escalated") {
             return await escalateSuspension({
               reason: taskSyncRes.escalationReason ?? "merge_conflict_unresolved",
@@ -18923,6 +19475,9 @@ async function runIssueCommand(input) {
                   code_fix_attempts_used: 0
                 })
               });
+              const pricing = parsedDevAgentsConfig?.pricing;
+              const tickets = updatedReviewReady.state.plan_manifest?.tickets ?? [];
+              await refreshFeaturePrUsage(gh, openFeaturePr, pricing);
               const readyMd = appendEpureCommandsSpoiler(
                 [
                   formatIssueStateMarker(updatedReviewReady.state),
@@ -18931,7 +19486,15 @@ async function runIssueCommand(input) {
                   `### \u2705 Feature Pull Request pr\xEAte pour validation humaine \u2014 PR #${featurePrNumber}`,
                   `- **Pull Request** : ${featurePrUrl || `#${featurePrNumber}`}`,
                   `- **CI externe & \`ai-review\`** : \`success\` sur \`${activeHeadSha}\``,
-                  "- **Prochaine \xE9tape** : Revue humaine et squash-merge vers `dev`."
+                  "- **Prochaine \xE9tape** : Revue humaine et squash-merge vers `dev`.",
+                  ...tickets.length > 0 ? [
+                    "",
+                    `Tickets int\xE9gr\xE9s \xE0 \`${featureBranch}\` :`,
+                    ...tickets.map(
+                      (ticket) => `- **#${ticket.ticketIssueNumber}** (${ticket.title})` + formatTicketUsageSuffix(currentTokenUsage(), ticket.ticketIssueNumber, pricing)
+                    )
+                  ] : [],
+                  ...formatEpicUsageSection(currentTokenUsage(), pricing)
                 ].join("\n"),
                 {
                   phase: "completed",
@@ -18989,22 +19552,25 @@ async function runIssueCommand(input) {
                 }))
               );
               const phaseModels = requirePhaseModels();
-              const squashCommit = await generateSemanticSquashCommitFromDiff({
-                prNumber: prNumberToMerge,
-                targetBranch: targetFeatureBranch,
-                defaultBranch: "dev",
-                planIssueNumber: effectiveInput.issueNumber,
-                ticketNumbers: [ticketNum],
-                fallbackTitle: openTaskPr?.title || `feat(ticket-${ticketNum}): complete ticket #${ticketNum}`,
-                changedFiles: changedFilesForSquash,
-                llmApiKey: effectiveInput.llmApiKey,
-                model: phaseModels.reviewModel,
-                providers: phaseModels.providers,
-                maxTransientRetries: phaseModels.maxTransientRetries,
-                transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
-                requestTimeoutMs: phaseModels.requestTimeoutMs,
-                fetchImpl: effectiveInput.fetchImpl
-              });
+              const squashCommit = await withUsageAttribution(
+                { phase: "integration", ticket: ticketNum },
+                () => generateSemanticSquashCommitFromDiff({
+                  prNumber: prNumberToMerge,
+                  targetBranch: targetFeatureBranch,
+                  defaultBranch: "dev",
+                  planIssueNumber: effectiveInput.issueNumber,
+                  ticketNumbers: [ticketNum],
+                  fallbackTitle: openTaskPr?.title || `feat(ticket-${ticketNum}): complete ticket #${ticketNum}`,
+                  changedFiles: changedFilesForSquash,
+                  llmApiKey: effectiveInput.llmApiKey,
+                  model: phaseModels.reviewModel,
+                  providers: phaseModels.providers,
+                  maxTransientRetries: phaseModels.maxTransientRetries,
+                  transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+                  requestTimeoutMs: phaseModels.requestTimeoutMs,
+                  fetchImpl: effectiveInput.fetchImpl
+                })
+              );
               await gh.updatePullRequest(prNumberToMerge, {
                 title: squashCommit.pr_title
               });
@@ -19050,21 +19616,24 @@ async function runIssueCommand(input) {
                     describeMergeRefusal(refusal, mergeableState)
                   );
                 }
-                const resync = await syncBranchWithBase({
-                  gh,
-                  targetBranch: taskBranchToMerge,
-                  baseBranch: targetFeatureBranch,
-                  issueNumber: ticketNum,
-                  llmApiKey: effectiveInput.llmApiKey,
-                  fetchImpl: effectiveInput.fetchImpl,
-                  model: phaseModels.implementationModel,
-                  providers: phaseModels.providers,
-                  maxTransientRetries: phaseModels.maxTransientRetries,
-                  transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
-                  requestTimeoutMs: phaseModels.requestTimeoutMs,
-                  sandboxRunner: effectiveInput.sandboxRunner,
-                  reviewersDir
-                });
+                const resync = await withUsageAttribution(
+                  { phase: "integration", ticket: ticketNum },
+                  () => syncBranchWithBase({
+                    gh,
+                    targetBranch: taskBranchToMerge,
+                    baseBranch: targetFeatureBranch,
+                    issueNumber: ticketNum,
+                    llmApiKey: effectiveInput.llmApiKey,
+                    fetchImpl: effectiveInput.fetchImpl,
+                    model: phaseModels.implementationModel,
+                    providers: phaseModels.providers,
+                    maxTransientRetries: phaseModels.maxTransientRetries,
+                    transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+                    requestTimeoutMs: phaseModels.requestTimeoutMs,
+                    sandboxRunner: effectiveInput.sandboxRunner,
+                    reviewersDir
+                  })
+                );
                 if (resync.status === "escalated") {
                   return await escalateRefusedMerge(
                     resync.escalationReason ?? "merge_conflict_unresolved",
@@ -19410,7 +19979,7 @@ ${t.filesToTouch.join(" ")}`
             }
             for (const ticket of ticketsManifest) {
               completedTicketsSummary.push(
-                `- **#${ticket.ticketIssueNumber}** (${ticket.title}) \u2014 previously squash-merged into \`${featureBranch}\``
+                `- **#${ticket.ticketIssueNumber}** (${ticket.title}) \u2014 previously squash-merged into \`${featureBranch}\`` + formatTicketUsageSuffix(currentTokenUsage(), ticket.ticketIssueNumber, parsedDevAgentsConfig?.pricing)
               );
             }
           }
@@ -19621,7 +20190,7 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
           }
         }
         try {
-          return await runFeatureIntegrationPhase({
+          return await withUsageAttribution({ phase: "integration" }, () => runFeatureIntegrationPhase({
             repository: effectiveInput.repository,
             issueNumber: effectiveInput.issueNumber,
             commentId: effectiveInput.commentId,
@@ -19665,7 +20234,7 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
             baseSyncGuard,
             resumeContextMarkdown,
             stopIfFeaturePrMerged
-          });
+          }));
         } catch (err) {
           if (err instanceof LLMError) {
             return await escalateToNeedsHuman({
@@ -19718,11 +20287,15 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
         fetchImpl: recordFetch
       }) : gh;
       const recordStore = rateLimited && !input.stateStore ? guardTerminalStates(
-        createGitHubApiRefStateStore({
-          repository: input.repository,
-          githubToken: activeToken,
-          fetchImpl: recordFetch
-        }),
+        meterTokenUsage(
+          createGitHubApiRefStateStore({
+            repository: input.repository,
+            githubToken: activeToken,
+            fetchImpl: recordFetch
+          }),
+          ledger,
+          refName
+        ),
         allowedTerminalSha
       ) : store;
       try {
@@ -19753,6 +20326,7 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
       }
     }
   } finally {
+    await writePendingTokenUsage();
     process.stdout.write(
       `[EPURE] GitHub API requests this run: ${githubRequestCount}
 `

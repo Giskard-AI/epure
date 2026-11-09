@@ -3,6 +3,7 @@ import {
   wrapUntrustedContent
 } from "../../security/prompt-injection-guard.js";
 import type { PlanManifestRecord } from "../../state/git-ref-state.js";
+import { withUsageAttribution } from "../../usage/token-usage.js";
 import { appendEpureCommandsSpoiler } from "../formatting/comments.js";
 import { callLlmJson } from "../llm-helper.js";
 import { embedManifestJson } from "../plan-manifest.js";
@@ -141,27 +142,29 @@ export async function runEpicConvergenceAudit(
       : [])
   ].join("\n");
 
-  return await callLlmJson<EpicConvergenceAuditPayload>({
-    apiKey: params.llmApiKey,
-    model: params.phaseModels.reviewModel,
-    providers: params.phaseModels.providers,
-    maxTransientRetries: params.phaseModels.maxTransientRetries,
-    transientRetryBackoffSeconds:
-      params.phaseModels.transientRetryBackoffSeconds,
-    requestTimeoutMs: params.phaseModels.requestTimeoutMs,
-    onTransientRetriesUsed: params.onTransientRetriesUsed,
-    systemInstruction,
-    prompt: userPrompt,
-    temperature: 0.1,
-    ...(explorationTools.tools ? { tools: explorationTools.tools } : {}),
-    ...(explorationTools.toolHandlers
-      ? { toolHandlers: explorationTools.toolHandlers }
-      : {}),
-    maxToolRounds: 6,
-    logLabel: `epic-convergence-audit#${params.issueNumber}`,
-    responseSchema: EPIC_CONVERGENCE_AUDIT_SCHEMA,
-    fetchImpl: params.fetchImpl
-  });
+  return await withUsageAttribution({ phase: "integration" }, () =>
+    callLlmJson<EpicConvergenceAuditPayload>({
+      apiKey: params.llmApiKey,
+      model: params.phaseModels.reviewModel,
+      providers: params.phaseModels.providers,
+      maxTransientRetries: params.phaseModels.maxTransientRetries,
+      transientRetryBackoffSeconds:
+        params.phaseModels.transientRetryBackoffSeconds,
+      requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+      onTransientRetriesUsed: params.onTransientRetriesUsed,
+      systemInstruction,
+      prompt: userPrompt,
+      temperature: 0.1,
+      ...(explorationTools.tools ? { tools: explorationTools.tools } : {}),
+      ...(explorationTools.toolHandlers
+        ? { toolHandlers: explorationTools.toolHandlers }
+        : {}),
+      maxToolRounds: 6,
+      logLabel: `epic-convergence-audit#${params.issueNumber}`,
+      responseSchema: EPIC_CONVERGENCE_AUDIT_SCHEMA,
+      fetchImpl: params.fetchImpl
+    })
+  );
 }
 
 export interface SpawnPhase2ConvergenceTicketsParams {

@@ -39,6 +39,13 @@ import {
   withFeatureCodeFixAttempts,
   type GitRefStateStore
 } from "../../state/git-ref-state.js";
+import type { PricingTable } from "../../usage/pricing.js";
+import { currentTokenUsage, withUsageAttribution } from "../../usage/token-usage.js";
+import {
+  formatEpicUsageSection,
+  formatPrUsageSection,
+  replacePrUsageSection
+} from "../../usage/usage-report.js";
 import { appendEpureCommandsSpoiler } from "../formatting/comments.js";
 import { callLlmJson } from "../llm-helper.js";
 import {
@@ -115,6 +122,21 @@ export interface RunFeatureIntegrationPhaseParams {
   readonly stopIfFeaturePrMerged: () => Promise<OrchestrateIssueResult | null>;
 }
 
+/** Rewrites the `## LLM Usage` section of the feature PR body with the epic total so far; the rest is untouched. */
+export async function refreshFeaturePrUsage(
+  gh: Pick<GitHubRestHelper, "updatePullRequest">,
+  pr: { readonly number: number; readonly body: string } | null,
+  pricing: PricingTable | undefined
+): Promise<void> {
+  if (!pr) {
+    return;
+  }
+  const body = replacePrUsageSection(pr.body, formatPrUsageSection(currentTokenUsage(), pricing));
+  if (body !== pr.body) {
+    await gh.updatePullRequest(pr.number, { body });
+  }
+}
+
 export async function runFeatureIntegrationPhase(
   params: RunFeatureIntegrationPhaseParams
 ): Promise<OrchestrateIssueResult> {
@@ -122,6 +144,7 @@ export async function runFeatureIntegrationPhase(
     params.parsedDevAgentsConfig?.reviewers_dir ?? DEFAULT_REVIEWERS_DIR;
   let verificationProfile = params.initialVerificationProfile;
   let verificationGuideMarkdown = params.initialVerificationGuideMarkdown;
+  const pricing = params.parsedDevAgentsConfig?.pricing;
   const escalate: EscalateToNeedsHumanFn = (escalation) =>
     params.escalateToNeedsHuman({ ...escalation, budgetScope: "feature" });
 
@@ -240,6 +263,8 @@ export async function runFeatureIntegrationPhase(
           ]
         : []),
       "",
+      formatPrUsageSection(currentTokenUsage(), pricing),
+      "",
       "## Governance",
       "- Requires human review and squash-merge into `dev` in the GitHub UI (ADR-0001, ADR-0027, Q45, Q91, Q95)."
     ].join("\n"),
@@ -264,6 +289,13 @@ export async function runFeatureIntegrationPhase(
         title: featureSquashPreview.pr_title,
         body: featurePrBody
       });
+  const refreshOpenFeaturePrUsage = async (): Promise<void> =>
+    refreshFeaturePrUsage(
+      params.gh,
+      await params.gh.findOpenPullRequestByHead(params.featureBranch, "dev"),
+      pricing
+    );
+  await refreshFeaturePrUsage(params.gh, existingFeaturePr, pricing);
 
   if (params.featureChangedFilesMap.size === 0) {
     const existingFeaturePrFiles = await params.gh.listPullRequestFiles(
@@ -350,7 +382,7 @@ export async function runFeatureIntegrationPhase(
       targetBranch: "dev"
     });
 
-    const reviewRes = await runMultiAgentPrReviewPass({
+    const reviewRes = await withUsageAttribution({ phase: "review" }, () => runMultiAgentPrReviewPass({
       repository: params.repository,
       prNumber: featurePr.number,
       headBranch: params.featureBranch,
@@ -377,12 +409,13 @@ export async function runFeatureIntegrationPhase(
       requestTimeoutMs: params.phaseModels.requestTimeoutMs,
       onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
       fetchImpl: params.fetchImpl
-    });
+    }));
 
     await params.gh.postPullRequestReview(featurePr.number, {
       commitId: passParams.headSha,
       body: reviewRes.review_body_markdown
     });
+    await refreshOpenFeaturePrUsage();
 
     await params.gh.publishCheckRun({
       name: "PR title",
@@ -659,7 +692,7 @@ export async function runFeatureIntegrationPhase(
       );
 
       const parsedFeatureFix =
-        await callLlmJson<GeneratedTicketImplementation>({
+        await withUsageAttribution({ phase: "fixes" }, () => callLlmJson<GeneratedTicketImplementation>({
           apiKey: params.llmApiKey,
           model: params.phaseModels.implementationModel,
           providers: params.phaseModels.providers,
@@ -685,7 +718,7 @@ export async function runFeatureIntegrationPhase(
           }),
           responseSchema: GENERATED_TICKET_IMPLEMENTATION_SCHEMA,
           fetchImpl: params.fetchImpl
-        });
+        }));
 
       const featureFixPreCheck = validateWorkspaceFileOperations({
         workDir: featureSandbox.workDir,
@@ -759,7 +792,7 @@ export async function runFeatureIntegrationPhase(
           .map(([p, c]) => `--- FILE: ${p} ---\n${c}`)
           .join("\n\n");
         const retryParsed =
-          await callLlmJson<GeneratedTicketImplementation>({
+          await withUsageAttribution({ phase: "fixes" }, () => callLlmJson<GeneratedTicketImplementation>({
             apiKey: params.llmApiKey,
             model: params.phaseModels.implementationModel,
             providers: params.phaseModels.providers,
@@ -807,7 +840,7 @@ export async function runFeatureIntegrationPhase(
             }),
             responseSchema: GENERATED_TICKET_IMPLEMENTATION_SCHEMA,
             fetchImpl: params.fetchImpl
-          });
+          }));
 
         const retryPreCheck = validateWorkspaceFileOperations({
           workDir: featureSandbox.workDir,
@@ -1028,6 +1061,7 @@ export async function runFeatureIntegrationPhase(
     });
   }
 
+  await refreshOpenFeaturePrUsage();
   const updatedDone = await updateIssueStateWithCas({
     issueNumber: params.issueNumber,
     store: params.store,
@@ -1051,6 +1085,7 @@ export async function runFeatureIntegrationPhase(
         params.featureBranch +
         "` :",
       ...params.completedTicketsSummary,
+      ...formatEpicUsageSection(currentTokenUsage(), params.parsedDevAgentsConfig?.pricing),
       "",
       `👉 **Pull Request finale ouverte vers \`dev\`** : ${featurePr.html_url}`,
       "Conformément à la gouvernance EPURE (Q45, Q91, Q95), la fusion finale `feature/* → dev` est réservée à la validation humaine dans l'interface GitHub."

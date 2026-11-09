@@ -1,17 +1,13 @@
+import {
+  bindToUsageContext,
+  recordTokenUsage,
+  type LLMRequestUsage,
+  type LLMTokenUsage,
+  type RecordUsageOptions
+} from "../usage/token-usage.js";
 import type { ProviderKind } from "./types.js";
 
 export const LLM_USAGE_LOG_PREFIX = "epure-llm-usage";
-
-export interface LLMTokenUsage {
-  readonly provider: ProviderKind;
-  readonly model: string;
-  // Every prompt token, cached ones included.
-  readonly input_tokens: number;
-  readonly cached_input_tokens: number;
-  // Every billed output token, thinking included.
-  readonly output_tokens: number;
-  readonly thinking_tokens: number;
-}
 
 type Counts = Readonly<Record<string, unknown>>;
 
@@ -57,7 +53,18 @@ export function extractLLMTokenUsage(
       input_tokens: count(u, "input_tokens") + cacheRead + count(u, "cache_creation_input_tokens"),
       cached_input_tokens: cacheRead,
       output_tokens: count(u, "output_tokens"),
-      thinking_tokens: 0
+      thinking_tokens: count(asCounts(u.output_tokens_details), "thinking_tokens")
+    };
+  }
+  // The Responses API names them input/output tokens, chat completions prompt/completion tokens.
+  if ("input_tokens" in u) {
+    return {
+      provider,
+      model,
+      input_tokens: count(u, "input_tokens"),
+      cached_input_tokens: count(asCounts(u.input_tokens_details), "cached_tokens"),
+      output_tokens: count(u, "output_tokens"),
+      thinking_tokens: count(asCounts(u.output_tokens_details), "reasoning_tokens")
     };
   }
   return {
@@ -72,4 +79,22 @@ export function extractLLMTokenUsage(
 
 export function formatLLMUsageLogLine(usage: LLMTokenUsage): string {
   return `${LLM_USAGE_LOG_PREFIX} ${JSON.stringify(usage)}`;
+}
+
+/**
+ * The one channel for LLM usage: the job-log line and the run's ledger. `LLMClient` and the sandbox
+ * proxy call it per response; an engine that bypasses both calls it once per session with its counts,
+ * or with `unavailable: true` when it has none.
+ */
+export function reportLLMUsage(usage: LLMRequestUsage, options?: RecordUsageOptions): void {
+  if (!("unavailable" in usage)) {
+    process.stdout.write(`${formatLLMUsageLogLine(usage)}\n`);
+  }
+  recordTokenUsage(usage, options);
+}
+
+/** reportLLMUsage bound to the caller's attribution, for callbacks that run outside it (a proxy's server). */
+export function usageReporter(options?: RecordUsageOptions): (usage: LLMRequestUsage) => void {
+  const inCallerContext = bindToUsageContext();
+  return (usage) => inCallerContext(() => reportLLMUsage(usage, options));
 }

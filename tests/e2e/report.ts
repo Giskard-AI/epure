@@ -1,4 +1,14 @@
-import { LLM_USAGE_LOG_PREFIX, type LLMTokenUsage } from "../../src/llm/usage.js";
+import { LLM_USAGE_LOG_PREFIX } from "../../src/llm/usage.js";
+import {
+  addTokenCounts,
+  NO_TOKENS,
+  totalTokensByModel,
+  USAGE_PHASES,
+  type LLMTokenUsage,
+  type ModelTokenCounts,
+  type TokenCounts,
+  type TokenUsageRecord
+} from "../../src/usage/token-usage.js";
 import type { ModelPricing } from "./config.js";
 import type { EscalationClass } from "./escalations.js";
 
@@ -46,6 +56,8 @@ export interface UsageTotals {
   readonly thinking_tokens: number;
   // null when the model has no entry in the pricing table.
   readonly cost_usd: number | null;
+  // State only: requests among `requests` whose engine reported no usage.
+  readonly usage_unavailable?: number | undefined;
 }
 
 export interface UsageSummary {
@@ -132,7 +144,7 @@ export function summarizeUsage(
     by_model[key] = { ...s, cost_usd: price ? costOf(s, price) : null };
   }
   const models = Object.values(by_model);
-  const add = (field: keyof Omit<UsageTotals, "cost_usd">) => models.reduce((sum, m) => sum + m[field], 0);
+  const add = (field: keyof Omit<UsageTotals, "cost_usd" | "usage_unavailable">) => models.reduce((sum, m) => sum + m[field], 0);
   return {
     by_model,
     total: {
@@ -154,6 +166,65 @@ export function summarizeUsageByPhase(
   return Object.fromEntries(
     phases.map((phase) => [phase, summarizeUsage(records.filter((r) => r.phase === phase), pricing).total])
   );
+}
+
+function totalsOfModels(models: ModelTokenCounts, pricing: Readonly<Record<string, ModelPricing>>): UsageTotals {
+  const t = Object.values(models).reduce(addTokenCounts, NO_TOKENS);
+  const entries = Object.entries(models);
+  return {
+    requests: t.requests,
+    input_tokens: t.input_tokens,
+    cached_input_tokens: t.cached_input_tokens,
+    output_tokens: t.output_tokens,
+    thinking_tokens: t.thinking_tokens,
+    cost_usd: entries.every(([model]) => pricing[model])
+      ? entries.reduce((sum, [model, counts]) => sum + costOf(counts, pricing[model]!), 0)
+      : null,
+    ...(t.usage_unavailable ? { usage_unavailable: t.usage_unavailable } : {})
+  };
+}
+
+export interface StateUsageSummary {
+  readonly by_phase: Readonly<Record<string, UsageTotals>>;
+  readonly total: UsageTotals;
+}
+
+/** The epic's `token_usage` from refs/epure/state, per EPURE phase across planning and every ticket. */
+export function summarizeStateUsage(
+  record: TokenUsageRecord,
+  pricing: Readonly<Record<string, ModelPricing>>
+): StateUsageSummary {
+  const by_phase: Record<string, UsageTotals> = {};
+  for (const phase of USAGE_PHASES) {
+    const models: Record<string, TokenCounts> = {};
+    for (const phases of Object.values(record)) {
+      for (const [model, counts] of Object.entries(phases[phase] ?? {})) {
+        models[model] = addTokenCounts(models[model] ?? NO_TOKENS, counts);
+      }
+    }
+    if (Object.keys(models).length > 0) {
+      by_phase[phase] = totalsOfModels(models, pricing);
+    }
+  }
+  return { by_phase, total: totalsOfModels(totalTokensByModel(record), pricing) };
+}
+
+const COMPARED_FIELDS = ["requests", "input_tokens", "cached_input_tokens", "output_tokens", "thinking_tokens"] as const;
+
+// A request without usage data writes no log line, so only requests with usage compare.
+export function compareStateUsageWithLogs(record: TokenUsageRecord, logs: readonly LLMTokenUsage[]): string[] {
+  const fromState = totalTokensByModel(record);
+  const fromLogs = summarizeUsage(logs, {}).by_model;
+  const models = [...new Set([...Object.keys(fromState), ...Object.keys(fromLogs)])].sort();
+  return models.flatMap((model) => {
+    const s = fromState[model] ?? NO_TOKENS;
+    const state = { ...s, requests: s.requests - (s.usage_unavailable ?? 0) };
+    const log = fromLogs[model] ?? { ...NO_TOKENS, cost_usd: null };
+    const differing = COMPARED_FIELDS.filter((field) => state[field] !== log[field]);
+    return differing.length === 0
+      ? []
+      : [`${model}: ${differing.map((f) => `${f} ${state[f]} in the state, ${log[f]} in the logs`).join(", ")}`];
+  });
 }
 
 export interface ActionsJob {
@@ -240,8 +311,12 @@ export interface SuccessCheck {
     | "no-internal-escalation"
     | "at-most-one-escalation-per-ticket"
     | "no-orchestrator-job-failure"
-    | "llm-usage-recorded";
-  readonly passed: boolean;
+    | "llm-usage-recorded"
+    | "state-usage-matches-job-logs"
+    | "gate-3-comment-shows-usage"
+    | "feature-pr-body-shows-usage";
+  // null: the evidence cannot tell, which does not fail the run.
+  readonly passed: boolean | null;
   readonly detail: string;
 }
 
@@ -269,6 +344,24 @@ export function acceptedEndState(state: Pick<EndState, "phase" | "status"> | nul
 
 const describeState = (s: EndState) => `${s.phase}/${s.status}${s.subphase && s.subphase !== "idle" ? ` (${s.subphase})` : ""}`;
 
+export const GATE_3_HEADING = "### ✅ Feature Pull Request prête pour validation humaine";
+const EPIC_TOTAL = /^- \*\*Epic total\*\*: (.+)$/m;
+const PR_USAGE_SECTION = /<!-- epure-llm-usage:start -->([\s\S]*?)<!-- epure-llm-usage:end -->/;
+const COST = / · (?:≥ )?(?:\$\d+\.\d{2}|< \$0\.01)$/;
+const requestsIn = (line: string) => Number(/ · ([\d,]+) requests?\b/.exec(line)?.[1]?.replace(/,/g, "") ?? Number.NaN);
+
+// What is missing from EPURE's usage on a GitHub surface: the epic total with a cost, then each ticket's line.
+function usageProblems(text: string, tickets: readonly number[]): string[] {
+  const total = EPIC_TOTAL.exec(text)?.[1];
+  return [
+    ...(total === undefined ? ["no epic total"] : COST.test(total) ? [] : [`no cost in the epic total "${total}"`]),
+    ...tickets.flatMap((t) => {
+      const line = new RegExp(`^- \\*\\*#${t}\\*\\* .* — LLM usage: (.+)$`, "m").exec(text)?.[1];
+      return line === undefined ? [`no usage line for #${t}`] : COST.test(line) ? [] : [`no cost on #${t}`];
+    })
+  ];
+}
+
 // Result fields that are null because reading them failed, with the error.
 export type Unknowns = Readonly<Partial<Record<"end_state" | "feature_pr" | "usage" | "actions" | "reviewed_task_prs" | "comments" | "host_clock", string>>>;
 
@@ -280,9 +373,30 @@ export function evaluateRun(input: {
   readonly jobFailures: readonly JobFailure[];
   readonly usageRecords: number;
   readonly unavailableJobLogs: readonly number[];
+  // A cancelled job may log usage it never wrote to the state.
+  readonly cancelledOrchestratorJobs: readonly number[];
+  // compareStateUsageWithLogs; null when the state holds no token usage or either side is unknown.
+  readonly stateUsageMismatches: readonly string[] | null;
+  // The agent App's last Gate 3 comment, the feature PR body, the plan's tickets and the requests in the state; null when absent or unread.
+  readonly gate3Comment: string | null;
+  readonly featurePrBody: string | null;
+  readonly tickets: readonly number[] | null;
+  readonly stateRequests: number | null;
   readonly unknown: Unknowns;
 }): { readonly success: boolean; readonly checks: readonly SuccessCheck[] } {
-  const { endState, error, featurePr, escalations, jobFailures, usageRecords, unavailableJobLogs, unknown } = input;
+  const { endState, error, featurePr, escalations, jobFailures, usageRecords, unavailableJobLogs, cancelledOrchestratorJobs, stateUsageMismatches, unknown } = input;
+  const atGate3 = acceptedEndState(endState)?.label === "Gate 3";
+  const gate3Problems = input.gate3Comment === null ? null : usageProblems(input.gate3Comment, input.tickets ?? []);
+  const prSection = input.featurePrBody === null ? null : PR_USAGE_SECTION.exec(input.featurePrBody)?.[1] ?? null;
+  const prRequests = prSection === null ? Number.NaN : requestsIn(EPIC_TOTAL.exec(prSection)?.[1] ?? "");
+  const prProblems =
+    prSection === null
+      ? null
+      : [
+          ...usageProblems(prSection, []),
+          ...(prRequests === input.stateRequests ? [] : [`${Number.isNaN(prRequests) ? "no" : prRequests} requests in the body, ${input.stateRequests ?? "unknown"} in the state`])
+        ];
+  const usageMismatch = stateUsageMismatches !== null && stateUsageMismatches.length > 0;
   const accepted = acceptedEndState(endState);
   const internal = escalations.filter((e) => e.class !== "legitimate");
   const perTicket = new Map<number, number>();
@@ -336,9 +450,49 @@ export function evaluateRun(input: {
           : usageRecords > 0
             ? `${usageRecords} requests`
             : "no epure-llm-usage line in the orchestrator logs: cost unknown"
+    },
+    {
+      id: "state-usage-matches-job-logs",
+      passed: usageMismatch && cancelledOrchestratorJobs.length > 0 ? null : stateUsageMismatches !== null && !usageMismatch,
+      detail: unknown.end_state
+        ? `EPURE state unknown: ${unknown.end_state}`
+        : unknown.usage
+          ? `job logs unknown: ${unknown.usage}`
+          : stateUsageMismatches === null
+            ? "no token_usage in the EPURE state"
+            : !usageMismatch
+              ? "no loss and no double write: the state's per-model totals equal the job-log totals"
+              : cancelledOrchestratorJobs.length > 0
+                ? `orchestrator jobs ${cancelledOrchestratorJobs.join(", ")} were cancelled and may have logged usage they never wrote: ${stateUsageMismatches.join("; ")}`
+                : stateUsageMismatches.join("; ")
+    },
+    {
+      id: "gate-3-comment-shows-usage",
+      passed: atGate3 ? gate3Problems !== null && gate3Problems.length === 0 : null,
+      detail: !atGate3
+        ? "EPURE did not reach Gate 3"
+        : gate3Problems === null
+          ? unknown.comments
+            ? `comments unknown: ${unknown.comments}`
+            : "no Gate 3 comment from the agent App"
+          : gate3Problems.length
+            ? gate3Problems.join("; ")
+            : `epic total and ${input.tickets?.length ?? 0} ticket lines with a cost`
+    },
+    {
+      id: "feature-pr-body-shows-usage",
+      passed: prProblems !== null && prProblems.length === 0,
+      detail:
+        input.featurePrBody === null
+          ? "no feature PR body"
+          : prProblems === null
+            ? "no epure-llm-usage section in the feature PR body"
+            : prProblems.length
+              ? prProblems.join("; ")
+              : `epic total with a cost and ${prRequests} requests, as in the state`
     }
   ];
-  return { success: checks.every((c) => c.passed), checks };
+  return { success: checks.every((c) => c.passed !== false), checks };
 }
 
 export interface Comparability {
@@ -441,7 +595,7 @@ export interface HarnessSettings {
 }
 
 export interface E2eRunResult {
-  readonly schema_version: 3;
+  readonly schema_version: 4;
   readonly run_id: string;
   readonly repository: string;
   readonly code_under_test: {
@@ -474,6 +628,8 @@ export interface E2eRunResult {
         readonly records: readonly UsageRecord[];
       })
     | null;
+  // What EPURE wrote to refs/epure/state; null when the state holds none or could not be read.
+  readonly state_usage: StateUsageSummary | null;
   readonly actions: ActionsMinutes | null;
   readonly reviewed_task_prs: number | null;
   readonly escalations: readonly EscalationEvent[];
@@ -512,7 +668,7 @@ export function renderMarkdownReport(r: E2eRunResult): string {
     "",
     "## Success checks",
     "",
-    ...r.checks.map((c) => `- [${c.passed ? "x" : " "}] ${c.id}: ${c.detail}`),
+    ...r.checks.map((c) => `- [${c.passed ? "x" : " "}] ${c.id}${c.passed === null ? " (unknown)" : ""}: ${c.detail}`),
     "",
     "## Phases",
     "",
@@ -530,6 +686,20 @@ export function renderMarkdownReport(r: E2eRunResult): string {
           ...Object.entries(r.usage.by_model).map(usageRow),
           ...Object.entries(r.usage.by_phase).map(([phase, u]) => usageRow([`phase ${phase}`, u])),
           usageRow(["total", r.usage.total])
+        ]),
+    "",
+    "## LLM usage recorded in the EPURE state",
+    "",
+    ...(r.state_usage === null
+      ? ["No token usage in the EPURE state."]
+      : [
+          "| EPURE phase | Requests | Input (cached) | Output (thinking) | Cost |",
+          "| --- | --- | --- | --- | --- |",
+          ...Object.entries(r.state_usage.by_phase).map(usageRow),
+          usageRow(["total", r.state_usage.total]),
+          ...(r.state_usage.total.usage_unavailable
+            ? ["", `${r.state_usage.total.usage_unavailable} of these requests reported no usage: their tokens are unknown.`]
+            : [])
         ]),
     "",
     `## Escalations (${r.escalations.length})`,

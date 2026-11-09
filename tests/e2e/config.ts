@@ -90,6 +90,25 @@ export function loadE2eConfig(env: NodeJS.ProcessEnv = process.env): E2eConfig {
   return config;
 }
 
+// Appended to the sandbox's `.github/agents.yml` so EPURE shows costs on GitHub; `read_on` is the date in `pricingSource`.
+export function agentsYmlPricing(config: Pick<E2eConfig, "model" | "pricing" | "pricingSource">): string {
+  const price = config.pricing[config.model];
+  const readOn = /\bread (\d{4}-\d{2}-\d{2})\b/.exec(config.pricingSource)?.[1];
+  if (!price || !readOn) {
+    throw new Error(`the e2e config needs a "pricing" entry for ${config.model} and a "pricingSource" saying "read YYYY-MM-DD"`);
+  }
+  return [
+    "pricing:",
+    `  ${JSON.stringify(config.model)}:`,
+    `    input_per_mtok: ${price.inputPerMTok}`,
+    ...(price.cachedInputPerMTok === undefined ? [] : [`    cached_input_per_mtok: ${price.cachedInputPerMTok}`]),
+    `    output_per_mtok: ${price.outputPerMTok}`,
+    `    source: ${JSON.stringify(config.pricingSource)}`,
+    `    read_on: ${JSON.stringify(readOn)}`,
+    ""
+  ].join("\n");
+}
+
 export interface GitHubToken {
   readonly token: string;
   readonly source: "EPURE_E2E_GITHUB_TOKEN" | "GH_TOKEN" | "GITHUB_TOKEN" | "gh auth token";

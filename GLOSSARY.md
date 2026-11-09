@@ -512,6 +512,18 @@ _Éviter_ : exposer les secrets d'agent ou de LLM à l'étape d'autorisation ini
 **Cloisonnement des secrets par environnements GitHub (environnement d'agent `<llm-env>` et environnement `release`)** : séparation stricte des secrets d'exécution d'agent (`EPURE_AGENT_APP_ID`, `EPURE_AGENT_APP_PRIVATE_KEY`, `LLM_API_KEY` ou variable fournisseur configurée dans `.github/agents.yml`, associés à un environnement GitHub dédié dont le nom est libre et agnostique du fournisseur LLM — `epure-agent` par défaut (clé `llm_environment` de `.github/agents.yml`, `setup-repo --llm-env`), autres exemples : `llm`, `openai`, `anthropic`, `gemini` — requis uniquement après `authorize-command`) et des secrets de promotion stable (`EPURE_RELEASE_APP_ID`, `EPURE_RELEASE_APP_PRIVATE_KEY` associés à l'environnement protégé `release` avec approbation humaine obligatoire), garantissant zéro exposition de secrets aux workflows publics (conformité Zizmor).
 _Éviter_ : stocker les clés privées de GitHub App ou les clés API LLM comme secrets globaux du dépôt accessibles à tous les jobs.
 
+## Usage des jetons LLM et coût affiché (ADR-0035)
+
+**Usage des jetons LLM** (`token_usage`) : jetons consommés par les appels aux modèles pour une **Issue de pilotage**, par portée (la portée `epic` ou un numéro de ticket), par phase d'usage et par modèle `<fournisseur>/<modèle>` (`requests`, `input_tokens`, `cached_input_tokens`, `output_tokens`, `thinking_tokens`), conservés dans `refs/epure/state/<issue>` et écrits avec les mises à jour d'état existantes. Chaque réponse est signalée par `reportLLMUsage`, seul canal : le `LLMClient`, le **Proxy LLM de sandbox** et l'adaptateur d'un moteur qui ne traverse pas le proxy l'appellent au même format.
+_Éviter_ : « usage des jetons » seul (confusion avec les jetons d'installation de la GitHub App) ; compter zéro jeton pour une requête dont le moteur ne rend pas d'usage (elle compte en `usage_unavailable`).
+
+**Portée `epic`** : part de l'**Usage des jetons LLM** d'une **Issue de pilotage** qui n'appartient à aucun ticket : planification (`plan`, `grilling`, `spec`, `tickets`), puis intégration, revue et corrections de la branche de fonctionnalité. Le total de l'issue de pilotage est la somme de cette portée et des tickets ; il n'est pas stocké.
+
+**Phase d'usage** (`UsagePhase`) : étape à laquelle un appel LLM est attribué dans l'**Usage des jetons LLM** : `plan`, `grilling`, `spec`, `tickets`, `implementation`, `review`, `fixes` ou `integration`. Elle est fixée par l'appelant (`withUsageAttribution`), pas déduite de la phase de l'état : une révision de spécification compte en `spec`, un appel de correction en `fixes`.
+
+**Table de prix** (`pricing`) : section facultative de `.github/agents.yml` donnant, par modèle, les dollars par million de jetons d'entrée, d'entrée en cache et de sortie, avec l'URL de la source et la date de lecture. Le coût est calculé à l'affichage, jamais stocké ; les jetons de réflexion sont facturés au prix de sortie.
+_Éviter_ : budget, plafond de dépense (hors périmètre, ADR-0012).
+
 
 
 

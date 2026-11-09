@@ -4,6 +4,7 @@ import {
   Agent as HttpAgent,
   createServer,
   request as httpRequest,
+  type ClientRequest,
   type IncomingHttpHeaders,
   type IncomingMessage,
   type OutgoingHttpHeaders,
@@ -13,8 +14,7 @@ import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 import { spawn, spawnSync } from "node:child_process";
 import type { AddressInfo } from "node:net";
 import { dirname, resolve } from "node:path";
-import { pipeline, Transform } from "node:stream";
-import { brotliDecompressSync, gunzipSync, inflateSync } from "node:zlib";
+import { pipeline, Transform, Writable } from "node:stream";
 import { containsPrivateKeyMaterial } from "../auth/github-apps.js";
 import { redactSecrets } from "../auth/issue-command-gate.js";
 import {
@@ -25,6 +25,8 @@ import {
 } from "../llm/client.js";
 import type { ProviderConfig } from "../llm/types.js";
 import { resolveProviderUpstream, type ProviderUpstream } from "../llm/upstream.js";
+import { usageReporter } from "../llm/usage.js";
+import { decodeBody, meterRequest, meterResponse, type MeteredRequest } from "./llm-proxy-usage.js";
 
 export type SandboxErrorCode =
   | "NONE"
@@ -36,6 +38,8 @@ export type SandboxErrorCode =
   | "PROXY_FORBIDDEN_ENDPOINT"
   | "PROXY_UPSTREAM_UNREACHABLE"
   | "PROXY_REQUEST_TOO_LARGE"
+  | "PROXY_REQUEST_UNREADABLE"
+  | "PROXY_REQUEST_TIMEOUT"
   | "SANDBOX_COMMAND_FAILED";
 
 export type SandboxNetworkPolicy = "proxy_only" | "https_only" | "offline";
@@ -89,6 +93,8 @@ export interface CreateLlmSandboxProxyOptions {
   readonly observeResponse?:
     | ((exchange: LlmProxyExchange) => LlmProxyResponseObserver | undefined)
     | undefined;
+  // Time to receive a request body, counted from when the request gets a slot. Default: the upstream timeout.
+  readonly requestBodyTimeoutMs?: number | undefined;
 }
 
 export interface LlmSandboxProxyHandle extends SandboxProxyEndpoint {
@@ -176,6 +182,8 @@ const DROPPED_REQUEST_HEADERS = new Set<string>([
 // Bodies are relayed byte for byte, so content-length and content-encoding stay valid.
 const DROPPED_RESPONSE_HEADERS = new Set<string>(HOP_BY_HOP_HEADERS);
 export const MAX_PROXY_REQUEST_BYTES = 20 * 1024 * 1024;
+// Each request body is held whole; further requests wait for a slot before their body is read.
+export const MAX_PROXY_IN_FLIGHT_REQUESTS = 4;
 
 export function buildSanitizedSandboxEnv(
   runnerEnv: Readonly<Record<string, string | undefined>>,
@@ -494,20 +502,6 @@ function guardObserver(
   };
 }
 
-function decodeBody(body: Buffer, contentEncoding: string | string[] | undefined): Buffer {
-  switch (String(contentEncoding ?? "").trim().toLowerCase()) {
-    case "gzip":
-    case "x-gzip":
-      return gunzipSync(body);
-    case "deflate":
-      return inflateSync(body);
-    case "br":
-      return brotliDecompressSync(body);
-    default:
-      return body;
-  }
-}
-
 class ProxyRequestTooLargeError extends Error {}
 
 function sendProxyError(
@@ -556,6 +550,8 @@ export async function createLlmSandboxProxy(
     target.protocol === "https:" ? new HttpsAgent({ keepAlive: true }) : new HttpAgent({ keepAlive: true });
   const proxyNonce = randomBytes(24).toString("hex");
   const nonceBytes = Buffer.from(proxyNonce);
+  const reportUsage = usageReporter({ labelledBySandbox: true });
+  const requestBodyTimeoutMs = options.requestBodyTimeoutMs ?? DEFAULT_LLM_REQUEST_TIMEOUT_MS;
 
   const relay = (req: IncomingMessage, res: ServerResponse): void => {
     const rawUrl = req.url ?? "/";
@@ -612,14 +608,14 @@ export async function createLlmSandboxProxy(
     headers[upstream.authHeader] =
       upstream.authHeader === "authorization" ? `Bearer ${apiKey}` : apiKey;
 
-    let responded = false;
+    let upstreamReq: ClientRequest | undefined;
     let failed = false;
     const fail = (status: number, code: SandboxErrorCode, message: string): void => {
       if (failed) {
         return;
       }
       failed = true;
-      upstreamReq.destroy();
+      upstreamReq?.destroy();
       if (res.headersSent) {
         res.destroy();
       } else {
@@ -627,38 +623,65 @@ export async function createLlmSandboxProxy(
         sendProxyError(res, status, code, message);
       }
     };
-
-    const upstreamReq = send({
-      agent,
-      hostname: target.hostname.replace(/^\[|\]$/g, ""),
-      port: target.port || undefined,
-      method: "POST",
-      path: `${basePath}${url.pathname}${query}`,
-      headers,
-      timeout: DEFAULT_LLM_REQUEST_TIMEOUT_MS
-    });
-    upstreamReq.on("timeout", () => upstreamReq.destroy(new Error("upstream idle timeout")));
-    upstreamReq.on("error", () =>
-      fail(502, "PROXY_UPSTREAM_UNREACHABLE", `Sandbox LLM proxy could not reach ${upstreamHost}.`)
-    );
     res.on("close", () => {
       if (!res.writableFinished) {
-        upstreamReq.destroy();
+        upstreamReq?.destroy();
       }
     });
 
+    const forward = ({ body, model }: MeteredRequest): void => {
+      headers["content-length"] = String(body.length);
+      const sent = send({
+        agent,
+        hostname: target.hostname.replace(/^\[|\]$/g, ""),
+        port: target.port || undefined,
+        method: "POST",
+        path: `${basePath}${url.pathname}${query}`,
+        headers,
+        timeout: DEFAULT_LLM_REQUEST_TIMEOUT_MS
+      });
+      upstreamReq = sent;
+      sent.on("timeout", () => sent.destroy(new Error("upstream idle timeout")));
+      sent.on("error", () =>
+        fail(502, "PROXY_UPSTREAM_UNREACHABLE", `Sandbox LLM proxy could not reach ${upstreamHost}.`)
+      );
+      sent.on("response", (upstreamRes) => relayResponse(upstreamRes, model));
+      sent.end(body);
+    };
+
+    // Read whole, within the cap: the model is in the body, and the usage request may have to be added.
+    const chunks: Buffer[] = [];
     let received = 0;
-    const limit = new Transform({
-      transform(chunk: Buffer, _encoding, callback) {
+    const collect = new Writable({
+      write(chunk: Buffer, _encoding, callback) {
         received += chunk.length;
-        callback(received > MAX_PROXY_REQUEST_BYTES ? new ProxyRequestTooLargeError() : null, chunk);
+        if (received > MAX_PROXY_REQUEST_BYTES) {
+          callback(new ProxyRequestTooLargeError());
+          return;
+        }
+        chunks.push(chunk);
+        callback();
       }
     });
-    pipeline(req, limit, upstreamReq, (err) => {
-      if (!err || responded) {
-        return;
-      }
-      if (err instanceof ProxyRequestTooLargeError) {
+    const bodyTimer = setTimeout(
+      () =>
+        fail(
+          408,
+          "PROXY_REQUEST_TIMEOUT",
+          `Sandbox LLM proxy did not receive the request body within ${requestBodyTimeoutMs} ms.`
+        ),
+      requestBodyTimeoutMs
+    );
+    pipeline(req, collect, (err) => {
+      clearTimeout(bodyTimer);
+      if (!err) {
+        // Runs outside the server's try: a body that cannot be re-serialised must not reach the process.
+        try {
+          forward(meterRequest(upstream.provider, url.pathname, Buffer.concat(chunks), req.headers["content-encoding"]));
+        } catch {
+          fail(400, "PROXY_REQUEST_UNREADABLE", "Sandbox LLM proxy could not read the request body.");
+        }
+      } else if (err instanceof ProxyRequestTooLargeError) {
         fail(
           413,
           "PROXY_REQUEST_TOO_LARGE",
@@ -669,17 +692,12 @@ export async function createLlmSandboxProxy(
       }
     });
 
-    upstreamReq.on("response", (upstreamRes) => {
-      responded = true;
+    const relayResponse = (upstreamRes: IncomingMessage, model: string): void => {
       const status = upstreamRes.statusCode ?? 502;
+      const contentType = String(upstreamRes.headers["content-type"] ?? "");
       const responseHeaders = forwardedHeaders(upstreamRes.headers, DROPPED_RESPONSE_HEADERS);
       const observer = guardObserver(() =>
-        options.observeResponse?.({
-          method: "POST",
-          path: url.pathname,
-          status,
-          contentType: String(upstreamRes.headers["content-type"] ?? "")
-        })
+        options.observeResponse?.({ method: "POST", path: url.pathname, status, contentType })
       );
 
       if (status >= 400) {
@@ -711,31 +729,57 @@ export async function createLlmSandboxProxy(
 
       res.writeHead(status, responseHeaders);
       res.flushHeaders();
+      const meter = meterResponse(upstream.provider, model, contentType, upstreamRes.headers["content-encoding"]);
       const tap = new Transform({
         transform(chunk: Buffer, _encoding, callback) {
+          meter.onChunk(chunk);
           observer.chunk(chunk);
           callback(null, chunk);
         }
       });
-      pipeline(upstreamRes, tap, res, () => observer.end());
-    });
+      pipeline(upstreamRes, tap, res, () => {
+        observer.end();
+        reportUsage(meter.onEnd());
+      });
+    };
   };
 
-  const server = createServer((req, res) => {
-    try {
-      relay(req, res);
-    } catch {
-      if (res.headersSent) {
-        res.destroy();
-      } else {
-        sendProxyError(
-          res,
-          502,
-          "PROXY_UPSTREAM_UNREACHABLE",
-          `Sandbox LLM proxy could not build the request to ${upstreamHost}.`
-        );
+  let inFlight = 0;
+  const waiting: Array<() => void> = [];
+  // Node's requestTimeout runs from the connection, so it would also count the wait for a slot.
+  const server = createServer({ requestTimeout: 0 }, (req, res) => {
+    const start = (): void => {
+      inFlight += 1;
+      res.once("close", () => {
+        inFlight -= 1;
+        waiting.shift()?.();
+      });
+      try {
+        relay(req, res);
+      } catch {
+        if (res.headersSent) {
+          res.destroy();
+        } else {
+          sendProxyError(
+            res,
+            502,
+            "PROXY_UPSTREAM_UNREACHABLE",
+            `Sandbox LLM proxy could not build the request to ${upstreamHost}.`
+          );
+        }
       }
+    };
+    if (inFlight < MAX_PROXY_IN_FLIGHT_REQUESTS) {
+      start();
+      return;
     }
+    waiting.push(start);
+    res.once("close", () => {
+      const index = waiting.indexOf(start);
+      if (index >= 0) {
+        waiting.splice(index, 1);
+      }
+    });
   });
 
   await new Promise<void>((resolve, reject) => {
