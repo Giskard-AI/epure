@@ -322,8 +322,11 @@ describe("Slice 3b — Pi agentEngine wiring for griller, spec_writer and ticket
         }
       };
 
-      const fetchImpl: typeof fetch = async () => {
-        fallbackFetchCount += 1;
+      const fetchImpl: typeof fetch = async (_input, init) => {
+        const bodyStr = typeof init?.body === "string" ? init.body : "";
+        if (!bodyStr.includes("Goldfish")) {
+          fallbackFetchCount += 1;
+        }
         return new Response(
           JSON.stringify({
             choices: [

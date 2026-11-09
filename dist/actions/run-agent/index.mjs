@@ -3227,7 +3227,7 @@ function buildSanitizedSandboxEnv(runnerEnv, proxy) {
     if (SECRET_ENV_NAME_PATTERN.test(key)) {
       continue;
     }
-    if (SANDBOX_STRIPPED_GIT_ENV_NAMES.has(key)) {
+    if (SANDBOX_STRIPPED_GIT_ENV_NAMES.has(key) || /^GIT_/i.test(key)) {
       continue;
     }
     if (containsPrivateKeyMaterial(value)) {
@@ -3261,7 +3261,7 @@ function buildAgentSessionEnv(runnerEnv, home, proxy, sessionEnv) {
   const customSessionEnv = sessionEnv?.(home);
   if (customSessionEnv) {
     for (const [key, value] of Object.entries(customSessionEnv)) {
-      if (!SANDBOX_STRIPPED_GIT_ENV_NAMES.has(key)) {
+      if (!SANDBOX_STRIPPED_GIT_ENV_NAMES.has(key) && !/^GIT_/i.test(key)) {
         env[key] = value;
       }
     }

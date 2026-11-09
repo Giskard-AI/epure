@@ -752,10 +752,7 @@ async function executeSingleReviewerPass(params: {
       });
       parsed = parseReviewerFindingsFromText(session.finalMessage);
       if (!parsed && (!input.llmApiKey || !input.llmApiKey.trim())) {
-        parsed = {
-          summary: session.finalMessage.trim(),
-          findings: []
-        };
+        throw new Error(`Reviewer ${reviewer} returned unparseable findings JSON`);
       }
     }
 
@@ -807,6 +804,29 @@ async function executeSingleReviewerPass(params: {
     ) {
       throw error;
     }
+    if (
+      error instanceof Error &&
+      error.message.includes("returned unparseable findings JSON")
+    ) {
+      return {
+        reviewer,
+        prompt_source: trustedPrompt.source,
+        summary: error.message,
+        findings: [
+          {
+            reviewer,
+            category: "must_fix",
+            severity: "high",
+            path: input.changedFiles[0]?.path ?? "",
+            line: 1,
+            title: error.message,
+            rationale: error.message,
+            suggested_action:
+              "Ensure the reviewer agent outputs a valid JSON findings object."
+          }
+        ]
+      };
+    }
     return {
       reviewer,
       prompt_source: trustedPrompt.source,
@@ -838,28 +858,28 @@ export async function runMultiAgentPrReviewPass(
   // Execute selected reviewers in parallel (read-only, max 4 concurrent)
   let tempWorktreeDir: string | undefined;
   let effectiveWorktreeDir = input.worktreeDir;
-  if (input.agentEngine && !effectiveWorktreeDir) {
-    tempWorktreeDir = mkdtempSync(join(tmpdir(), "epure-review-wt-"));
-    effectiveWorktreeDir = tempWorktreeDir;
-    const filesMap = new Map<string, string>();
-    if (input.workspaceFiles) {
-      const entries =
-        input.workspaceFiles instanceof Map ||
-        typeof (input.workspaceFiles as ReadonlyMap<string, string>).entries === "function"
-          ? Array.from((input.workspaceFiles as ReadonlyMap<string, string>).entries())
-          : Object.entries(input.workspaceFiles as Readonly<Record<string, string>>);
-      for (const [k, v] of entries) {
-        filesMap.set(k, v);
-      }
-    }
-    for (const f of input.changedFiles) {
-      filesMap.set(f.path, f.content);
-    }
-    syncWorkspaceFiles(tempWorktreeDir, filesMap, new Set(input.deletedFiles ?? []));
-  }
-
   let passes: SingleReviewerPassOutput[];
   try {
+    if (input.agentEngine && !effectiveWorktreeDir) {
+      tempWorktreeDir = mkdtempSync(join(tmpdir(), "epure-review-wt-"));
+      effectiveWorktreeDir = tempWorktreeDir;
+      const filesMap = new Map<string, string>();
+      if (input.workspaceFiles) {
+        const entries =
+          input.workspaceFiles instanceof Map ||
+          typeof (input.workspaceFiles as ReadonlyMap<string, string>).entries === "function"
+            ? Array.from((input.workspaceFiles as ReadonlyMap<string, string>).entries())
+            : Object.entries(input.workspaceFiles as Readonly<Record<string, string>>);
+        for (const [k, v] of entries) {
+          filesMap.set(k, v);
+        }
+      }
+      for (const f of input.changedFiles) {
+        filesMap.set(f.path, f.content);
+      }
+      syncWorkspaceFiles(tempWorktreeDir, filesMap, new Set(input.deletedFiles ?? []));
+    }
+
     passes = await mapWithConcurrencyLimit(
       selection.selected_reviewers,
       MAX_CONCURRENT_REVIEWERS,

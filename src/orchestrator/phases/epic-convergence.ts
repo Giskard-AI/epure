@@ -202,16 +202,16 @@ export async function runEpicConvergenceAudit(
     if (params.agentEngine) {
       let tempWorktreeDir: string | undefined;
       let effectiveWorktreeDir = params.worktreeDir;
-      if (!effectiveWorktreeDir) {
-        tempWorktreeDir = mkdtempSync(join(tmpdir(), "epure-convergence-wt-"));
-        effectiveWorktreeDir = tempWorktreeDir;
-        const filesMap = new Map<string, string>(params.accumulatedFiles);
-        for (const [k, v] of params.featureChangedFilesMap.entries()) {
-          filesMap.set(k, v);
-        }
-        syncWorkspaceFiles(tempWorktreeDir, filesMap, new Set());
-      }
       try {
+        if (!effectiveWorktreeDir) {
+          tempWorktreeDir = mkdtempSync(join(tmpdir(), "epure-convergence-wt-"));
+          effectiveWorktreeDir = tempWorktreeDir;
+          const filesMap = new Map<string, string>(params.accumulatedFiles);
+          for (const [k, v] of params.featureChangedFilesMap.entries()) {
+            filesMap.set(k, v);
+          }
+          syncWorkspaceFiles(tempWorktreeDir, filesMap, new Set());
+        }
         const session = await params.agentEngine.run({
           role: "convergence_auditor",
           toolPolicy: "read_only",

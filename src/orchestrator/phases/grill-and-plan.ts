@@ -366,6 +366,15 @@ function extractSpecArtifactsFromAgentSession(params: {
   readonly defaultSpecPath: string;
   readonly existingGlossary?: string | undefined;
   readonly existingSpec?: string | undefined;
+  readonly existingAdrs?:
+    | ReadonlyArray<{
+        readonly path: string;
+        readonly content: string;
+        readonly filename?: string | undefined;
+        readonly title?: string | undefined;
+        readonly markdown?: string | undefined;
+      }>
+    | undefined;
 }): GeneratedSpecArtifacts | null {
   const {
     finalMessage,
@@ -373,7 +382,8 @@ function extractSpecArtifactsFromAgentSession(params: {
     planSlug,
     defaultSpecPath,
     existingGlossary,
-    existingSpec
+    existingSpec,
+    existingAdrs
   } = params;
 
   const specFileEntry = Array.from(fileMap.entries()).find(
@@ -443,8 +453,18 @@ function extractSpecArtifactsFromAgentSession(params: {
     return null;
   }
 
-  const fallbackAdrContent =
-    "# ADR 0001\n\n## Context\nSpecification generated via agentEngine.\n\n## Decision\nAdopt the approved specification architecture.\n\n## Consequences\nDeterministic implementation.\n";
+  const resolvedAdrs =
+    writtenAdrs.length > 0
+      ? writtenAdrs
+      : Array.isArray(rawObj?.adrs) && rawObj.adrs.length > 0
+        ? rawObj.adrs
+        : existingAdrs && existingAdrs.length > 0
+          ? existingAdrs
+          : [];
+
+  if (resolvedAdrs.length === 0) {
+    return null;
+  }
 
   const candidateRaw: Record<string, unknown> = {
     plan_slug:
@@ -460,17 +480,7 @@ function extractSpecArtifactsFromAgentSession(params: {
           : existingGlossary && existingGlossary.trim().length > 0
             ? existingGlossary
             : "# Glossary\n\n- **Domain Term**: Canonical project definition.\n",
-    adrs:
-      writtenAdrs.length > 0
-        ? writtenAdrs
-        : Array.isArray(rawObj?.adrs) && rawObj.adrs.length > 0
-          ? rawObj.adrs
-          : [
-              {
-                path: "docs/adr/0001-plan-architecture.md",
-                content: fallbackAdrContent
-              }
-            ],
+    adrs: resolvedAdrs,
     spec_path: specFileEntry
       ? specFileEntry[0]
       : typeof rawObj?.spec_path === "string" &&
@@ -551,6 +561,15 @@ async function runSpecWriterAgentSession(params: {
   readonly defaultSpecPath: string;
   readonly existingGlossary?: string | undefined;
   readonly existingSpec?: string | undefined;
+  readonly existingAdrs?:
+    | ReadonlyArray<{
+        readonly path: string;
+        readonly content: string;
+        readonly filename?: string | undefined;
+        readonly title?: string | undefined;
+        readonly markdown?: string | undefined;
+      }>
+    | undefined;
   readonly seedFiles: ReadonlyMap<string, string>;
   readonly worktreeDir?: string | undefined;
   readonly activeToken?: string | undefined;
@@ -566,6 +585,12 @@ async function runSpecWriterAgentSession(params: {
       params.defaultSpecPath.trim().replace(/^\/+/, ""),
       params.existingSpec
     );
+  }
+  for (const adr of params.existingAdrs ?? []) {
+    const normalizedAdrPath = adr.path.trim().replace(/^\/+/, "");
+    if (normalizedAdrPath && adr.content.trim().length > 0) {
+      seedEntries.set(normalizedAdrPath, adr.content);
+    }
   }
   if (!effectiveWorktreeDir) {
     tempWorktreeDir = mkdtempSync(join(tmpdir(), "epure-spec-writer-wt-"));
@@ -611,7 +636,8 @@ async function runSpecWriterAgentSession(params: {
       planSlug: params.planSlug,
       defaultSpecPath: params.defaultSpecPath,
       existingGlossary: params.existingGlossary,
-      existingSpec: params.existingSpec
+      existingSpec: params.existingSpec,
+      existingAdrs: params.existingAdrs
     });
   } finally {
     outerSnapshot.dispose();
@@ -1105,6 +1131,33 @@ export async function runGrillAndPlanPhase(params: {
       (await readRepoFileSafely("GLOSSARY.md", "dev")) ??
       undefined;
 
+    const existingAdrsForSpec: Array<{
+      path: string;
+      content: string;
+      filename: string;
+      title: string;
+      markdown: string;
+    }> = [];
+    const candidateSpecAdrPaths = [
+      ...(specManifest?.adrPaths ?? []),
+      ...(gh.listDirectoryPaths
+        ? await gh.listDirectoryPaths(planBranch, "docs/adr").catch(() => [])
+        : [])
+    ];
+    for (const adrPath of new Set(candidateSpecAdrPaths)) {
+      const adrContent = await readRepoFileSafely(adrPath, planBranch);
+      if (adrContent && adrContent.trim().length > 0) {
+        const filename = adrPath.split("/").pop() ?? adrPath;
+        existingAdrsForSpec.push({
+          path: adrPath,
+          content: adrContent,
+          filename,
+          title: filename,
+          markdown: adrContent
+        });
+      }
+    }
+
     let specArtifactsFromAgent: GeneratedSpecArtifacts | null = null;
     if (agentEngine) {
       specArtifactsFromAgent = await runSpecWriterAgentSession({
@@ -1116,6 +1169,7 @@ export async function runGrillAndPlanPhase(params: {
         defaultSpecPath: specManifest?.specPath ?? `docs/specs/${planSlug}.md`,
         existingGlossary: existingGlossaryForSpec,
         existingSpec: currentSpecOnBranch ?? undefined,
+        existingAdrs: existingAdrsForSpec,
         seedFiles: grillExplorationCache,
         worktreeDir,
         activeToken
@@ -1147,7 +1201,7 @@ export async function runGrillAndPlanPhase(params: {
 
     // Goldfish Zero-Context Spec Audit (Google EGM, ADR-0031)
     let goldfishAudit: GoldfishSpecAuditPayload | null = null;
-    if (!specArtifactsFromAgent) {
+    if (llmApiKey.trim().length > 0) {
       try {
         goldfishAudit = await runGoldfishSpecAudit({
           specArtifacts,
@@ -1299,23 +1353,27 @@ export async function runGrillAndPlanPhase(params: {
       candidateDesignTopics: ["theme", "layout", "accessibility"]
     });
 
-    const designGate =
-      touchesFrontendUi && !specArtifactsFromAgent
-        ? await runUserAdvocateDesignGate({
-            repository,
-            planTitle: issue.title,
-            glossaryMarkdown: specArtifacts.glossary_markdown,
-            specMarkdown: specArtifacts.spec_markdown,
-            llmApiKey,
-            model: phaseModels.reviewModel,
-            providers: phaseModels.providers,
-            maxTransientRetries: phaseModels.maxTransientRetries,
-            transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
-            requestTimeoutMs: phaseModels.requestTimeoutMs,
-            onTransientRetriesUsed,
-            fetchImpl
-          })
-        : null;
+    let designGate: Awaited<ReturnType<typeof runUserAdvocateDesignGate>> | null = null;
+    if (touchesFrontendUi && llmApiKey.trim().length > 0) {
+      try {
+        designGate = await runUserAdvocateDesignGate({
+          repository,
+          planTitle: issue.title,
+          glossaryMarkdown: specArtifacts.glossary_markdown,
+          specMarkdown: specArtifacts.spec_markdown,
+          llmApiKey,
+          model: phaseModels.reviewModel,
+          providers: phaseModels.providers,
+          maxTransientRetries: phaseModels.maxTransientRetries,
+          transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+          requestTimeoutMs: phaseModels.requestTimeoutMs,
+          onTransientRetriesUsed,
+          fetchImpl
+        });
+      } catch {
+        designGate = null;
+      }
+    }
 
     const plannedStack = detectRepositoryStack({
       targetFilesHint
@@ -1654,25 +1712,58 @@ export async function runGrillAndPlanPhase(params: {
           GENERATED_TICKET_DAG_SCHEMA
         );
         if (dagOnly) {
-          const fallbackAdr =
-            "# ADR 0001\n\n## Context\nApproved specification on plan branch.\n\n## Decision\nExecute atomic TDD ticket DAG.\n\n## Consequences\nDeterministic execution.\n";
-          bundleFromAgent = {
-            plan_slug: planSlug,
-            glossary_markdown:
-              "# Glossary\n\n- **Domain Term**: Canonical project definition.\n",
-            adrs: [
-              {
-                path: "docs/adr/0001-plan-architecture.md",
-                content: fallbackAdr,
-                filename: "0001-plan-architecture.md",
-                title: "ADR 0001",
-                markdown: fallbackAdr
+          const existingAdrsFromCache: Array<{
+            path: string;
+            content: string;
+            filename: string;
+            title: string;
+            markdown: string;
+          }> = [];
+          for (const [p, c] of grillExplorationCache.entries()) {
+            const norm = p.trim().replace(/^\/+/, "");
+            if (/^docs\/adr\/\d{4}-[a-z0-9-]+\.md$/.test(norm) && c.trim().length > 0) {
+              const filename = norm.split("/").pop() ?? norm;
+              existingAdrsFromCache.push({
+                path: norm,
+                content: c,
+                filename,
+                title: filename,
+                markdown: c
+              });
+            }
+          }
+          if (existingAdrsFromCache.length === 0 && gh.listDirectoryPaths) {
+            const dirAdrs = await gh
+              .listDirectoryPaths(planBranch, "docs/adr")
+              .catch(() => []);
+            for (const adrPath of dirAdrs) {
+              const content = await readRepoFileSafely(adrPath, planBranch);
+              if (content && content.trim().length > 0) {
+                const filename = adrPath.split("/").pop() ?? adrPath;
+                existingAdrsFromCache.push({
+                  path: adrPath,
+                  content,
+                  filename,
+                  title: filename,
+                  markdown: content
+                });
               }
-            ],
-            spec_path: candidateSpecPath,
-            spec_markdown: `# Specification (${planSlug})\n\n${issue.body}`,
-            tickets: dagOnly.tickets
-          };
+            }
+          }
+          if (existingAdrsFromCache.length > 0) {
+            bundleFromAgent = {
+              plan_slug: planSlug,
+              glossary_markdown:
+                grillExplorationCache.get("GLOSSARY.md") ??
+                "# Glossary\n\n- **Domain Term**: Canonical project definition.\n",
+              adrs: existingAdrsFromCache,
+              spec_path: candidateSpecPath,
+              spec_markdown:
+                grillExplorationCache.get(candidateSpecPath) ??
+                `# Specification (${planSlug})\n\n${issue.body}`,
+              tickets: dagOnly.tickets
+            };
+          }
         }
       }
     }

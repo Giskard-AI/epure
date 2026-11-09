@@ -743,33 +743,35 @@ export async function runFeatureIntegrationPhase(
             isProtectedPath: (p) => isSensitiveTaskBranchPath(p, reviewersDir)
           });
           try {
-            const session = await engine.run({
-              role: "fixer",
-              toolPolicy: "write",
-              instructions: [
-                "Tu es un ingénieur TDD EPURE corrigeant les échecs décrits dans le message (vérification Stage 1, constats 'must_fix' de revue, CI externe) sur la PR finale de feature en gardant 100% des cibles Stage 1 au vert.",
-                PROMPT_INJECTION_IMMUNITY_CLAUSE,
-                "Tu travailles directement dans le checkout du dépôt (répertoire courant) avec tes outils : les fichiers que tu laisses modifiés, créés ou supprimés constituent le livrable.",
-                `Ne modifie JAMAIS ${reviewersDir}/**, .github/workflows/**, .github/agents.yml, .env* ni .git/.`,
-                "",
-                verificationGuideMarkdown,
-                "",
-                EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
-              ].join("\n"),
-              prompt: promptText,
-              worktree: featureSandbox.workDir,
-              timeoutMs:
-                params.phaseModels.requestTimeoutMs ?? 30 * 60 * 1000,
-              model: params.phaseModels.implementationModel,
-              providers: params.phaseModels.providers,
-              thinking: "high",
-              trackedPaths,
-              isProtectedPath: (p) =>
-                isSensitiveTaskBranchPath(p, reviewersDir),
-              maxLlmRequests:
-                params.parsedDevAgentsConfig?.agent_max_llm_requests ?? 200,
-              secrets: [params.activeToken]
-            });
+            const session = await withUsageAttribution({ phase: "fixes" }, () =>
+              engine.run({
+                role: "fixer",
+                toolPolicy: "write",
+                instructions: [
+                  "Tu es un ingénieur TDD EPURE corrigeant les échecs décrits dans le message (vérification Stage 1, constats 'must_fix' de revue, CI externe) sur la PR finale de feature en gardant 100% des cibles Stage 1 au vert.",
+                  PROMPT_INJECTION_IMMUNITY_CLAUSE,
+                  "Tu travailles directement dans le checkout du dépôt (répertoire courant) avec tes outils : les fichiers que tu laisses modifiés, créés ou supprimés constituent le livrable.",
+                  `Ne modifie JAMAIS ${reviewersDir}/**, .github/workflows/**, .github/agents.yml, .env* ni .git/.`,
+                  "",
+                  verificationGuideMarkdown,
+                  "",
+                  EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
+                ].join("\n"),
+                prompt: promptText,
+                worktree: featureSandbox.workDir,
+                timeoutMs:
+                  params.phaseModels.requestTimeoutMs ?? 30 * 60 * 1000,
+                model: params.phaseModels.implementationModel,
+                providers: params.phaseModels.providers,
+                thinking: "high",
+                trackedPaths,
+                isProtectedPath: (p) =>
+                  isSensitiveTaskBranchPath(p, reviewersDir),
+                maxLlmRequests:
+                  params.parsedDevAgentsConfig?.agent_max_llm_requests ?? 200,
+                secrets: [params.activeToken]
+              })
+            );
             const outerDiff = await outerSnapshot.collect();
             const protectedSkipped = [
               ...outerDiff.skipped,
@@ -843,6 +845,7 @@ export async function runFeatureIntegrationPhase(
                 protectedPaths: []
               };
             }
+            let parsedPayload: GeneratedTicketImplementation | undefined;
             try {
               const parsedJson = JSON.parse(
                 session.finalMessage.trim()
@@ -854,19 +857,49 @@ export async function runFeatureIntegrationPhase(
                   Array.isArray(parsedJson.patches) ||
                   Array.isArray(parsedJson.deleted_files))
               ) {
-                return {
-                  parsed: {
-                    commit_message: parsedJson.commit_message ?? commitMessage,
-                    test_summary: parsedJson.test_summary ?? testSummary,
-                    files: parsedJson.files ?? [],
-                    patches: parsedJson.patches ?? [],
-                    deleted_files: parsedJson.deleted_files ?? []
-                  },
-                  protectedPaths: []
+                parsedPayload = {
+                  commit_message: parsedJson.commit_message ?? commitMessage,
+                  test_summary: parsedJson.test_summary ?? testSummary,
+                  files: parsedJson.files ?? [],
+                  patches: parsedJson.patches ?? [],
+                  deleted_files: parsedJson.deleted_files ?? []
                 };
               }
             } catch {
               // ignore non-JSON finalMessage
+            }
+            if (parsedPayload) {
+              assertNoSecretMaterial(
+                [
+                  {
+                    label: "the commit message",
+                    text: parsedPayload.commit_message ?? ""
+                  },
+                  {
+                    label: "the test summary",
+                    text: parsedPayload.test_summary ?? ""
+                  },
+                  ...(parsedPayload.files ?? []).map((f) => ({
+                    label: f.path,
+                    text: f.content
+                  })),
+                  ...(parsedPayload.patches ?? []).flatMap((p) =>
+                    p.edits.map((e) => ({
+                      label: p.path,
+                      text: e.new_string ?? e.replace ?? ""
+                    }))
+                  )
+                ],
+                [
+                  params.activeToken,
+                  params.llmApiKey,
+                  ...collectRunnerSecretValues(process.env)
+                ]
+              );
+              return {
+                parsed: parsedPayload,
+                protectedPaths: []
+              };
             }
             if (!params.llmApiKey || !params.llmApiKey.trim()) {
               return {
@@ -1116,6 +1149,21 @@ export async function runFeatureIntegrationPhase(
           codeFixAttemptsUsed: featureReviewFixAttempt,
           mustFixFindings: finalFeatureReview.must_fix_findings,
           diagnosticExcerpt: featureTestCheck.output.slice(-2000)
+        });
+      }
+
+      if (changedFixFilesMap.size === 0 && changedDeletedFilesSet.size === 0) {
+        return await escalate({
+          reason: "remediation_exhausted",
+          ticketNumber: params.issueNumber,
+          branch: params.featureBranch,
+          prNumber: featurePr.number,
+          prUrl: featurePr.html_url,
+          featurePrUrl: featurePr.html_url,
+          codeFixAttemptsUsed: featureReviewFixAttempt,
+          mustFixFindings: finalFeatureReview.must_fix_findings,
+          diagnosticExcerpt:
+            "Review-fix agent produced no file modifications or deletions."
         });
       }
 

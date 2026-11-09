@@ -1968,7 +1968,7 @@ var LLMClient = class {
     const rateLimitFallback = options.rateLimitFallbackSeconds ?? defaultRateLimitFallback;
     const sleepMs = options.sleepMs ?? (async (ms) => {
       if (ms > 0) {
-        await new Promise((resolve4) => setTimeout(resolve4, ms));
+        await new Promise((resolve5) => setTimeout(resolve5, ms));
       }
     });
     let totalTransientRetriesUsed = 0;
@@ -2388,7 +2388,7 @@ function buildSanitizedSandboxEnv(runnerEnv, proxy) {
     if (SECRET_ENV_NAME_PATTERN.test(key)) {
       continue;
     }
-    if (SANDBOX_STRIPPED_GIT_ENV_NAMES.has(key)) {
+    if (SANDBOX_STRIPPED_GIT_ENV_NAMES.has(key) || /^GIT_/i.test(key)) {
       continue;
     }
     if (containsPrivateKeyMaterial(value)) {
@@ -2422,7 +2422,7 @@ function buildAgentSessionEnv(runnerEnv, home, proxy, sessionEnv) {
   const customSessionEnv = sessionEnv?.(home);
   if (customSessionEnv) {
     for (const [key, value] of Object.entries(customSessionEnv)) {
-      if (!SANDBOX_STRIPPED_GIT_ENV_NAMES.has(key)) {
+      if (!SANDBOX_STRIPPED_GIT_ENV_NAMES.has(key) && !/^GIT_/i.test(key)) {
         env[key] = value;
       }
     }
@@ -2920,19 +2920,19 @@ async function createLlmSandboxProxy(options) {
       }
     });
   });
-  await new Promise((resolve4, reject) => {
+  await new Promise((resolve5, reject) => {
     server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => resolve4());
+    server.listen(0, "127.0.0.1", () => resolve5());
   });
   const address = server.address();
   const proxyUrl = `http://127.0.0.1:${address.port}`;
   return {
     proxyUrl,
     proxyNonce,
-    close: () => new Promise((resolve4) => {
+    close: () => new Promise((resolve5) => {
       agent.destroy();
       server.closeAllConnections();
-      server.close(() => resolve4());
+      server.close(() => resolve5());
     })
   };
 }
@@ -10706,7 +10706,7 @@ async function waitForExternalCiChecks(input) {
   const timeoutMs = (input.timeoutMinutes ?? 15) * 60 * 1e3;
   const graceWindowMs = (input.graceWindowSeconds ?? 45) * 1e3;
   const pollIntervalMs = input.pollIntervalMs ?? 5e3;
-  const sleepFn = input.sleepFn ?? ((ms) => new Promise((resolve4) => setTimeout(resolve4, ms)));
+  const sleepFn = input.sleepFn ?? ((ms) => new Promise((resolve5) => setTimeout(resolve5, ms)));
   let simulatedElapsedMs = 0;
   const startWallMs = input.nowFn ? input.nowFn() : Date.now();
   const getElapsedMs = () => {
@@ -11557,6 +11557,7 @@ function formatStatusUsageLines(record, pricing) {
 import { spawn as spawn3 } from "node:child_process";
 import {
   existsSync as existsSync5,
+  lstatSync as lstatSync3,
   mkdirSync as mkdirSync5,
   mkdtempSync as mkdtempSync5,
   readFileSync as readFileSync3,
@@ -11564,7 +11565,7 @@ import {
   writeFileSync as writeFileSync5
 } from "node:fs";
 import { tmpdir as tmpdir4 } from "node:os";
-import { dirname as dirname4, join as join5 } from "node:path";
+import { dirname as dirname4, join as join5, resolve as resolve4 } from "node:path";
 
 // src/orchestrator/prompts/code-discipline.ts
 var EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT = [
@@ -13509,8 +13510,6 @@ ${wrapUntrustedContent("untrusted_workspace_files", s.content)}`
   ].join("\n");
   try {
     if (input.agentEngine) {
-      let tempWorktreeDir;
-      let effectiveWorktreeDir = input.worktreeDir;
       const seedEntries = /* @__PURE__ */ new Map();
       for (const a of input.devAdrs) {
         seedEntries.set(a.path.trim().replace(/^\/+/, ""), a.content);
@@ -13524,26 +13523,24 @@ ${wrapUntrustedContent("untrusted_workspace_files", s.content)}`
       if (input.glossaryContent !== void 0) {
         seedEntries.set("GLOSSARY.md", input.glossaryContent);
       }
-      if (!effectiveWorktreeDir) {
-        tempWorktreeDir = mkdtempSync5(join5(tmpdir4(), "epure-adr-reconcile-"));
-        effectiveWorktreeDir = tempWorktreeDir;
+      const tempWorktreeDir = mkdtempSync5(join5(tmpdir4(), "epure-adr-reconcile-"));
+      let outerSnapshot;
+      try {
         for (const [relPath, content] of seedEntries.entries()) {
           const fullPath = join5(tempWorktreeDir, relPath);
           mkdirSync5(dirname4(fullPath), { recursive: true });
           writeFileSync5(fullPath, content, "utf8");
         }
-      }
-      const trackedPaths = Array.from(seedEntries.keys());
-      const outerSnapshot = await snapshotWorktree(effectiveWorktreeDir, {
-        trackedPaths
-      });
-      try {
+        const trackedPaths = Array.from(seedEntries.keys());
+        outerSnapshot = await snapshotWorktree(tempWorktreeDir, {
+          trackedPaths
+        });
         const session = await input.agentEngine.run({
           role: "adr_reconciler",
           toolPolicy: "write",
           instructions: systemInstruction,
           prompt: userPrompt,
-          worktree: effectiveWorktreeDir,
+          worktree: tempWorktreeDir,
           timeoutMs: input.requestTimeoutMs ?? 30 * 60 * 1e3,
           model: input.model,
           providers: input.providers,
@@ -13562,7 +13559,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", s.content)}`
           ...session.diff.deleted_files.map((p) => p.trim().replace(/^\/+/, ""))
         ]);
         const updated_files = Array.from(fileMap.entries()).filter(
-          ([path]) => path === "GLOSSARY.md" || path.startsWith("docs/adr/") || path.startsWith("docs/specs/")
+          ([path]) => !deletedSet.has(path) && (path === "GLOSSARY.md" || path.startsWith("docs/adr/") || path.startsWith("docs/specs/"))
         ).map(([path, content]) => ({ path, content }));
         const deleted_adr_paths = Array.from(deletedSet).filter(
           (path) => path.startsWith("docs/adr/")
@@ -13579,7 +13576,12 @@ ${wrapUntrustedContent("untrusted_workspace_files", s.content)}`
           session.finalMessage
         );
         if (parsedFromMessage) {
-          return parsedFromMessage;
+          return {
+            ...parsedFromMessage,
+            updated_files: parsedFromMessage.updated_files.filter(
+              (f) => !parsedFromMessage.deleted_adr_paths.includes(f.path)
+            )
+          };
         }
         if (!input.llmClient && !input.llmApiKey) {
           return {
@@ -13590,12 +13592,10 @@ ${wrapUntrustedContent("untrusted_workspace_files", s.content)}`
           };
         }
       } finally {
-        outerSnapshot.dispose();
-        if (tempWorktreeDir) {
-          try {
-            rmSync5(tempWorktreeDir, { recursive: true, force: true });
-          } catch {
-          }
+        outerSnapshot?.dispose();
+        try {
+          rmSync5(tempWorktreeDir, { recursive: true, force: true });
+        } catch {
         }
       }
     }
@@ -13662,8 +13662,14 @@ async function applyAdrLlmReconciliation(params) {
     }
   }
   for (const delPath of llmReconciled.deleted_adr_paths) {
-    if (delPath.startsWith("docs/adr/") && !params.deletedAdrPaths.includes(delPath)) {
-      params.deletedAdrPaths.push(delPath);
+    if (delPath.startsWith("docs/adr/")) {
+      if (!params.deletedAdrPaths.includes(delPath)) {
+        params.deletedAdrPaths.push(delPath);
+      }
+      const idx = params.filesToMutate.findIndex((f) => f.path === delPath);
+      if (idx >= 0) {
+        params.filesToMutate.splice(idx, 1);
+      }
     }
   }
 }
@@ -13844,9 +13850,36 @@ async function integratePlanBranchIntoFeature(params) {
     ...closedLegacyPlanPrNumber !== void 0 ? { closedLegacyPlanPrNumber } : {}
   };
 }
-var GIT_CONFLICT_MARKER_LINE_REGEX = /^(?:<{7}|>{7}|\|{7})(?: |$)/m;
+var GIT_CONFLICT_MARKER_LINE_REGEX = /^(?:<{7,}|>{7,}|\|{7,})(?: |$)/m;
 function containsGitConflictMarkers(content) {
   return GIT_CONFLICT_MARKER_LINE_REGEX.test(content.replace(/\r\n/g, "\n"));
+}
+function verifyNoSymlinkSegments(worktreeDir, relPath) {
+  const root = resolve4(worktreeDir);
+  const segments = relPath.replace(/\\/g, "/").replace(/^\/+/, "").split("/").filter(Boolean);
+  if (segments.length === 0 || segments.some((s) => s === "." || s === "..")) {
+    throw new Error(`Unsafe worktree relative path: ${relPath}`);
+  }
+  let current = root;
+  for (const seg of segments) {
+    current = join5(current, seg);
+    try {
+      if (lstatSync3(current).isSymbolicLink()) {
+        throw new Error(`Symlink segment detected in worktree path: ${relPath}`);
+      }
+    } catch (err) {
+      if (err.code === "ENOENT") {
+        continue;
+      }
+      throw err;
+    }
+  }
+  return current;
+}
+function assertSafeWorktreeTarget(worktreeDir, relPath) {
+  const abs = verifyNoSymlinkSegments(worktreeDir, relPath);
+  rmSync5(abs, { force: true });
+  return abs;
 }
 var LOCAL_GIT_MERGE_TIMEOUT_MS = 6e4;
 async function runIsolatedGitThreeWayMerge(params) {
@@ -13922,13 +13955,12 @@ async function runIsolatedGitThreeWayMerge(params) {
     const absentPaths = [];
     for (const f of params.files) {
       const content = pick(f);
-      const abs = join5(params.worktreeDir, f.path);
+      const abs = assertSafeWorktreeTarget(params.worktreeDir, f.path);
       if (content !== null) {
         mkdirSync5(dirname4(abs), { recursive: true });
         writeFileSync5(abs, content, "utf8");
         presentPaths.push(f.path);
       } else {
-        rmSync5(abs, { force: true });
         absentPaths.push(f.path);
       }
     }
@@ -13947,7 +13979,11 @@ async function runIsolatedGitThreeWayMerge(params) {
   try {
     await runGit(["init", "--quiet"]);
     mkdirSync5(join5(gitDir, "info"), { recursive: true });
-    writeFileSync5(join5(gitDir, "info", "attributes"), "* -filter -diff\n", "utf8");
+    writeFileSync5(
+      join5(gitDir, "info", "attributes"),
+      "* -filter -diff merge=text conflict-marker-size=7\n",
+      "utf8"
+    );
     await applySide((f) => f.baseContent);
     await runGit(["commit", "--quiet", "--allow-empty", "-m", "base"]);
     const baseCommitSha = (await runGit(["rev-parse", "HEAD"])).stdout.toString("utf8").trim();
@@ -13971,11 +14007,12 @@ async function runIsolatedGitThreeWayMerge(params) {
     const autoDeletedPaths = [];
     const conflictingFiles = [];
     for (const f of params.files) {
-      const abs = join5(params.worktreeDir, f.path);
+      const abs = verifyNoSymlinkSegments(params.worktreeDir, f.path);
       if (unmergedPaths.has(f.path)) {
         conflictingFiles.push(f);
-        const currentDisk = existsSync5(abs) ? readFileSync3(abs, "utf8") : "";
+        const currentDisk = existsSync5(abs) && lstatSync3(abs).isFile() ? readFileSync3(abs, "utf8") : "";
         if (!containsGitConflictMarkers(currentDisk)) {
+          assertSafeWorktreeTarget(params.worktreeDir, f.path);
           mkdirSync5(dirname4(abs), { recursive: true });
           writeFileSync5(
             abs,
@@ -13990,7 +14027,7 @@ async function runIsolatedGitThreeWayMerge(params) {
             "utf8"
           );
         }
-      } else if (existsSync5(abs)) {
+      } else if (existsSync5(abs) && lstatSync3(abs).isFile()) {
         autoMergedFiles.push({
           path: f.path,
           content: readFileSync3(abs, "utf8")
@@ -14386,8 +14423,18 @@ async function syncBranchWithBase(input) {
         }
         for (const conflictPath of codeConflictPaths) {
           const normalizedPath = conflictPath.trim().replace(/^\/+/, "");
-          const diskPath = join5(worktreeDir, normalizedPath);
-          const resolvedContent = effectiveDiffFileMap.get(normalizedPath) ?? (existsSync5(diskPath) ? readFileSync3(diskPath, "utf8") : null);
+          let diskContent = null;
+          if (!effectiveDiffFileMap.has(normalizedPath)) {
+            try {
+              const diskPath = verifyNoSymlinkSegments(worktreeDir, normalizedPath);
+              if (existsSync5(diskPath) && lstatSync3(diskPath).isFile()) {
+                diskContent = readFileSync3(diskPath, "utf8");
+              }
+            } catch {
+              diskContent = null;
+            }
+          }
+          const resolvedContent = effectiveDiffFileMap.get(normalizedPath) ?? diskContent;
           if (resolvedContent === null) {
             return await escalateConflict(
               `LLM conflict resolution path mismatch: expected [${Array.from(expectedPathsSet).join(", ")}], received [${allTouchedPaths.join(", ")}].`
@@ -15227,7 +15274,8 @@ function extractSpecArtifactsFromAgentSession(params) {
     planSlug,
     defaultSpecPath,
     existingGlossary,
-    existingSpec
+    existingSpec,
+    existingAdrs
   } = params;
   const specFileEntry = Array.from(fileMap.entries()).find(
     ([path, content]) => path.startsWith("docs/specs/") && path.endsWith(".md") && content.trim().length > 0
@@ -15276,16 +15324,14 @@ function extractSpecArtifactsFromAgentSession(params) {
   if (!specFileEntry && !rawObj && !looksLikeMarkdownSpec) {
     return null;
   }
-  const fallbackAdrContent = "# ADR 0001\n\n## Context\nSpecification generated via agentEngine.\n\n## Decision\nAdopt the approved specification architecture.\n\n## Consequences\nDeterministic implementation.\n";
+  const resolvedAdrs = writtenAdrs.length > 0 ? writtenAdrs : Array.isArray(rawObj?.adrs) && rawObj.adrs.length > 0 ? rawObj.adrs : existingAdrs && existingAdrs.length > 0 ? existingAdrs : [];
+  if (resolvedAdrs.length === 0) {
+    return null;
+  }
   const candidateRaw = {
     plan_slug: typeof rawObj?.plan_slug === "string" && rawObj.plan_slug.trim().length > 0 ? rawObj.plan_slug : planSlug,
     glossary_markdown: writtenGlossary && writtenGlossary.trim().length > 0 ? writtenGlossary : typeof rawObj?.glossary_markdown === "string" && rawObj.glossary_markdown.trim().length > 0 ? rawObj.glossary_markdown : existingGlossary && existingGlossary.trim().length > 0 ? existingGlossary : "# Glossary\n\n- **Domain Term**: Canonical project definition.\n",
-    adrs: writtenAdrs.length > 0 ? writtenAdrs : Array.isArray(rawObj?.adrs) && rawObj.adrs.length > 0 ? rawObj.adrs : [
-      {
-        path: "docs/adr/0001-plan-architecture.md",
-        content: fallbackAdrContent
-      }
-    ],
+    adrs: resolvedAdrs,
     spec_path: specFileEntry ? specFileEntry[0] : typeof rawObj?.spec_path === "string" && rawObj.spec_path.trim().startsWith("docs/specs/") ? rawObj.spec_path : defaultSpecPath,
     spec_markdown: specFileEntry ? specFileEntry[1] : typeof rawObj?.spec_markdown === "string" && rawObj.spec_markdown.trim().length > 0 ? rawObj.spec_markdown : looksLikeMarkdownSpec ? trimmedMsg : existingSpec ?? "",
     ...Array.isArray(rawObj?.target_files_hint) ? { target_files_hint: rawObj.target_files_hint } : {},
@@ -15340,6 +15386,12 @@ async function runSpecWriterAgentSession(params) {
       params.existingSpec
     );
   }
+  for (const adr of params.existingAdrs ?? []) {
+    const normalizedAdrPath = adr.path.trim().replace(/^\/+/, "");
+    if (normalizedAdrPath && adr.content.trim().length > 0) {
+      seedEntries.set(normalizedAdrPath, adr.content);
+    }
+  }
   if (!effectiveWorktreeDir) {
     tempWorktreeDir = mkdtempSync6(join6(tmpdir5(), "epure-spec-writer-wt-"));
     effectiveWorktreeDir = tempWorktreeDir;
@@ -15384,7 +15436,8 @@ async function runSpecWriterAgentSession(params) {
       planSlug: params.planSlug,
       defaultSpecPath: params.defaultSpecPath,
       existingGlossary: params.existingGlossary,
-      existingSpec: params.existingSpec
+      existingSpec: params.existingSpec,
+      existingAdrs: params.existingAdrs
     });
   } finally {
     outerSnapshot.dispose();
@@ -15795,6 +15848,24 @@ ${issue.body}`
       )
     ].join("\n");
     const existingGlossaryForSpec = await readRepoFileSafely("GLOSSARY.md", planBranch) ?? await readRepoFileSafely("GLOSSARY.md", "dev") ?? void 0;
+    const existingAdrsForSpec = [];
+    const candidateSpecAdrPaths = [
+      ...specManifest?.adrPaths ?? [],
+      ...gh.listDirectoryPaths ? await gh.listDirectoryPaths(planBranch, "docs/adr").catch(() => []) : []
+    ];
+    for (const adrPath of new Set(candidateSpecAdrPaths)) {
+      const adrContent = await readRepoFileSafely(adrPath, planBranch);
+      if (adrContent && adrContent.trim().length > 0) {
+        const filename = adrPath.split("/").pop() ?? adrPath;
+        existingAdrsForSpec.push({
+          path: adrPath,
+          content: adrContent,
+          filename,
+          title: filename,
+          markdown: adrContent
+        });
+      }
+    }
     let specArtifactsFromAgent = null;
     if (agentEngine) {
       specArtifactsFromAgent = await runSpecWriterAgentSession({
@@ -15806,6 +15877,7 @@ ${issue.body}`
         defaultSpecPath: specManifest?.specPath ?? `docs/specs/${planSlug}.md`,
         existingGlossary: existingGlossaryForSpec,
         existingSpec: currentSpecOnBranch ?? void 0,
+        existingAdrs: existingAdrsForSpec,
         seedFiles: grillExplorationCache,
         worktreeDir,
         activeToken
@@ -15830,7 +15902,7 @@ ${issue.body}`
       fetchImpl
     });
     let goldfishAudit = null;
-    if (!specArtifactsFromAgent) {
+    if (llmApiKey.trim().length > 0) {
       try {
         goldfishAudit = await runGoldfishSpecAudit({
           specArtifacts,
@@ -15961,20 +16033,27 @@ ${issue.body}`
       alreadyAnsweredTopics: ["theme", "layout"],
       candidateDesignTopics: ["theme", "layout", "accessibility"]
     });
-    const designGate2 = touchesFrontendUi2 && !specArtifactsFromAgent ? await runUserAdvocateDesignGate({
-      repository,
-      planTitle: issue.title,
-      glossaryMarkdown: specArtifacts.glossary_markdown,
-      specMarkdown: specArtifacts.spec_markdown,
-      llmApiKey,
-      model: phaseModels.reviewModel,
-      providers: phaseModels.providers,
-      maxTransientRetries: phaseModels.maxTransientRetries,
-      transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
-      requestTimeoutMs: phaseModels.requestTimeoutMs,
-      onTransientRetriesUsed,
-      fetchImpl
-    }) : null;
+    let designGate2 = null;
+    if (touchesFrontendUi2 && llmApiKey.trim().length > 0) {
+      try {
+        designGate2 = await runUserAdvocateDesignGate({
+          repository,
+          planTitle: issue.title,
+          glossaryMarkdown: specArtifacts.glossary_markdown,
+          specMarkdown: specArtifacts.spec_markdown,
+          llmApiKey,
+          model: phaseModels.reviewModel,
+          providers: phaseModels.providers,
+          maxTransientRetries: phaseModels.maxTransientRetries,
+          transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+          requestTimeoutMs: phaseModels.requestTimeoutMs,
+          onTransientRetriesUsed,
+          fetchImpl
+        });
+      } catch {
+        designGate2 = null;
+      }
+    }
     const plannedStack2 = detectRepositoryStack({
       targetFilesHint
     });
@@ -16265,25 +16344,48 @@ ${issue.body}`
           GENERATED_TICKET_DAG_SCHEMA
         );
         if (dagOnly) {
-          const fallbackAdr = "# ADR 0001\n\n## Context\nApproved specification on plan branch.\n\n## Decision\nExecute atomic TDD ticket DAG.\n\n## Consequences\nDeterministic execution.\n";
-          bundleFromAgent = {
-            plan_slug: planSlug,
-            glossary_markdown: "# Glossary\n\n- **Domain Term**: Canonical project definition.\n",
-            adrs: [
-              {
-                path: "docs/adr/0001-plan-architecture.md",
-                content: fallbackAdr,
-                filename: "0001-plan-architecture.md",
-                title: "ADR 0001",
-                markdown: fallbackAdr
+          const existingAdrsFromCache = [];
+          for (const [p, c] of grillExplorationCache.entries()) {
+            const norm = p.trim().replace(/^\/+/, "");
+            if (/^docs\/adr\/\d{4}-[a-z0-9-]+\.md$/.test(norm) && c.trim().length > 0) {
+              const filename = norm.split("/").pop() ?? norm;
+              existingAdrsFromCache.push({
+                path: norm,
+                content: c,
+                filename,
+                title: filename,
+                markdown: c
+              });
+            }
+          }
+          if (existingAdrsFromCache.length === 0 && gh.listDirectoryPaths) {
+            const dirAdrs = await gh.listDirectoryPaths(planBranch, "docs/adr").catch(() => []);
+            for (const adrPath of dirAdrs) {
+              const content = await readRepoFileSafely(adrPath, planBranch);
+              if (content && content.trim().length > 0) {
+                const filename = adrPath.split("/").pop() ?? adrPath;
+                existingAdrsFromCache.push({
+                  path: adrPath,
+                  content,
+                  filename,
+                  title: filename,
+                  markdown: content
+                });
               }
-            ],
-            spec_path: candidateSpecPath,
-            spec_markdown: `# Specification (${planSlug})
+            }
+          }
+          if (existingAdrsFromCache.length > 0) {
+            bundleFromAgent = {
+              plan_slug: planSlug,
+              glossary_markdown: grillExplorationCache.get("GLOSSARY.md") ?? "# Glossary\n\n- **Domain Term**: Canonical project definition.\n",
+              adrs: existingAdrsFromCache,
+              spec_path: candidateSpecPath,
+              spec_markdown: grillExplorationCache.get(candidateSpecPath) ?? `# Specification (${planSlug})
 
 ${issue.body}`,
-            tickets: dagOnly.tickets
-          };
+              tickets: dagOnly.tickets
+            };
+          }
         }
       }
     }
@@ -16703,16 +16805,16 @@ ${content}`
     if (params.agentEngine) {
       let tempWorktreeDir;
       let effectiveWorktreeDir = params.worktreeDir;
-      if (!effectiveWorktreeDir) {
-        tempWorktreeDir = mkdtempSync7(join7(tmpdir6(), "epure-convergence-wt-"));
-        effectiveWorktreeDir = tempWorktreeDir;
-        const filesMap = new Map(params.accumulatedFiles);
-        for (const [k, v] of params.featureChangedFilesMap.entries()) {
-          filesMap.set(k, v);
-        }
-        syncWorkspaceFiles(tempWorktreeDir, filesMap, /* @__PURE__ */ new Set());
-      }
       try {
+        if (!effectiveWorktreeDir) {
+          tempWorktreeDir = mkdtempSync7(join7(tmpdir6(), "epure-convergence-wt-"));
+          effectiveWorktreeDir = tempWorktreeDir;
+          const filesMap = new Map(params.accumulatedFiles);
+          for (const [k, v] of params.featureChangedFilesMap.entries()) {
+            filesMap.set(k, v);
+          }
+          syncWorkspaceFiles(tempWorktreeDir, filesMap, /* @__PURE__ */ new Set());
+        }
         const session = await params.agentEngine.run({
           role: "convergence_auditor",
           toolPolicy: "read_only",
@@ -17438,10 +17540,7 @@ ${wrapUntrustedContent("untrusted_spec_content", input.designMarkdown)}` : "",
       });
       parsed = parseReviewerFindingsFromText(session.finalMessage);
       if (!parsed && (!input.llmApiKey || !input.llmApiKey.trim())) {
-        parsed = {
-          summary: session.finalMessage.trim(),
-          findings: []
-        };
+        throw new Error(`Reviewer ${reviewer} returned unparseable findings JSON`);
       }
     }
     if (!parsed) {
@@ -17485,6 +17584,25 @@ ${wrapUntrustedContent("untrusted_spec_content", input.designMarkdown)}` : "",
     if (error instanceof AuthenticationError || error instanceof QuotaExhaustedError) {
       throw error;
     }
+    if (error instanceof Error && error.message.includes("returned unparseable findings JSON")) {
+      return {
+        reviewer,
+        prompt_source: trustedPrompt.source,
+        summary: error.message,
+        findings: [
+          {
+            reviewer,
+            category: "must_fix",
+            severity: "high",
+            path: input.changedFiles[0]?.path ?? "",
+            line: 1,
+            title: error.message,
+            rationale: error.message,
+            suggested_action: "Ensure the reviewer agent outputs a valid JSON findings object."
+          }
+        ]
+      };
+    }
     return {
       reviewer,
       prompt_source: trustedPrompt.source,
@@ -17511,23 +17629,23 @@ async function runMultiAgentPrReviewPass(input) {
   }
   let tempWorktreeDir;
   let effectiveWorktreeDir = input.worktreeDir;
-  if (input.agentEngine && !effectiveWorktreeDir) {
-    tempWorktreeDir = mkdtempSync8(join8(tmpdir7(), "epure-review-wt-"));
-    effectiveWorktreeDir = tempWorktreeDir;
-    const filesMap = /* @__PURE__ */ new Map();
-    if (input.workspaceFiles) {
-      const entries = input.workspaceFiles instanceof Map || typeof input.workspaceFiles.entries === "function" ? Array.from(input.workspaceFiles.entries()) : Object.entries(input.workspaceFiles);
-      for (const [k, v] of entries) {
-        filesMap.set(k, v);
-      }
-    }
-    for (const f of input.changedFiles) {
-      filesMap.set(f.path, f.content);
-    }
-    syncWorkspaceFiles(tempWorktreeDir, filesMap, new Set(input.deletedFiles ?? []));
-  }
   let passes;
   try {
+    if (input.agentEngine && !effectiveWorktreeDir) {
+      tempWorktreeDir = mkdtempSync8(join8(tmpdir7(), "epure-review-wt-"));
+      effectiveWorktreeDir = tempWorktreeDir;
+      const filesMap = /* @__PURE__ */ new Map();
+      if (input.workspaceFiles) {
+        const entries = input.workspaceFiles instanceof Map || typeof input.workspaceFiles.entries === "function" ? Array.from(input.workspaceFiles.entries()) : Object.entries(input.workspaceFiles);
+        for (const [k, v] of entries) {
+          filesMap.set(k, v);
+        }
+      }
+      for (const f of input.changedFiles) {
+        filesMap.set(f.path, f.content);
+      }
+      syncWorkspaceFiles(tempWorktreeDir, filesMap, new Set(input.deletedFiles ?? []));
+    }
     passes = await mapWithConcurrencyLimit(
       selection.selected_reviewers,
       MAX_CONCURRENT_REVIEWERS,
@@ -18186,30 +18304,33 @@ ${c}`).join("\n\n");
             isProtectedPath: (p) => isSensitiveTaskBranchPath(p, reviewersDir)
           });
           try {
-            const session = await engine.run({
-              role: "fixer",
-              toolPolicy: "write",
-              instructions: [
-                "Tu es un ing\xE9nieur TDD EPURE corrigeant les \xE9checs d\xE9crits dans le message (v\xE9rification Stage 1, constats 'must_fix' de revue, CI externe) sur la PR finale de feature en gardant 100% des cibles Stage 1 au vert.",
-                PROMPT_INJECTION_IMMUNITY_CLAUSE,
-                "Tu travailles directement dans le checkout du d\xE9p\xF4t (r\xE9pertoire courant) avec tes outils : les fichiers que tu laisses modifi\xE9s, cr\xE9\xE9s ou supprim\xE9s constituent le livrable.",
-                `Ne modifie JAMAIS ${reviewersDir}/**, .github/workflows/**, .github/agents.yml, .env* ni .git/.`,
-                "",
-                verificationGuideMarkdown,
-                "",
-                EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
-              ].join("\n"),
-              prompt: promptText,
-              worktree: featureSandbox.workDir,
-              timeoutMs: params.phaseModels.requestTimeoutMs ?? 30 * 60 * 1e3,
-              model: params.phaseModels.implementationModel,
-              providers: params.phaseModels.providers,
-              thinking: "high",
-              trackedPaths,
-              isProtectedPath: (p) => isSensitiveTaskBranchPath(p, reviewersDir),
-              maxLlmRequests: params.parsedDevAgentsConfig?.agent_max_llm_requests ?? 200,
-              secrets: [params.activeToken]
-            });
+            const session = await withUsageAttribution(
+              { phase: "fixes" },
+              () => engine.run({
+                role: "fixer",
+                toolPolicy: "write",
+                instructions: [
+                  "Tu es un ing\xE9nieur TDD EPURE corrigeant les \xE9checs d\xE9crits dans le message (v\xE9rification Stage 1, constats 'must_fix' de revue, CI externe) sur la PR finale de feature en gardant 100% des cibles Stage 1 au vert.",
+                  PROMPT_INJECTION_IMMUNITY_CLAUSE,
+                  "Tu travailles directement dans le checkout du d\xE9p\xF4t (r\xE9pertoire courant) avec tes outils : les fichiers que tu laisses modifi\xE9s, cr\xE9\xE9s ou supprim\xE9s constituent le livrable.",
+                  `Ne modifie JAMAIS ${reviewersDir}/**, .github/workflows/**, .github/agents.yml, .env* ni .git/.`,
+                  "",
+                  verificationGuideMarkdown,
+                  "",
+                  EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
+                ].join("\n"),
+                prompt: promptText,
+                worktree: featureSandbox.workDir,
+                timeoutMs: params.phaseModels.requestTimeoutMs ?? 30 * 60 * 1e3,
+                model: params.phaseModels.implementationModel,
+                providers: params.phaseModels.providers,
+                thinking: "high",
+                trackedPaths,
+                isProtectedPath: (p) => isSensitiveTaskBranchPath(p, reviewersDir),
+                maxLlmRequests: params.parsedDevAgentsConfig?.agent_max_llm_requests ?? 200,
+                secrets: [params.activeToken]
+              })
+            );
             const outerDiff = await outerSnapshot.collect();
             const protectedSkipped = [
               ...outerDiff.skipped,
@@ -18279,23 +18400,54 @@ ${c}`).join("\n\n");
                 protectedPaths: []
               };
             }
+            let parsedPayload;
             try {
               const parsedJson = JSON.parse(
                 session.finalMessage.trim()
               );
               if (parsedJson && typeof parsedJson === "object" && (Array.isArray(parsedJson.files) || Array.isArray(parsedJson.patches) || Array.isArray(parsedJson.deleted_files))) {
-                return {
-                  parsed: {
-                    commit_message: parsedJson.commit_message ?? commitMessage,
-                    test_summary: parsedJson.test_summary ?? testSummary,
-                    files: parsedJson.files ?? [],
-                    patches: parsedJson.patches ?? [],
-                    deleted_files: parsedJson.deleted_files ?? []
-                  },
-                  protectedPaths: []
+                parsedPayload = {
+                  commit_message: parsedJson.commit_message ?? commitMessage,
+                  test_summary: parsedJson.test_summary ?? testSummary,
+                  files: parsedJson.files ?? [],
+                  patches: parsedJson.patches ?? [],
+                  deleted_files: parsedJson.deleted_files ?? []
                 };
               }
             } catch {
+            }
+            if (parsedPayload) {
+              assertNoSecretMaterial(
+                [
+                  {
+                    label: "the commit message",
+                    text: parsedPayload.commit_message ?? ""
+                  },
+                  {
+                    label: "the test summary",
+                    text: parsedPayload.test_summary ?? ""
+                  },
+                  ...(parsedPayload.files ?? []).map((f) => ({
+                    label: f.path,
+                    text: f.content
+                  })),
+                  ...(parsedPayload.patches ?? []).flatMap(
+                    (p) => p.edits.map((e) => ({
+                      label: p.path,
+                      text: e.new_string ?? e.replace ?? ""
+                    }))
+                  )
+                ],
+                [
+                  params.activeToken,
+                  params.llmApiKey,
+                  ...collectRunnerSecretValues(process.env)
+                ]
+              );
+              return {
+                parsed: parsedPayload,
+                protectedPaths: []
+              };
             }
             if (!params.llmApiKey || !params.llmApiKey.trim()) {
               return {
@@ -18529,6 +18681,19 @@ ${c}`).join("\n\n");
           codeFixAttemptsUsed: featureReviewFixAttempt,
           mustFixFindings: finalFeatureReview.must_fix_findings,
           diagnosticExcerpt: featureTestCheck.output.slice(-2e3)
+        });
+      }
+      if (changedFixFilesMap.size === 0 && changedDeletedFilesSet.size === 0) {
+        return await escalate({
+          reason: "remediation_exhausted",
+          ticketNumber: params.issueNumber,
+          branch: params.featureBranch,
+          prNumber: featurePr.number,
+          prUrl: featurePr.html_url,
+          featurePrUrl: featurePr.html_url,
+          codeFixAttemptsUsed: featureReviewFixAttempt,
+          mustFixFindings: finalFeatureReview.must_fix_findings,
+          diagnosticExcerpt: "Review-fix agent produced no file modifications or deletions."
         });
       }
       const changedFixFiles = Array.from(changedFixFilesMap.entries()).map(

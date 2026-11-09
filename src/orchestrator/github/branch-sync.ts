@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -8,7 +9,7 @@ import {
   writeFileSync
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import {
   assertNoSecretMaterial,
   type AgentEngine
@@ -694,8 +695,6 @@ export async function reconcileAdrsWithLlm(
 
   try {
     if (input.agentEngine) {
-      let tempWorktreeDir: string | undefined;
-      let effectiveWorktreeDir = input.worktreeDir;
       const seedEntries = new Map<string, string>();
       for (const a of input.devAdrs) {
         seedEntries.set(a.path.trim().replace(/^\/+/, ""), a.content);
@@ -709,26 +708,24 @@ export async function reconcileAdrsWithLlm(
       if (input.glossaryContent !== undefined) {
         seedEntries.set("GLOSSARY.md", input.glossaryContent);
       }
-      if (!effectiveWorktreeDir) {
-        tempWorktreeDir = mkdtempSync(join(tmpdir(), "epure-adr-reconcile-"));
-        effectiveWorktreeDir = tempWorktreeDir;
+      const tempWorktreeDir = mkdtempSync(join(tmpdir(), "epure-adr-reconcile-"));
+      let outerSnapshot: Awaited<ReturnType<typeof snapshotWorktree>> | undefined;
+      try {
         for (const [relPath, content] of seedEntries.entries()) {
           const fullPath = join(tempWorktreeDir, relPath);
           mkdirSync(dirname(fullPath), { recursive: true });
           writeFileSync(fullPath, content, "utf8");
         }
-      }
-      const trackedPaths = Array.from(seedEntries.keys());
-      const outerSnapshot = await snapshotWorktree(effectiveWorktreeDir, {
-        trackedPaths
-      });
-      try {
+        const trackedPaths = Array.from(seedEntries.keys());
+        outerSnapshot = await snapshotWorktree(tempWorktreeDir, {
+          trackedPaths
+        });
         const session = await input.agentEngine.run({
           role: "adr_reconciler",
           toolPolicy: "write",
           instructions: systemInstruction,
           prompt: userPrompt,
-          worktree: effectiveWorktreeDir,
+          worktree: tempWorktreeDir,
           timeoutMs: input.requestTimeoutMs ?? 30 * 60 * 1000,
           model: input.model,
           providers: input.providers,
@@ -749,9 +746,10 @@ export async function reconcileAdrsWithLlm(
         const updated_files = Array.from(fileMap.entries())
           .filter(
             ([path]) =>
-              path === "GLOSSARY.md" ||
-              path.startsWith("docs/adr/") ||
-              path.startsWith("docs/specs/")
+              !deletedSet.has(path) &&
+              (path === "GLOSSARY.md" ||
+                path.startsWith("docs/adr/") ||
+                path.startsWith("docs/specs/"))
           )
           .map(([path, content]) => ({ path, content }));
         const deleted_adr_paths = Array.from(deletedSet).filter((path) =>
@@ -771,7 +769,12 @@ export async function reconcileAdrsWithLlm(
           session.finalMessage
         );
         if (parsedFromMessage) {
-          return parsedFromMessage;
+          return {
+            ...parsedFromMessage,
+            updated_files: parsedFromMessage.updated_files.filter(
+              (f) => !parsedFromMessage.deleted_adr_paths.includes(f.path)
+            )
+          };
         }
         if (!input.llmClient && !input.llmApiKey) {
           return {
@@ -783,13 +786,11 @@ export async function reconcileAdrsWithLlm(
           };
         }
       } finally {
-        outerSnapshot.dispose();
-        if (tempWorktreeDir) {
-          try {
-            rmSync(tempWorktreeDir, { recursive: true, force: true });
-          } catch {
-            // ignore cleanup error
-          }
+        outerSnapshot?.dispose();
+        try {
+          rmSync(tempWorktreeDir, { recursive: true, force: true });
+        } catch {
+          // ignore cleanup error
         }
       }
     }
@@ -885,11 +886,14 @@ async function applyAdrLlmReconciliation(params: {
     }
   }
   for (const delPath of llmReconciled.deleted_adr_paths) {
-    if (
-      delPath.startsWith("docs/adr/") &&
-      !params.deletedAdrPaths.includes(delPath)
-    ) {
-      params.deletedAdrPaths.push(delPath);
+    if (delPath.startsWith("docs/adr/")) {
+      if (!params.deletedAdrPaths.includes(delPath)) {
+        params.deletedAdrPaths.push(delPath);
+      }
+      const idx = params.filesToMutate.findIndex((f) => f.path === delPath);
+      if (idx >= 0) {
+        params.filesToMutate.splice(idx, 1);
+      }
     }
   }
 }
@@ -1209,10 +1213,43 @@ export interface SyncBranchWithBaseResult {
 
 // Any `<<<<<<<`, `|||||||` (diff3 base) or `>>>>>>>` marker line, even without the rest of its block.
 // A lone `=======` line is tolerated: it is also a setext heading or a comment banner.
-const GIT_CONFLICT_MARKER_LINE_REGEX = /^(?:<{7}|>{7}|\|{7})(?: |$)/m;
+const GIT_CONFLICT_MARKER_LINE_REGEX = /^(?:<{7,}|>{7,}|\|{7,})(?: |$)/m;
 
 function containsGitConflictMarkers(content: string): boolean {
   return GIT_CONFLICT_MARKER_LINE_REGEX.test(content.replace(/\r\n/g, "\n"));
+}
+
+function verifyNoSymlinkSegments(worktreeDir: string, relPath: string): string {
+  const root = resolve(worktreeDir);
+  const segments = relPath
+    .replace(/\\/g, "/")
+    .replace(/^\/+/, "")
+    .split("/")
+    .filter(Boolean);
+  if (segments.length === 0 || segments.some((s) => s === "." || s === "..")) {
+    throw new Error(`Unsafe worktree relative path: ${relPath}`);
+  }
+  let current = root;
+  for (const seg of segments) {
+    current = join(current, seg);
+    try {
+      if (lstatSync(current).isSymbolicLink()) {
+        throw new Error(`Symlink segment detected in worktree path: ${relPath}`);
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        continue;
+      }
+      throw err;
+    }
+  }
+  return current;
+}
+
+function assertSafeWorktreeTarget(worktreeDir: string, relPath: string): string {
+  const abs = verifyNoSymlinkSegments(worktreeDir, relPath);
+  rmSync(abs, { force: true });
+  return abs;
 }
 
 interface ThreeWayFileVersions {
@@ -1305,13 +1342,12 @@ async function runIsolatedGitThreeWayMerge(params: {
     const absentPaths: string[] = [];
     for (const f of params.files) {
       const content = pick(f);
-      const abs = join(params.worktreeDir, f.path);
+      const abs = assertSafeWorktreeTarget(params.worktreeDir, f.path);
       if (content !== null) {
         mkdirSync(dirname(abs), { recursive: true });
         writeFileSync(abs, content, "utf8");
         presentPaths.push(f.path);
       } else {
-        rmSync(abs, { force: true });
         absentPaths.push(f.path);
       }
     }
@@ -1331,7 +1367,11 @@ async function runIsolatedGitThreeWayMerge(params: {
   try {
     await runGit(["init", "--quiet"]);
     mkdirSync(join(gitDir, "info"), { recursive: true });
-    writeFileSync(join(gitDir, "info", "attributes"), "* -filter -diff\n", "utf8");
+    writeFileSync(
+      join(gitDir, "info", "attributes"),
+      "* -filter -diff merge=text conflict-marker-size=7\n",
+      "utf8"
+    );
 
     await applySide((f) => f.baseContent);
     await runGit(["commit", "--quiet", "--allow-empty", "-m", "base"]);
@@ -1362,11 +1402,15 @@ async function runIsolatedGitThreeWayMerge(params: {
     const conflictingFiles: ThreeWayFileVersions[] = [];
 
     for (const f of params.files) {
-      const abs = join(params.worktreeDir, f.path);
+      const abs = verifyNoSymlinkSegments(params.worktreeDir, f.path);
       if (unmergedPaths.has(f.path)) {
         conflictingFiles.push(f);
-        const currentDisk = existsSync(abs) ? readFileSync(abs, "utf8") : "";
+        const currentDisk =
+          existsSync(abs) && lstatSync(abs).isFile()
+            ? readFileSync(abs, "utf8")
+            : "";
         if (!containsGitConflictMarkers(currentDisk)) {
+          assertSafeWorktreeTarget(params.worktreeDir, f.path);
           mkdirSync(dirname(abs), { recursive: true });
           writeFileSync(
             abs,
@@ -1381,7 +1425,7 @@ async function runIsolatedGitThreeWayMerge(params: {
             "utf8"
           );
         }
-      } else if (existsSync(abs)) {
+      } else if (existsSync(abs) && lstatSync(abs).isFile()) {
         autoMergedFiles.push({
           path: f.path,
           content: readFileSync(abs, "utf8")
@@ -1876,10 +1920,19 @@ export async function syncBranchWithBase(
 
         for (const conflictPath of codeConflictPaths) {
           const normalizedPath = conflictPath.trim().replace(/^\/+/, "");
-          const diskPath = join(worktreeDir, normalizedPath);
+          let diskContent: string | null = null;
+          if (!effectiveDiffFileMap.has(normalizedPath)) {
+            try {
+              const diskPath = verifyNoSymlinkSegments(worktreeDir, normalizedPath);
+              if (existsSync(diskPath) && lstatSync(diskPath).isFile()) {
+                diskContent = readFileSync(diskPath, "utf8");
+              }
+            } catch {
+              diskContent = null;
+            }
+          }
           const resolvedContent =
-            effectiveDiffFileMap.get(normalizedPath) ??
-            (existsSync(diskPath) ? readFileSync(diskPath, "utf8") : null);
+            effectiveDiffFileMap.get(normalizedPath) ?? diskContent;
           if (resolvedContent === null) {
             return await escalateConflict(
               `LLM conflict resolution path mismatch: expected [${Array.from(expectedPathsSet).join(", ")}], received [${allTouchedPaths.join(", ")}].`
