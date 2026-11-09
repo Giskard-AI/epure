@@ -596,12 +596,56 @@ export interface ReconcileAdrsWithLlmInput extends LlmRequestTuning {
   readonly llmApiKey?: string | undefined;
   readonly model: string;
   readonly fetchImpl?: typeof fetch | undefined;
+  readonly agentEngine?: AgentEngine | undefined;
+  readonly worktreeDir?: string | undefined;
+}
+
+function parseAdrReconciliationFromText(
+  text: string
+): AdrCoherenceReconciliationPayload | null {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const fenceMatch = /```(?:json)?\s*([\s\S]*?)```/i.exec(trimmed);
+  const candidates = [
+    ...(fenceMatch && fenceMatch[1] ? [fenceMatch[1].trim()] : []),
+    trimmed
+  ];
+  const firstBrace = trimmed.indexOf("{");
+  const lastBrace = trimmed.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    candidates.push(trimmed.slice(firstBrace, lastBrace + 1));
+  }
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(
+        candidate
+      ) as Partial<AdrCoherenceReconciliationPayload>;
+      if (
+        parsed &&
+        typeof parsed === "object" &&
+        Array.isArray(parsed.updated_files) &&
+        Array.isArray(parsed.deleted_adr_paths)
+      ) {
+        return {
+          coherent: typeof parsed.coherent === "boolean" ? parsed.coherent : true,
+          summary: typeof parsed.summary === "string" ? parsed.summary : "",
+          updated_files: parsed.updated_files,
+          deleted_adr_paths: parsed.deleted_adr_paths
+        };
+      }
+    } catch {
+      // try next candidate
+    }
+  }
+  return null;
 }
 
 export async function reconcileAdrsWithLlm(
   input: ReconcileAdrsWithLlmInput
 ): Promise<AdrCoherenceReconciliationPayload | null> {
-  if (!input.llmClient && !input.llmApiKey) {
+  if (!input.agentEngine && !input.llmClient && !input.llmApiKey) {
     return null;
   }
   if (input.devAdrs.length === 0 || input.featureAdrs.length === 0) {
@@ -649,6 +693,106 @@ export async function reconcileAdrsWithLlm(
   ].join("\n");
 
   try {
+    if (input.agentEngine) {
+      let tempWorktreeDir: string | undefined;
+      let effectiveWorktreeDir = input.worktreeDir;
+      const seedEntries = new Map<string, string>();
+      for (const a of input.devAdrs) {
+        seedEntries.set(a.path.trim().replace(/^\/+/, ""), a.content);
+      }
+      for (const a of input.featureAdrs) {
+        seedEntries.set(a.path.trim().replace(/^\/+/, ""), a.content);
+      }
+      for (const s of input.specFiles) {
+        seedEntries.set(s.path.trim().replace(/^\/+/, ""), s.content);
+      }
+      if (input.glossaryContent !== undefined) {
+        seedEntries.set("GLOSSARY.md", input.glossaryContent);
+      }
+      if (!effectiveWorktreeDir) {
+        tempWorktreeDir = mkdtempSync(join(tmpdir(), "epure-adr-reconcile-"));
+        effectiveWorktreeDir = tempWorktreeDir;
+        for (const [relPath, content] of seedEntries.entries()) {
+          const fullPath = join(tempWorktreeDir, relPath);
+          mkdirSync(dirname(fullPath), { recursive: true });
+          writeFileSync(fullPath, content, "utf8");
+        }
+      }
+      const trackedPaths = Array.from(seedEntries.keys());
+      const outerSnapshot = await snapshotWorktree(effectiveWorktreeDir, {
+        trackedPaths
+      });
+      try {
+        const session = await input.agentEngine.run({
+          role: "adr_reconciler",
+          toolPolicy: "write",
+          instructions: systemInstruction,
+          prompt: userPrompt,
+          worktree: effectiveWorktreeDir,
+          timeoutMs: input.requestTimeoutMs ?? 30 * 60 * 1000,
+          model: input.model,
+          providers: input.providers,
+          trackedPaths
+        });
+        const outerDiff = await outerSnapshot.collect();
+        const fileMap = new Map<string, string>();
+        for (const f of outerDiff.files) {
+          fileMap.set(f.path.trim().replace(/^\/+/, ""), f.content);
+        }
+        for (const f of session.diff.files) {
+          fileMap.set(f.path.trim().replace(/^\/+/, ""), f.content);
+        }
+        const deletedSet = new Set<string>([
+          ...outerDiff.deleted_files.map((p) => p.trim().replace(/^\/+/, "")),
+          ...session.diff.deleted_files.map((p) => p.trim().replace(/^\/+/, ""))
+        ]);
+        const updated_files = Array.from(fileMap.entries())
+          .filter(
+            ([path]) =>
+              path === "GLOSSARY.md" ||
+              path.startsWith("docs/adr/") ||
+              path.startsWith("docs/specs/")
+          )
+          .map(([path, content]) => ({ path, content }));
+        const deleted_adr_paths = Array.from(deletedSet).filter((path) =>
+          path.startsWith("docs/adr/")
+        );
+        if (updated_files.length > 0 || deleted_adr_paths.length > 0) {
+          return {
+            coherent: true,
+            summary:
+              session.finalMessage.trim() ||
+              "Reconciled ADRs and GLOSSARY.md via agentEngine.",
+            updated_files,
+            deleted_adr_paths
+          };
+        }
+        const parsedFromMessage = parseAdrReconciliationFromText(
+          session.finalMessage
+        );
+        if (parsedFromMessage) {
+          return parsedFromMessage;
+        }
+        if (!input.llmClient && !input.llmApiKey) {
+          return {
+            coherent: true,
+            summary:
+              session.finalMessage.trim() || "No ADR updates required.",
+            updated_files: [],
+            deleted_adr_paths: []
+          };
+        }
+      } finally {
+        outerSnapshot.dispose();
+        if (tempWorktreeDir) {
+          try {
+            rmSync(tempWorktreeDir, { recursive: true, force: true });
+          } catch {
+            // ignore cleanup error
+          }
+        }
+      }
+    }
     if (input.llmClient) {
       return await input.llmClient.completeStructured({
         model: input.model,
@@ -697,8 +841,9 @@ async function applyAdrLlmReconciliation(params: {
   readonly llmApiKey?: string | undefined;
   readonly model: string;
   readonly fetchImpl?: typeof fetch | undefined;
+  readonly agentEngine?: AgentEngine | undefined;
 } & LlmRequestTuning): Promise<void> {
-  if (!params.llmClient && !params.llmApiKey) {
+  if (!params.agentEngine && !params.llmClient && !params.llmApiKey) {
     return;
   }
   const devAdrsLoaded: Array<{ path: string; content: string }> = [];
@@ -717,7 +862,8 @@ async function applyAdrLlmReconciliation(params: {
     llmApiKey: params.llmApiKey,
     model: params.model,
     ...pickLlmRequestTuning(params),
-    fetchImpl: params.fetchImpl
+    fetchImpl: params.fetchImpl,
+    agentEngine: params.agentEngine
   });
   if (!llmReconciled) {
     return;
@@ -773,6 +919,7 @@ export async function integratePlanBranchIntoFeature(params: {
   readonly llmApiKey?: string | undefined;
   readonly model: string;
   readonly fetchImpl?: typeof fetch | undefined;
+  readonly agentEngine?: AgentEngine | undefined;
 } & LlmRequestTuning): Promise<IntegratePlanBranchIntoFeatureResult> {
   const baseBranch = params.baseBranch ?? "dev";
   const featureInitialSha = await params.gh.ensureBranch(
@@ -982,7 +1129,8 @@ export async function integratePlanBranchIntoFeature(params: {
       llmApiKey: params.llmApiKey,
       model: params.model,
       ...pickLlmRequestTuning(params),
-      fetchImpl: params.fetchImpl
+      fetchImpl: params.fetchImpl,
+      agentEngine: params.agentEngine
     });
   }
 
@@ -1399,7 +1547,9 @@ export async function syncBranchWithBase(
           llmApiKey: input.llmApiKey,
           model: input.model,
           ...pickLlmRequestTuning(input),
-          fetchImpl: input.fetchImpl
+          fetchImpl: input.fetchImpl,
+          agentEngine:
+            input.agentEngine?.name === "pi" ? input.agentEngine : undefined
         });
         if (adrFilesToUpdate.length > 0 || adrDeletedPaths.length > 0) {
           const reconciledSha = await input.gh.commitFilesToBranch({

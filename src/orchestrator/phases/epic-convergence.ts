@@ -1,3 +1,8 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { AgentEngine } from "../../agent/engine.js";
+import { syncWorkspaceFiles } from "../../sandbox/polyglot-workspace-runner.js";
 import {
   PROMPT_INJECTION_IMMUNITY_CLAUSE,
   wrapUntrustedContent
@@ -43,6 +48,57 @@ export interface RunEpicConvergenceAuditParams {
   readonly phaseModels: ResolvedPhaseModels;
   readonly onTransientRetriesUsed?: ((used: number) => void) | undefined;
   readonly fetchImpl?: typeof fetch | undefined;
+  readonly agentEngine?: AgentEngine | undefined;
+  readonly worktreeDir?: string | undefined;
+  readonly activeToken?: string | undefined;
+  readonly maxLlmRequests?: number | undefined;
+}
+
+function parseConvergenceAuditFromText(
+  text: string
+): EpicConvergenceAuditPayload | null {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const fenceMatch = /```(?:json)?\s*([\s\S]*?)```/i.exec(trimmed);
+  const candidates = [
+    ...(fenceMatch && fenceMatch[1] ? [fenceMatch[1].trim()] : []),
+    trimmed
+  ];
+  const firstBrace = trimmed.indexOf("{");
+  const lastBrace = trimmed.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    candidates.push(trimmed.slice(firstBrace, lastBrace + 1));
+  }
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(
+        candidate
+      ) as Partial<EpicConvergenceAuditPayload>;
+      if (
+        parsed &&
+        typeof parsed === "object" &&
+        (parsed.verdict === "CONVERGED" || parsed.verdict === "INCOMPLETE") &&
+        Array.isArray(parsed.unwired_modules) &&
+        Array.isArray(parsed.stub_violations) &&
+        Array.isArray(parsed.unmet_criteria) &&
+        Array.isArray(parsed.remediation_tickets)
+      ) {
+        return {
+          verdict: parsed.verdict,
+          rationale: typeof parsed.rationale === "string" ? parsed.rationale : "",
+          unwired_modules: parsed.unwired_modules,
+          stub_violations: parsed.stub_violations,
+          unmet_criteria: parsed.unmet_criteria,
+          remediation_tickets: parsed.remediation_tickets
+        };
+      }
+    } catch {
+      // try next candidate
+    }
+  }
+  return null;
 }
 
 /**
@@ -142,8 +198,49 @@ export async function runEpicConvergenceAudit(
       : [])
   ].join("\n");
 
-  return await withUsageAttribution({ phase: "integration" }, () =>
-    callLlmJson<EpicConvergenceAuditPayload>({
+  return await withUsageAttribution({ phase: "integration" }, async () => {
+    if (params.agentEngine) {
+      let tempWorktreeDir: string | undefined;
+      let effectiveWorktreeDir = params.worktreeDir;
+      if (!effectiveWorktreeDir) {
+        tempWorktreeDir = mkdtempSync(join(tmpdir(), "epure-convergence-wt-"));
+        effectiveWorktreeDir = tempWorktreeDir;
+        const filesMap = new Map<string, string>(params.accumulatedFiles);
+        for (const [k, v] of params.featureChangedFilesMap.entries()) {
+          filesMap.set(k, v);
+        }
+        syncWorkspaceFiles(tempWorktreeDir, filesMap, new Set());
+      }
+      try {
+        const session = await params.agentEngine.run({
+          role: "convergence_auditor",
+          toolPolicy: "read_only",
+          instructions: systemInstruction,
+          prompt: userPrompt,
+          worktree: effectiveWorktreeDir,
+          timeoutMs: params.phaseModels.requestTimeoutMs ?? 30 * 60 * 1000,
+          model: params.phaseModels.reviewModel,
+          providers: params.phaseModels.providers,
+          thinking: "high",
+          maxLlmRequests: params.maxLlmRequests,
+          ...(params.activeToken ? { secrets: [params.activeToken] } : {})
+        });
+        const parsed = parseConvergenceAuditFromText(session.finalMessage);
+        if (parsed) {
+          return parsed;
+        }
+      } finally {
+        if (tempWorktreeDir) {
+          try {
+            rmSync(tempWorktreeDir, { recursive: true, force: true });
+          } catch {
+            // ignore cleanup error
+          }
+        }
+      }
+    }
+
+    return await callLlmJson<EpicConvergenceAuditPayload>({
       apiKey: params.llmApiKey,
       model: params.phaseModels.reviewModel,
       providers: params.phaseModels.providers,
@@ -163,8 +260,8 @@ export async function runEpicConvergenceAudit(
       logLabel: `epic-convergence-audit#${params.issueNumber}`,
       responseSchema: EPIC_CONVERGENCE_AUDIT_SCHEMA,
       fetchImpl: params.fetchImpl
-    })
-  );
+    });
+  });
 }
 
 export interface SpawnPhase2ConvergenceTicketsParams {

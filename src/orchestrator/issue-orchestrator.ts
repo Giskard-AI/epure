@@ -1152,7 +1152,11 @@ async function runMeteredIssueCommand(
             transientRetryBackoffSeconds:
               phaseModels.transientRetryBackoffSeconds,
             requestTimeoutMs: phaseModels.requestTimeoutMs,
-            fetchImpl: effectiveInput.fetchImpl
+            fetchImpl: effectiveInput.fetchImpl,
+            agentEngine:
+              effectiveInput.agentEngine?.name === "pi"
+                ? effectiveInput.agentEngine
+                : undefined
           });
         }
 
@@ -1904,7 +1908,11 @@ async function runMeteredIssueCommand(
           maxTransientRetries: phaseModels.maxTransientRetries,
           transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
           requestTimeoutMs: phaseModels.requestTimeoutMs,
-          fetchImpl: effectiveInput.fetchImpl
+          fetchImpl: effectiveInput.fetchImpl,
+          agentEngine:
+            effectiveInput.agentEngine?.name === "pi"
+              ? effectiveInput.agentEngine
+              : undefined
         });
         await updateIssueStateWithCas({
           issueNumber: effectiveInput.issueNumber,
@@ -2122,7 +2130,12 @@ async function runMeteredIssueCommand(
             onTransientRetriesUsed: (used) => {
               totalTransientRetriesUsed += used;
             },
-            fetchImpl: effectiveInput.fetchImpl
+            fetchImpl: effectiveInput.fetchImpl,
+            agentEngine:
+              effectiveInput.agentEngine?.name === "pi"
+                ? effectiveInput.agentEngine
+                : undefined,
+            activeToken
           });
 
           if (convergenceAudit.verdict === "CONVERGED") {

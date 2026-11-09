@@ -1,4 +1,9 @@
-import type { AgentEngine } from "../../agent/engine.js";
+import {
+  assertNoSecretMaterial,
+  type AgentEngine,
+  type FileMode
+} from "../../agent/engine.js";
+import { snapshotWorktree } from "../../agent/worktree-snapshot.js";
 import { redactSecrets } from "../../auth/issue-command-gate.js";
 import {
   discoverVerificationProfile,
@@ -19,13 +24,16 @@ import {
   type ReviewerAgentName
 } from "../../review/reviewer-roster.js";
 import { generateSemanticSquashCommitFromDiff } from "../../review/squash-commit-generator.js";
-import type {
-  SandboxExecutionInput,
-  SandboxExecutionResult
+import {
+  collectRunnerSecretValues,
+  type SandboxExecutionInput,
+  type SandboxExecutionResult
 } from "../../sandbox/llm-sandbox.js";
 import {
   formatVerificationToolingGuideMarkdown,
+  isSensitiveTaskBranchPath,
   prepareRepositorySandboxWorkspace,
+  syncWorkspaceFiles,
   validateWorkspaceFileOperations
 } from "../../sandbox/polyglot-workspace-runner.js";
 import {
@@ -50,9 +58,22 @@ import {
 import { appendEpureCommandsSpoiler } from "../formatting/comments.js";
 import { callLlmJson } from "../llm-helper.js";
 import {
+  reconcileAdrsWithLlm,
   syncBranchWithBase,
-  type BaseSyncGuard
+  type BaseSyncGuard,
+  type ReconcileAdrsWithLlmInput
 } from "../github/branch-sync.js";
+import {
+  runEpicConvergenceAudit,
+  type RunEpicConvergenceAuditParams
+} from "./epic-convergence.js";
+
+export {
+  reconcileAdrsWithLlm,
+  runEpicConvergenceAudit,
+  type ReconcileAdrsWithLlmInput,
+  type RunEpicConvergenceAuditParams
+};
 import { EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT } from "../prompts/code-discipline.js";
 import { formatResumeContextPromptLines } from "../prompts/resume-context.js";
 import {
@@ -412,7 +433,12 @@ export async function runFeatureIntegrationPhase(
         params.phaseModels.transientRetryBackoffSeconds,
       requestTimeoutMs: params.phaseModels.requestTimeoutMs,
       onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
-      fetchImpl: params.fetchImpl
+      fetchImpl: params.fetchImpl,
+      agentEngine:
+        params.agentEngine?.name === "pi" ? params.agentEngine : undefined,
+      githubToken: params.activeToken,
+      maxLlmRequests:
+        params.parsedDevAgentsConfig?.agent_max_llm_requests ?? 200
     }));
 
     await params.gh.postPullRequestReview(featurePr.number, {
@@ -695,34 +721,220 @@ export async function runFeatureIntegrationPhase(
         wrapUntrustedContent("untrusted_workspace_files", currentFilesContext)
       );
 
-      const parsedFeatureFix =
-        await withUsageAttribution({ phase: "fixes" }, () => callLlmJson<GeneratedTicketImplementation>({
-          apiKey: params.llmApiKey,
-          model: params.phaseModels.implementationModel,
-          providers: params.phaseModels.providers,
-          maxTransientRetries: params.phaseModels.maxTransientRetries,
-          transientRetryBackoffSeconds:
-            params.phaseModels.transientRetryBackoffSeconds,
-          requestTimeoutMs: params.phaseModels.requestTimeoutMs,
-          onTransientRetriesUsed: (used) =>
-            params.addTransientRetriesUsed(used),
-          thinkingLevel: "HIGH",
-          logLabel: `feature-review-fix:#PR${featurePr.number}/iter-${featureReviewFixAttempt}`,
-          systemInstruction: featureFixSystemInstruction,
-          prompt: featureFixPromptParts.join("\n"),
-          temperature: 0.1,
-          ...buildRepoExplorationToolsAndHandlers({
-            branch: params.featureBranch,
-            featureBranch: params.featureBranch,
-            accumulatedFiles: params.accumulatedFiles,
-            deletedFilesSet: params.featureDeletedFilesSet,
-            devBranchPaths: params.devBranchPaths,
-            reviewersDir,
-            gh: params.gh
-          }),
-          responseSchema: GENERATED_TICKET_IMPLEMENTATION_SCHEMA,
-          fetchImpl: params.fetchImpl
-        }));
+      const featureFileModes = new Map<string, FileMode>();
+      const runFeatureFixWithAgentOrLlm = async (
+        promptText: string,
+        logLabel: string
+      ): Promise<{
+        parsed: GeneratedTicketImplementation;
+        protectedPaths: string[];
+      }> => {
+        if (params.agentEngine) {
+          const engine = params.agentEngine;
+          syncWorkspaceFiles(
+            featureSandbox.workDir,
+            params.accumulatedFiles,
+            params.featureDeletedFilesSet,
+            featureFileModes
+          );
+          const trackedPaths = Array.from(params.accumulatedFiles.keys());
+          const outerSnapshot = await snapshotWorktree(featureSandbox.workDir, {
+            trackedPaths,
+            isProtectedPath: (p) => isSensitiveTaskBranchPath(p, reviewersDir)
+          });
+          try {
+            const session = await engine.run({
+              role: "fixer",
+              toolPolicy: "write",
+              instructions: [
+                "Tu es un ingénieur TDD EPURE corrigeant les échecs décrits dans le message (vérification Stage 1, constats 'must_fix' de revue, CI externe) sur la PR finale de feature en gardant 100% des cibles Stage 1 au vert.",
+                PROMPT_INJECTION_IMMUNITY_CLAUSE,
+                "Tu travailles directement dans le checkout du dépôt (répertoire courant) avec tes outils : les fichiers que tu laisses modifiés, créés ou supprimés constituent le livrable.",
+                `Ne modifie JAMAIS ${reviewersDir}/**, .github/workflows/**, .github/agents.yml, .env* ni .git/.`,
+                "",
+                verificationGuideMarkdown,
+                "",
+                EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
+              ].join("\n"),
+              prompt: promptText,
+              worktree: featureSandbox.workDir,
+              timeoutMs:
+                params.phaseModels.requestTimeoutMs ?? 30 * 60 * 1000,
+              model: params.phaseModels.implementationModel,
+              providers: params.phaseModels.providers,
+              thinking: "high",
+              trackedPaths,
+              isProtectedPath: (p) =>
+                isSensitiveTaskBranchPath(p, reviewersDir),
+              maxLlmRequests:
+                params.parsedDevAgentsConfig?.agent_max_llm_requests ?? 200,
+              secrets: [params.activeToken]
+            });
+            const outerDiff = await outerSnapshot.collect();
+            const protectedSkipped = [
+              ...outerDiff.skipped,
+              ...session.diff.skipped
+            ]
+              .filter((s) => s.reason === "protected")
+              .map((s) => s.path.trim().replace(/^\/+/, ""));
+            if (protectedSkipped.length > 0) {
+              return {
+                parsed: {
+                  commit_message: `fix(review): address final feature review findings on #${params.issueNumber}`,
+                  test_summary: "",
+                  files: [],
+                  patches: [],
+                  deleted_files: []
+                },
+                protectedPaths: Array.from(new Set(protectedSkipped))
+              };
+            }
+            const fileMap = new Map<string, string>();
+            for (const f of outerDiff.files) {
+              const p = f.path.trim().replace(/^\/+/, "");
+              fileMap.set(p, f.content);
+              featureFileModes.set(p, f.mode);
+            }
+            for (const f of session.diff.files) {
+              const p = f.path.trim().replace(/^\/+/, "");
+              fileMap.set(p, f.content);
+              featureFileModes.set(p, f.mode);
+            }
+            const deletedFiles = Array.from(
+              new Set([
+                ...outerDiff.deleted_files.map((p) =>
+                  p.trim().replace(/^\/+/, "")
+                ),
+                ...session.diff.deleted_files.map((p) =>
+                  p.trim().replace(/^\/+/, "")
+                )
+              ])
+            );
+            const commitMessage = `fix(review): address final feature review findings on #${params.issueNumber}`;
+            const testSummary =
+              session.finalMessage.trim() ||
+              "Addressed final feature review findings and verified test suite";
+            if (fileMap.size > 0 || deletedFiles.length > 0) {
+              assertNoSecretMaterial(
+                [
+                  { label: "the commit message", text: commitMessage },
+                  { label: "the test summary", text: testSummary },
+                  ...Array.from(fileMap.entries()).map(([path, content]) => ({
+                    label: path,
+                    text: content
+                  }))
+                ],
+                [
+                  params.activeToken,
+                  params.llmApiKey,
+                  ...collectRunnerSecretValues(process.env)
+                ]
+              );
+              return {
+                parsed: {
+                  commit_message: commitMessage,
+                  test_summary: testSummary,
+                  files: Array.from(fileMap.entries()).map(
+                    ([path, content]) => ({ path, content })
+                  ),
+                  patches: [],
+                  deleted_files: deletedFiles
+                },
+                protectedPaths: []
+              };
+            }
+            try {
+              const parsedJson = JSON.parse(
+                session.finalMessage.trim()
+              ) as Partial<GeneratedTicketImplementation>;
+              if (
+                parsedJson &&
+                typeof parsedJson === "object" &&
+                (Array.isArray(parsedJson.files) ||
+                  Array.isArray(parsedJson.patches) ||
+                  Array.isArray(parsedJson.deleted_files))
+              ) {
+                return {
+                  parsed: {
+                    commit_message: parsedJson.commit_message ?? commitMessage,
+                    test_summary: parsedJson.test_summary ?? testSummary,
+                    files: parsedJson.files ?? [],
+                    patches: parsedJson.patches ?? [],
+                    deleted_files: parsedJson.deleted_files ?? []
+                  },
+                  protectedPaths: []
+                };
+              }
+            } catch {
+              // ignore non-JSON finalMessage
+            }
+            if (!params.llmApiKey || !params.llmApiKey.trim()) {
+              return {
+                parsed: {
+                  commit_message: commitMessage,
+                  test_summary: testSummary,
+                  files: [],
+                  patches: [],
+                  deleted_files: []
+                },
+                protectedPaths: []
+              };
+            }
+          } finally {
+            outerSnapshot.dispose();
+          }
+        }
+
+        const parsed = await withUsageAttribution({ phase: "fixes" }, () =>
+          callLlmJson<GeneratedTicketImplementation>({
+            apiKey: params.llmApiKey,
+            model: params.phaseModels.implementationModel,
+            providers: params.phaseModels.providers,
+            maxTransientRetries: params.phaseModels.maxTransientRetries,
+            transientRetryBackoffSeconds:
+              params.phaseModels.transientRetryBackoffSeconds,
+            requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+            onTransientRetriesUsed: (used) =>
+              params.addTransientRetriesUsed(used),
+            thinkingLevel: "HIGH",
+            logLabel,
+            systemInstruction: featureFixSystemInstruction,
+            prompt: promptText,
+            temperature: 0.1,
+            ...buildRepoExplorationToolsAndHandlers({
+              branch: params.featureBranch,
+              featureBranch: params.featureBranch,
+              accumulatedFiles: params.accumulatedFiles,
+              deletedFilesSet: params.featureDeletedFilesSet,
+              devBranchPaths: params.devBranchPaths,
+              reviewersDir,
+              gh: params.gh
+            }),
+            responseSchema: GENERATED_TICKET_IMPLEMENTATION_SCHEMA,
+            fetchImpl: params.fetchImpl
+          })
+        );
+        return { parsed, protectedPaths: [] };
+      };
+
+      const initialFixOutcome = await runFeatureFixWithAgentOrLlm(
+        featureFixPromptParts.join("\n"),
+        `feature-review-fix:#PR${featurePr.number}/iter-${featureReviewFixAttempt}`
+      );
+      if (initialFixOutcome.protectedPaths.length > 0) {
+        return await escalate({
+          reason: "sensitive_path_violation",
+          ticketNumber: params.issueNumber,
+          branch: params.featureBranch,
+          prNumber: featurePr.number,
+          prUrl: featurePr.html_url,
+          featurePrUrl: featurePr.html_url,
+          codeFixAttemptsUsed: featureReviewFixAttempt,
+          sensitivePaths: initialFixOutcome.protectedPaths,
+          traversalPaths: []
+        });
+      }
+      const parsedFeatureFix = initialFixOutcome.parsed;
 
       const featureFixPreCheck = validateWorkspaceFileOperations({
         workDir: featureSandbox.workDir,
@@ -795,56 +1007,46 @@ export async function runFeatureIntegrationPhase(
         )
           .map(([p, c]) => `--- FILE: ${p} ---\n${c}`)
           .join("\n\n");
-        const retryParsed =
-          await withUsageAttribution({ phase: "fixes" }, () => callLlmJson<GeneratedTicketImplementation>({
-            apiKey: params.llmApiKey,
-            model: params.phaseModels.implementationModel,
-            providers: params.phaseModels.providers,
-            maxTransientRetries: params.phaseModels.maxTransientRetries,
-            transientRetryBackoffSeconds:
-              params.phaseModels.transientRetryBackoffSeconds,
-            requestTimeoutMs: params.phaseModels.requestTimeoutMs,
-            onTransientRetriesUsed: (used) =>
-              params.addTransientRetriesUsed(used),
-            thinkingLevel: "HIGH",
-            logLabel: `feature-review-test-retry:#PR${featurePr.number}/iter-${featureReviewFixAttempt}`,
-            systemInstruction: featureFixSystemInstruction,
-            prompt: [
-              `La correction de review finale a échoué à la vérification Stage 1 (tentative ${featureReviewFixAttempt}/${maxFeatureReviewFixAttempts}) :`,
-              wrapUntrustedContent(
-                "untrusted_test_output",
-                featureTestCheck.output
-              ),
-              "",
-              ...(findingsText
-                ? [
-                    "Constats must_fix à maintenir corrigés :",
-                    wrapUntrustedContent(
-                      "untrusted_issue_content",
-                      findingsText
-                    ),
-                    ""
-                  ]
-                : []),
-              "Fichiers actuels du workspace :",
-              wrapUntrustedContent(
-                "untrusted_workspace_files",
-                retryFilesContext
-              )
-            ].join("\n"),
-            temperature: 0.1,
-            ...buildRepoExplorationToolsAndHandlers({
-              branch: params.featureBranch,
-              featureBranch: params.featureBranch,
-              accumulatedFiles: params.accumulatedFiles,
-              deletedFilesSet: params.featureDeletedFilesSet,
-              devBranchPaths: params.devBranchPaths,
-              reviewersDir,
-              gh: params.gh
-            }),
-            responseSchema: GENERATED_TICKET_IMPLEMENTATION_SCHEMA,
-            fetchImpl: params.fetchImpl
-          }));
+        const retryOutcome = await runFeatureFixWithAgentOrLlm(
+          [
+            `La correction de review finale a échoué à la vérification Stage 1 (tentative ${featureReviewFixAttempt}/${maxFeatureReviewFixAttempts}) :`,
+            wrapUntrustedContent(
+              "untrusted_test_output",
+              featureTestCheck.output
+            ),
+            "",
+            ...(findingsText
+              ? [
+                  "Constats must_fix à maintenir corrigés :",
+                  wrapUntrustedContent(
+                    "untrusted_issue_content",
+                    findingsText
+                  ),
+                  ""
+                ]
+              : []),
+            "Fichiers actuels du workspace :",
+            wrapUntrustedContent(
+              "untrusted_workspace_files",
+              retryFilesContext
+            )
+          ].join("\n"),
+          `feature-review-test-retry:#PR${featurePr.number}/iter-${featureReviewFixAttempt}`
+        );
+        if (retryOutcome.protectedPaths.length > 0) {
+          return await escalate({
+            reason: "sensitive_path_violation",
+            ticketNumber: params.issueNumber,
+            branch: params.featureBranch,
+            prNumber: featurePr.number,
+            prUrl: featurePr.html_url,
+            featurePrUrl: featurePr.html_url,
+            codeFixAttemptsUsed: featureReviewFixAttempt,
+            sensitivePaths: retryOutcome.protectedPaths,
+            traversalPaths: []
+          });
+        }
+        const retryParsed = retryOutcome.parsed;
 
         const retryPreCheck = validateWorkspaceFileOperations({
           workDir: featureSandbox.workDir,
@@ -918,7 +1120,11 @@ export async function runFeatureIntegrationPhase(
       }
 
       const changedFixFiles = Array.from(changedFixFilesMap.entries()).map(
-        ([path, content]) => ({ path, content })
+        ([path, content]) => ({
+          path,
+          content,
+          mode: featureFileModes.get(path)
+        })
       );
 
       const fixTaskBranch = `task/review-fix-${params.issueNumber}-${featureReviewFixAttempt}`;

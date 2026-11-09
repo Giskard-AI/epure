@@ -1816,7 +1816,14 @@ export async function runTicketExecutionLoop(
           requestTimeoutMs: params.phaseModels.requestTimeoutMs,
           onTransientRetriesUsed: (used) =>
             params.addTransientRetriesUsed(used),
-          fetchImpl: params.fetchImpl
+          fetchImpl: params.fetchImpl,
+          agentEngine:
+            params.agentEngine?.name === "pi" ? params.agentEngine : undefined,
+          worktreeDir: sandboxWorkspace.workDir,
+          githubToken: params.activeToken,
+          maxLlmRequests:
+            params.parsedDevAgentsConfig?.agent_max_llm_requests ??
+            DEFAULT_AGENT_MAX_LLM_REQUESTS
         }));
 
         await params.gh.postPullRequestReview(openTaskPr.number, {

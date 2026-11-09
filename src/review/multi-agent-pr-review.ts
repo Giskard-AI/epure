@@ -1,3 +1,7 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { AgentEngine } from "../agent/engine.js";
 import {
   evaluateImpeccableFrontendPr,
   type ImpeccablePrFinding
@@ -24,6 +28,7 @@ import {
   type UserAdvocateLlmPayload,
   type UserAdvocatePayload
 } from "../orchestrator/prompts/schemas.js";
+import { syncWorkspaceFiles } from "../sandbox/polyglot-workspace-runner.js";
 import {
   detectPromptInjectionInPrFiles,
   PROMPT_INJECTION_IMMUNITY_CLAUSE,
@@ -125,6 +130,10 @@ export interface RunMultiAgentPrReviewInput {
   readonly requestTimeoutMs?: number | undefined;
   readonly onTransientRetriesUsed?: ((retriesUsed: number) => void) | undefined;
   readonly fetchImpl?: typeof fetch | undefined;
+  readonly agentEngine?: AgentEngine | undefined;
+  readonly worktreeDir?: string | undefined;
+  readonly githubToken?: string | undefined;
+  readonly maxLlmRequests?: number | undefined;
 }
 
 export interface MultiAgentPrReviewResult {
@@ -594,11 +603,68 @@ export function buildReviewerInspectionTools(input: RunMultiAgentPrReviewInput):
   return { declarations, handlers };
 }
 
+export const MAX_CONCURRENT_REVIEWERS = 4;
+
+function parseReviewerFindingsFromText(text: string): ReviewerFindingsPayload | null {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const fenceMatch = /```(?:json)?\s*([\s\S]*?)```/i.exec(trimmed);
+  const candidates = [
+    ...(fenceMatch && fenceMatch[1] ? [fenceMatch[1].trim()] : []),
+    trimmed
+  ];
+  const firstBrace = trimmed.indexOf("{");
+  const lastBrace = trimmed.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    candidates.push(trimmed.slice(firstBrace, lastBrace + 1));
+  }
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as Partial<ReviewerFindingsPayload>;
+      if (parsed && typeof parsed === "object" && Array.isArray(parsed.findings)) {
+        return {
+          summary: typeof parsed.summary === "string" ? parsed.summary : "",
+          findings: parsed.findings
+        };
+      }
+    } catch {
+      // try next candidate
+    }
+  }
+  return null;
+}
+
+async function mapWithConcurrencyLimit<T, R>(
+  items: readonly T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.max(1, Math.min(limit, items.length));
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (true) {
+        const currentIndex = nextIndex;
+        nextIndex += 1;
+        if (currentIndex >= items.length) {
+          return;
+        }
+        results[currentIndex] = await worker(items[currentIndex]!, currentIndex);
+      }
+    })
+  );
+  return results;
+}
+
 async function executeSingleReviewerPass(params: {
   readonly reviewer: ReviewerAgentName;
   readonly input: RunMultiAgentPrReviewInput;
+  readonly worktreeDir?: string | undefined;
 }): Promise<SingleReviewerPassOutput> {
-  const { reviewer, input } = params;
+  const { reviewer, input, worktreeDir } = params;
   const trustedPrompt = resolveTrustedReviewerPrompt({
     reviewer,
     repository: input.repository,
@@ -606,7 +672,7 @@ async function executeSingleReviewerPass(params: {
     reviewersDir: input.reviewersDir
   });
 
-  if (!input.llmApiKey || !input.llmApiKey.trim()) {
+  if (!input.agentEngine && (!input.llmApiKey || !input.llmApiKey.trim())) {
     return {
       reviewer,
       prompt_source: trustedPrompt.source,
@@ -669,25 +735,51 @@ async function executeSingleReviewerPass(params: {
   ].join("\n");
 
   try {
-    const parsed = await callLlmJson<ReviewerFindingsPayload>({
-      apiKey: input.llmApiKey,
-      model: input.model,
-      providers: input.providers,
-      maxTransientRetries: input.maxTransientRetries,
-      transientRetryBackoffSeconds: input.transientRetryBackoffSeconds,
-      requestTimeoutMs: input.requestTimeoutMs,
-      onTransientRetriesUsed: input.onTransientRetriesUsed,
-      thinkingLevel: "HIGH",
-      logLabel: `review:${reviewer}#PR${input.prNumber}`,
-      systemInstruction,
-      prompt,
-      responseMimeType: "application/json",
-      responseSchema: REVIEWER_FINDINGS_SCHEMA,
-      temperature: 0.0,
-      tools: reviewerTools.declarations,
-      toolHandlers: reviewerTools.handlers,
-      fetchImpl: input.fetchImpl
-    });
+    let parsed: ReviewerFindingsPayload | null = null;
+    if (input.agentEngine && worktreeDir) {
+      const session = await input.agentEngine.run({
+        role: "reviewer",
+        toolPolicy: "read_only",
+        instructions: systemInstruction,
+        prompt,
+        worktree: worktreeDir,
+        timeoutMs: input.requestTimeoutMs ?? 30 * 60 * 1000,
+        model: input.model,
+        providers: input.providers,
+        thinking: "high",
+        maxLlmRequests: input.maxLlmRequests,
+        ...(input.githubToken ? { secrets: [input.githubToken] } : {})
+      });
+      parsed = parseReviewerFindingsFromText(session.finalMessage);
+      if (!parsed && (!input.llmApiKey || !input.llmApiKey.trim())) {
+        parsed = {
+          summary: session.finalMessage.trim(),
+          findings: []
+        };
+      }
+    }
+
+    if (!parsed) {
+      parsed = await callLlmJson<ReviewerFindingsPayload>({
+        apiKey: input.llmApiKey ?? "",
+        model: input.model,
+        providers: input.providers,
+        maxTransientRetries: input.maxTransientRetries,
+        transientRetryBackoffSeconds: input.transientRetryBackoffSeconds,
+        requestTimeoutMs: input.requestTimeoutMs,
+        onTransientRetriesUsed: input.onTransientRetriesUsed,
+        thinkingLevel: "HIGH",
+        logLabel: `review:${reviewer}#PR${input.prNumber}`,
+        systemInstruction,
+        prompt,
+        responseMimeType: "application/json",
+        responseSchema: REVIEWER_FINDINGS_SCHEMA,
+        temperature: 0.0,
+        tools: reviewerTools.declarations,
+        toolHandlers: reviewerTools.handlers,
+        fetchImpl: input.fetchImpl
+      });
+    }
 
     const findings: ReviewerFinding[] = (parsed.findings ?? []).map((f) => ({
       reviewer,
@@ -743,12 +835,50 @@ export async function runMultiAgentPrReviewPass(
     );
   }
 
-  // Execute selected reviewers in parallel (read-only)
-  const passes = await Promise.all(
-    selection.selected_reviewers.map((reviewer) =>
-      executeSingleReviewerPass({ reviewer, input })
-    )
-  );
+  // Execute selected reviewers in parallel (read-only, max 4 concurrent)
+  let tempWorktreeDir: string | undefined;
+  let effectiveWorktreeDir = input.worktreeDir;
+  if (input.agentEngine && !effectiveWorktreeDir) {
+    tempWorktreeDir = mkdtempSync(join(tmpdir(), "epure-review-wt-"));
+    effectiveWorktreeDir = tempWorktreeDir;
+    const filesMap = new Map<string, string>();
+    if (input.workspaceFiles) {
+      const entries =
+        input.workspaceFiles instanceof Map ||
+        typeof (input.workspaceFiles as ReadonlyMap<string, string>).entries === "function"
+          ? Array.from((input.workspaceFiles as ReadonlyMap<string, string>).entries())
+          : Object.entries(input.workspaceFiles as Readonly<Record<string, string>>);
+      for (const [k, v] of entries) {
+        filesMap.set(k, v);
+      }
+    }
+    for (const f of input.changedFiles) {
+      filesMap.set(f.path, f.content);
+    }
+    syncWorkspaceFiles(tempWorktreeDir, filesMap, new Set(input.deletedFiles ?? []));
+  }
+
+  let passes: SingleReviewerPassOutput[];
+  try {
+    passes = await mapWithConcurrencyLimit(
+      selection.selected_reviewers,
+      MAX_CONCURRENT_REVIEWERS,
+      (reviewer) =>
+        executeSingleReviewerPass({
+          reviewer,
+          input,
+          worktreeDir: effectiveWorktreeDir
+        })
+    );
+  } finally {
+    if (tempWorktreeDir) {
+      try {
+        rmSync(tempWorktreeDir, { recursive: true, force: true });
+      } catch {
+        // ignore cleanup error
+      }
+    }
+  }
 
   const mustFixFindings: ReviewerFinding[] = [];
   const informationalFindings: ReviewerFinding[] = [];
