@@ -40,6 +40,8 @@ export type SandboxErrorCode =
   | "PROXY_REQUEST_TOO_LARGE"
   | "PROXY_REQUEST_UNREADABLE"
   | "PROXY_REQUEST_TIMEOUT"
+  | "PROXY_REQUEST_CAP_REACHED"
+  | "LLM_REQUEST_CAP_REACHED"
   | "SANDBOX_COMMAND_FAILED";
 
 export type SandboxNetworkPolicy = "proxy_only" | "https_only" | "offline";
@@ -95,6 +97,9 @@ export interface CreateLlmSandboxProxyOptions {
     | undefined;
   // Time to receive a request body, counted from when the request gets a slot. Default: the upstream timeout.
   readonly requestBodyTimeoutMs?: number | undefined;
+  // Requests past it get a 429 and onRequestCapReached runs; none of them reaches the upstream.
+  readonly maxRequests?: number | undefined;
+  readonly onRequestCapReached?: (() => void) | undefined;
 }
 
 export interface LlmSandboxProxyHandle extends SandboxProxyEndpoint {
@@ -113,6 +118,7 @@ export interface SandboxCommand {
 }
 
 // An agent session gets a fresh HOME/TMPDIR under /tmp: its only writable place besides cwd.
+// Its environment is PATH, LANG, HOME, TMPDIR, the proxy variables and `env`, nothing else from the runner.
 export interface SandboxAgentSession {
   // Run there first under https_only, before the LLM proxy and its nonce exist.
   readonly installCommands?: readonly SandboxCommand[] | undefined;
@@ -120,11 +126,14 @@ export interface SandboxAgentSession {
   readonly homeFiles?:
     | ((proxy: SandboxProxyEndpoint | undefined) => Readonly<Record<string, string>>)
     | undefined;
+  readonly env?: ((home: string) => Readonly<Record<string, string>>) | undefined;
 }
 
 export interface SandboxSessionIo {
   readonly stdin: Writable;
   readonly stdout: Readable;
+  // Kills the command's process group.
+  kill(): void;
 }
 
 export interface SandboxExecutionInput {
@@ -142,7 +151,10 @@ export interface SandboxExecutionInput {
   readonly readOnlyPaths?: readonly string[] | undefined;
   readonly agentSession?: SandboxAgentSession | undefined;
   readonly observeLlmResponse?: CreateLlmSandboxProxyOptions["observeResponse"];
-  // Talks to the command over stdin/stdout (stdout is then not captured); stdin is closed when it settles.
+  // Past it the command is killed and the result is LLM_REQUEST_CAP_REACHED.
+  readonly maxLlmRequests?: number | undefined;
+  // Talks to the command over stdin/stdout (stdout is then not captured, stderr keeps its last 64 KiB);
+  // stdin is closed when it settles.
   readonly interact?: ((io: SandboxSessionIo) => Promise<void>) | undefined;
 }
 
@@ -231,6 +243,32 @@ export function buildSanitizedSandboxEnv(
   return sanitized;
 }
 
+const AGENT_SESSION_INHERITED_ENV = ["PATH", "LANG"] as const;
+
+export function buildAgentSessionEnv(
+  runnerEnv: Readonly<Record<string, string | undefined>>,
+  home: string,
+  proxy: SandboxProxyEndpoint | undefined,
+  sessionEnv: SandboxAgentSession["env"]
+): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const name of AGENT_SESSION_INHERITED_ENV) {
+    const value = runnerEnv[name];
+    if (typeof value === "string") {
+      env[name] = value;
+    }
+  }
+  return {
+    ...env,
+    ...sessionEnv?.(home),
+    HOME: home,
+    TMPDIR: home,
+    EPURE_SANDBOX_ACTIVE: "true",
+    NO_COLOR: "1",
+    ...(proxy ? { EPURE_LLM_PROXY_URL: proxy.proxyUrl, EPURE_LLM_PROXY_NONCE: proxy.proxyNonce } : {})
+  };
+}
+
 export function buildLandrunInvocation(params: {
   readonly command: string;
   readonly args: readonly string[];
@@ -261,16 +299,9 @@ export function buildLandrunInvocation(params: {
 
   const rwxPaths = new Set<string>([
     resolvedCwd,
-    params.agentDir ? sanitizeLandrunPath(resolve(params.agentDir)) : "/tmp"
+    params.agentDir ? sanitizeLandrunPath(resolve(params.agentDir)) : "/tmp",
+    ...packageCacheDirs(params.networkPolicy, params.sanitizedEnv).map(sanitizeLandrunPath)
   ]);
-  if (params.networkPolicy === "https_only") {
-    const home = sanitizeLandrunPath(params.sanitizedEnv.HOME?.trim() ?? "");
-    if (home) {
-      rwxPaths.add(`${home}/.npm`);
-      rwxPaths.add(`${home}/.cache`);
-      rwxPaths.add(`${home}/.cargo`);
-    }
-  }
 
   const landrunArgs: string[] = [
     "--rox",
@@ -298,16 +329,29 @@ export function buildLandrunInvocation(params: {
   return landrunArgs;
 }
 
+// Writable for dependency installs (https_only), under HOME.
+function packageCacheDirs(
+  networkPolicy: SandboxNetworkPolicy,
+  env: Readonly<Record<string, string>>
+): string[] {
+  const home = env.HOME?.trim() ?? "";
+  return networkPolicy === "https_only" && home
+    ? [".npm", ".cache", ".cargo"].map((sub) => `${home}/${sub}`)
+    : [];
+}
+
 // Landlock does not mediate connect() on pathname Unix sockets, so the namespace must hide them:
 // /run (docker.sock, containerd, D-Bus, /run/user/<uid>) and /tmp become empty tmpfs, and a fresh
-// pid namespace and /proc keep the orchestrator's /proc/<pid>/environ out of reach.
+// pid namespace and /proc keep the orchestrator's /proc/<pid>/environ out of reach. The root is
+// read-only; cwd, the agent dir and writablePaths are bound writable.
 export function buildBubblewrapInvocation(params: {
   readonly command: string;
   readonly args: readonly string[];
   readonly cwd: string;
   readonly readOnlyPaths?: readonly string[] | undefined;
   readonly agentDir?: string | undefined;
-  // Host network kept, and the root bound writable: landrun inside enforces ports and writes.
+  readonly writablePaths?: readonly string[] | undefined;
+  // Host network kept: landrun inside enforces ports.
   readonly underLandrun?: boolean | undefined;
 }): readonly string[] {
   const resolvedCwd = resolve(params.cwd);
@@ -316,14 +360,15 @@ export function buildBubblewrapInvocation(params: {
     ...(params.readOnlyPaths ?? []).flatMap((p) => ["--ro-bind", resolve(p), resolve(p)]),
     ...(params.agentDir
       ? ["--bind", resolve(params.agentDir), resolve(params.agentDir)]
-      : [])
+      : []),
+    ...(params.writablePaths ?? []).flatMap((p) => ["--bind-try", resolve(p), resolve(p)])
   ];
   return [
     ...(params.underLandrun ? [] : ["--unshare-net"]),
     "--unshare-pid",
     "--unshare-ipc",
     "--die-with-parent",
-    params.underLandrun ? "--bind" : "--ro-bind",
+    "--ro-bind",
     "/",
     "/",
     "--dev",
@@ -390,6 +435,7 @@ export function buildKernelSandboxedCommand(
       cwd: input.cwd,
       readOnlyPaths: input.readOnlyPaths,
       agentDir: input.agentDir,
+      writablePaths: packageCacheDirs(input.networkPolicy, input.sanitizedEnv),
       underLandrun: backend === "bubblewrap+landrun"
     });
 
@@ -564,6 +610,7 @@ export async function createLlmSandboxProxy(
   const nonceBytes = Buffer.from(proxyNonce);
   const reportUsage = usageReporter({ labelledBySandbox: true });
   const requestBodyTimeoutMs = options.requestBodyTimeoutMs ?? DEFAULT_LLM_REQUEST_TIMEOUT_MS;
+  let acceptedRequests = 0;
 
   const relay = (req: IncomingMessage, res: ServerResponse): void => {
     const rawUrl = req.url ?? "/";
@@ -593,6 +640,18 @@ export async function createLlmSandboxProxy(
         "PROXY_FORBIDDEN_ENDPOINT",
         `Sandbox LLM proxy forbids ${req.method ?? "?"} '${url.pathname}' on ${upstreamHost}.`
       );
+      return;
+    }
+    acceptedRequests += 1;
+    if (options.maxRequests !== undefined && acceptedRequests > options.maxRequests) {
+      res.setHeader("connection", "close");
+      sendProxyError(
+        res,
+        429,
+        "PROXY_REQUEST_CAP_REACHED",
+        `Sandbox LLM proxy forwards at most ${options.maxRequests} requests per session.`
+      );
+      options.onRequestCapReached?.();
       return;
     }
     if (Number(req.headers["content-length"] ?? 0) > MAX_PROXY_REQUEST_BYTES) {
@@ -875,7 +934,7 @@ function resolveLlmProxyTarget(
   }
 }
 
-function collectRunnerSecretValues(
+export function collectRunnerSecretValues(
   runnerEnv: Readonly<Record<string, string | undefined>>
 ): string[] {
   const values: string[] = [];
@@ -976,7 +1035,7 @@ export async function runInUntrustedCodeSandbox(
   const cwd = input.cwd ?? process.cwd();
   const timeoutMs = input.timeoutMs ?? 60 * 60 * 1000;
   const agentDir = input.agentSession ? mkdtempSync("/tmp/epure-agent-") : undefined;
-  const agentEnv = agentDir ? { HOME: agentDir, TMPDIR: agentDir } : {};
+  const installHomeEnv = agentDir ? { HOME: agentDir, TMPDIR: agentDir } : {};
 
   const runConfined = (
     command: SandboxCommand,
@@ -985,16 +1044,11 @@ export async function runInUntrustedCodeSandbox(
     proxyPort?: number | undefined,
     interact?: SandboxExecutionInput["interact"]
   ): Promise<SpawnedOutput> => {
-    if (policy === "https_only") {
-      const home = env.HOME?.trim() ?? "";
-      if (home) {
-        for (const sub of [".npm", ".cache", ".cargo"]) {
-          try {
-            mkdirSync(resolve(home, sub), { recursive: true });
-          } catch {
-            // Best-effort cache directory creation before Landlock ruleset population
-          }
-        }
+    for (const dir of packageCacheDirs(policy, env)) {
+      try {
+        mkdirSync(dir, { recursive: true });
+      } catch {
+        // Best-effort cache directory creation before Landlock ruleset population
       }
     }
     const wrapped = buildKernelSandboxedCommand({
@@ -1008,12 +1062,16 @@ export async function runInUntrustedCodeSandbox(
       readOnlyPaths: input.readOnlyPaths,
       agentDir
     });
-    return spawnCaptured(wrapped.command, wrapped.args, cwd, env, timeoutMs, interact);
+    return spawnCaptured(wrapped.command, wrapped.args, cwd, env, timeoutMs, interact, (kill) => {
+      killChild = kill;
+    });
   };
 
+  let killChild: (() => void) | undefined;
+  let requestCapReached = false;
   let proxy: LlmSandboxProxyHandle | undefined;
   try {
-    const installEnv = { ...buildSanitizedSandboxEnv(input.runnerEnv), ...agentEnv };
+    const installEnv = { ...buildSanitizedSandboxEnv(input.runnerEnv), ...installHomeEnv };
     for (const install of installCommands) {
       const installed = await runConfined(install, "https_only", installEnv);
       if (installed.exitCode !== 0) {
@@ -1037,7 +1095,12 @@ export async function runInUntrustedCodeSandbox(
       ? await createLlmSandboxProxy({
           upstream: llmTarget.upstream,
           apiKey: llmTarget.apiKey,
-          observeResponse: input.observeLlmResponse
+          observeResponse: input.observeLlmResponse,
+          maxRequests: input.maxLlmRequests,
+          onRequestCapReached: () => {
+            requestCapReached = true;
+            killChild?.();
+          }
         })
       : undefined;
     if (agentDir) {
@@ -1050,18 +1113,22 @@ export async function runInUntrustedCodeSandbox(
     const childResult = await runConfined(
       { command: input.command, args: input.args },
       networkPolicy,
-      { ...buildSanitizedSandboxEnv(input.runnerEnv, proxy), ...agentEnv },
+      agentDir
+        ? buildAgentSessionEnv(input.runnerEnv, agentDir, proxy, input.agentSession?.env)
+        : buildSanitizedSandboxEnv(input.runnerEnv, proxy),
       proxy ? parsePortFromProxyUrl(proxy.proxyUrl) : undefined,
       input.interact
     );
-    const ok = childResult.exitCode === 0;
+    const ok = childResult.exitCode === 0 && !requestCapReached;
 
     return {
       isolated: true,
-      error_code: ok ? "NONE" : "SANDBOX_COMMAND_FAILED",
-      error_message: ok
-        ? ""
-        : `Sandboxed command exited with code ${childResult.exitCode}.`,
+      error_code: requestCapReached ? "LLM_REQUEST_CAP_REACHED" : ok ? "NONE" : "SANDBOX_COMMAND_FAILED",
+      error_message: requestCapReached
+        ? `Sandboxed command was killed after its ${input.maxLlmRequests ?? 0} allowed LLM requests.`
+        : ok
+          ? ""
+          : `Sandboxed command exited with code ${childResult.exitCode}.`,
       exit_code: childResult.exitCode,
       stdout: redactSecrets(childResult.stdout, secretValues),
       stderr: redactSecrets(childResult.stderr, secretValues),
@@ -1088,6 +1155,8 @@ function isCiRunner(runnerEnv: Readonly<Record<string, string | undefined>>): bo
   );
 }
 
+const MAX_SESSION_STDERR_BYTES = 64 * 1024;
+
 interface SpawnedOutput {
   readonly exitCode: number;
   readonly stdout: string;
@@ -1100,7 +1169,8 @@ function spawnCaptured(
   cwd: string,
   env: Record<string, string>,
   timeoutMs: number,
-  interact?: SandboxExecutionInput["interact"]
+  interact: SandboxExecutionInput["interact"],
+  onSpawn: (kill: () => void) => void
 ): Promise<SpawnedOutput> {
   return new Promise((resolvePromise) => {
     // Own process group, so a phase's background processes die with it instead of outliving it.
@@ -1123,14 +1193,17 @@ function spawnCaptured(
       }
     };
 
+    onSpawn(killGroup);
+
     const stdoutChunks: Buffer[] = [];
-    const stderrChunks: Buffer[] = [];
+    let stderrChunks: Buffer[] = [];
+    let stderrBytes = 0;
 
     const timer = setTimeout(killGroup, timeoutMs);
     child.on("exit", killGroup);
 
     if (interact) {
-      void interact({ stdin: child.stdin, stdout: child.stdout }).then(
+      void interact({ stdin: child.stdin, stdout: child.stdout, kill: killGroup }).then(
         () => child.stdin.end(),
         () => killGroup()
       );
@@ -1138,7 +1211,15 @@ function spawnCaptured(
       child.stdin.end();
       child.stdout.on("data", (chunk: Buffer) => stdoutChunks.push(chunk));
     }
-    child.stderr.on("data", (chunk: Buffer) => stderrChunks.push(chunk));
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderrChunks.push(chunk);
+      stderrBytes += chunk.length;
+      if (interact && stderrBytes > MAX_SESSION_STDERR_BYTES) {
+        const tail = Buffer.concat(stderrChunks).subarray(-MAX_SESSION_STDERR_BYTES);
+        stderrChunks = [tail];
+        stderrBytes = tail.length;
+      }
+    });
 
     child.on("error", (err) => {
       clearTimeout(timer);
