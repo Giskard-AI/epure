@@ -200,19 +200,54 @@ describe("meterTokenUsage", () => {
 
 describe("TokenUsageLedger model cap", () => {
   it.each([
-    { id: "models-up-to-the-cap-keep-their-own-key", distinct: MAX_MODELS_PER_RUN, expectedOther: undefined },
-    { id: "models-past-the-cap-share-the-overflow-key", distinct: MAX_MODELS_PER_RUN + 3, expectedOther: counts(3, 3, 3) }
+    { id: "sandbox-models-up-to-the-cap-keep-their-own-key", distinct: MAX_MODELS_PER_RUN, expectedOther: undefined },
+    { id: "sandbox-models-past-the-cap-share-the-overflow-key", distinct: MAX_MODELS_PER_RUN + 3, expectedOther: counts(3, 3, 3) }
   ])("$id", ({ distinct, expectedOther }) => {
     const ledger = new TokenUsageLedger();
     for (let i = 0; i < distinct; i += 1) {
-      ledger.record({ phase: "implementation" }, { ...known(1, 1), model: `m-${i}` });
+      ledger.record({ phase: "implementation" }, { ...known(1, 1), model: `m-${i}` }, { labelledBySandbox: true });
     }
-    ledger.record({ phase: "implementation" }, { ...known(1, 1), model: "m-0" });
+    ledger.record({ phase: "implementation" }, { ...known(1, 1), model: "m-0" }, { labelledBySandbox: true });
 
     const models = ledger.current().epic?.implementation ?? {};
     expect(Object.keys(models)).toHaveLength(Math.min(distinct, MAX_MODELS_PER_RUN) + (expectedOther ? 1 : 0));
     expect(models["anthropic/m-0"]).toEqual(counts(2, 2, 2));
     expect(models[`anthropic/${OVERFLOW_MODEL}`]).toEqual(expectedOther);
+  });
+
+  it.each([
+    { id: "orchestrator-model-first-is-not-counted-toward-the-cap", orchestratorFirst: true },
+    { id: "orchestrator-model-after-a-full-sandbox-cap-keeps-its-own-key", orchestratorFirst: false }
+  ])("$id", ({ orchestratorFirst }) => {
+    const ledger = new TokenUsageLedger();
+    const orchestratorCall = () => ledger.record({ phase: "implementation" }, { ...known(1, 1), model: "planner" });
+    if (orchestratorFirst) {
+      orchestratorCall();
+    }
+    for (let i = 0; i < MAX_MODELS_PER_RUN + 1; i += 1) {
+      ledger.record({ phase: "implementation" }, { ...known(1, 1), model: `m-${i}` }, { labelledBySandbox: true });
+    }
+    if (!orchestratorFirst) {
+      orchestratorCall();
+    }
+
+    const models = ledger.current().epic?.implementation ?? {};
+    expect(models["anthropic/planner"]).toEqual(counts(1, 1, 1));
+    expect(models[`anthropic/m-${MAX_MODELS_PER_RUN - 1}`]).toEqual(counts(1, 1, 1));
+    expect(models[`anthropic/${OVERFLOW_MODEL}`]).toEqual(counts(1, 1, 1));
+  });
+
+  it("a sandbox label that names an already-recorded model keeps that key past the cap", () => {
+    const ledger = new TokenUsageLedger();
+    ledger.record({ phase: "implementation" }, { ...known(1, 1), model: "planner" });
+    for (let i = 0; i < MAX_MODELS_PER_RUN; i += 1) {
+      ledger.record({ phase: "implementation" }, { ...known(1, 1), model: `m-${i}` }, { labelledBySandbox: true });
+    }
+    ledger.record({ phase: "implementation" }, { ...known(1, 1), model: "planner" }, { labelledBySandbox: true });
+
+    const models = ledger.current().epic?.implementation ?? {};
+    expect(models["anthropic/planner"]).toEqual(counts(2, 2, 2));
+    expect(models[`anthropic/${OVERFLOW_MODEL}`]).toBeUndefined();
   });
 });
 

@@ -131,24 +131,35 @@ interface PendingUsage {
   readonly usage: LLMRequestUsage;
 }
 
-// A sandboxed agent names its own models: past this many per run, they share one key.
+// A sandboxed agent names its own models: past this many new ones per run, they share one key.
 export const MAX_MODELS_PER_RUN = 16;
 export const OVERFLOW_MODEL = "other";
+
+export interface RecordUsageOptions {
+  // The model label came from a sandboxed agent's request; only such labels count toward the cap.
+  readonly labelledBySandbox?: boolean | undefined;
+}
 
 /** Usage of one run: recorded per request, written to the plan state with its next update. */
 export class TokenUsageLedger {
   private pending: PendingUsage[] = [];
   private lastKnown: TokenUsageRecord = {};
   private readonly models = new Set<string>();
+  private sandboxModels = 0;
 
-  record(attribution: UsageAttribution, usage: LLMRequestUsage): void {
+  record(attribution: UsageAttribution, usage: LLMRequestUsage, options: RecordUsageOptions = {}): void {
     const model = `${usage.provider}/${usage.model}`;
-    if (this.models.has(model) || this.models.size < MAX_MODELS_PER_RUN) {
+    if (!this.models.has(model)) {
+      if (options.labelledBySandbox && this.sandboxModels >= MAX_MODELS_PER_RUN) {
+        this.pending.push({ attribution, usage: { ...usage, model: OVERFLOW_MODEL } });
+        return;
+      }
       this.models.add(model);
-      this.pending.push({ attribution, usage });
-    } else {
-      this.pending.push({ attribution, usage: { ...usage, model: OVERFLOW_MODEL } });
+      if (options.labelledBySandbox) {
+        this.sandboxModels += 1;
+      }
     }
+    this.pending.push({ attribution, usage });
   }
 
   /** The state's record plus the usage this run has not written yet. */
@@ -208,9 +219,9 @@ export function currentTokenUsage(): TokenUsageRecord | undefined {
 }
 
 /** Adds one response's usage to the run's ledger under the current attribution; a no-op outside a metered run. */
-export function recordTokenUsage(usage: LLMRequestUsage): void {
+export function recordTokenUsage(usage: LLMRequestUsage, options?: RecordUsageOptions): void {
   const context = usageContext.getStore();
-  context?.ledger.record(context.attribution, usage);
+  context?.ledger.record(context.attribution, usage, options);
 }
 
 /** Runs a callback in the caller's usage context, for callbacks that run outside it (a proxy's server). */

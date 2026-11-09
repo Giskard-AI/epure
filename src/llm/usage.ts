@@ -2,7 +2,8 @@ import {
   bindToUsageContext,
   recordTokenUsage,
   type LLMRequestUsage,
-  type LLMTokenUsage
+  type LLMTokenUsage,
+  type RecordUsageOptions
 } from "../usage/token-usage.js";
 import type { ProviderKind } from "./types.js";
 
@@ -85,15 +86,15 @@ export function formatLLMUsageLogLine(usage: LLMTokenUsage): string {
  * proxy call it per response; an engine that bypasses both calls it once per session with its counts,
  * or with `unavailable: true` when it has none.
  */
-export function reportLLMUsage(usage: LLMRequestUsage): void {
+export function reportLLMUsage(usage: LLMRequestUsage, options?: RecordUsageOptions): void {
   if (!("unavailable" in usage)) {
     process.stdout.write(`${formatLLMUsageLogLine(usage)}\n`);
   }
-  recordTokenUsage(usage);
+  recordTokenUsage(usage, options);
 }
 
 /** reportLLMUsage bound to the caller's attribution, for callbacks that run outside it (a proxy's server). */
-export function usageReporter(): (usage: LLMRequestUsage) => void {
+export function usageReporter(options?: RecordUsageOptions): (usage: LLMRequestUsage) => void {
   const inCallerContext = bindToUsageContext();
-  return (usage) => inCallerContext(() => reportLLMUsage(usage));
+  return (usage) => inCallerContext(() => reportLLMUsage(usage, options));
 }
