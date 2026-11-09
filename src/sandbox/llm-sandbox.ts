@@ -39,6 +39,7 @@ export type SandboxErrorCode =
   | "PROXY_UPSTREAM_UNREACHABLE"
   | "PROXY_REQUEST_TOO_LARGE"
   | "PROXY_REQUEST_UNREADABLE"
+  | "PROXY_REQUEST_TIMEOUT"
   | "SANDBOX_COMMAND_FAILED";
 
 export type SandboxNetworkPolicy = "proxy_only" | "https_only" | "offline";
@@ -92,6 +93,8 @@ export interface CreateLlmSandboxProxyOptions {
   readonly observeResponse?:
     | ((exchange: LlmProxyExchange) => LlmProxyResponseObserver | undefined)
     | undefined;
+  // Time to receive a request body, counted from when the request gets a slot. Default: the upstream timeout.
+  readonly requestBodyTimeoutMs?: number | undefined;
 }
 
 export interface LlmSandboxProxyHandle extends SandboxProxyEndpoint {
@@ -547,7 +550,8 @@ export async function createLlmSandboxProxy(
     target.protocol === "https:" ? new HttpsAgent({ keepAlive: true }) : new HttpAgent({ keepAlive: true });
   const proxyNonce = randomBytes(24).toString("hex");
   const nonceBytes = Buffer.from(proxyNonce);
-  const reportUsage = usageReporter();
+  const reportUsage = usageReporter({ labelledBySandbox: true });
+  const requestBodyTimeoutMs = options.requestBodyTimeoutMs ?? DEFAULT_LLM_REQUEST_TIMEOUT_MS;
 
   const relay = (req: IncomingMessage, res: ServerResponse): void => {
     const rawUrl = req.url ?? "/";
@@ -659,7 +663,17 @@ export async function createLlmSandboxProxy(
         callback();
       }
     });
+    const bodyTimer = setTimeout(
+      () =>
+        fail(
+          408,
+          "PROXY_REQUEST_TIMEOUT",
+          `Sandbox LLM proxy did not receive the request body within ${requestBodyTimeoutMs} ms.`
+        ),
+      requestBodyTimeoutMs
+    );
     pipeline(req, collect, (err) => {
+      clearTimeout(bodyTimer);
       if (!err) {
         // Runs outside the server's try: a body that cannot be re-serialised must not reach the process.
         try {
@@ -732,7 +746,8 @@ export async function createLlmSandboxProxy(
 
   let inFlight = 0;
   const waiting: Array<() => void> = [];
-  const server = createServer((req, res) => {
+  // Node's requestTimeout runs from the connection, so it would also count the wait for a slot.
+  const server = createServer({ requestTimeout: 0 }, (req, res) => {
     const start = (): void => {
       inFlight += 1;
       res.once("close", () => {

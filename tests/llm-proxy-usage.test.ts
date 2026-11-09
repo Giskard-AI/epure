@@ -1,4 +1,4 @@
-import type { ServerResponse } from "node:http";
+import { request as httpRequest, type ServerResponse } from "node:http";
 import { gzipSync } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveProviderUpstream, type ProviderKind } from "../src/llm/index.js";
@@ -417,6 +417,75 @@ describe("createLlmSandboxProxy request limits", () => {
       expect((await Promise.all(responses)).map((res) => res.status)).toEqual(
         Array(MAX_PROXY_IN_FLIGHT_REQUESTS + 1).fill(200)
       );
+    } finally {
+      await proxy.close();
+    }
+  });
+
+  it("a queued request with a body over the socket buffer is served after waiting longer than the body timeout", async () => {
+    const held: ServerResponse[] = [];
+    const upstream = await startFakeLlmUpstream((_req, res) => {
+      held.push(res);
+    });
+    openUpstreams.push(upstream);
+    const proxy = await createLlmSandboxProxy({
+      upstream: resolveProviderUpstream("anthropic", { base_url: upstream.url }),
+      apiKey: REAL_KEY,
+      requestBodyTimeoutMs: 300
+    });
+    const post = (body: string) =>
+      fetch(`${proxy.proxyUrl}/v1/messages`, { method: "POST", headers: { "x-api-key": proxy.proxyNonce }, body });
+    const largeBody = JSON.stringify({ model: "claude-x", prompt: "x".repeat(500_000) });
+
+    try {
+      const inFlight = Array.from({ length: MAX_PROXY_IN_FLIGHT_REQUESTS }, () => post(JSON.stringify({ model: "claude-x" })));
+      await vi.waitFor(() => expect(held).toHaveLength(MAX_PROXY_IN_FLIGHT_REQUESTS));
+      const queued = post(largeBody);
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+
+      held[0]!.writeHead(200, { "content-type": "application/json" }).end("{}");
+      await vi.waitFor(() => expect(held).toHaveLength(MAX_PROXY_IN_FLIGHT_REQUESTS + 1));
+      held.slice(1).forEach((res) => res.writeHead(200, { "content-type": "application/json" }).end("{}"));
+
+      expect((await queued).status).toBe(200);
+      expect(upstream.requests.at(-1)?.body).toBe(largeBody);
+      await Promise.all(inFlight);
+    } finally {
+      await proxy.close();
+    }
+  });
+
+  it("a request holding a slot whose body stops arriving gets a 408 after the body timeout", async () => {
+    const upstream = await startFakeLlmUpstream((_req, res) => {
+      res.end("{}");
+    });
+    openUpstreams.push(upstream);
+    const proxy = await createLlmSandboxProxy({
+      upstream: resolveProviderUpstream("anthropic", { base_url: upstream.url }),
+      apiKey: REAL_KEY,
+      requestBodyTimeoutMs: 300
+    });
+
+    try {
+      const { status, errorCode } = await new Promise<{ status: number | undefined; errorCode: string }>((resolve, reject) => {
+        const req = httpRequest(`${proxy.proxyUrl}/v1/messages`, {
+          method: "POST",
+          headers: { "x-api-key": proxy.proxyNonce, "content-length": "1000" }
+        });
+        req.on("response", (res) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (chunk: Buffer) => chunks.push(chunk));
+          res.on("end", () =>
+            resolve({ status: res.statusCode, errorCode: (JSON.parse(Buffer.concat(chunks).toString()) as { error_code: string }).error_code })
+          );
+        });
+        req.on("error", reject);
+        req.write('{"model":');
+      });
+
+      expect(status).toBe(408);
+      expect(errorCode).toBe("PROXY_REQUEST_TIMEOUT");
+      expect(upstream.requests).toHaveLength(0);
     } finally {
       await proxy.close();
     }
