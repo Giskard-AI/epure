@@ -1,3 +1,5 @@
+import { containsPrivateKeyMaterial } from "../auth/github-apps.js";
+import { redactSecrets } from "../auth/issue-command-gate.js";
 import type { ProviderConfig } from "../llm/types.js";
 
 export type AgentRole = "implementer" | "fixer";
@@ -40,6 +42,8 @@ export interface AgentSessionRequest {
   readonly isProtectedPath?: ((path: string) => boolean) | undefined;
   // LLM requests the session may send before it is aborted with AGENT_REQUEST_CAP_REACHED.
   readonly maxLlmRequests?: number | undefined;
+  // Values minted during the run (e.g. the installation token) that the diff and final message must not contain.
+  readonly secrets?: readonly string[] | undefined;
 }
 
 // Token usage is never part of the result. The adapter reports it exactly once (ADR-0035): per response
@@ -74,5 +78,22 @@ export class AgentEngineError extends Error {
     super(message);
     this.name = "AgentEngineError";
     this.code = code;
+  }
+}
+
+// The error names where the secret was found, never the secret itself.
+export function assertNoSecretMaterial(
+  sources: ReadonlyArray<{ readonly label: string; readonly text: string }>,
+  secrets: readonly string[]
+): void {
+  const values = secrets.map((s) => s.trim()).filter((s) => s.length >= 8);
+  const leaking = sources
+    .filter((s) => containsPrivateKeyMaterial(s.text) || values.some((v) => s.text.includes(v)))
+    .map((s) => redactSecrets(s.label, values));
+  if (leaking.length > 0) {
+    throw new AgentEngineError(
+      "AGENT_SECRET_IN_DIFF",
+      `Secret material (a runner secret, the installation token, the proxy nonce or a private key) was found in ${[...new Set(leaking)].join(", ")}; nothing was committed.`
+    );
   }
 }

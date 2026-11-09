@@ -3,8 +3,6 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
-import { containsPrivateKeyMaterial } from "../auth/github-apps.js";
-import { redactSecrets } from "../auth/issue-command-gate.js";
 import { parseModelIdentifier } from "../llm/client.js";
 import { classifyHttpError, LLMError } from "../llm/errors.js";
 import {
@@ -18,11 +16,11 @@ import {
 } from "../sandbox/llm-sandbox.js";
 import {
   AgentEngineError,
+  assertNoSecretMaterial,
   type AgentEngine,
   type AgentSessionRequest,
   type AgentSessionResult,
-  type AgentToolPolicy,
-  type WorktreeDiff
+  type AgentToolPolicy
 } from "./engine.js";
 import { translateModelForPi } from "./pi-models.js";
 import { snapshotWorktree } from "./worktree-snapshot.js";
@@ -205,12 +203,20 @@ export function createPiAgentEngine(options: PiAgentEngineOptions): AgentEngine 
           throw sessionProviderError(request, upstreamError, outcome.lastErrorMessage, options.runnerEnv);
         }
         const diff = await snapshot.collect();
-        assertNoSecrets(diff, [
-          ...collectRunnerSecretValues(options.runnerEnv),
-          ...providerKeys(request, options.runnerEnv),
-          ...(options.extraSecrets ?? []),
-          proxyNonce
-        ]);
+        assertNoSecretMaterial(
+          [
+            ...diff.files.map((f) => ({ label: f.path, text: f.content })),
+            ...[...diff.files, ...diff.skipped].map((f) => ({ label: "a file path", text: f.path })),
+            { label: "the final message", text: outcome.finalMessage }
+          ],
+          [
+            ...collectRunnerSecretValues(options.runnerEnv),
+            ...providerKeys(request, options.runnerEnv),
+            ...(options.extraSecrets ?? []),
+            ...(request.secrets ?? []),
+            proxyNonce
+          ]
+        );
         return { finalMessage: outcome.finalMessage, diff };
       } finally {
         snapshot?.dispose();
@@ -226,20 +232,6 @@ function providerKeys(
 ): string[] {
   const { providerConfig } = parseModelIdentifier(request.model, request.providers, env);
   return providerConfig?.apiKey ? [providerConfig.apiKey] : [];
-}
-
-// The error names files only: the secret itself must not reach a log or comment.
-function assertNoSecrets(diff: WorktreeDiff, secrets: readonly string[]): void {
-  const values = secrets.map((s) => s.trim()).filter((s) => s.length >= 8);
-  const leaking = diff.files
-    .filter((f) => containsPrivateKeyMaterial(f.content) || values.some((v) => f.content.includes(v)))
-    .map((f) => redactSecrets(f.path, values));
-  if (leaking.length > 0) {
-    throw new AgentEngineError(
-      "AGENT_SECRET_IN_DIFF",
-      `The session left secret material (a runner secret, the proxy nonce or a private key) in ${leaking.join(", ")}; nothing was committed.`
-    );
-  }
 }
 
 function collectErrorBody(

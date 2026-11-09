@@ -1629,6 +1629,41 @@ describe("Implementation, Stage 1 fixes and review/CI remediation run as agent e
   });
 
   it.each([
+    { id: "installation-token-in-the-commit-message-escalates-agent_secret_leak_blocked", summary: { commit_message: "feat: a ghs_test", test_summary: "green" } },
+    { id: "llm-key-in-the-test-summary-escalates-agent_secret_leak_blocked", summary: { commit_message: "feat: a", test_summary: "ran with key_test" } }
+  ])("$id", async ({ summary }) => {
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const store = await seedState(FEATURE_INTEGRATION_PENDING_STATE);
+    const router = declareFreshTicketFlow().onHost("api.openai.com", "POST", "/v1/chat/completions", (req) =>
+      json({ choices: [{ message: { content: JSON.stringify(schemaName(req.body) === "ticket_session_summary" ? summary : { summary: "ok", findings: [] }) } }] })
+    );
+    const { engine } = scriptedEngine([changed("src/a.ts")]);
+
+    try {
+      await orchestrateIssueCommand({
+        repository: REPO,
+        commandArgs: "",
+        fallbackGithubToken: "ghs_test",
+        llmApiKey: "key_test",
+        model: "openai/gpt-test",
+        stateStore: store,
+        fetchImpl: router.fetch,
+        sandboxRunner: PASSING_SANDBOX,
+        agentEngine: engine,
+        command: "approve",
+        actor: "maintainer",
+        issueNumber: ISSUE,
+        commentId: 900
+      });
+    } finally {
+      vi.restoreAllMocks();
+    }
+
+    expect(await readState(store)).toMatchObject({ status: "suspended", last_escalation: { reason: "agent_secret_leak_blocked", ticket_number: ISSUE } });
+    expect(router.calls("POST", `${R}/git/commits`)).toBe(0);
+  });
+
+  it.each([
     { id: "no-known-job-deadline-uses-the-30-minute-session-cap", deadlineInMin: undefined, expectedMin: 30 },
     { id: "plenty-of-job-budget-keeps-the-session-cap", deadlineInMin: 120, expectedMin: 30 },
     { id: "session-ends-10-minutes-before-the-job-deadline", deadlineInMin: 25, expectedMin: 15 },

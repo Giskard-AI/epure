@@ -15,17 +15,24 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import type { ServerResponse } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AgentEngineError, type AgentSessionRequest, type WorktreeDiff } from "../src/agent/engine.js";
+import { PassThrough } from "node:stream";
+import {
+  AgentEngineError,
+  assertNoSecretMaterial,
+  type AgentSessionRequest,
+  type WorktreeDiff
+} from "../src/agent/engine.js";
 import { createPiAgentEngine, resolveVendoredPiDir } from "../src/agent/pi-engine.js";
 import { translateModelForPi } from "../src/agent/pi-models.js";
 import { listTrackedPaths, snapshotWorktree } from "../src/agent/worktree-snapshot.js";
 import { AuthenticationError, BadRequestError } from "../src/llm/errors.js";
-import type { SandboxExecutionResult } from "../src/sandbox/llm-sandbox.js";
+import type { SandboxExecutionInput, SandboxExecutionResult } from "../src/sandbox/llm-sandbox.js";
 import { isSensitiveTaskBranchPath } from "../src/sandbox/polyglot-workspace-runner.js";
 import { runWithTokenUsageLedger, TokenUsageLedger } from "../src/usage/token-usage.js";
 import { startFakeLlmUpstream, type FakeLlmUpstream } from "./fixtures/fake-llm-upstream.js";
 
 const REAL_KEY = "sk-ant-real-RunnerHeldKey1234567890ABCDEF";
+const INSTALLATION_TOKEN = "ghs_installationToken1234567890abcdef";
 const PROXY_URL = "http://127.0.0.1:4100";
 
 const tempDirs: string[] = [];
@@ -579,6 +586,42 @@ describe("createPiAgentEngine", () => {
     await expect(engine.run(sessionRequest(tempWorktree({})))).rejects.toMatchObject({ code: "AGENT_ISOLATION_UNAVAILABLE" });
     expect(sandboxRunner).toHaveBeenCalledWith(expect.objectContaining({ enforceKernelSandbox: expected }));
   });
+
+  it.each([
+    { id: "line-at-the-8-mib-cap-is-read", bytes: 8 * 1024 * 1024, killed: false, code: "AGENT_PROTOCOL_ERROR", message: /before the session settled/ },
+    { id: "line-over-the-8-mib-cap-kills-the-session", bytes: 8 * 1024 * 1024 + 1, killed: true, code: "AGENT_PROTOCOL_ERROR", message: /RPC line over/ }
+  ])("$id", async ({ bytes, killed, code, message }) => {
+    const kill = vi.fn();
+    const sandboxRunner = vi.fn(async (input: SandboxExecutionInput): Promise<SandboxExecutionResult> => {
+      const stdout = new PassThrough();
+      const session = input.interact?.({ stdin: new PassThrough(), stdout, kill: () => { kill(); stdout.end(); } });
+      stdout.write(Buffer.alloc(bytes, 0x61));
+      stdout.end();
+      await session;
+      return { isolated: true, error_code: "NONE", error_message: "", proxy_url: "", exit_code: 1, stdout: "", stderr: "", duration_ms: 0 };
+    });
+    const engine = createPiAgentEngine({ runnerEnv: {}, piDir: "/opt/pi", sandboxRunner });
+
+    await expect(engine.run(sessionRequest(tempWorktree({})))).rejects.toMatchObject({ code, message: expect.stringMatching(message) });
+    expect(kill).toHaveBeenCalledTimes(killed ? 1 : 0);
+  });
+});
+
+describe("assertNoSecretMaterial", () => {
+  it.each([
+    { id: "secret-in-the-commit-message", label: "the commit message", text: `fix: rotate ${INSTALLATION_TOKEN}`, leaks: true },
+    { id: "private-key-in-the-test-summary", label: "the test summary", text: "-----BEGIN RSA PRIVATE KEY-----\nAAAA", leaks: true },
+    { id: "clean-summary-text", label: "the test summary", text: "12 tests pass.", leaks: false }
+  ])("$id", ({ label, text, leaks }) => {
+    const check = (): void => assertNoSecretMaterial([{ label, text }], [INSTALLATION_TOKEN]);
+
+    if (leaks) {
+      expect(check).toThrow(expect.objectContaining({ code: "AGENT_SECRET_IN_DIFF", message: expect.stringContaining(label) }));
+      expect(check).not.toThrow(expect.objectContaining({ message: expect.stringContaining(INSTALLATION_TOKEN) }));
+    } else {
+      expect(check).not.toThrow();
+    }
+  });
 });
 
 const PI_AVAILABLE = (() => {
@@ -685,6 +728,21 @@ describe.skipIf(!PI_AVAILABLE)("Pi agent engine in the sandbox, against a fake p
       expected: { name: "AgentEngineError", code: "AGENT_SECRET_IN_DIFF" }
     },
     {
+      id: "installation-token-in-a-file-path-fails-the-session-without-echoing-it",
+      turns: [
+        anthropicStream({ type: "tool_use", id: "toolu_1", name: "write", input: { path: `notes-${INSTALLATION_TOKEN}.txt`, content: "x\n" } }, { input: 10, output: 5 }),
+        anthropicStream({ type: "text", text: "Done." }, { input: 10, output: 5 })
+      ],
+      maxLlmRequests: undefined,
+      expected: { name: "AgentEngineError", code: "AGENT_SECRET_IN_DIFF" }
+    },
+    {
+      id: "runner-secret-in-the-final-message-fails-the-session-without-echoing-it",
+      turns: [anthropicStream({ type: "text", text: `Used key ${REAL_KEY}.` }, { input: 10, output: 5 })],
+      maxLlmRequests: undefined,
+      expected: { name: "AgentEngineError", code: "AGENT_SECRET_IN_DIFF" }
+    },
+    {
       id: "session-past-its-llm-request-cap-is-aborted",
       turns: [
         anthropicStream({ type: "tool_use", id: "toolu_1", name: "bash", input: { command: "true" } }, { input: 10, output: 5 })
@@ -701,12 +759,14 @@ describe.skipIf(!PI_AVAILABLE)("Pi agent engine in the sandbox, against a fake p
     const run = engine.run(
       sessionRequest(worktree, {
         maxLlmRequests,
+        secrets: [INSTALLATION_TOKEN],
         providers: { anthropic: { provider: "anthropic", base_url: upstream.url, api_key: REAL_KEY } }
       })
     );
 
     await expect(run).rejects.toMatchObject(expected);
     await expect(run).rejects.not.toHaveProperty("message", expect.stringContaining(REAL_KEY));
+    await expect(run).rejects.not.toHaveProperty("message", expect.stringContaining(INSTALLATION_TOKEN));
     if (maxLlmRequests !== undefined) {
       expect(upstream.requests).toHaveLength(maxLlmRequests);
     }

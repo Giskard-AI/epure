@@ -1,5 +1,6 @@
 import {
   AgentEngineError,
+  assertNoSecretMaterial,
   type AgentEngine,
   type AgentRole,
   type AgentThinkingLevel,
@@ -36,9 +37,10 @@ import {
   type ReviewerAgentName
 } from "../../review/reviewer-roster.js";
 import { generateSemanticSquashCommitFromDiff } from "../../review/squash-commit-generator.js";
-import type {
-  SandboxExecutionInput,
-  SandboxExecutionResult
+import {
+  collectRunnerSecretValues,
+  type SandboxExecutionInput,
+  type SandboxExecutionResult
 } from "../../sandbox/llm-sandbox.js";
 import {
   formatVerificationToolingGuideMarkdown,
@@ -404,7 +406,8 @@ async function runTicketAgentSession(
     thinking: params.thinkingLevel ? THINKING_LEVELS[params.thinkingLevel] : undefined,
     trackedPaths: session.trackedPaths,
     isProtectedPath: (path) => isSensitiveTaskBranchPath(path, params.reviewersDir),
-    maxLlmRequests: session.maxLlmRequests
+    maxLlmRequests: session.maxLlmRequests,
+    secrets: [params.gh.token]
   });
 
   for (const f of diff.files) {
@@ -431,6 +434,14 @@ async function runTicketAgentSession(
     ...diff.deleted_files.map((p) => `- ${p} (supprimé)`)
   ];
   const summary = await summarizeAgentSession(params, changedPaths, finalMessage, session.jobDeadlineMs);
+  // The summary reaches the commit and the PR body.
+  assertNoSecretMaterial(
+    [
+      { label: "the commit message", text: summary.commit_message },
+      { label: "the test summary", text: summary.test_summary }
+    ],
+    [params.gh.token, params.llmApiKey, ...collectRunnerSecretValues(process.env)]
+  );
 
   return {
     commit_message: summary.commit_message,
@@ -447,6 +458,8 @@ const THINKING_LEVELS = {
   MEDIUM: "medium",
   HIGH: "high"
 } as const satisfies Record<NonNullable<GenerateTicketImplementationWithFallbackParams["thinkingLevel"]>, AgentThinkingLevel>;
+
+const MAX_SUMMARIZED_FINAL_MESSAGE_CHARS = 16_000;
 
 // A failed summary call (other than auth or quota) falls back to a deterministic message instead of losing the session.
 async function summarizeAgentSession(
@@ -478,7 +491,12 @@ async function summarizeAgentSession(
       changedPaths.length > 0 ? changedPaths.join("\n") : "(aucun)",
       "",
       "Compte rendu de la session :",
-      wrapUntrustedContent("untrusted_test_output", finalMessage)
+      wrapUntrustedContent(
+        "untrusted_test_output",
+        finalMessage.length > MAX_SUMMARIZED_FINAL_MESSAGE_CHARS
+          ? `${finalMessage.slice(0, MAX_SUMMARIZED_FINAL_MESSAGE_CHARS)}\n[… compte rendu tronqué]`
+          : finalMessage
+      )
     ].join("\n"),
     temperature: 0.1,
     responseSchema: TICKET_SESSION_SUMMARY_SCHEMA,
