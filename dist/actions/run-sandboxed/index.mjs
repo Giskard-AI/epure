@@ -206,9 +206,9 @@ function resolveProviderUpstream(provider, providerConfig, env = process.env) {
 // src/usage/token-usage.ts
 import { AsyncLocalStorage } from "node:async_hooks";
 var usageContext = new AsyncLocalStorage();
-function recordTokenUsage(usage) {
+function recordTokenUsage(usage, options) {
   const context = usageContext.getStore();
-  context?.ledger.record(context.attribution, usage);
+  context?.ledger.record(context.attribution, usage, options);
 }
 function bindToUsageContext() {
   return AsyncLocalStorage.snapshot();
@@ -277,16 +277,16 @@ function extractLLMTokenUsage(provider, model, body) {
 function formatLLMUsageLogLine(usage) {
   return `${LLM_USAGE_LOG_PREFIX} ${JSON.stringify(usage)}`;
 }
-function reportLLMUsage(usage) {
+function reportLLMUsage(usage, options) {
   if (!("unavailable" in usage)) {
     process.stdout.write(`${formatLLMUsageLogLine(usage)}
 `);
   }
-  recordTokenUsage(usage);
+  recordTokenUsage(usage, options);
 }
-function usageReporter() {
+function usageReporter(options) {
   const inCallerContext = bindToUsageContext();
-  return (usage) => inCallerContext(() => reportLLMUsage(usage));
+  return (usage) => inCallerContext(() => reportLLMUsage(usage, options));
 }
 
 // src/llm/client.ts
@@ -3046,7 +3046,8 @@ async function createLlmSandboxProxy(options) {
   const agent = target.protocol === "https:" ? new HttpsAgent({ keepAlive: true }) : new HttpAgent({ keepAlive: true });
   const proxyNonce = randomBytes(24).toString("hex");
   const nonceBytes = Buffer.from(proxyNonce);
-  const reportUsage = usageReporter();
+  const reportUsage = usageReporter({ labelledBySandbox: true });
+  const requestBodyTimeoutMs = options.requestBodyTimeoutMs ?? DEFAULT_LLM_REQUEST_TIMEOUT_MS;
   const relay = (req, res) => {
     const rawUrl = req.url ?? "/";
     if (!rawUrl.startsWith("/")) {
@@ -3151,7 +3152,16 @@ async function createLlmSandboxProxy(options) {
         callback();
       }
     });
+    const bodyTimer = setTimeout(
+      () => fail(
+        408,
+        "PROXY_REQUEST_TIMEOUT",
+        `Sandbox LLM proxy did not receive the request body within ${requestBodyTimeoutMs} ms.`
+      ),
+      requestBodyTimeoutMs
+    );
     pipeline(req, collect, (err) => {
+      clearTimeout(bodyTimer);
       if (!err) {
         try {
           forward(meterRequest(upstream.provider, url.pathname, Buffer.concat(chunks), req.headers["content-encoding"]));
@@ -3218,7 +3228,7 @@ async function createLlmSandboxProxy(options) {
   };
   let inFlight = 0;
   const waiting = [];
-  const server = createServer((req, res) => {
+  const server = createServer({ requestTimeout: 0 }, (req, res) => {
     const start = () => {
       inFlight += 1;
       res.once("close", () => {
