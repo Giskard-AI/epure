@@ -257,6 +257,40 @@ describe("Sandbox LLM proxy & untrusted code credential isolation (#98)", () => 
     expect(await exitsWithin(Number(result.stdout.trim()), 2_000)).toBe(true);
   });
 
+  it("runInUntrustedCodeSandbox [interactive-session-talks-over-stdio-and-reads-proxy-aware-home-files]", async () => {
+    const upstream = await sseUpstream();
+    let reply = "";
+    const result = await runInUntrustedCodeSandbox({
+      isolationAvailable: true,
+      runnerEnv: { PATH: process.env.PATH, OPENAI_API_KEY: REAL_KEY, OPENAI_BASE_URL: upstream.url },
+      kernelCapabilities: { landrunAvailable: false, bubblewrapAvailable: false },
+      command: process.execPath,
+      args: [
+        "-e",
+        "process.stdin.once('data', (d) => { const cfg = JSON.parse(require('node:fs').readFileSync(process.env.HOME + '/.cfg/route.json', 'utf8')); process.stdout.write(JSON.stringify({ got: String(d).trim(), cfg, nonce: process.env.EPURE_LLM_PROXY_NONCE }) + '\\n'); })"
+      ],
+      llm: { model: "openai/gpt-x" },
+      agentSession: {
+        homeFiles: (proxy) => ({ ".cfg/route.json": JSON.stringify({ url: proxy?.proxyUrl, nonce: proxy?.proxyNonce }) })
+      },
+      interact: async ({ stdin, stdout }) => {
+        stdin.write("ping\n");
+        for await (const chunk of stdout) {
+          reply += String(chunk);
+          if (reply.includes("\n")) {
+            return;
+          }
+        }
+      }
+    });
+    const parsed = JSON.parse(reply) as { got: string; cfg: { url: string; nonce: string }; nonce: string };
+
+    expect(result.error_code).toBe("NONE");
+    expect(result.stdout).toBe("");
+    expect(parsed.got).toBe("ping");
+    expect(parsed.cfg).toEqual({ url: result.proxy_url, nonce: parsed.nonce });
+  });
+
   const RUNNER_KEYS = {
     PATH: "/usr/bin",
     OPENAI_API_KEY: REAL_KEY,

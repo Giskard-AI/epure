@@ -1,5 +1,5 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import {
   Agent as HttpAgent,
   createServer,
@@ -14,7 +14,7 @@ import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 import { spawn, spawnSync } from "node:child_process";
 import type { AddressInfo } from "node:net";
 import { dirname, resolve } from "node:path";
-import { pipeline, Transform, Writable } from "node:stream";
+import { pipeline, Transform, Writable, type Readable } from "node:stream";
 import { containsPrivateKeyMaterial } from "../auth/github-apps.js";
 import { redactSecrets } from "../auth/issue-command-gate.js";
 import {
@@ -116,6 +116,15 @@ export interface SandboxCommand {
 export interface SandboxAgentSession {
   // Run there first under https_only, before the LLM proxy and its nonce exist.
   readonly installCommands?: readonly SandboxCommand[] | undefined;
+  // Written under HOME (relative paths) once the proxy exists, e.g. an agent's model config.
+  readonly homeFiles?:
+    | ((proxy: SandboxProxyEndpoint | undefined) => Readonly<Record<string, string>>)
+    | undefined;
+}
+
+export interface SandboxSessionIo {
+  readonly stdin: Writable;
+  readonly stdout: Readable;
 }
 
 export interface SandboxExecutionInput {
@@ -132,6 +141,9 @@ export interface SandboxExecutionInput {
   // Readable and executable inside the sandbox, e.g. a vendored agent engine.
   readonly readOnlyPaths?: readonly string[] | undefined;
   readonly agentSession?: SandboxAgentSession | undefined;
+  readonly observeLlmResponse?: CreateLlmSandboxProxyOptions["observeResponse"];
+  // Talks to the command over stdin/stdout (stdout is then not captured); stdin is closed when it settles.
+  readonly interact?: ((io: SandboxSessionIo) => Promise<void>) | undefined;
 }
 
 export interface SandboxExecutionResult {
@@ -970,7 +982,8 @@ export async function runInUntrustedCodeSandbox(
     command: SandboxCommand,
     policy: SandboxNetworkPolicy,
     env: Record<string, string>,
-    proxyPort?: number | undefined
+    proxyPort?: number | undefined,
+    interact?: SandboxExecutionInput["interact"]
   ): Promise<SpawnedOutput> => {
     if (policy === "https_only") {
       const home = env.HOME?.trim() ?? "";
@@ -995,7 +1008,7 @@ export async function runInUntrustedCodeSandbox(
       readOnlyPaths: input.readOnlyPaths,
       agentDir
     });
-    return spawnCaptured(wrapped.command, wrapped.args, cwd, env, timeoutMs);
+    return spawnCaptured(wrapped.command, wrapped.args, cwd, env, timeoutMs, interact);
   };
 
   let proxy: LlmSandboxProxyHandle | undefined;
@@ -1021,13 +1034,25 @@ export async function runInUntrustedCodeSandbox(
     }
 
     proxy = llmTarget
-      ? await createLlmSandboxProxy({ upstream: llmTarget.upstream, apiKey: llmTarget.apiKey })
+      ? await createLlmSandboxProxy({
+          upstream: llmTarget.upstream,
+          apiKey: llmTarget.apiKey,
+          observeResponse: input.observeLlmResponse
+        })
       : undefined;
+    if (agentDir) {
+      for (const [relPath, content] of Object.entries(input.agentSession?.homeFiles?.(proxy) ?? {})) {
+        const target = resolve(agentDir, relPath);
+        mkdirSync(dirname(target), { recursive: true });
+        writeFileSync(target, content, { encoding: "utf8", mode: 0o600 });
+      }
+    }
     const childResult = await runConfined(
       { command: input.command, args: input.args },
       networkPolicy,
       { ...buildSanitizedSandboxEnv(input.runnerEnv, proxy), ...agentEnv },
-      proxy ? parsePortFromProxyUrl(proxy.proxyUrl) : undefined
+      proxy ? parsePortFromProxyUrl(proxy.proxyUrl) : undefined,
+      input.interact
     );
     const ok = childResult.exitCode === 0;
 
@@ -1074,15 +1099,19 @@ function spawnCaptured(
   args: readonly string[],
   cwd: string,
   env: Record<string, string>,
-  timeoutMs: number
+  timeoutMs: number,
+  interact?: SandboxExecutionInput["interact"]
 ): Promise<SpawnedOutput> {
   return new Promise((resolvePromise) => {
     // Own process group, so a phase's background processes die with it instead of outliving it.
     const child = spawn(command, [...args], {
       cwd,
       env,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe"],
       detached: true
+    });
+    child.stdin.on("error", () => {
+      // the child exited before reading everything it was sent
     });
     const killGroup = (): void => {
       if (child.pid !== undefined) {
@@ -1100,7 +1129,15 @@ function spawnCaptured(
     const timer = setTimeout(killGroup, timeoutMs);
     child.on("exit", killGroup);
 
-    child.stdout.on("data", (chunk: Buffer) => stdoutChunks.push(chunk));
+    if (interact) {
+      void interact({ stdin: child.stdin, stdout: child.stdout }).then(
+        () => child.stdin.end(),
+        () => killGroup()
+      );
+    } else {
+      child.stdin.end();
+      child.stdout.on("data", (chunk: Buffer) => stdoutChunks.push(chunk));
+    }
     child.stderr.on("data", (chunk: Buffer) => stderrChunks.push(chunk));
 
     child.on("error", (err) => {
