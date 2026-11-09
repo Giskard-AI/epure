@@ -2,6 +2,7 @@ import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { AgentEngineError, type AgentEngine, type AgentSessionRequest, type AgentSessionResult } from "../src/agent/engine.js";
+import { BadRequestError } from "../src/llm/errors.js";
 import { ClosureNotProcessedError, EscalationNotRecordedError, orchestrateIssueCommand } from "../src/orchestrator/issue-orchestrator.js";
 import { GitHubRateLimitError } from "../src/orchestrator/github/rate-limit.js";
 import { AmbiguousFeatureBranchError, findExistingFeatureBranch } from "../src/orchestrator/phases/epic-closure.js";
@@ -70,6 +71,48 @@ async function seedState(
   return store;
 }
 
+function routerAgentEngine(router: GitHubMockRouter): AgentEngine {
+  return {
+    name: "test-engine",
+    run: async (req) => {
+      if (req.role !== "implementer" && req.role !== "fixer") {
+        return { finalMessage: "", diff: { files: [], deleted_files: [], skipped: [] } };
+      }
+      const res = await router.fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: req.model,
+          messages: [
+            { role: "system", content: req.instructions },
+            { role: "user", content: req.prompt }
+          ],
+          response_format: {
+            type: "json_schema",
+            json_schema: { name: "generated_ticket_implementation" }
+          }
+        })
+      });
+      if (res.status === 400) {
+        throw new BadRequestError("invalid request", { provider: "openai", status: 400 });
+      }
+      const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+      const content = JSON.parse(data.choices?.[0]?.message?.content ?? "{}") as { files?: Array<{ path: string; content: string }> };
+      if (!Array.isArray(content.files)) {
+        return { finalMessage: "", diff: { files: [], deleted_files: [], skipped: [] } };
+      }
+      return {
+        finalMessage: "Wrote src/a.ts; vitest green.",
+        diff: {
+          files: content.files.map((f) => ({ path: f.path, content: f.content, mode: "100644" as const })),
+          deleted_files: [],
+          skipped: []
+        }
+      };
+    }
+  };
+}
+
 async function run(
   router: GitHubMockRouter,
   store: GitRefStateStore,
@@ -83,6 +126,7 @@ async function run(
     model: "openai/gpt-test",
     stateStore: store,
     fetchImpl: router.fetch,
+    agentEngine: routerAgentEngine(router),
     ...input
   });
 }
@@ -821,9 +865,9 @@ describe("Resume context: comments after the last processed command reach the re
 
 describe("Planning LLM rounds can always read the repository", () => {
   it.each([
-    { id: "plan-command-outside-github-actions-sends-the-repo-read-tools-with-the-grill-round", command: "plan" },
-    { id: "to-spec-command-outside-github-actions-sends-the-repo-read-tools-with-the-spec-round", command: "to-spec" }
-  ] as const)("$id", async ({ command }) => {
+    { id: "plan-command-outside-github-actions-sends-the-repo-read-tools-with-the-grill-round", command: "plan", expectedRole: "griller", expectedToolPolicy: "read_only" },
+    { id: "to-spec-command-outside-github-actions-sends-the-repo-read-tools-with-the-spec-round", command: "to-spec", expectedRole: "spec_writer", expectedToolPolicy: "write" }
+  ] as const)("$id", async ({ command, expectedRole, expectedToolPolicy }) => {
     vi.stubEnv("GITHUB_ACTIONS", "");
     const store = await seedState({ phase: "grilling", status: "active", subphase: "idle", active_branch: "plan/77-async-ci-feature", plan_branch: "plan/77-async-ci-feature" });
     const router = declareIssueWrites(declareIssueReads(createGitHubMockRouter()))
@@ -831,15 +875,38 @@ describe("Planning LLM rounds can always read the repository", () => {
       .on("POST", `${R}/git/refs`, json({ object: { sha: "branch-sha" } }, 201))
       .onHost("api.openai.com", "POST", "/v1/chat/completions", json({ error: { message: "stop after capturing the planning prompt" } }, 400));
 
+    const requests: AgentSessionRequest[] = [];
+    const recordingEngine: AgentEngine = {
+      name: "pi",
+      run: async (req) => {
+        requests.push(req);
+        return { finalMessage: "", diff: { files: [], deleted_files: [], skipped: [] } };
+      }
+    };
+
     try {
-      await run(router, store, { command, actor: "maintainer", issueNumber: ISSUE, commentId: 900 });
+      await orchestrateIssueCommand({
+        repository: REPO,
+        commandArgs: "",
+        fallbackGithubToken: "ghs_test",
+        llmApiKey: "key_test",
+        model: "openai/gpt-test",
+        stateStore: store,
+        fetchImpl: router.fetch,
+        agentEngine: recordingEngine,
+        command,
+        actor: "maintainer",
+        issueNumber: ISSUE,
+        commentId: 900
+      });
     } finally {
       vi.unstubAllEnvs();
     }
-    const llmRequest = router.requests.find((r) => r.host === "api.openai.com");
 
     expect(router.unmatched).toEqual([]);
-    expect(JSON.stringify(llmRequest?.body)).toContain("read_repo_file");
+    expect(requests.length).toBeGreaterThanOrEqual(1);
+    expect(requests[0]?.role).toBe(expectedRole);
+    expect(requests[0]?.toolPolicy).toBe(expectedToolPolicy);
   });
 });
 
@@ -1193,6 +1260,7 @@ describe("One remediation budget per ticket shared by fix rounds and Stage 1 ret
       model: "openai/gpt-test",
       stateStore: store,
       fetchImpl: router.fetch,
+      agentEngine: routerAgentEngine(router),
       sandboxRunner: FAILING_SANDBOX,
       command: "continue",
       actor: "github-actions[bot]",
@@ -1732,6 +1800,7 @@ describe("One remediation budget per feature PR shared by fix rounds and Stage 1
       model: "openai/gpt-test",
       stateStore: store,
       fetchImpl: router.fetch,
+      agentEngine: routerAgentEngine(router),
       sandboxRunner: FAILING_SANDBOX,
       command: "continue",
       actor: "github-actions[bot]",
@@ -1773,6 +1842,7 @@ describe("A resume command after budget exhaustion grants one fresh budget and r
       model: "openai/gpt-test",
       stateStore: store,
       fetchImpl: router.fetch,
+      agentEngine: routerAgentEngine(router),
       sandboxRunner: FAILING_SANDBOX,
       command,
       actor: "maintainer",

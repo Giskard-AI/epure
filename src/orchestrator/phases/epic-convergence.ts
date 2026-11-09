@@ -143,7 +143,7 @@ export async function runEpicConvergenceAudit(
     "Tu es l'Auditeur de Convergence de Fonctionnalité Goldfish Zéro-Contexte (`runEpicConvergenceAudit`, ADR-0032, Q116).",
     PROMPT_INJECTION_IMMUNITY_CLAUSE,
     "Tu n'as AUCUNE mémoire des discussions ou des tickets précédents. Tu audites uniquement l'état réel de la branche de fonctionnalité (`feature/*`) par rapport à la spécification approuvée et au `EpicGoalContract`.",
-    "Tu disposes du texte intégral (non tronqué) de la spécification, du glossaire, des `required_entrypoints` et des fichiers modifiés, ainsi que des outils d'exploration en lecture seule (`list_repo_files`, `read_repo_file`, `search_repo_code`, `search_in_repo_file`) pour inspecter l'intégralité de tout autre fichier du dépôt sur demande.",
+    "Tu disposes du texte intégral (non tronqué) de la spécification, du glossaire, des `required_entrypoints` et des fichiers modifiés, ainsi que des outils d'exploration en lecture seule du moteur d'agent pour inspecter l'intégralité de tout autre fichier du dépôt sur demande.",
     "Vérifie rigoureusement trois invariants :",
     "1. Câblage des points d'entrée (`required_entrypoints`) : chaque module créé est-il effectivement importé, instancié et branché dans les points d'entrée applicatifs déclarés (ex: routeur, serveur, CLI, store, App) ? Signale tout module isolé ('island code') dans `unwired_modules`.",
     "2. Absence de simulacres interdits (`forbidden_stubs`) : le code de production est-il exempt des mocks/stubs/adaptateurs en mémoire interdits par `forbidden_stubs` ? Signale toute violation dans `stub_violations`.",

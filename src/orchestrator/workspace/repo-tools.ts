@@ -704,7 +704,7 @@ export function buildCompactWorkspaceFilesContext(
   if (catalogEntries.length > 0) {
     sections.push(
       [
-        "--- WORKSPACE FILE CATALOG (use `read_repo_file` or `search_in_repo_file` to inspect full content) ---",
+        "--- WORKSPACE FILE CATALOG (inspect files in the workspace for full content) ---",
         ...catalogEntries
       ].join("\n")
     );

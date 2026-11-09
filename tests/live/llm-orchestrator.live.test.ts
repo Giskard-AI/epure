@@ -471,7 +471,7 @@ describeLive(
         expect(planRes.status).toBe("active");
         expect(planRes.created_ticket_numbers).toEqual([]);
         expect(ghState.llmRequestBodies.flatMap(declaredToolNames)).toEqual(
-          expect.arrayContaining([expect.stringMatching(/^(read_repo_file|list_repo_files)$/)])
+          expect.arrayContaining([expect.stringMatching(/^(web_search|web_fetch)$/)])
         );
 
         // Stage 2: Human reply answering all questions and confirming everything is decided

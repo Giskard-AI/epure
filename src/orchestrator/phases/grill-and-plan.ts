@@ -761,7 +761,7 @@ export async function runGrillAndPlanPhase(params: {
     const grillSystemInstruction = [
       "Tu es l'architecte EPURE conduisant un entretien multi-tours `/grill-with-docs` sur une GitHub Issue.",
       PROMPT_INJECTION_IMMUNITY_CLAUSE,
-      "Si une question peut être éclairée ou résolue en inspectant le dépôt (fichiers Markdown, ADRs, GLOSSARY, code source), utilise d'abord les outils d'exploration (`list_repo_files`, `read_repo_file`, `search_in_repo_file`) avant de poser tes questions.",
+      "Si une question peut être éclairée ou résolue en inspectant le dépôt (fichiers Markdown, ADRs, GLOSSARY, code source), utilise d'abord les outils d'exploration (lecture et recherche de fichiers dans le dépôt) avant de poser tes questions.",
       "Parcours l'arbre des décisions en rounds successifs (la « frontière » des décisions dont les prérequis sont connus).",
       "Pose les 3 à 4 questions de cadrage décisives de ce premier round (architecture, invariants métiers, gestion d'état/persistance, couverture de tests TDD) au format :",
       "❓ **Q1** - **<Titre>** : <Question>",
@@ -872,7 +872,7 @@ export async function runGrillAndPlanPhase(params: {
       "Tu es l'architecte EPURE conduisant un entretien multi-tours `/grill-with-docs` (arbre de décisions par rounds).",
       PROMPT_INJECTION_IMMUNITY_CLAUSE,
       "Analyse l'issue initiale et l'historique complet de la conversation (questions posées par l'Architecte EPURE et réponses de l'Humain).",
-      "Utilise si nécessaire les outils d'exploration (`list_repo_files`, `read_repo_file`, `search_in_repo_file`) pour inspecter les fichiers réels du dépôt (docs, ADRs, GLOSSARY, code source) et ancrer tes questions ou ta synthèse dans la réalité du code.",
+      "Utilise si nécessaire les outils d'exploration (lecture et recherche de fichiers dans le dépôt) pour inspecter les fichiers réels du dépôt (docs, ADRs, GLOSSARY, code source) et ancrer tes questions ou ta synthèse dans la réalité du code.",
       "Détermine si la frontière de l'arbre de décisions est vide (`frontier_resolved: true`) ou s'il reste des questions non répondues, des contre-propositions humaines ouvrant de nouvelles branches techniques/métiers, ou des ambiguïtés concrètes dans le dépôt nécessitant un round supplémentaire (`frontier_resolved: false`).",
       "Règles de décision :",
       "- Si l'humain n'a répondu que partiellement aux questions du round précédent, a posé une question en retour, a rejeté une recommandation sans préciser l'alternative, ou si sa réponse débloque un choix architectural/documentaire aval concret non encore tranché -> `frontier_resolved: false` et génère les questions de suivi numérotées (`❓ **Q...**` + `➡️ **Recommandation**`).",

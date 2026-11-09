@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { runGoldfishSpecAudit } from "../src/orchestrator/phases/grill-and-plan.js";
 import { EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT } from "../src/orchestrator/prompts/code-discipline.js";
-import { buildRepoExplorationToolsAndHandlers } from "../src/orchestrator/workspace/repo-tools.js";
 import {
   buildWebExplorationToolsAndHandlers,
   cleanHtmlToReadableText,
@@ -320,34 +319,18 @@ describe("EPURE v1.2 Chantier 3 & 4 — Ponytail 5, Goldfish EGM & Anti-SSRF Web
         );
       };
 
-      const ghMock = {
-        readSingleBranchFile: async () => "export {};"
-      } as unknown as GitHubRestHelper;
-
-      const exploration = buildRepoExplorationToolsAndHandlers({
-        branch: "dev",
-        featureBranch: "feature/1-web",
-        accumulatedFiles: new Map(),
-        devBranchPaths: ["src/index.ts"],
-        gh: ghMock,
-        phase: "implementation",
+      const exploration = buildWebExplorationToolsAndHandlers({
+        phase: "plan",
         webToolsConfig: {
           enabled: true,
           phases: ["plan", "spec", "implementation"],
-          max_requests_per_run: 2,
-          timeout_ms: 5000,
-          max_fetch_bytes: 1024
+          max_requests_per_run: 2
         },
         fetchImpl: mockFetch
       });
 
-      expect(exploration.tools?.map((t) => t.name)).toEqual([
-        "list_repo_files",
-        "search_in_repo_file",
-        "read_repo_file",
-        "web_search",
-        "web_fetch"
-      ]);
+      const toolNames = exploration.tools.map((t) => t.name);
+      expect(toolNames).toEqual(["web_search", "web_fetch"]);
 
       const searchResult = (await exploration.toolHandlers!.web_search!({
         query: "vitest",
