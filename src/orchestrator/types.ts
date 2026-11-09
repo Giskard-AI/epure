@@ -1,3 +1,4 @@
+import type { AgentEngine } from "../agent/engine.js";
 import type { EpureCommandName } from "../auth/issue-command-gate.js";
 import type {
   AgentsConfig,
@@ -155,6 +156,8 @@ export interface OrchestrateIssueInput {
     | ((input: SandboxExecutionInput) => Promise<SandboxExecutionResult>)
     | undefined;
   readonly asyncCiContinuation?: boolean | undefined;
+  // Runs implementation, Stage 1 fixes and review/CI remediation; without it they use the in-house tool loop.
+  readonly agentEngine?: AgentEngine | undefined;
   readonly triggerHeadSha?: string | undefined;
   // Identifies this run in the plan's lease (`claimed_by_run_id`); a random id when absent.
   readonly runId?: string | undefined;

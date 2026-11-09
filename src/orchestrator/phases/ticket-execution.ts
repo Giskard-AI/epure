@@ -1,3 +1,4 @@
+import type { AgentEngine, AgentRole } from "../../agent/engine.js";
 import { redactSecrets } from "../../auth/issue-command-gate.js";
 import {
   discoverVerificationProfile,
@@ -30,6 +31,7 @@ import type {
 import {
   formatVerificationToolingGuideMarkdown,
   prepareRepositorySandboxWorkspace,
+  syncWorkspaceFiles,
   validateWorkspaceFileOperations
 } from "../../sandbox/polyglot-workspace-runner.js";
 import {
@@ -62,6 +64,10 @@ import {
 } from "../github/rest-client.js";
 import { EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT } from "../prompts/code-discipline.js";
 import { formatResumeContextPromptLines } from "../prompts/resume-context.js";
+import {
+  TICKET_SESSION_SUMMARY_SCHEMA,
+  type TicketSessionSummary
+} from "../prompts/schemas.js";
 import {
   createGeneratedTicketImplementationSchema,
   type EscalateToNeedsHumanFn,
@@ -127,6 +133,8 @@ export interface RunTicketExecutionLoopParams {
   readonly resumeContextMarkdown?: string | undefined;
   // Moves the epic to `done` and returns its result when a human merged the feature PR meanwhile.
   readonly stopIfFeaturePrMerged: () => Promise<OrchestrateIssueResult | null>;
+  // Implementation, Stage 1 fixes and review/CI remediation run as sessions of this engine when set.
+  readonly agentEngine?: AgentEngine | undefined;
 }
 
 export interface RunTicketExecutionLoopOutcome {
@@ -258,11 +266,101 @@ interface GenerateTicketImplementationWithFallbackParams {
   readonly phaseModels: ResolvedPhaseModels;
   readonly addTransientRetriesUsed: (delta: number) => void;
   readonly fetchImpl?: typeof fetch | undefined;
+  readonly agentSession?: TicketAgentSession | undefined;
+}
+
+interface TicketAgentSession {
+  readonly engine: AgentEngine;
+  readonly role: AgentRole;
+  // The Stage 1 checkout; it is brought to the ticket's current files before the session.
+  readonly worktree: string;
+}
+
+const TICKET_AGENT_SESSION_TIMEOUT_MS = 30 * 60 * 1000;
+
+const TICKET_AGENT_ROLE_HEADLINES: Record<AgentRole, string> = {
+  implementer: "Tu es un ingénieur TDD EPURE implémentant un ticket approuvé.",
+  fixer:
+    "Tu es un ingénieur TDD EPURE corrigeant les échecs décrits dans le message (vérification Stage 1, constats 'must_fix' de revue, CI externe) en gardant 100% des cibles Stage 1 au vert."
+};
+
+function ticketAgentInstructions(role: AgentRole, reviewersDir: string): string {
+  return [
+    TICKET_AGENT_ROLE_HEADLINES[role],
+    PROMPT_INJECTION_IMMUNITY_CLAUSE,
+    "Tu travailles directement dans le checkout du dépôt (répertoire courant) avec tes outils : les fichiers que tu laisses modifiés, créés ou supprimés constituent le livrable. Les outils `*_repo_file` et le schéma JSON évoqués dans le message n'existent pas dans cette session.",
+    "Écris des tests paramétrés couvrant les critères d'acceptation et cas limites, et du code propre qui les fait passer. Lance les commandes de vérification du guide quand c'est possible ; le réseau est coupé (hors LLM), n'installe aucune dépendance.",
+    `Ne modifie JAMAIS ${reviewersDir}/**, .github/workflows/**, .github/agents.yml, .env* ni .git/.`,
+    "Termine par un court compte rendu : fichiers changés, tests ajoutés et commandes lancées avec leur résultat.",
+    "",
+    EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
+  ].join("\n");
+}
+
+// Agent session, then a direct structured-output call for the commit message: the diff is the worktree's.
+async function runTicketAgentSession(
+  params: GenerateTicketImplementationWithFallbackParams,
+  session: TicketAgentSession
+): Promise<GeneratedTicketImplementation> {
+  syncWorkspaceFiles(session.worktree, params.accumulatedFiles, params.deletedFilesSet);
+  const { finalMessage, diff } = await session.engine.run({
+    role: session.role,
+    toolPolicy: "write",
+    instructions: ticketAgentInstructions(session.role, params.reviewersDir),
+    prompt: params.prompt,
+    worktree: session.worktree,
+    timeoutMs: TICKET_AGENT_SESSION_TIMEOUT_MS,
+    model: params.phaseModels.implementationModel,
+    providers: params.phaseModels.providers
+  });
+
+  const changedPaths = [
+    ...diff.files.map((f) => `- ${f.path}`),
+    ...diff.deleted_files.map((p) => `- ${p} (supprimé)`)
+  ];
+  const summary = await callLlmJson<TicketSessionSummary>({
+    apiKey: params.llmApiKey,
+    model: params.phaseModels.implementationModel,
+    providers: params.phaseModels.providers,
+    maxTransientRetries: params.phaseModels.maxTransientRetries,
+    transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
+    requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+    onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
+    logLabel: params.logLabel ? `${params.logLabel}/summary` : undefined,
+    systemInstruction: [
+      "Tu rédiges le message de commit (Conventional Commits) et le résumé de tests des changements qu'une session d'agent a laissés dans le dépôt.",
+      PROMPT_INJECTION_IMMUNITY_CLAUSE,
+      'Renvoie un objet JSON : { "commit_message": "...", "test_summary": "..." }.'
+    ].join("\n"),
+    prompt: [
+      `Ticket #${params.ticket.ticketIssueNumber} : ${params.ticket.title}`,
+      "",
+      "Fichiers changés :",
+      changedPaths.length > 0 ? changedPaths.join("\n") : "(aucun)",
+      "",
+      "Compte rendu de la session :",
+      wrapUntrustedContent("untrusted_test_output", finalMessage)
+    ].join("\n"),
+    temperature: 0.1,
+    responseSchema: TICKET_SESSION_SUMMARY_SCHEMA,
+    fetchImpl: params.fetchImpl
+  });
+
+  return {
+    commit_message: summary.commit_message,
+    test_summary: summary.test_summary,
+    files: [...diff.files],
+    patches: [],
+    deleted_files: [...diff.deleted_files]
+  };
 }
 
 async function generateTicketImplementationWithFallback(
   params: GenerateTicketImplementationWithFallbackParams
 ): Promise<GeneratedTicketImplementation> {
+  if (params.agentSession) {
+    return runTicketAgentSession(params, params.agentSession);
+  }
   const stagedBuffer: StagedTicketImplementationBuffer =
     createStagedTicketImplementationBuffer(params.ensureBaselineLoaded);
   const schemaWithStaged = createGeneratedTicketImplementationSchema({
@@ -781,6 +879,10 @@ export async function runTicketExecutionLoop(
         formatVerificationToolingGuideMarkdown(verificationProfile);
     }
     const bootstrappedTargets = new Set<string>();
+    const agentSessionFor = (role: AgentRole): TicketAgentSession | undefined =>
+      params.agentEngine
+        ? { engine: params.agentEngine, role, worktree: sandboxWorkspace.workDir }
+        : undefined;
 
     let taskPr: { number: number; html_url: string; head_sha: string } | undefined;
     const initialTicketFixAttempts =
@@ -1080,7 +1182,8 @@ export async function runTicketExecutionLoop(
           llmApiKey: params.llmApiKey,
           phaseModels: params.phaseModels,
           addTransientRetriesUsed: params.addTransientRetriesUsed,
-          fetchImpl: params.fetchImpl
+          fetchImpl: params.fetchImpl,
+          agentSession: agentSessionFor("implementer")
         }));
 
         const preStage1Check = validateWorkspaceFileOperations({
@@ -1212,7 +1315,8 @@ export async function runTicketExecutionLoop(
             llmApiKey: params.llmApiKey,
             phaseModels: params.phaseModels,
             addTransientRetriesUsed: params.addTransientRetriesUsed,
-            fetchImpl: params.fetchImpl
+            fetchImpl: params.fetchImpl,
+            agentSession: agentSessionFor("fixer")
           }));
 
           const fixPreCheck = validateWorkspaceFileOperations({
@@ -1712,7 +1816,8 @@ export async function runTicketExecutionLoop(
           llmApiKey: params.llmApiKey,
           phaseModels: params.phaseModels,
           addTransientRetriesUsed: params.addTransientRetriesUsed,
-          fetchImpl: params.fetchImpl
+          fetchImpl: params.fetchImpl,
+          agentSession: agentSessionFor("fixer")
         }));
 
         const remediationPreCheck = validateWorkspaceFileOperations({
@@ -1831,7 +1936,8 @@ export async function runTicketExecutionLoop(
             llmApiKey: params.llmApiKey,
             phaseModels: params.phaseModels,
             addTransientRetriesUsed: params.addTransientRetriesUsed,
-            fetchImpl: params.fetchImpl
+            fetchImpl: params.fetchImpl,
+            agentSession: agentSessionFor("fixer")
           }));
 
           const retryPreCheck = validateWorkspaceFileOperations({

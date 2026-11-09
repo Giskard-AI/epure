@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { AgentEngine, AgentSessionRequest } from "../src/agent/engine.js";
 import { ClosureNotProcessedError, EscalationNotRecordedError, orchestrateIssueCommand } from "../src/orchestrator/issue-orchestrator.js";
 import { GitHubRateLimitError } from "../src/orchestrator/github/rate-limit.js";
 import { AmbiguousFeatureBranchError, findExistingFeatureBranch } from "../src/orchestrator/phases/epic-closure.js";
@@ -1204,6 +1205,94 @@ describe("One remediation budget per ticket shared by fix rounds and Stage 1 ret
       code_fix_attempts_by_ticket: { [String(ISSUE)]: 3 },
       last_escalation: { reason: "remediation_exhausted", ticket_number: ISSUE, budget_scope: "ticket" }
     });
+  });
+});
+
+describe("Implementation, Stage 1 fixes and review/CI remediation run as agent engine sessions (#99)", () => {
+  function recordingEngine(): { readonly engine: AgentEngine; readonly requests: AgentSessionRequest[] } {
+    const requests: AgentSessionRequest[] = [];
+    return {
+      requests,
+      engine: {
+        name: "recording",
+        run: async (request) => {
+          requests.push(request);
+          return {
+            finalMessage: "Wrote src/a.ts; vitest green.",
+            diff: { files: [{ path: "src/a.ts", content: "export const a = 2;\n" }], deleted_files: [] }
+          };
+        }
+      }
+    };
+  }
+
+  const answeringSessionSummaries = (router: GitHubMockRouter): GitHubMockRouter =>
+    router.onHost("api.openai.com", "POST", "/v1/chat/completions", (req) => {
+      const name = schemaName(req.body);
+      const payload =
+        name === "ticket_session_summary"
+          ? { commit_message: "feat: a", test_summary: "a.test.ts green" }
+          : name === "squash_commit_payload"
+            ? { title: "feat: ship it", body: "", pr_title: "feat: ship it", commit_title: "feat: ship it", commit_body: "", bullets: ["- ship it"] }
+            : { summary: "ok", findings: [] };
+      return json({ choices: [{ message: { content: JSON.stringify(payload) } }] });
+    });
+
+  const summaryCalls = (router: GitHubMockRouter): number =>
+    router.requests.filter((r) => r.host === "api.openai.com" && schemaName(r.body) === "ticket_session_summary").length;
+
+  it.each([
+    {
+      id: "continue-on-an-escalated-ticket-reruns-fixer-sessions-until-the-ticket-budget-is-spent",
+      state: { status: "suspended", subphase: "idle", last_processed_comment_id: ESCALATED_AT_CURSOR },
+      router: () =>
+        declareImplementationFlow(createGitHubMockRouter(), "failure", { taskPr: true, featurePr: true })
+          .on("POST", `${R}/issues/${TICKET}/labels`, json([]))
+          .on("GET", `${R}/issues/${ISSUE}/comments?per_page=100`, json([]))
+          .on("GET", /\/git\/commits\/[^/]+$/, json({ sha: "branch-sha", tree: { sha: "tree-sha" } }))
+          .on("POST", `${R}/git/blobs`, json({ sha: "blob-sha" }, 201))
+          .on("POST", `${R}/git/trees`, json({ sha: "new-tree-sha" }, 201))
+          .on("POST", `${R}/git/commits`, json({ sha: "wip-sha" }, 201))
+          .on("PATCH", /\/git\/refs\/heads\//, json({ object: { sha: "wip-sha" } })),
+      sandboxRunner: undefined,
+      trigger: { command: "continue", actor: "maintainer", issueNumber: ISSUE, commentId: RESUME_COMMENT },
+      expectedRoles: ["fixer", "fixer", "fixer"],
+      expectedStatus: "suspended"
+    },
+    {
+      id: "failing-ci-then-failing-stage1-run-fixer-sessions-until-the-ticket-budget-is-spent",
+      state: { status: "active", subphase: "waiting_ticket_ci", active_ticket_number: ISSUE, active_task_branch: TASK_BRANCH, active_pr_number: 106 },
+      router: () => declareFailingFixFlow(),
+      sandboxRunner: FAILING_SANDBOX,
+      trigger: { command: "continue", actor: "github-actions[bot]", ...TRIGGERS.workflowRun },
+      expectedRoles: ["fixer", "fixer", "fixer"],
+      expectedStatus: "suspended"
+    }
+  ] as const)("$id", async ({ state, router: declare, sandboxRunner, trigger, expectedRoles, expectedStatus }) => {
+    const store = await seedState(state);
+    const router = answeringSessionSummaries(declare());
+    const { engine, requests } = recordingEngine();
+
+    await orchestrateIssueCommand({
+      repository: REPO,
+      commandArgs: "",
+      fallbackGithubToken: "ghs_test",
+      llmApiKey: "key_test",
+      model: "openai/gpt-test",
+      stateStore: store,
+      fetchImpl: router.fetch,
+      sandboxRunner,
+      agentEngine: engine,
+      ...trigger
+    });
+
+    expect(router.unmatched).toEqual([]);
+    expect(requests.map((r) => [r.role, r.toolPolicy, r.model])).toEqual(
+      expectedRoles.map((role) => [role, "write", "openai/gpt-test"])
+    );
+    expect(implementationCalls(router)).toBe(0);
+    expect(summaryCalls(router)).toBe(expectedRoles.length);
+    expect(await readState(store)).toMatchObject({ status: expectedStatus });
   });
 });
 

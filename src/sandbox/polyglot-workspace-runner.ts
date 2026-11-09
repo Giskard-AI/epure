@@ -530,6 +530,22 @@ function materializeSeedFilesIntoWorkspace(
   }
 }
 
+// Brings workDir to the given in-memory state; paths outside it or inside .git are skipped.
+export function syncWorkspaceFiles(
+  workDir: string,
+  files: ReadonlyMap<string, string>,
+  deletedFiles: Iterable<string>
+): void {
+  materializeSeedFilesIntoWorkspace(workDir, files);
+  const resolvedRoot = resolve(workDir);
+  for (const rawPath of deletedFiles) {
+    const cleanRel = rawPath.replace(/^\/+/, "");
+    if (isContainedRelativePath(resolvedRoot, cleanRel, false)) {
+      rmSync(resolve(resolvedRoot, cleanRel), { force: true });
+    }
+  }
+}
+
 export function prepareRepositorySandboxWorkspace(
   input: PrepareRepositorySandboxWorkspaceInput
 ): PreparedSandboxWorkspace {

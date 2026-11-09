@@ -3010,7 +3010,7 @@ async function publishAgentProposal(input) {
 
 // src/sandbox/llm-sandbox.ts
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import {
   Agent as HttpAgent,
   createServer,
@@ -3801,7 +3801,7 @@ async function runInUntrustedCodeSandbox(input) {
   const timeoutMs = input.timeoutMs ?? 60 * 60 * 1e3;
   const agentDir = input.agentSession ? mkdtempSync("/tmp/epure-agent-") : void 0;
   const agentEnv = agentDir ? { HOME: agentDir, TMPDIR: agentDir } : {};
-  const runConfined = (command, policy, env, proxyPort) => {
+  const runConfined = (command, policy, env, proxyPort, interact) => {
     if (policy === "https_only") {
       const home = env.HOME?.trim() ?? "";
       if (home) {
@@ -3824,7 +3824,7 @@ async function runInUntrustedCodeSandbox(input) {
       readOnlyPaths: input.readOnlyPaths,
       agentDir
     });
-    return spawnCaptured(wrapped.command, wrapped.args, cwd, env, timeoutMs);
+    return spawnCaptured(wrapped.command, wrapped.args, cwd, env, timeoutMs, interact);
   };
   let proxy;
   try {
@@ -3847,12 +3847,24 @@ async function runInUntrustedCodeSandbox(input) {
         };
       }
     }
-    proxy = llmTarget ? await createLlmSandboxProxy({ upstream: llmTarget.upstream, apiKey: llmTarget.apiKey }) : void 0;
+    proxy = llmTarget ? await createLlmSandboxProxy({
+      upstream: llmTarget.upstream,
+      apiKey: llmTarget.apiKey,
+      observeResponse: input.observeLlmResponse
+    }) : void 0;
+    if (agentDir) {
+      for (const [relPath, content] of Object.entries(input.agentSession?.homeFiles?.(proxy) ?? {})) {
+        const target = resolve(agentDir, relPath);
+        mkdirSync(dirname(target), { recursive: true });
+        writeFileSync(target, content, { encoding: "utf8", mode: 384 });
+      }
+    }
     const childResult = await runConfined(
       { command: input.command, args: input.args },
       networkPolicy,
       { ...buildSanitizedSandboxEnv(input.runnerEnv, proxy), ...agentEnv },
-      proxy ? parsePortFromProxyUrl(proxy.proxyUrl) : void 0
+      proxy ? parsePortFromProxyUrl(proxy.proxyUrl) : void 0,
+      input.interact
     );
     const ok = childResult.exitCode === 0;
     return {
@@ -3881,13 +3893,15 @@ function isCiRunner(runnerEnv) {
     (env) => flagged(env.GITHUB_ACTIONS) || flagged(env.CI)
   );
 }
-function spawnCaptured(command, args, cwd, env, timeoutMs) {
+function spawnCaptured(command, args, cwd, env, timeoutMs, interact) {
   return new Promise((resolvePromise) => {
     const child = spawn(command, [...args], {
       cwd,
       env,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe"],
       detached: true
+    });
+    child.stdin.on("error", () => {
     });
     const killGroup = () => {
       if (child.pid !== void 0) {
@@ -3901,7 +3915,15 @@ function spawnCaptured(command, args, cwd, env, timeoutMs) {
     const stderrChunks = [];
     const timer = setTimeout(killGroup, timeoutMs);
     child.on("exit", killGroup);
-    child.stdout.on("data", (chunk) => stdoutChunks.push(chunk));
+    if (interact) {
+      void interact({ stdin: child.stdin, stdout: child.stdout }).then(
+        () => child.stdin.end(),
+        () => killGroup()
+      );
+    } else {
+      child.stdin.end();
+      child.stdout.on("data", (chunk) => stdoutChunks.push(chunk));
+    }
     child.stderr.on("data", (chunk) => stderrChunks.push(chunk));
     child.on("error", (err) => {
       clearTimeout(timer);

@@ -2044,7 +2044,8 @@ async function runMeteredIssueCommand(
         initialCodeFixAttemptsByTicket,
         baseSyncGuard,
         resumeContextMarkdown,
-        stopIfFeaturePrMerged
+        stopIfFeaturePrMerged,
+        agentEngine: effectiveInput.agentEngine
       });
 
       if (loopOutcome.halted && loopOutcome.result) {
@@ -2223,7 +2224,8 @@ async function runMeteredIssueCommand(
             initialCodeFixAttemptsByTicket,
             baseSyncGuard,
             resumeContextMarkdown,
-            stopIfFeaturePrMerged
+            stopIfFeaturePrMerged,
+            agentEngine: effectiveInput.agentEngine
           });
 
           if (loopOutcome.halted && loopOutcome.result) {

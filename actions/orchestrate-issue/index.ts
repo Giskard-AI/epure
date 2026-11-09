@@ -1,4 +1,5 @@
 import { appendFileSync } from "node:fs";
+import { createPiAgentEngine } from "../../src/agent/pi-engine.js";
 import { redactSecrets } from "../../src/auth/issue-command-gate.js";
 import {
   EscalationNotRecordedError,
@@ -103,7 +104,10 @@ async function run(): Promise<void> {
       ...(triggerHeadSha ? { triggerHeadSha } : {}),
       ...(asyncCiContinuation ? { asyncCiContinuation } : {}),
       runId,
-      workflowJob
+      workflowJob,
+      agentEngine: createPiAgentEngine({
+        runnerEnv: { ...process.env, ...(llmApiKey ? { LLM_API_KEY: llmApiKey } : {}) }
+      })
     });
 
     writeGitHubOutputs(
