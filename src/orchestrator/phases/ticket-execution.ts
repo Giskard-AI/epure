@@ -28,8 +28,7 @@ import { DEFAULT_LLM_REQUEST_TIMEOUT_MS } from "../../llm/client.js";
 import {
   AuthenticationError,
   LLMError,
-  QuotaExhaustedError,
-  StructuredOutputValidationError
+  QuotaExhaustedError
 } from "../../llm/errors.js";
 import { runMultiAgentPrReviewPass } from "../../review/multi-agent-pr-review.js";
 import {
@@ -86,9 +85,7 @@ import {
   type TicketSessionSummary
 } from "../prompts/schemas.js";
 import {
-  createGeneratedTicketImplementationSchema,
   type EscalateToNeedsHumanFn,
-  type GeneratedTicketImplementation,
   type GitBlobRef,
   type GitHubRestHelper,
   type IssueMetadata,
@@ -99,13 +96,9 @@ import {
 import {
   applyTicketImplementationPayload,
   buildCompactWorkspaceFilesContext,
-  buildRepoExplorationToolsAndHandlers,
-  checkIsExistingRepoWorkspace,
-  createStagedTicketImplementationBuffer,
-  mergeStagedBufferIntoImplementationPayload,
   runTestsInIsolatedWorkspace,
   validateTicketIntegrityGuard,
-  type StagedTicketImplementationBuffer
+  type TicketImplementationDiffPayload
 } from "../workspace/repo-tools.js";
 
 export interface RunTicketExecutionLoopParams {
@@ -258,16 +251,6 @@ async function checkMidLoopCancellation(params: {
   return null;
 }
 
-function isLikelyTestTargetPath(filePath: string): boolean {
-  const clean = filePath.trim().replace(/^\/+/, "");
-  const baseName = clean.split("/").pop() ?? clean;
-  return (
-    /(?:^|\/)(?:__tests__|tests?|specs?)\//i.test(clean) ||
-    /(?:\.test|\.spec|_test|_spec)\.[a-z0-9]+$/i.test(baseName) ||
-    /^test_[^/]+\.py$/i.test(baseName)
-  );
-}
-
 interface GenerateTicketImplementationWithFallbackParams {
   readonly ticket: TrackedTicketCommentMetadata;
   readonly branch: string;
@@ -385,7 +368,7 @@ function ticketAgentInstructions(role: AgentRole, reviewersDir: string): string 
   return [
     TICKET_AGENT_ROLE_HEADLINES[role],
     PROMPT_INJECTION_IMMUNITY_CLAUSE,
-    "Tu travailles directement dans le checkout du dépôt (répertoire courant) avec tes outils : les fichiers que tu laisses modifiés, créés ou supprimés constituent le livrable. Les outils `*_repo_file` et le schéma JSON évoqués dans le message n'existent pas dans cette session.",
+    "Tu travailles directement dans le checkout du dépôt (répertoire courant) avec tes outils : les fichiers que tu laisses modifiés, créés ou supprimés constituent le livrable.",
     "Écris des tests paramétrés couvrant les critères d'acceptation et cas limites, et du code propre qui les fait passer. Lance les commandes de vérification du guide quand c'est possible ; le réseau est coupé (hors LLM), n'installe aucune dépendance.",
     `Ne modifie JAMAIS ${reviewersDir}/**, .github/workflows/**, .github/agents.yml, .env* ni .git/.`,
     "Termine par un court compte rendu : fichiers changés, tests ajoutés et commandes lancées avec leur résultat.",
@@ -398,7 +381,7 @@ function ticketAgentInstructions(role: AgentRole, reviewersDir: string): string 
 async function runTicketAgentSession(
   params: GenerateTicketImplementationWithFallbackParams,
   session: TicketAgentSession
-): Promise<GeneratedTicketImplementation> {
+): Promise<TicketImplementationDiffPayload> {
   const nowMs = Date.now();
   const timeoutMs = agentSessionTimeoutMs(session.jobDeadlineMs, nowMs);
   if (timeoutMs === undefined) {
@@ -529,207 +512,14 @@ async function summarizeAgentSession(
 
 async function generateTicketImplementationWithFallback(
   params: GenerateTicketImplementationWithFallbackParams
-): Promise<GeneratedTicketImplementation> {
-  if (params.agentSession) {
-    return runTicketAgentSession(params, params.agentSession);
-  }
-  const stagedBuffer: StagedTicketImplementationBuffer =
-    createStagedTicketImplementationBuffer(params.ensureBaselineLoaded);
-  const schemaWithStaged = createGeneratedTicketImplementationSchema({
-    hasStagedMutations: () => stagedBuffer.hasMutations()
-  });
-
-  try {
-    const parsedPrimary = await callLlmJson<GeneratedTicketImplementation>({
-      apiKey: params.llmApiKey,
-      model: params.phaseModels.implementationModel,
-      providers: params.phaseModels.providers,
-      maxTransientRetries: params.phaseModels.maxTransientRetries,
-      transientRetryBackoffSeconds:
-        params.phaseModels.transientRetryBackoffSeconds,
-      requestTimeoutMs: params.phaseModels.requestTimeoutMs,
-      onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
-      thinkingLevel: params.thinkingLevel,
-      logLabel: params.logLabel,
-      systemInstruction: params.systemInstruction,
-      prompt: params.prompt,
-      temperature: 0.1,
-      maxToolRounds: 35,
-      ...buildRepoExplorationToolsAndHandlers({
-        branch: params.branch,
-        featureBranch: params.featureBranch,
-        accumulatedFiles: params.accumulatedFiles,
-        deletedFilesSet: params.deletedFilesSet,
-        stagedImplementation: stagedBuffer,
-        devBranchPaths: params.devBranchPaths,
-        reviewersDir: params.reviewersDir,
-        gh: params.gh
-      }),
-      responseSchema: schemaWithStaged,
-      fetchImpl: params.fetchImpl
-    });
-
-    return mergeStagedBufferIntoImplementationPayload(
-      stagedBuffer,
-      parsedPrimary
+): Promise<TicketImplementationDiffPayload> {
+  if (!params.agentSession) {
+    throw new AgentEngineError(
+      "AGENT_ENGINE_UNAVAILABLE",
+      "No agentEngine configured for ticket session."
     );
-  } catch (primaryErr) {
-    if (!(primaryErr instanceof StructuredOutputValidationError)) {
-      stagedBuffer.files.clear();
-      stagedBuffer.deletedFiles.clear();
-      throw primaryErr;
-    }
-
-    const declaredTargets = params.ticket.filesToTouch
-      .map((f) => f.trim().replace(/^\/+/, ""))
-      .filter(Boolean);
-
-    const untouchedTargets = declaredTargets.filter(
-      (targetPath) =>
-        !stagedBuffer.files.has(targetPath) &&
-        !stagedBuffer.deletedFiles.has(targetPath)
-    );
-
-    const hasTestInTargetsOrStaged =
-      declaredTargets.some((t) => isLikelyTestTargetPath(t)) ||
-      Array.from(stagedBuffer.files.keys()).some((t) =>
-        isLikelyTestTargetPath(t)
-      );
-
-    const fallbackBatches: string[] = [...untouchedTargets];
-    if (!hasTestInTargetsOrStaged) {
-      fallbackBatches.push("__TEST_SUITE_BATCH__");
-    }
-
-    if (fallbackBatches.length === 0 && stagedBuffer.hasMutations()) {
-      return mergeStagedBufferIntoImplementationPayload(stagedBuffer, {
-        commit_message: `feat(ticket-${params.ticket.ticketIssueNumber}): ${params.ticket.title}`,
-        test_summary:
-          "Recovered staged incremental mutations after final turn truncation",
-        files: [],
-        patches: [],
-        deleted_files: []
-      });
-    }
-
-    if (fallbackBatches.length === 0) {
-      stagedBuffer.files.clear();
-      stagedBuffer.deletedFiles.clear();
-      throw primaryErr;
-    }
-
-    if (process.env.GITHUB_ACTIONS === "true") {
-      process.stdout.write(
-        `[EPURE][Ticket #${params.ticket.ticketIssueNumber}] Primary codegen hit StructuredOutputValidationError; triggering ChunkedTicketImplementationFallback across ${fallbackBatches.length} target(s)\n`
-      );
-    }
-
-    let lastCommitMessage = `feat(ticket-${params.ticket.ticketIssueNumber}): ${params.ticket.title}`;
-    let lastTestSummary = "Chunked file-by-file implementation verified";
-    const collectedPatches: NonNullable<
-      GeneratedTicketImplementation["patches"]
-    >[number][] = [];
-
-    try {
-      for (const batchTarget of fallbackBatches) {
-        const isTestBatch = batchTarget === "__TEST_SUITE_BATCH__";
-        const stagedSummary =
-          stagedBuffer.files.size > 0
-            ? [
-                "Fichiers déjà générés dans le tampon transactionnel de ce ticket :",
-                ...Array.from(stagedBuffer.files.entries()).map(
-                  ([sp, sc]) => `--- STAGED FILE: ${sp} ---\n${sc}`
-                )
-              ].join("\n\n")
-            : "";
-
-        const batchPrompt = [
-          params.prompt,
-          "",
-          ...(stagedSummary ? [stagedSummary, ""] : []),
-          isTestBatch
-            ? `REPLI SEGMENTÉ (Lot de tests unitaires) : Génère UNIQUEMENT le(s) fichier(s) de tests paramétrés couvrant les critères d'acceptation du Ticket #${params.ticket.ticketIssueNumber}. Ne réécris pas les fichiers d'implémentation déjà présents dans le tampon.`
-            : `REPLI SEGMENTÉ (Fichier cible unique : \`${batchTarget}\`) : Génère ou patche UNIQUEMENT le fichier \`${batchTarget}\` requis par le Ticket #${params.ticket.ticketIssueNumber}. Ne génère aucun autre fichier dans cet appel.`
-        ].join("\n");
-
-        const batchImpl = await callLlmJson<GeneratedTicketImplementation>({
-          apiKey: params.llmApiKey,
-          model: params.phaseModels.implementationModel,
-          providers: params.phaseModels.providers,
-          maxTransientRetries: params.phaseModels.maxTransientRetries,
-          transientRetryBackoffSeconds:
-            params.phaseModels.transientRetryBackoffSeconds,
-          requestTimeoutMs: params.phaseModels.requestTimeoutMs,
-          onTransientRetriesUsed: (used) =>
-            params.addTransientRetriesUsed(used),
-          thinkingLevel: params.thinkingLevel,
-          logLabel: params.logLabel
-            ? `${params.logLabel}/chunk:${batchTarget}`
-            : `chunk:#${params.ticket.ticketIssueNumber}:${batchTarget}`,
-          systemInstruction: params.systemInstruction,
-          prompt: batchPrompt,
-          temperature: 0.1,
-          maxToolRounds: 20,
-          ...buildRepoExplorationToolsAndHandlers({
-            branch: params.branch,
-            featureBranch: params.featureBranch,
-            accumulatedFiles: params.accumulatedFiles,
-            deletedFilesSet: params.deletedFilesSet,
-            stagedImplementation: stagedBuffer,
-            devBranchPaths: params.devBranchPaths,
-            reviewersDir: params.reviewersDir,
-            gh: params.gh
-          }),
-          responseSchema: schemaWithStaged,
-          fetchImpl: params.fetchImpl
-        });
-
-        if (batchImpl.commit_message?.trim()) {
-          lastCommitMessage = batchImpl.commit_message.trim();
-        }
-        if (batchImpl.test_summary?.trim()) {
-          lastTestSummary = batchImpl.test_summary.trim();
-        }
-        for (const f of batchImpl.files ?? []) {
-          const clean = f.path.trim().replace(/^\/+/, "");
-          if (clean) {
-            await params.ensureBaselineLoaded([clean]);
-            stagedBuffer.files.set(clean, f.content);
-            stagedBuffer.deletedFiles.delete(clean);
-          }
-        }
-        for (const del of batchImpl.deleted_files ?? []) {
-          const clean = del.trim().replace(/^\/+/, "");
-          if (clean) {
-            await params.ensureBaselineLoaded([clean]);
-            stagedBuffer.files.delete(clean);
-            stagedBuffer.deletedFiles.add(clean);
-          }
-        }
-        for (const patch of batchImpl.patches ?? []) {
-          collectedPatches.push(patch);
-        }
-      }
-    } catch (fallbackErr) {
-      stagedBuffer.files.clear();
-      stagedBuffer.deletedFiles.clear();
-      throw fallbackErr;
-    }
-
-    if (!stagedBuffer.hasMutations() && collectedPatches.length === 0) {
-      stagedBuffer.files.clear();
-      stagedBuffer.deletedFiles.clear();
-      throw primaryErr;
-    }
-
-    return mergeStagedBufferIntoImplementationPayload(stagedBuffer, {
-      commit_message: lastCommitMessage,
-      test_summary: lastTestSummary,
-      files: [],
-      ...(collectedPatches.length > 0 ? { patches: collectedPatches } : {}),
-      deleted_files: []
-    });
   }
+  return runTicketAgentSession(params, params.agentSession);
 }
 
 export async function runTicketExecutionLoop(
@@ -1329,11 +1119,6 @@ export async function runTicketExecutionLoop(
           ]
         });
 
-        const isBrownfieldRepo = checkIsExistingRepoWorkspace(
-          params.accumulatedFiles,
-          params.devBranchPaths
-        );
-
         const tddSystemInstruction = [
           "Tu es un ingénieur TDD EPURE implémentant un ticket approuvé.",
           PROMPT_INJECTION_IMMUNITY_CLAUSE,
@@ -1342,41 +1127,9 @@ export async function runTicketExecutionLoop(
           "2. Implémente le code propre et complet faisant passer 100% des tests.",
           "3. N'utilise aucune dépendance externe exotique non déclarée.",
           `4. Ne modifie JAMAIS ${reviewersDir}/**, .github/workflows/**, .github/agents.yml ou .env*.`,
+          "5. Édite directement le répertoire de travail (worktree) et vérifie les cibles de test.",
           "",
           verificationGuideMarkdown,
-          "",
-          ...(isBrownfieldRepo
-            ? [
-                "5. Il s'agit d'un dépôt existant. Utilise les outils `list_repo_files`, `search_in_repo_file` et `read_repo_file` pour inspecter le contenu intégral des fichiers pertinents avant de coder.",
-                "6. Tu peux écrire ou modifier les fichiers au fil des tours d'outils avec `write_repo_file`, `patch_repo_file` et `delete_repo_file` (recommandé pour les tickets multi-fichiers afin d'éviter toute troncature du JSON final), ou les renvoyer dans l'objet JSON final (`patches`, `files`, `deleted_files`). Si tu as déjà écrit tous les fichiers via `write_repo_file` / `patch_repo_file`, renvoie simplement `files: []`, `patches: []`, `deleted_files: []` avec `commit_message` et `test_summary`.",
-                "Renvoie un objet JSON strictement valide respectant ce schéma :",
-                "{",
-                '  "commit_message": "fix: ...",',
-                '  "test_summary": "Tests and acceptance criteria verified",',
-                '  "patches": [',
-                '    { "path": "src/...", "edits": [{ "old_string": "...", "new_string": "..." }] }',
-                "  ],",
-                '  "files": [',
-                '    { "path": "tests/...", "content": "..." }',
-                "  ],",
-                '  "deleted_files": []',
-                "}"
-              ]
-            : [
-                "5. Tu disposes des fichiers du workspace (intégraux) et des outils (`list_repo_files`, `search_in_repo_file`, `read_repo_file`, `write_repo_file`, `patch_repo_file`, `delete_repo_file`). Tu peux créer ou modifier les fichiers au fil des tours d'outils ou les renvoyer dans l'objet JSON final respectant exactement ce schéma :",
-                "{",
-                `  "commit_message": "feat(ticket-${ticket.ticketIssueNumber}): ...",`,
-                '  "test_summary": "Parameterized test suite verified",',
-                '  "patches": [',
-                '    { "path": "src/...", "edits": [{ "old_string": "...", "new_string": "..." }] }',
-                "  ],",
-                '  "files": [',
-                '    { "path": "src/...", "content": "..." },',
-                '    { "path": "tests/...", "content": "..." }',
-                "  ],",
-                '  "deleted_files": []',
-                "}"
-              ]),
           "",
           EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
         ].join("\n");
@@ -1518,25 +1271,10 @@ export async function runTicketExecutionLoop(
           const fixSystemInstruction = [
             "Tu es un ingénieur TDD EPURE corrigeant un échec de vérification Stage 1 en sandbox isolée.",
             PROMPT_INJECTION_IMMUNITY_CLAUSE,
-            "Corrige les fichiers en défaut (code ou assertions de test) pour que 100% des cibles Stage 1 passent.",
+            "Corrige les fichiers en défaut (code ou assertions de test) dans le répertoire de travail pour que 100% des cibles Stage 1 passent.",
             `Ne modifie JAMAIS ${reviewersDir}/**, .github/workflows/**, .github/agents.yml ou .env*.`,
-            "Tu peux utiliser les outils `list_repo_files`, `search_in_repo_file`, `read_repo_file`, `write_repo_file`, `patch_repo_file` et `delete_repo_file` pour inspecter et modifier les fichiers du dépôt.",
-            "Pour modifier un fichier existant volumineux, utilise de préférence `patch_repo_file` ou `patches` (`old_string` -> `new_string` exact). Pour supprimer un fichier obsolète, utilise `delete_repo_file` ou `deleted_files`.",
             "",
             verificationGuideMarkdown,
-            "",
-            "Renvoie un objet JSON strictement valide respectant exactement ce schéma :",
-            "{",
-            `  "commit_message": "feat(ticket-${ticket.ticketIssueNumber}): ...",`,
-            '  "test_summary": "Stage 1 verification suite verified",',
-            '  "patches": [',
-            '    { "path": "...", "edits": [{ "old_string": "...", "new_string": "..." }] }',
-            "  ],",
-            '  "files": [',
-            '    { "path": "...", "content": "..." }',
-            "  ],",
-            '  "deleted_files": []',
-            "}",
             "",
             EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
           ].join("\n");
@@ -2057,25 +1795,10 @@ export async function runTicketExecutionLoop(
         const reviewFixSystemInstruction = [
           "Tu es un ingénieur TDD EPURE corrigeant les constats bloquants ('must_fix') de revue multi-agents et/ou les échecs CI externes.",
           PROMPT_INJECTION_IMMUNITY_CLAUSE,
-          "Corrige précisément chaque anomalie tout en maintenant 100% des cibles Stage 1 au vert.",
+          "Corrige précisément chaque anomalie dans le répertoire de travail tout en maintenant 100% des cibles Stage 1 au vert.",
           `Ne modifie JAMAIS ${reviewersDir}/**, .github/workflows/**, .github/agents.yml ou .env*.`,
-          "Utilise les outils `list_repo_files`, `search_in_repo_file`, `read_repo_file`, `write_repo_file`, `patch_repo_file` et `delete_repo_file` pour inspecter et modifier les fichiers pertinents du dépôt.",
           "",
           verificationGuideMarkdown,
-          "",
-          "Pour modifier un fichier existant volumineux, utilise de préférence `patch_repo_file` ou `patches` (`old_string` -> `new_string` exact). Sinon utilise `write_repo_file` ou `files` avec le contenu intégral du fichier. Pour supprimer un fichier obsolète, utilise `delete_repo_file` ou `deleted_files`.",
-          "Renvoie un objet JSON strictement valide :",
-          "{",
-          `  "commit_message": "fix(review): address post-PR findings on #${ticket.ticketIssueNumber}",`,
-          '  "test_summary": "Addressed review and CI findings and verified test suite",',
-          '  "patches": [',
-          '    { "path": "...", "edits": [{ "old_string": "...", "new_string": "..." }] }',
-          "  ],",
-          '  "files": [',
-          '    { "path": "...", "content": "..." }',
-          "  ],",
-          '  "deleted_files": ["..."]',
-          "}",
           "",
           EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
         ].join("\n");

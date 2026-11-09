@@ -59,7 +59,7 @@ import {
   type ResolvedPhaseModels,
   type TrackedTicketCommentMetadata
 } from "../types.js";
-import { buildRepoExplorationToolsAndHandlers } from "../workspace/repo-tools.js";
+import { buildWebExplorationToolsAndHandlers } from "../workspace/web-tools.js";
 
 export function buildParentIssueTicketsTasklistBlock(
   tickets: readonly Pick<
@@ -739,15 +739,8 @@ export async function runGrillAndPlanPhase(params: {
   }
 
   const grillExplorationCache = new Map<string, string>();
-  const grillRepoTools = buildRepoExplorationToolsAndHandlers({
-    gh,
-    branch: "dev",
-    featureBranch: "main",
-    accumulatedFiles: grillExplorationCache,
-    devBranchPaths: [],
+  const grillRepoTools = buildWebExplorationToolsAndHandlers({
     phase: command === "to-spec" ? "spec" : "plan",
-    alwaysEnableRepoTools: true,
-    reviewersDir,
     fetchImpl
   });
 

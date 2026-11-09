@@ -23,7 +23,6 @@ import {
   type ResolvedPhaseModels,
   type TrackedTicketCommentMetadata
 } from "../types.js";
-import { buildRepoExplorationToolsAndHandlers } from "../workspace/repo-tools.js";
 import {
   createLinkedPhaseTicketsOnGitHub,
   upsertParentIssueTicketsTasklist
@@ -110,17 +109,6 @@ function parseConvergenceAuditFromText(
 export async function runEpicConvergenceAudit(
   params: RunEpicConvergenceAuditParams
 ): Promise<EpicConvergenceAuditPayload> {
-  const explorationTools = buildRepoExplorationToolsAndHandlers({
-    gh: params.gh,
-    branch: params.featureBranch,
-    featureBranch: params.featureBranch,
-    accumulatedFiles: params.accumulatedFiles,
-    devBranchPaths: params.devBranchPaths,
-    phase: "review",
-    alwaysEnableRepoTools: true,
-    fetchImpl: params.fetchImpl
-  });
-
   const changedEntries =
     params.featureChangedFilesMap.size > 0
       ? Array.from(params.featureChangedFilesMap.entries())
@@ -252,11 +240,6 @@ export async function runEpicConvergenceAudit(
       systemInstruction,
       prompt: userPrompt,
       temperature: 0.1,
-      ...(explorationTools.tools ? { tools: explorationTools.tools } : {}),
-      ...(explorationTools.toolHandlers
-        ? { toolHandlers: explorationTools.toolHandlers }
-        : {}),
-      maxToolRounds: 6,
       logLabel: `epic-convergence-audit#${params.issueNumber}`,
       responseSchema: EPIC_CONVERGENCE_AUDIT_SCHEMA,
       fetchImpl: params.fetchImpl
