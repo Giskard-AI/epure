@@ -153,6 +153,29 @@ interface GitTreeEntry {
   readonly size?: number;
 }
 
+// A file written over a directory (or under a file) would silently drop every entry the commit does not delete itself,
+// e.g. a file named `.github` replacing the workflows.
+function assertNoFileDirectorySwap(
+  branch: string,
+  written: ReadonlyArray<{ readonly path: string }>,
+  parentFiles: ReadonlyMap<string, string>,
+  deleted: ReadonlySet<string>
+): void {
+  const ancestorsOf = (path: string): string[] =>
+    path.split("/").slice(0, -1).map((_, i, segments) => segments.slice(0, i + 1).join("/"));
+  const kept = [...parentFiles.keys()].filter((p) => !deleted.has(p));
+  const keptFiles = new Set(kept);
+  const keptDirs = new Set(kept.flatMap(ancestorsOf));
+  const swaps = written
+    .map((e) => e.path)
+    .filter((p) => keptDirs.has(p) || ancestorsOf(p).some((a) => keptFiles.has(a)));
+  if (swaps.length > 0) {
+    throw new Error(
+      `Refusing to commit ${swaps.join(", ")} to '${branch}': each would replace a directory with a file, or a file with a directory, whose other entries the commit does not delete.`
+    );
+  }
+}
+
 function encodeGitHubContentsPath(filePath: string): string {
   return filePath
     .split("/")
@@ -894,9 +917,10 @@ export function createGitHubRestHelper(params: {
         input.fromBranch ?? "main"
       );
 
+      // `mode` undefined: the parent's mode for an existing file, 100644 for a new one.
       const treeEntries: Array<{
         path: string;
-        mode: string;
+        mode: string | undefined;
         type: "blob";
         sha: string | null;
       }> = [];
@@ -915,7 +939,7 @@ export function createGitHubRestHelper(params: {
         seenTreePaths.add(cleanPath);
         treeEntries.push({
           path: cleanPath,
-          mode: file.mode ?? "100644",
+          mode: file.mode,
           type: "blob",
           sha: blobRes.data!.sha
         });
@@ -975,9 +999,25 @@ export function createGitHubRestHelper(params: {
         );
         const baseTreeSha = parentCommit.data!.tree.sha;
 
-        const attemptEntries = [...treeEntries];
+        const parentTree =
+          treeEntries.length > 0 || pendingDeletedPaths.length > 0
+            ? await readCommitTree(parentCommitSha)
+            : { entries: [], truncated: true };
+        const parentFiles = parentTree.truncated
+          ? null
+          : new Map(
+              parentTree.entries.flatMap((e) =>
+                e.type !== "tree" && e.path ? [[e.path, e.mode ?? "100644"] as const] : []
+              )
+            );
+        if (parentFiles) {
+          assertNoFileDirectorySwap(input.branch, treeEntries, parentFiles, new Set(pendingDeletedPaths));
+        }
+        const attemptEntries = treeEntries.map((e) => ({
+          ...e,
+          mode: e.mode ?? (parentFiles?.get(e.path) === "100755" ? "100755" : "100644")
+        }));
         if (pendingDeletedPaths.length > 0) {
-          const parentTree = await readCommitTree(parentCommitSha);
           const existingTreePaths = parentTree.truncated
             ? null
             : new Set(

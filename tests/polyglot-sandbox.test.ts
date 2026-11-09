@@ -418,6 +418,15 @@ describe("EPURE v1.4.0 — Polyglot Verification Discovery, Workspace Sandbox & 
         expectedSensitive: [] as string[]
       },
       {
+        id: "blocks-files-replacing-or-nested-under-protected-paths-on-task-branch",
+        files: [".github", ".agents", ".github/agents.yml/x", ".env/x", ".github/CODEOWNERS", ".agents/skills/x.md"],
+        isTaskBranch: true,
+        reviewersDir: undefined as string | undefined,
+        expectedAllowed: false,
+        expectedTraversal: [] as string[],
+        expectedSensitive: [".github", ".agents", ".github/agents.yml/x", ".env/x"]
+      },
+      {
         id: "allows-normal-source-paths-on-task-branch",
         files: ["frontend/src/App.tsx", "backend/src/index.ts"],
         isTaskBranch: true,

@@ -290,14 +290,22 @@ function normalizeRelativeCandidate(rawPath: string): string {
     .replace(/^\/+/, "");
 }
 
+// Also true under a sensitive path (`.env/x`) and for a path that would replace a directory holding one (a file named `.github`).
 export function isSensitiveTaskBranchPath(
   rawPath: string,
   reviewersDir: string = DEFAULT_REVIEWERS_DIR
 ): boolean {
-  const norm = normalizeRelativeCandidate(rawPath);
+  const norm = normalizeRelativeCandidate(rawPath).replace(/\/+$/, "");
+  const segments = norm.split("/");
+  const matches = (path: string): boolean =>
+    SENSITIVE_TASK_BRANCH_PATH_PATTERNS.some((re) => re.test(path)) ||
+    isSensitiveReviewerRosterPath(path, reviewersDir);
+  const lower = norm.toLowerCase();
   return (
-    SENSITIVE_TASK_BRANCH_PATH_PATTERNS.some((re) => re.test(norm)) ||
-    isSensitiveReviewerRosterPath(norm, reviewersDir)
+    segments.some((_, i) => matches(segments.slice(0, i + 1).join("/"))) ||
+    [".github/workflows", ".github/agents.yml", ".github/agents.yaml", reviewersDir, DEFAULT_REVIEWERS_DIR].some(
+      (root) => norm.length > 0 && root.toLowerCase().startsWith(`${lower}/`)
+    )
   );
 }
 

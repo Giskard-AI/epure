@@ -172,13 +172,26 @@ export async function snapshotWorktree(
       await git(["add", "--all"]);
       const after = (await git(["write-tree"])).toString("utf8").trim();
       const entries = parseDiffTree(await git(["diff-tree", "-r", "-z", "--no-renames", before, after]));
+      const protectedKnown = [
+        ...splitNul(await git(["ls-tree", "-r", "-z", "--name-only", before])),
+        ...entries.map((e) => e.path)
+      ].filter(isProtected);
+      // A file or directory swap must not slip a path past the predicate: `.env/x` under a protected file,
+      // or a file named `.github` replacing the directory that holds protected paths.
+      const isProtectedEntry = (path: string): boolean => {
+        const segments = path.split("/");
+        return (
+          segments.some((_, i) => isProtected(segments.slice(0, i + 1).join("/"))) ||
+          protectedKnown.some((p) => p.startsWith(`${path}/`))
+        );
+      };
 
       const skipped: Array<{ path: string; reason: SkippedPathReason; existedBefore: boolean }> = [];
       const deleted: string[] = [];
       const candidates: DiffTreeEntry[] = [];
       for (const entry of entries) {
         const existedBefore = entry.status !== "A";
-        if (isProtected(entry.path)) {
+        if (isProtectedEntry(entry.path)) {
           skipped.push({ path: entry.path, reason: "protected", existedBefore });
         } else if (entry.status === "D") {
           deleted.push(entry.path);

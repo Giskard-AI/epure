@@ -21,6 +21,7 @@ import { translateModelForPi } from "../src/agent/pi-models.js";
 import { listTrackedPaths, snapshotWorktree } from "../src/agent/worktree-snapshot.js";
 import { AuthenticationError, BadRequestError } from "../src/llm/errors.js";
 import type { SandboxExecutionResult } from "../src/sandbox/llm-sandbox.js";
+import { isSensitiveTaskBranchPath } from "../src/sandbox/polyglot-workspace-runner.js";
 import { runWithTokenUsageLedger, TokenUsageLedger } from "../src/usage/token-usage.js";
 import { startFakeLlmUpstream, type FakeLlmUpstream } from "./fixtures/fake-llm-upstream.js";
 
@@ -304,6 +305,63 @@ describe("snapshotWorktree", () => {
 
       expect(await snapshot.collect()).toEqual(expected);
       expect(treeOf(dir)).toEqual(expectedTree);
+    } finally {
+      snapshot.dispose();
+    }
+  });
+
+  const replaceWithFile = (path: string) => (dir: string) => {
+    rmSync(join(dir, path), { recursive: true });
+    writeFileSync(join(dir, path), "x\n");
+  };
+  const replaceWithDirectory = (path: string) => (dir: string) => {
+    rmSync(join(dir, path));
+    mkdirSync(join(dir, path));
+    writeFileSync(join(dir, path, "x"), "x\n");
+  };
+  it.each([
+    {
+      id: "github-directory-replaced-by-a-file",
+      before: { ".github/workflows/ci.yml": "on: push\n", "src/a.ts": "a\n" },
+      change: replaceWithFile(".github"),
+      expectedSkipped: [".github", ".github/workflows/ci.yml"]
+    },
+    {
+      id: "agents-directory-replaced-by-a-file",
+      before: { ".agents/reviewers/security.md": "r\n", "src/a.ts": "a\n" },
+      change: replaceWithFile(".agents"),
+      expectedSkipped: [".agents", ".agents/reviewers/security.md"]
+    },
+    {
+      id: "agents-yml-replaced-by-a-directory",
+      before: { ".github/agents.yml": "models: {}\n", "src/a.ts": "a\n" },
+      change: replaceWithDirectory(".github/agents.yml"),
+      expectedSkipped: [".github/agents.yml", ".github/agents.yml/x"]
+    },
+    {
+      id: "env-file-replaced-by-a-directory",
+      before: { ".env": "TOKEN=1\n", "src/a.ts": "a\n" },
+      change: replaceWithDirectory(".env"),
+      expectedSkipped: [".env", ".env/x"]
+    },
+    {
+      id: "directory-holding-a-nested-env-file-replaced-by-a-file",
+      before: { "config/.env.production": "TOKEN=1\n", "src/a.ts": "a\n" },
+      change: replaceWithFile("config"),
+      expectedSkipped: ["config", "config/.env.production"]
+    }
+  ])("[$id] a file/directory swap over a protected path is put back and reported", async ({ before, change, expectedSkipped }) => {
+    const dir = tempWorktree(before);
+    const snapshot = await snapshotWorktree(dir, { isProtectedPath: (path) => isSensitiveTaskBranchPath(path) });
+    try {
+      change(dir);
+      const diff = await snapshot.collect();
+
+      expect(diff.files).toEqual([]);
+      expect(diff.deleted_files).toEqual([]);
+      expect(diff.skipped.map((s) => s.path).sort()).toEqual(expectedSkipped);
+      expect(new Set(diff.skipped.map((s) => s.reason))).toEqual(new Set(["protected"]));
+      expect(treeOf(dir)).toEqual(before);
     } finally {
       snapshot.dispose();
     }

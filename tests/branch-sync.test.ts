@@ -385,6 +385,63 @@ describe("GitHub REST helper — branch reads return null or empty only on 404 (
   });
 });
 
+describe("commitFilesToBranch — file/directory swaps and kept modes (#99)", () => {
+  const BASE = {
+    ".github/workflows/ci.yml": "on: push\n",
+    ".github/agents.yml": "models: {}\n",
+    ".agents/reviewers/security.md": "# Security\n",
+    ".env": "TOKEN=1\n",
+    "lib/a.ts": "export const a = 1;\n"
+  };
+
+  it.each([
+    { id: "github-file-over-the-workflows-directory", path: ".github" },
+    { id: "agents-file-over-the-reviewer-roster", path: ".agents" },
+    { id: "file-under-agents-yml", path: ".github/agents.yml/x" },
+    { id: "file-under-the-env-file", path: ".env/x" }
+  ])("[$id] is refused and the branch does not move", async ({ path }) => {
+    const ctx = setup({ shared: BASE, ours: {}, theirs: {} });
+    const headBefore = featureHead(ctx.git);
+
+    await expect(
+      ctx.gh.commitFilesToBranch({ branch: FEATURE, commitMessage: "swap", files: [{ path, content: "x\n" }] })
+    ).rejects.toThrow(`Refusing to commit ${path} to '${FEATURE}'`);
+    expect(featureHead(ctx.git)).toBe(headBefore);
+  });
+
+  it("a-swap-whose-other-entries-the-commit-deletes-is-allowed", async () => {
+    const ctx = setup({ shared: BASE, ours: {}, theirs: {} });
+
+    await ctx.gh.commitFilesToBranch({
+      branch: FEATURE,
+      commitMessage: "lib becomes a file",
+      files: [{ path: "lib", content: "x\n" }],
+      deletedFiles: ["lib/a.ts"]
+    });
+
+    expect(ctx.git.readFile(FEATURE, "lib")).toBe("x\n");
+  });
+
+  it.each([
+    { id: "no-mode-keeps-the-parent-executable-bit", mode: undefined, expected: "100755" },
+    { id: "explicit-mode-wins", mode: "100644" as const, expected: "100644" }
+  ])("[$id]", async ({ mode, expected }) => {
+    const ctx = setup({ shared: { ...BASE, "bin/run.sh": "#!/bin/sh\n" }, ours: {}, theirs: {} });
+    ctx.git.setMode("bin/run.sh", "100755");
+
+    await ctx.gh.commitFilesToBranch({
+      branch: FEATURE,
+      commitMessage: "edit",
+      files: [{ path: "bin/run.sh", content: "#!/bin/sh\necho 2\n", mode }]
+    });
+
+    const written = ctx.router.requests
+      .filter((r) => r.method === "POST" && r.path === `${R}/git/trees`)
+      .flatMap((r) => (r.body as { tree: Array<{ path: string; mode: string }> }).tree);
+    expect(written).toEqual([expect.objectContaining({ path: "bin/run.sh", mode: expected })]);
+  });
+});
+
 describe("syncBranchWithBase — conflict reads stay bounded and incomplete data never deletes a file (#110)", () => {
   it("base-only-files-are-carried-as-their-blob-with-their-mode-without-being-read-or-re-uploaded", async () => {
     const ctx = setup({
@@ -489,7 +546,8 @@ describe("syncBranchWithBase — conflict reads stay bounded and incomplete data
     expect(outcome).toEqual(
       id.startsWith("plan-integration") ? ["GLOSSARY.md", "docs/adr/0001-plan.md", "docs/specs/42-sync.md"] : "merged"
     );
-    expect(ctx.router.calls("GET", /\/git\/trees\/[^?]+\?recursive=1$/)).toBe(0);
+    // The plan commit reads its parent tree once for the file/directory swap check, which a truncated listing skips.
+    expect(ctx.router.calls("GET", /\/git\/trees\/[^?]+\?recursive=1$/)).toBe(id.startsWith("plan-integration") ? 1 : 0);
   });
 
   it("path hints on a truncated listing return the partial listing with a warning", async () => {
