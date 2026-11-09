@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -9,7 +9,7 @@ import {
   readRunLease,
   type EpureIssueState
 } from "../../src/state/git-ref-state.js";
-import type { E2eConfig } from "./config.js";
+import { agentsYmlPricing, type E2eConfig } from "./config.js";
 import { EPIC_BODY, EPIC_TITLE, GRILL_ANSWERS } from "./epic.js";
 import { classifyEscalation } from "./escalations.js";
 import { createOnce, type GitHubApi } from "./github.js";
@@ -23,6 +23,7 @@ import {
   deriveEngine,
   escalationReasonFromComment,
   evaluateRun,
+  GATE_3_HEADING,
   hostClock,
   parseUsageLines,
   PhaseClock,
@@ -356,6 +357,7 @@ async function preflight(
   if (!config.epureRef || !config.model) {
     throw new Error('the e2e config needs "epureRef" and "model"');
   }
+  agentsYmlPricing(config);
   const epureSha = await resolveEpureSha(gh, config.epureRef);
   const harnessCommit = verifyCodeUnderTest(epureSha);
   await verifyDestructiveTarget(gh);
@@ -434,7 +436,9 @@ async function installEpure(
   try {
     // The committed seed only, with its file modes: what the sandbox received at reset.
     execFileSync("tar", ["-x", "-C", dir], { input: execFileSync("git", ["archive", "--format=tar", `HEAD:${SEED_PATH}`]) });
-    const files: TreeFile[] = runSetupRepo(dir, run.config, run.gh.repository, sha, token, false).map((path) => ({
+    const mutated = runSetupRepo(dir, run.config, run.gh.repository, sha, token, false);
+    appendFileSync(join(dir, ".github/agents.yml"), `\n${agentsYmlPricing(run.config)}`);
+    const files: TreeFile[] = mutated.map((path) => ({
       path,
       mode: statSync(join(dir, path)).mode & 0o111 ? "100755" : "100644",
       content: readFileSync(join(dir, path))
@@ -520,12 +524,12 @@ async function countReviewedTaskPrs(gh: GitHubApi): Promise<number> {
   return reviewed;
 }
 
-async function findFeaturePr(run: Run, state: EpureIssueState | null): Promise<PullRequestRef | null> {
-  const pulls = await run.gh.paginate<{ number: number; html_url: string; head: { ref: string } }>(
+async function findFeaturePr(run: Run, state: EpureIssueState | null): Promise<(PullRequestRef & { readonly body: string }) | null> {
+  const pulls = await run.gh.paginate<{ number: number; html_url: string; body: string | null; head: { ref: string } }>(
     `/repos/${run.gh.repository}/pulls?state=open&base=dev`
   );
   const pr = pulls.find((p) => (state?.feature_branch ? p.head.ref === state.feature_branch : p.head.ref.startsWith("feature/")));
-  return pr ? { number: pr.number, url: pr.html_url } : null;
+  return pr ? { number: pr.number, url: pr.html_url, body: pr.body ?? "" } : null;
 }
 
 interface CreatedIssue {
@@ -646,10 +650,13 @@ export async function runSandboxEpic(
     log(`[e2e] no log for orchestrator jobs ${evidence.unavailableJobLogs.join(", ")}: their LLM usage is missing`);
   }
   const reviewedTaskPrs = run.issue ? await attempt("reviewed_task_prs", () => countReviewedTaskPrs(gh)) : 0;
+  let gate3Comment: string | null = null;
   if (run.issue) {
-    const comments = await attempt("comments", () => gh.paginate<unknown>(`/repos/${gh.repository}/issues/${run.issue}/comments`));
+    const comments = await attempt("comments", () => gh.paginate<IssueComment>(`/repos/${gh.repository}/issues/${run.issue}/comments`));
     if (comments) {
       writeFileSync(join(dir, "comments.json"), `${JSON.stringify(comments, null, 2)}\n`);
+      gate3Comment =
+        comments.findLast((c) => c.performed_via_github_app?.id === config.agentAppId && c.body?.includes(GATE_3_HEADING))?.body ?? null;
     }
   }
   const records = evidence ? attributeUsage(evidence.usage, clock.phases, run.resumes) : [];
@@ -658,6 +665,7 @@ export async function runSandboxEpic(
   const endState = finalState ? { phase: finalState.phase, status: finalState.status, subphase: finalState.subphase ?? null } : null;
   const tickets = unknown.end_state ? null : (finalState?.plan_manifest?.tickets.map((t) => t.ticketIssueNumber) ?? []);
   const stateUsage = finalState?.token_usage;
+  const stateUsageSummary = stateUsage ? summarizeStateUsage(stateUsage, config.pricing) : null;
   const { success, checks } = evaluateRun({
     endState,
     error,
@@ -668,6 +676,10 @@ export async function runSandboxEpic(
     unavailableJobLogs: evidence?.unavailableJobLogs ?? [],
     cancelledOrchestratorJobs: evidence?.cancelledOrchestratorJobs ?? [],
     stateUsageMismatches: stateUsage && evidence ? compareStateUsageWithLogs(stateUsage, records) : null,
+    gate3Comment,
+    featurePrBody: featurePr?.body ?? null,
+    tickets,
+    stateRequests: stateUsageSummary?.total.requests ?? null,
     unknown
   });
   const clockEnd = await attempt("host_clock", () => sampleClock(gh));
@@ -696,7 +708,7 @@ export async function runSandboxEpic(
     issue,
     end_state: endState && { ...endState, accepted: acceptedEndState(endState)?.label ?? null },
     tickets,
-    feature_pr: featurePr,
+    feature_pr: featurePr && { number: featurePr.number, url: featurePr.url },
     phases: clock.phases,
     usage: evidence && {
       ...summarizeUsage(records, config.pricing),
@@ -704,7 +716,7 @@ export async function runSandboxEpic(
       unavailable_job_logs: evidence.unavailableJobLogs,
       records
     },
-    state_usage: stateUsage ? summarizeStateUsage(stateUsage, config.pricing) : null,
+    state_usage: stateUsageSummary,
     actions: evidence && actionsMinutes(evidence.jobs),
     reviewed_task_prs: reviewedTaskPrs,
     escalations: run.escalations,

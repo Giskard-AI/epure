@@ -312,7 +312,9 @@ export interface SuccessCheck {
     | "at-most-one-escalation-per-ticket"
     | "no-orchestrator-job-failure"
     | "llm-usage-recorded"
-    | "state-usage-matches-job-logs";
+    | "state-usage-matches-job-logs"
+    | "gate-3-comment-shows-usage"
+    | "feature-pr-body-shows-usage";
   // null: the evidence cannot tell, which does not fail the run.
   readonly passed: boolean | null;
   readonly detail: string;
@@ -342,6 +344,24 @@ export function acceptedEndState(state: Pick<EndState, "phase" | "status"> | nul
 
 const describeState = (s: EndState) => `${s.phase}/${s.status}${s.subphase && s.subphase !== "idle" ? ` (${s.subphase})` : ""}`;
 
+export const GATE_3_HEADING = "### ✅ Feature Pull Request prête pour validation humaine";
+const EPIC_TOTAL = /^- \*\*Epic total\*\*: (.+)$/m;
+const PR_USAGE_SECTION = /<!-- epure-llm-usage:start -->([\s\S]*?)<!-- epure-llm-usage:end -->/;
+const COST = / · (?:≥ )?(?:\$\d+\.\d{2}|< \$0\.01)$/;
+const requestsIn = (line: string) => Number(/ · ([\d,]+) requests?\b/.exec(line)?.[1]?.replace(/,/g, "") ?? Number.NaN);
+
+// What is missing from EPURE's usage on a GitHub surface: the epic total with a cost, then each ticket's line.
+function usageProblems(text: string, tickets: readonly number[]): string[] {
+  const total = EPIC_TOTAL.exec(text)?.[1];
+  return [
+    ...(total === undefined ? ["no epic total"] : COST.test(total) ? [] : [`no cost in the epic total "${total}"`]),
+    ...tickets.flatMap((t) => {
+      const line = new RegExp(`^- \\*\\*#${t}\\*\\* .* — LLM usage: (.+)$`, "m").exec(text)?.[1];
+      return line === undefined ? [`no usage line for #${t}`] : COST.test(line) ? [] : [`no cost on #${t}`];
+    })
+  ];
+}
+
 // Result fields that are null because reading them failed, with the error.
 export type Unknowns = Readonly<Partial<Record<"end_state" | "feature_pr" | "usage" | "actions" | "reviewed_task_prs" | "comments" | "host_clock", string>>>;
 
@@ -357,9 +377,25 @@ export function evaluateRun(input: {
   readonly cancelledOrchestratorJobs: readonly number[];
   // compareStateUsageWithLogs; null when the state holds no token usage or either side is unknown.
   readonly stateUsageMismatches: readonly string[] | null;
+  // The agent App's last Gate 3 comment, the feature PR body, the plan's tickets and the requests in the state; null when absent or unread.
+  readonly gate3Comment: string | null;
+  readonly featurePrBody: string | null;
+  readonly tickets: readonly number[] | null;
+  readonly stateRequests: number | null;
   readonly unknown: Unknowns;
 }): { readonly success: boolean; readonly checks: readonly SuccessCheck[] } {
   const { endState, error, featurePr, escalations, jobFailures, usageRecords, unavailableJobLogs, cancelledOrchestratorJobs, stateUsageMismatches, unknown } = input;
+  const atGate3 = acceptedEndState(endState)?.label === "Gate 3";
+  const gate3Problems = input.gate3Comment === null ? null : usageProblems(input.gate3Comment, input.tickets ?? []);
+  const prSection = input.featurePrBody === null ? null : PR_USAGE_SECTION.exec(input.featurePrBody)?.[1] ?? null;
+  const prRequests = prSection === null ? Number.NaN : requestsIn(EPIC_TOTAL.exec(prSection)?.[1] ?? "");
+  const prProblems =
+    prSection === null
+      ? null
+      : [
+          ...usageProblems(prSection, []),
+          ...(prRequests === input.stateRequests ? [] : [`${Number.isNaN(prRequests) ? "no" : prRequests} requests in the body, ${input.stateRequests ?? "unknown"} in the state`])
+        ];
   const usageMismatch = stateUsageMismatches !== null && stateUsageMismatches.length > 0;
   const accepted = acceptedEndState(endState);
   const internal = escalations.filter((e) => e.class !== "legitimate");
@@ -429,6 +465,31 @@ export function evaluateRun(input: {
               : cancelledOrchestratorJobs.length > 0
                 ? `orchestrator jobs ${cancelledOrchestratorJobs.join(", ")} were cancelled and may have logged usage they never wrote: ${stateUsageMismatches.join("; ")}`
                 : stateUsageMismatches.join("; ")
+    },
+    {
+      id: "gate-3-comment-shows-usage",
+      passed: atGate3 ? gate3Problems !== null && gate3Problems.length === 0 : null,
+      detail: !atGate3
+        ? "EPURE did not reach Gate 3"
+        : gate3Problems === null
+          ? unknown.comments
+            ? `comments unknown: ${unknown.comments}`
+            : "no Gate 3 comment from the agent App"
+          : gate3Problems.length
+            ? gate3Problems.join("; ")
+            : `epic total and ${input.tickets?.length ?? 0} ticket lines with a cost`
+    },
+    {
+      id: "feature-pr-body-shows-usage",
+      passed: prProblems !== null && prProblems.length === 0,
+      detail:
+        input.featurePrBody === null
+          ? "no feature PR body"
+          : prProblems === null
+            ? "no epure-llm-usage section in the feature PR body"
+            : prProblems.length
+              ? prProblems.join("; ")
+              : `epic total with a cost and ${prRequests} requests, as in the state`
     }
   ];
   return { success: checks.every((c) => c.passed !== false), checks };

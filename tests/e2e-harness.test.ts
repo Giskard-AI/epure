@@ -2,8 +2,9 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { buildDefaultAgentsYaml, parseAgentsYaml } from "../src/bootstrap/setup-repo.js";
 import { createInitialIssueState, type EpureIssueState } from "../src/state/git-ref-state.js";
-import { assertE2eSandboxRepository, loadE2eConfig, resolveGitHubToken } from "./e2e/config.js";
+import { agentsYmlPricing, assertE2eSandboxRepository, loadE2eConfig, resolveGitHubToken } from "./e2e/config.js";
 import {
   codeUnderTestProblems,
   collectEvidence,
@@ -139,6 +140,37 @@ describe("loadE2eConfig", () => {
     }
   ])("refuses $id", ({ file: content, env, error }) => {
     expect(() => withConfigFile(content, (path) => loadE2eConfig({ EPURE_E2E_CONFIG: path, ...env }))).toThrow(error);
+  });
+});
+
+describe("agentsYmlPricing", () => {
+  const SOURCE = "https://aistudio.google.com/docs/pricing (paid tier, $1.50/$7.50/$0.15 from 2027-01-01), read 2026-11-08";
+  const flash = { inputPerMTok: 0.75, outputPerMTok: 3.75, cachedInputPerMTok: 0.075 };
+
+  it.each([
+    {
+      id: "harness-price-with-cached-input-parses-as-epure-pricing",
+      pricing: { "google/gemini-3.8-flash": flash },
+      expected: { input_per_mtok: 0.75, output_per_mtok: 3.75, cached_input_per_mtok: 0.075, source: SOURCE, read_on: "2026-11-08" }
+    },
+    {
+      id: "harness-price-without-cached-input-parses-without-it",
+      pricing: { "google/gemini-3.8-flash": { inputPerMTok: 1, outputPerMTok: 4 } },
+      expected: { input_per_mtok: 1, output_per_mtok: 4, source: SOURCE, read_on: "2026-11-08" }
+    }
+  ])("$id", ({ pricing, expected }) => {
+    const yml = `${buildDefaultAgentsYaml()}\n${agentsYmlPricing({ model: "google/gemini-3.8-flash", pricing, pricingSource: SOURCE })}`;
+
+    expect(parseAgentsYaml(yml).pricing).toEqual({ "google/gemini-3.8-flash": expected });
+  });
+
+  it.each([
+    { id: "model-without-a-price", pricing: { "openai/gpt-x": flash }, pricingSource: SOURCE },
+    { id: "source-without-a-read-date", pricing: { "google/gemini-3.8-flash": flash }, pricingSource: "https://aistudio.google.com/docs/pricing" }
+  ])("refuses $id", ({ pricing, pricingSource }) => {
+    expect(() => agentsYmlPricing({ model: "google/gemini-3.8-flash", pricing, pricingSource })).toThrow(
+      /needs a "pricing" entry for google\/gemini-3\.8-flash and a "pricingSource" saying "read YYYY-MM-DD"/
+    );
   });
 });
 
@@ -899,6 +931,18 @@ describe("evaluateRun", () => {
   const failure = { run_id: 1, url: "https://github.com/o/sandbox/actions/runs/1", conclusion: "failure", phase: "spec", at: "" };
 
   const gate3: EndState = { phase: "review", status: "awaiting_human_approval", subphase: "idle" };
+  const total = "620,229 input tokens (332,014 cached) · 116,873 output (101,432 thinking) · 89 requests · $0.68";
+  const gate3Comment = [
+    "### ✅ Feature Pull Request prête pour validation humaine — PR #30",
+    "",
+    "Tickets intégrés à `feature/25-x` :",
+    "- **#26** (Add a) — LLM usage: 1,000 input tokens (0 cached) · 100 output (50 thinking) · 20 requests · $0.12",
+    "- **#27** (Add b) — LLM usage: 2,000 input tokens (0 cached) · 200 output (90 thinking) · 24 requests · < $0.01",
+    "",
+    "## LLM Usage",
+    `- **Epic total**: ${total}`
+  ].join("\n");
+  const featurePrBody = `## Summary\n\n<!-- epure-llm-usage:start -->\n## LLM Usage\n- **Epic total**: ${total}\n<!-- epure-llm-usage:end -->\n\n## Governance`;
   const passing = {
     endState: gate3,
     error: null,
@@ -909,6 +953,10 @@ describe("evaluateRun", () => {
     unavailableJobLogs: [],
     cancelledOrchestratorJobs: [],
     stateUsageMismatches: [],
+    gate3Comment,
+    featurePrBody,
+    tickets: [26, 27],
+    stateRequests: 89,
     unknown: {}
   } satisfies Parameters<typeof evaluateRun>[0];
   const mismatch = ["google/flash: requests 4 in the state, 5 in the logs"];
@@ -994,6 +1042,38 @@ describe("evaluateRun", () => {
     { id: "mismatches-are-listed", patch: { stateUsageMismatches: ["a/x: requests 1 in the state, 2 in the logs", "b/y: requests 0 in the state, 1 in the logs"] }, detail: "a/x: requests 1 in the state, 2 in the logs; b/y: requests 0 in the state, 1 in the logs" }
   ])("state-usage-matches-job-logs detail: $id", ({ patch, detail }) => {
     expect(evaluateRun({ ...passing, ...patch }).checks.find((c) => c.id === "state-usage-matches-job-logs")?.detail).toBe(detail);
+  });
+
+  it.each<{ id: string; patch: Partial<Parameters<typeof evaluateRun>[0]>; passed: boolean | null; detail: string }>([
+    { id: "epic-total-and-every-ticket-with-a-cost", patch: {}, passed: true, detail: "epic total and 2 ticket lines with a cost" },
+    { id: "not-at-gate-3-cannot-tell", patch: { endState: { phase: "completed", status: "done", subphase: "idle" }, gate3Comment: null }, passed: null, detail: "EPURE did not reach Gate 3" },
+    { id: "no-gate-3-comment", patch: { gate3Comment: null }, passed: false, detail: "no Gate 3 comment from the agent App" },
+    { id: "unreadable-comments", patch: { gate3Comment: null, unknown: { comments: "GET comments: HTTP 502" } }, passed: false, detail: "comments unknown: GET comments: HTTP 502" },
+    {
+      id: "comment-without-usage",
+      patch: { gate3Comment: "### ✅ Feature Pull Request prête pour validation humaine — PR #30\n- **Prochaine étape** : merge" },
+      passed: false,
+      detail: "no epic total; no usage line for #26; no usage line for #27"
+    },
+    {
+      id: "tokens-without-a-cost",
+      patch: { gate3Comment: gate3Comment.replace(" · $0.68", "").replace(" · $0.12", "") },
+      passed: false,
+      detail: `no cost in the epic total "${total.replace(" · $0.68", "")}"; no cost on #26`
+    }
+  ])("gate-3-comment-shows-usage: $id", ({ patch, passed, detail }) => {
+    expect(evaluateRun({ ...passing, ...patch }).checks.find((c) => c.id === "gate-3-comment-shows-usage")).toEqual({ id: "gate-3-comment-shows-usage", passed, detail });
+  });
+
+  it.each<{ id: string; patch: Partial<Parameters<typeof evaluateRun>[0]>; passed: boolean; detail: string }>([
+    { id: "priced-total-equal-to-the-state", patch: {}, passed: true, detail: "epic total with a cost and 89 requests, as in the state" },
+    { id: "total-written-before-the-review-pass", patch: { stateRequests: 109 }, passed: false, detail: "89 requests in the body, 109 in the state" },
+    { id: "state-unread", patch: { stateRequests: null }, passed: false, detail: "89 requests in the body, unknown in the state" },
+    { id: "total-without-a-cost", patch: { featurePrBody: featurePrBody.replace(" · $0.68", "") }, passed: false, detail: `no cost in the epic total "${total.replace(" · $0.68", "")}"` },
+    { id: "body-without-the-usage-section", patch: { featurePrBody: "## Summary" }, passed: false, detail: "no epure-llm-usage section in the feature PR body" },
+    { id: "no-feature-pr", patch: { featurePr: null, featurePrBody: null }, passed: false, detail: "no feature PR body" }
+  ])("feature-pr-body-shows-usage: $id", ({ patch, passed, detail }) => {
+    expect(evaluateRun({ ...passing, ...patch }).checks.find((c) => c.id === "feature-pr-body-shows-usage")).toEqual({ id: "feature-pr-body-shows-usage", passed, detail });
   });
 });
 
@@ -1305,7 +1385,7 @@ describe("renderMarkdownReport", () => {
       job_failures: [],
       comparable: { comparable: false, unmet: ["no review on a task pull request"] },
       unknown: {},
-      ...evaluateRun({ endState, error: "timed out", featurePr: null, escalations, jobFailures: [], usageRecords: 0, unavailableJobLogs: [], cancelledOrchestratorJobs: [], stateUsageMismatches: null, unknown: {} }),
+      ...evaluateRun({ endState, error: "timed out", featurePr: null, escalations, jobFailures: [], usageRecords: 0, unavailableJobLogs: [], cancelledOrchestratorJobs: [], stateUsageMismatches: null, gate3Comment: null, featurePrBody: null, tickets: [3, 4], stateRequests: null, unknown: {} }),
       error: "timed out",
       ...patch
     };
