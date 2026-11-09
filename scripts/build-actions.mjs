@@ -1,5 +1,5 @@
 import { build } from "esbuild";
-import { mkdirSync } from "node:fs";
+import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -61,3 +61,25 @@ for (const target of actionTargets) {
     legalComments: "inline"
   });
 }
+
+// Pi ships a self-contained bundle: copied as published, never re-bundled.
+const piPackageDir = resolve(rootDir, "node_modules/@earendil-works/pi-coding-agent");
+const piVendorDir = resolve(rootDir, "dist/vendor/pi");
+const piPackage = JSON.parse(readFileSync(resolve(piPackageDir, "package.json"), "utf8"));
+rmSync(piVendorDir, { recursive: true, force: true });
+cpSync(resolve(piPackageDir, "dist/bundle"), piVendorDir, { recursive: true });
+// Pi reads its name and config dir from the nearest package.json, which must not be EPURE's.
+writeFileSync(
+  resolve(piVendorDir, "package.json"),
+  `${JSON.stringify(
+    {
+      name: piPackage.name,
+      version: piPackage.version,
+      license: piPackage.license,
+      type: piPackage.type,
+      piConfig: piPackage.piConfig
+    },
+    null,
+    2
+  )}\n`
+);
