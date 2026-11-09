@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import {
+  chmodSync,
   cpSync,
   existsSync,
   lstatSync,
@@ -290,14 +291,22 @@ function normalizeRelativeCandidate(rawPath: string): string {
     .replace(/^\/+/, "");
 }
 
+// Also true under a sensitive path (`.env/x`) and for a path that would replace a directory holding one (a file named `.github`).
 export function isSensitiveTaskBranchPath(
   rawPath: string,
   reviewersDir: string = DEFAULT_REVIEWERS_DIR
 ): boolean {
-  const norm = normalizeRelativeCandidate(rawPath);
+  const norm = normalizeRelativeCandidate(rawPath).replace(/\/+$/, "");
+  const segments = norm.split("/");
+  const matches = (path: string): boolean =>
+    SENSITIVE_TASK_BRANCH_PATH_PATTERNS.some((re) => re.test(path)) ||
+    isSensitiveReviewerRosterPath(path, reviewersDir);
+  const lower = norm.toLowerCase();
   return (
-    SENSITIVE_TASK_BRANCH_PATH_PATTERNS.some((re) => re.test(norm)) ||
-    isSensitiveReviewerRosterPath(norm, reviewersDir)
+    segments.some((_, i) => matches(segments.slice(0, i + 1).join("/"))) ||
+    [".github/workflows", ".github/agents.yml", ".github/agents.yaml", reviewersDir, DEFAULT_REVIEWERS_DIR].some(
+      (root) => norm.length > 0 && root.toLowerCase().startsWith(`${lower}/`)
+    )
   );
 }
 
@@ -527,6 +536,29 @@ function materializeSeedFilesIntoWorkspace(
     const targetPath = resolve(resolvedRoot, cleanRel);
     mkdirSync(dirname(targetPath), { recursive: true });
     writeFileSync(targetPath, content, "utf8");
+  }
+}
+
+// Brings workDir to the given in-memory state; paths outside it or inside .git are skipped.
+export function syncWorkspaceFiles(
+  workDir: string,
+  files: ReadonlyMap<string, string>,
+  deletedFiles: Iterable<string>,
+  fileModes: ReadonlyMap<string, "100644" | "100755"> = new Map()
+): void {
+  materializeSeedFilesIntoWorkspace(workDir, files);
+  const resolvedRoot = resolve(workDir);
+  for (const [rawPath, mode] of fileModes) {
+    const cleanRel = rawPath.replace(/^\/+/, "");
+    if (files.has(rawPath) && isContainedRelativePath(resolvedRoot, cleanRel, false)) {
+      chmodSync(resolve(resolvedRoot, cleanRel), mode === "100755" ? 0o755 : 0o644);
+    }
+  }
+  for (const rawPath of deletedFiles) {
+    const cleanRel = rawPath.replace(/^\/+/, "");
+    if (isContainedRelativePath(resolvedRoot, cleanRel, false)) {
+      rmSync(resolve(resolvedRoot, cleanRel), { force: true });
+    }
   }
 }
 

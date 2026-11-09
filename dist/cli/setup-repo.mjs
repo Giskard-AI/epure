@@ -601,7 +601,7 @@ function buildSandboxToolingSetupSteps(rtkVersion = PINNED_RTK_VERSION) {
     "      - name: Provision Ubuntu 26.04 kernel sandbox (landrun + bubblewrap) & stateless RTK",
     "        run: |",
     "          sudo apt-get update -qq",
-    "          sudo apt-get install -y --no-install-recommends landrun bubblewrap ca-certificates curl",
+    "          sudo apt-get install -y --no-install-recommends landrun bubblewrap ripgrep fd-find ca-certificates curl",
     '          mkdir -p "$HOME/.npm" "$HOME/.cache" "$HOME/.cargo"',
     "          # renovate: datasource=github-releases depName=rtk-ai/rtk",
     `          RTK_VERSION="${safeRtkVersion}"`,
@@ -1953,6 +1953,7 @@ function resolveAgentsConfig(overrides = {}) {
     llm_environment: llmEnvironment,
     merge_policy: overrides.merge_policy ?? DEFAULT_AGENTS_CONFIG.merge_policy,
     max_code_fix_attempts: overrides.max_code_fix_attempts ?? DEFAULT_AGENTS_CONFIG.max_code_fix_attempts,
+    ...overrides.agent_max_llm_requests !== void 0 ? { agent_max_llm_requests: Math.max(1, Math.floor(overrides.agent_max_llm_requests)) } : {},
     ...overrides.max_epic_phases !== void 0 ? {
       max_epic_phases: Math.min(
         3,
@@ -2274,6 +2275,7 @@ function parseAgentsYaml(yamlContent) {
   let llm_request_timeout_seconds;
   let job_timeout_minutes;
   let review_timeout_minutes;
+  let agent_max_llm_requests;
   let max_concurrent_tasks_per_feature;
   let trace_retention_days;
   let preview_retention_days;
@@ -2419,6 +2421,9 @@ function parseAgentsYaml(yamlContent) {
         job_timeout_minutes = parseNum(val);
       } else if (key === "review_timeout_minutes") {
         review_timeout_minutes = parseNum(val);
+      } else if (key === "agent_max_llm_requests") {
+        const parsed = parseNum(val);
+        agent_max_llm_requests = parsed === void 0 ? void 0 : Math.max(1, parsed);
       } else if (key === "max_concurrent_tasks_per_feature") {
         max_concurrent_tasks_per_feature = parseNum(val);
       } else if (key === "trace_retention_days") {
@@ -2703,6 +2708,7 @@ function parseAgentsYaml(yamlContent) {
     ...llm_request_timeout_seconds !== void 0 ? { llm_request_timeout_seconds } : {},
     ...job_timeout_minutes !== void 0 ? { job_timeout_minutes } : {},
     ...review_timeout_minutes !== void 0 ? { review_timeout_minutes } : {},
+    ...agent_max_llm_requests !== void 0 ? { agent_max_llm_requests } : {},
     ...max_concurrent_tasks_per_feature !== void 0 ? { max_concurrent_tasks_per_feature } : {},
     ...trace_retention_days !== void 0 ? { trace_retention_days } : {},
     ...preview_retention_days !== void 0 ? { preview_retention_days } : {},
@@ -2819,10 +2825,15 @@ function buildCallerWorkflows(pinnedSha, stack, jobTimeoutMinutes = DEFAULT_AGEN
         "      pull-requests: write # open, review, and squash-merge task PRs",
         "      checks: read # the GITHUB_TOKEN fallback reads CI check runs; the Agent App publishes EPURE's with its own permissions",
         "    steps:",
+        "      - name: Record job start",
+        "        id: job-start",
+        '        run: echo "ms=$(date +%s%3N)" >> "$GITHUB_OUTPUT"',
         ...buildSandboxToolingSetupSteps(),
         "      - name: Run pre-bundled EPURE issue orchestrator",
         "        id: orchestrate",
         `        uses: Giskard-AI/epure/actions/orchestrate-issue@${pinnedSha} # v1.1.0`,
+        "        env:",
+        "          EPURE_JOB_STARTED_AT_MS: ${{ steps.job-start.outputs.ms }}",
         "        with:",
         "          repository: ${{ github.repository }}",
         "          issue_number: ${{ github.event.issue.number || 0 }}",

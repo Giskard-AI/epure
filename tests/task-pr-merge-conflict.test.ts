@@ -1,4 +1,7 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import type { AgentEngine, AgentSessionRequest } from "../src/agent/engine.js";
 import { orchestrateIssueCommand } from "../src/orchestrator/issue-orchestrator.js";
 import {
   createInMemoryGitRefStateStore,
@@ -31,12 +34,12 @@ function gemini(payload: unknown): Response {
   );
 }
 
-function geminiAnswer(body: string): Response {
+function geminiAnswer(body: string, findings: readonly unknown[]): Response {
   const props = (
     JSON.parse(body) as { generationConfig?: { responseJsonSchema?: { properties?: Record<string, unknown> } } }
   ).generationConfig?.responseJsonSchema?.properties ?? {};
-  if ("findings" in props) {
-    return gemini({ reviewer: "standards-reviewer", summary: "LGTM", findings: [] });
+  if ("findings" in props || (findings.length > 0 && body.includes("reviewer"))) {
+    return gemini({ reviewer: "standards-reviewer", summary: "LGTM", findings });
   }
   if ("verdict" in props && "unwired_modules" in props) {
     return gemini({ verdict: "CONVERGED", rationale: "wired", unwired_modules: [], stub_violations: [], unmet_criteria: [], remediation_tickets: [] });
@@ -53,6 +56,13 @@ function geminiAnswer(body: string): Response {
   });
 }
 
+interface AgentScenario {
+  readonly engine: AgentEngine;
+  // Answers a request before the shared routes; undefined falls through.
+  readonly route: (method: string, path: string) => Response | undefined;
+  readonly reviewFindings: () => readonly unknown[];
+}
+
 interface Scenario {
   // Responses of `PUT /pulls/172/merge`, in order (the last one repeats).
   readonly mergeStatuses: readonly number[];
@@ -63,6 +73,7 @@ interface Scenario {
   readonly refusalMessage?: string;
   // Head of PR #172 once a 409 answered the merge (someone pushed after the review).
   readonly movedHeadSha?: string;
+  readonly agent?: AgentScenario;
 }
 
 async function runTicket(scenario: Scenario) {
@@ -92,7 +103,11 @@ async function runTicket(scenario: Scenario) {
     const reply = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status });
 
     if (u.hostname === "generativelanguage.googleapis.com") {
-      return geminiAnswer(body);
+      return geminiAnswer(body, scenario.agent?.reviewFindings() ?? []);
+    }
+    const routed = scenario.agent?.route(method, path);
+    if (routed) {
+      return routed;
     }
     if (path.endsWith("/issues/70") && method === "GET") {
       return reply({ id: 7000, number: 70, title: "[Plan] Slice 1 Postgres", body: "Plan body", state: "open" });
@@ -186,6 +201,7 @@ async function runTicket(scenario: Scenario) {
     llmApiKey: "AIzaMockKey",
     stateStore: store,
     fetchImpl,
+    agentEngine: scenario.agent?.engine,
     sandboxRunner: async () => ({
       isolated: true,
       error_code: "NONE",
@@ -207,7 +223,10 @@ async function runTicket(scenario: Scenario) {
   const mergeShas = requests
     .filter((r) => r.method === "PUT" && r.path.endsWith("/pulls/172/merge"))
     .map((r) => (JSON.parse(r.body) as { sha: string }).sha);
-  return { result, state, mergeAttempts, mergeShas, reviewedShas, taskResyncs };
+  const committedBlobs = requests
+    .filter((r) => r.method === "POST" && r.path.endsWith("/git/blobs"))
+    .map((r) => JSON.parse(r.body) as { content: string });
+  return { result, state, mergeAttempts, mergeShas, reviewedShas, taskResyncs, committedBlobs };
 }
 
 describe("ticket execution — a conflicting task PR is re-synced instead of waiting or failing (#105)", () => {
@@ -261,6 +280,66 @@ describe("ticket execution — a conflicting task PR is re-synced instead of wai
     expect(mergeAttempts).toBe(1);
     expect(reviewedShas).toEqual(["new-commit-sha-70"]);
     expect(result.summary_markdown).toContain("Repository rule violations found (mergeable_state: `blocked`)");
+  });
+
+  it("agent-session-after-a-mid-ticket-re-sync-sees-and-commits-the-merged-files", async () => {
+    const MERGED_POSTGRES = "export const pg = true;\nexport const merged = 'from-feature';\n";
+    const FEATURE_ONLY = "export const featureOnly = 1;\n";
+    const base64File = (text: string) =>
+      new Response(JSON.stringify({ type: "file", encoding: "base64", content: Buffer.from(text).toString("base64") }), { status: 200 });
+    const requests: AgentSessionRequest[] = [];
+    const worktreeSeenByFixer: Record<string, string | null> = {};
+    const engine: AgentEngine = {
+      name: "scripted",
+      run: async (request) => {
+        requests.push(request);
+        if (request.role === "fixer") {
+          for (const path of ["src/postgres.ts", "src/feature-only.ts"]) {
+            const abs = join(request.worktree, path);
+            worktreeSeenByFixer[path] = existsSync(abs) ? readFileSync(abs, "utf8") : null;
+          }
+          return { finalMessage: "Fixed.", diff: { files: [{ path: "src/fix.ts", content: "export const fix = 1;\n", mode: "100644" }], deleted_files: [], skipped: [] } };
+        }
+        return { finalMessage: "Wrote.", diff: { files: [{ path: "src/postgres.ts", content: "export const pg = true;\n", mode: "100644" }], deleted_files: [], skipped: [] } };
+      }
+    };
+
+    const { result, committedBlobs } = await runTicket({
+      mergeStatuses: [200],
+      resyncStatus: 201,
+      firstMergeableState: "dirty",
+      agent: {
+        engine,
+        reviewFindings: () =>
+          requests.some((r) => r.role === "fixer")
+            ? []
+            : [{ category: "must_fix", severity: "high", path: "src/postgres.ts", line: 1, title: "Missing fix", rationale: "Add src/fix.ts." }],
+        route: (method, path) => {
+          if (method === "GET" && path.includes("/pulls/172/files")) {
+            return new Response(JSON.stringify([{ filename: "src/postgres.ts", status: "modified", patch: "@@ -1 +1 @@" }]), { status: 200 });
+          }
+          if (method === "GET" && path.includes(`/compare/new-commit-sha-70...${RESYNC_SHA}`)) {
+            return new Response(
+              JSON.stringify({ merge_base_commit: { sha: "base-sha-70" }, files: [{ filename: "src/postgres.ts" }, { filename: "src/feature-only.ts" }], ahead_by: 1 }),
+              { status: 200 }
+            );
+          }
+          if (method === "GET" && path.includes(`/contents/src/postgres.ts?ref=${RESYNC_SHA}`)) {
+            return base64File(MERGED_POSTGRES);
+          }
+          if (method === "GET" && path.includes(`/contents/src/feature-only.ts?ref=${RESYNC_SHA}`)) {
+            return base64File(FEATURE_ONLY);
+          }
+          return undefined;
+        }
+      }
+    });
+
+    expect(requests.map((r) => r.role)).toEqual(["implementer", "fixer"]);
+    expect(worktreeSeenByFixer).toEqual({ "src/postgres.ts": MERGED_POSTGRES, "src/feature-only.ts": FEATURE_ONLY });
+    expect(committedBlobs.map((b) => b.content)).toContain(MERGED_POSTGRES);
+    expect(committedBlobs.map((b) => b.content)).not.toContain(FEATURE_ONLY);
+    expect(result.status).toBe("done");
   });
 
   it("merge-refused-because-the-head-moved-re-reviews-the-new-head-and-merges-it", async () => {

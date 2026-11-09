@@ -1196,7 +1196,7 @@ describe("5. Pre-bundled CLI (dist/cli/setup-repo.mjs) & skill (.agents/skills/s
       expect(ci.content).toContain(expectedCiSubstring);
 
       const sandboxSteps = buildSandboxToolingSetupSteps().join("\n");
-      expect(sandboxSteps).toContain("landrun bubblewrap");
+      expect(sandboxSteps).toContain("landrun bubblewrap ripgrep fd-find");
       expect(sandboxSteps).toContain("# renovate: datasource=github-releases depName=rtk-ai/rtk");
       expect(sandboxSteps).toContain(PINNED_RTK_VERSION);
       expect(sandboxSteps).toContain("sha256sum --check --ignore-missing");

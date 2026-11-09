@@ -835,6 +835,7 @@ function resolveAgentsConfig(overrides = {}) {
     llm_environment: llmEnvironment,
     merge_policy: overrides.merge_policy ?? DEFAULT_AGENTS_CONFIG.merge_policy,
     max_code_fix_attempts: overrides.max_code_fix_attempts ?? DEFAULT_AGENTS_CONFIG.max_code_fix_attempts,
+    ...overrides.agent_max_llm_requests !== void 0 ? { agent_max_llm_requests: Math.max(1, Math.floor(overrides.agent_max_llm_requests)) } : {},
     ...overrides.max_epic_phases !== void 0 ? {
       max_epic_phases: Math.min(
         3,
@@ -965,6 +966,7 @@ function parseAgentsYaml(yamlContent) {
   let llm_request_timeout_seconds;
   let job_timeout_minutes;
   let review_timeout_minutes;
+  let agent_max_llm_requests;
   let max_concurrent_tasks_per_feature;
   let trace_retention_days;
   let preview_retention_days;
@@ -1110,6 +1112,9 @@ function parseAgentsYaml(yamlContent) {
         job_timeout_minutes = parseNum(val);
       } else if (key === "review_timeout_minutes") {
         review_timeout_minutes = parseNum(val);
+      } else if (key === "agent_max_llm_requests") {
+        const parsed = parseNum(val);
+        agent_max_llm_requests = parsed === void 0 ? void 0 : Math.max(1, parsed);
       } else if (key === "max_concurrent_tasks_per_feature") {
         max_concurrent_tasks_per_feature = parseNum(val);
       } else if (key === "trace_retention_days") {
@@ -1394,6 +1399,7 @@ function parseAgentsYaml(yamlContent) {
     ...llm_request_timeout_seconds !== void 0 ? { llm_request_timeout_seconds } : {},
     ...job_timeout_minutes !== void 0 ? { job_timeout_minutes } : {},
     ...review_timeout_minutes !== void 0 ? { review_timeout_minutes } : {},
+    ...agent_max_llm_requests !== void 0 ? { agent_max_llm_requests } : {},
     ...max_concurrent_tasks_per_feature !== void 0 ? { max_concurrent_tasks_per_feature } : {},
     ...trace_retention_days !== void 0 ? { trace_retention_days } : {},
     ...preview_retention_days !== void 0 ? { preview_retention_days } : {},
@@ -1518,6 +1524,18 @@ var TruncatedGitTreeError = class extends Error {
   commitSha;
   name = "TruncatedGitTreeError";
 };
+function assertNoFileDirectorySwap(branch, written, parentFiles, deleted) {
+  const ancestorsOf = (path) => path.split("/").slice(0, -1).map((_, i, segments) => segments.slice(0, i + 1).join("/"));
+  const kept = [...parentFiles.keys()].filter((p) => !deleted.has(p));
+  const keptFiles = new Set(kept);
+  const keptDirs = new Set(kept.flatMap(ancestorsOf));
+  const swaps = written.map((e) => e.path).filter((p) => keptDirs.has(p) || ancestorsOf(p).some((a) => keptFiles.has(a)));
+  if (swaps.length > 0) {
+    throw new Error(
+      `Refusing to commit ${swaps.join(", ")} to '${branch}': each would replace a directory with a file, or a file with a directory, whose other entries the commit does not delete.`
+    );
+  }
+}
 function encodeGitHubContentsPath(filePath) {
   return filePath.split("/").filter((segment) => segment.length > 0).map((segment) => encodeURIComponent(segment)).join("/");
 }
@@ -2157,7 +2175,7 @@ function createGitHubRestHelper(params) {
         seenTreePaths.add(cleanPath);
         treeEntries.push({
           path: cleanPath,
-          mode: "100644",
+          mode: file.mode,
           type: "blob",
           sha: blobRes.data.sha
         });
@@ -2205,9 +2223,20 @@ function createGitHubRestHelper(params) {
           `/repos/${owner}/${repo}/git/commits/${parentCommitSha}`
         );
         const baseTreeSha = parentCommit.data.tree.sha;
-        const attemptEntries = [...treeEntries];
+        const parentTree = treeEntries.length > 0 || pendingDeletedPaths.length > 0 ? await readCommitTree(parentCommitSha) : { entries: [], truncated: true };
+        const parentFiles = parentTree.truncated ? null : new Map(
+          parentTree.entries.flatMap(
+            (e) => e.type !== "tree" && e.path ? [[e.path, e.mode ?? "100644"]] : []
+          )
+        );
+        if (parentFiles) {
+          assertNoFileDirectorySwap(input.branch, treeEntries, parentFiles, new Set(pendingDeletedPaths));
+        }
+        const attemptEntries = treeEntries.map((e) => ({
+          ...e,
+          mode: e.mode ?? (parentFiles?.get(e.path) === "100755" ? "100755" : "100644")
+        }));
         if (pendingDeletedPaths.length > 0) {
-          const parentTree = await readCommitTree(parentCommitSha);
           const existingTreePaths = parentTree.truncated ? null : new Set(
             parentTree.entries.flatMap(
               (e) => e.type === "blob" && e.path ? [e.path] : []
@@ -2288,7 +2317,8 @@ function createGitHubRestHelper(params) {
           ).map((item) => ({
             filename: item.filename.trim().replace(/^\/+/, ""),
             status: item.status ?? "modified",
-            ...typeof item.patch === "string" ? { patch: item.patch } : {}
+            ...typeof item.patch === "string" ? { patch: item.patch } : {},
+            ...typeof item.previous_filename === "string" ? { previous_filename: item.previous_filename.trim().replace(/^\/+/, "") } : {}
           }));
         }
       } catch {
@@ -2611,7 +2641,7 @@ async function loadTrustedAgentsProviders(gh) {
 
 // src/sandbox/llm-sandbox.ts
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import {
   Agent as HttpAgent,
   createServer,
@@ -2798,6 +2828,25 @@ function buildSanitizedSandboxEnv(runnerEnv, proxy) {
   sanitized.NO_COLOR = "1";
   return sanitized;
 }
+var AGENT_SESSION_INHERITED_ENV = ["PATH", "LANG"];
+function buildAgentSessionEnv(runnerEnv, home, proxy, sessionEnv) {
+  const env = {};
+  for (const name of AGENT_SESSION_INHERITED_ENV) {
+    const value = runnerEnv[name];
+    if (typeof value === "string") {
+      env[name] = value;
+    }
+  }
+  return {
+    ...env,
+    ...sessionEnv?.(home),
+    HOME: home,
+    TMPDIR: home,
+    EPURE_SANDBOX_ACTIVE: "true",
+    NO_COLOR: "1",
+    ...proxy ? { EPURE_LLM_PROXY_URL: proxy.proxyUrl, EPURE_LLM_PROXY_NONCE: proxy.proxyNonce } : {}
+  };
+}
 function buildLandrunInvocation(params) {
   const sanitizeLandrunPath = (p) => p.replace(/,/g, "");
   const resolvedCwd = sanitizeLandrunPath(resolve(params.cwd));
@@ -2818,23 +2867,17 @@ function buildLandrunInvocation(params) {
   }
   const rwxPaths = /* @__PURE__ */ new Set([
     resolvedCwd,
-    params.agentDir ? sanitizeLandrunPath(resolve(params.agentDir)) : "/tmp"
+    params.agentDir ? sanitizeLandrunPath(resolve(params.agentDir)) : "/tmp",
+    ...packageCacheDirs(params.networkPolicy, params.sanitizedEnv).map(sanitizeLandrunPath)
   ]);
-  if (params.networkPolicy === "https_only") {
-    const home = sanitizeLandrunPath(params.sanitizedEnv.HOME?.trim() ?? "");
-    if (home) {
-      rwxPaths.add(`${home}/.npm`);
-      rwxPaths.add(`${home}/.cache`);
-      rwxPaths.add(`${home}/.cargo`);
-    }
-  }
   const landrunArgs = [
     "--rox",
     Array.from(roxPaths).join(","),
     "--ro",
     "/dev,/proc",
     "--rwx",
-    Array.from(rwxPaths).join(",")
+    Array.from(rwxPaths).join(","),
+    ...params.writableDevNull ? ["--rw", "/dev/null"] : []
   ];
   if (params.networkPolicy === "proxy_only") {
     if (typeof params.proxyPort === "number" && params.proxyPort > 0) {
@@ -2849,18 +2892,23 @@ function buildLandrunInvocation(params) {
   landrunArgs.push("--", params.command, ...params.args);
   return landrunArgs;
 }
+function packageCacheDirs(networkPolicy, env) {
+  const home = env.HOME?.trim() ?? "";
+  return networkPolicy === "https_only" && home ? [".npm", ".cache", ".cargo"].map((sub) => `${home}/${sub}`) : [];
+}
 function buildBubblewrapInvocation(params) {
   const resolvedCwd = resolve(params.cwd);
   const extraBinds = [
     ...(params.readOnlyPaths ?? []).flatMap((p) => ["--ro-bind", resolve(p), resolve(p)]),
-    ...params.agentDir ? ["--bind", resolve(params.agentDir), resolve(params.agentDir)] : []
+    ...params.agentDir ? ["--bind", resolve(params.agentDir), resolve(params.agentDir)] : [],
+    ...(params.writablePaths ?? []).flatMap((p) => ["--bind-try", resolve(p), resolve(p)])
   ];
   return [
     ...params.underLandrun ? [] : ["--unshare-net"],
     "--unshare-pid",
     "--unshare-ipc",
     "--die-with-parent",
-    params.underLandrun ? "--bind" : "--ro-bind",
+    "--ro-bind",
     "/",
     "/",
     "--dev",
@@ -2907,7 +2955,8 @@ function buildKernelSandboxedCommand(input) {
     networkPolicy: input.networkPolicy,
     proxyPort: input.proxyPort,
     readOnlyPaths: input.readOnlyPaths,
-    agentDir: input.agentDir
+    agentDir: input.agentDir,
+    writableDevNull: backend === "bubblewrap+landrun"
   });
   const bubblewrap = (command, args) => buildBubblewrapInvocation({
     command,
@@ -2915,6 +2964,7 @@ function buildKernelSandboxedCommand(input) {
     cwd: input.cwd,
     readOnlyPaths: input.readOnlyPaths,
     agentDir: input.agentDir,
+    writablePaths: packageCacheDirs(input.networkPolicy, input.sanitizedEnv),
     underLandrun: backend === "bubblewrap+landrun"
   });
   switch (backend) {
@@ -3048,6 +3098,7 @@ async function createLlmSandboxProxy(options) {
   const nonceBytes = Buffer.from(proxyNonce);
   const reportUsage = usageReporter({ labelledBySandbox: true });
   const requestBodyTimeoutMs = options.requestBodyTimeoutMs ?? DEFAULT_LLM_REQUEST_TIMEOUT_MS;
+  let acceptedRequests = 0;
   const relay = (req, res) => {
     const rawUrl = req.url ?? "/";
     if (!rawUrl.startsWith("/")) {
@@ -3076,6 +3127,18 @@ async function createLlmSandboxProxy(options) {
         "PROXY_FORBIDDEN_ENDPOINT",
         `Sandbox LLM proxy forbids ${req.method ?? "?"} '${url.pathname}' on ${upstreamHost}.`
       );
+      return;
+    }
+    acceptedRequests += 1;
+    if (options.maxRequests !== void 0 && acceptedRequests > options.maxRequests) {
+      res.setHeader("connection", "close");
+      sendProxyError(
+        res,
+        429,
+        "PROXY_REQUEST_CAP_REACHED",
+        `Sandbox LLM proxy forwards at most ${options.maxRequests} requests per session.`
+      );
+      options.onRequestCapReached?.();
       return;
     }
     if (Number(req.headers["content-length"] ?? 0) > MAX_PROXY_REQUEST_BYTES) {
@@ -3401,17 +3464,12 @@ async function runInUntrustedCodeSandbox(input) {
   const cwd = input.cwd ?? process.cwd();
   const timeoutMs = input.timeoutMs ?? 60 * 60 * 1e3;
   const agentDir = input.agentSession ? mkdtempSync("/tmp/epure-agent-") : void 0;
-  const agentEnv = agentDir ? { HOME: agentDir, TMPDIR: agentDir } : {};
-  const runConfined = (command, policy, env, proxyPort) => {
-    if (policy === "https_only") {
-      const home = env.HOME?.trim() ?? "";
-      if (home) {
-        for (const sub of [".npm", ".cache", ".cargo"]) {
-          try {
-            mkdirSync(resolve(home, sub), { recursive: true });
-          } catch {
-          }
-        }
+  const installHomeEnv = agentDir ? { HOME: agentDir, TMPDIR: agentDir } : {};
+  const runConfined = (command, policy, env, proxyPort, interact) => {
+    for (const dir of packageCacheDirs(policy, env)) {
+      try {
+        mkdirSync(dir, { recursive: true });
+      } catch {
       }
     }
     const wrapped = buildKernelSandboxedCommand({
@@ -3425,11 +3483,15 @@ async function runInUntrustedCodeSandbox(input) {
       readOnlyPaths: input.readOnlyPaths,
       agentDir
     });
-    return spawnCaptured(wrapped.command, wrapped.args, cwd, env, timeoutMs);
+    return spawnCaptured(wrapped.command, wrapped.args, cwd, env, timeoutMs, interact, (kill) => {
+      killChild = kill;
+    });
   };
+  let killChild;
+  let requestCapReached = false;
   let proxy;
   try {
-    const installEnv = { ...buildSanitizedSandboxEnv(input.runnerEnv), ...agentEnv };
+    const installEnv = { ...buildSanitizedSandboxEnv(input.runnerEnv), ...installHomeEnv };
     for (const install of installCommands) {
       const installed = await runConfined(install, "https_only", installEnv);
       if (installed.exitCode !== 0) {
@@ -3448,18 +3510,35 @@ async function runInUntrustedCodeSandbox(input) {
         };
       }
     }
-    proxy = llmTarget ? await createLlmSandboxProxy({ upstream: llmTarget.upstream, apiKey: llmTarget.apiKey }) : void 0;
+    proxy = llmTarget ? await createLlmSandboxProxy({
+      upstream: llmTarget.upstream,
+      apiKey: llmTarget.apiKey,
+      observeResponse: input.observeLlmResponse,
+      maxRequests: input.maxLlmRequests,
+      onRequestCapReached: () => {
+        requestCapReached = true;
+        killChild?.();
+      }
+    }) : void 0;
+    if (agentDir) {
+      for (const [relPath, content] of Object.entries(input.agentSession?.homeFiles?.(proxy) ?? {})) {
+        const target = resolve(agentDir, relPath);
+        mkdirSync(dirname(target), { recursive: true });
+        writeFileSync(target, content, { encoding: "utf8", mode: 384 });
+      }
+    }
     const childResult = await runConfined(
       { command: input.command, args: input.args },
       networkPolicy,
-      { ...buildSanitizedSandboxEnv(input.runnerEnv, proxy), ...agentEnv },
-      proxy ? parsePortFromProxyUrl(proxy.proxyUrl) : void 0
+      agentDir ? buildAgentSessionEnv(input.runnerEnv, agentDir, proxy, input.agentSession?.env) : buildSanitizedSandboxEnv(input.runnerEnv, proxy),
+      proxy ? parsePortFromProxyUrl(proxy.proxyUrl) : void 0,
+      input.interact
     );
-    const ok = childResult.exitCode === 0;
+    const ok = childResult.exitCode === 0 && !requestCapReached;
     return {
       isolated: true,
-      error_code: ok ? "NONE" : "SANDBOX_COMMAND_FAILED",
-      error_message: ok ? "" : `Sandboxed command exited with code ${childResult.exitCode}.`,
+      error_code: requestCapReached ? "LLM_REQUEST_CAP_REACHED" : ok ? "NONE" : "SANDBOX_COMMAND_FAILED",
+      error_message: requestCapReached ? `Sandboxed command was killed after its ${input.maxLlmRequests ?? 0} allowed LLM requests.` : ok ? "" : `Sandboxed command exited with code ${childResult.exitCode}.`,
       exit_code: childResult.exitCode,
       stdout: redactSecrets(childResult.stdout, secretValues),
       stderr: redactSecrets(childResult.stderr, secretValues),
@@ -3482,13 +3561,16 @@ function isCiRunner(runnerEnv) {
     (env) => flagged(env.GITHUB_ACTIONS) || flagged(env.CI)
   );
 }
-function spawnCaptured(command, args, cwd, env, timeoutMs) {
+var MAX_SESSION_STDERR_BYTES = 64 * 1024;
+function spawnCaptured(command, args, cwd, env, timeoutMs, interact, onSpawn) {
   return new Promise((resolvePromise) => {
     const child = spawn(command, [...args], {
       cwd,
       env,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe"],
       detached: true
+    });
+    child.stdin.on("error", () => {
     });
     const killGroup = () => {
       if (child.pid !== void 0) {
@@ -3498,12 +3580,30 @@ function spawnCaptured(command, args, cwd, env, timeoutMs) {
         }
       }
     };
+    onSpawn(killGroup);
     const stdoutChunks = [];
-    const stderrChunks = [];
+    let stderrChunks = [];
+    let stderrBytes = 0;
     const timer = setTimeout(killGroup, timeoutMs);
     child.on("exit", killGroup);
-    child.stdout.on("data", (chunk) => stdoutChunks.push(chunk));
-    child.stderr.on("data", (chunk) => stderrChunks.push(chunk));
+    if (interact) {
+      void interact({ stdin: child.stdin, stdout: child.stdout, kill: killGroup }).then(
+        () => child.stdin.end(),
+        () => killGroup()
+      );
+    } else {
+      child.stdin.end();
+      child.stdout.on("data", (chunk) => stdoutChunks.push(chunk));
+    }
+    child.stderr.on("data", (chunk) => {
+      stderrChunks.push(chunk);
+      stderrBytes += chunk.length;
+      if (interact && stderrBytes > MAX_SESSION_STDERR_BYTES) {
+        const tail = Buffer.concat(stderrChunks).subarray(-MAX_SESSION_STDERR_BYTES);
+        stderrChunks = [tail];
+        stderrBytes = tail.length;
+      }
+    });
     child.on("error", (err) => {
       clearTimeout(timer);
       resolvePromise({

@@ -142,6 +142,10 @@ jobs:
       pull-requests: write
       checks: write
     steps:
+      - name: Record job start
+        id: job-start
+        run: echo "ms=$(date +%s%3N)" >> "$GITHUB_OUTPUT"
+
       - name: Checkout EPURE framework bundle
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -152,7 +156,7 @@ jobs:
       - name: Provision Ubuntu 26.04 kernel sandbox (landrun + bubblewrap) & stateless RTK
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends landrun bubblewrap ca-certificates curl
+          sudo apt-get install -y --no-install-recommends landrun bubblewrap ripgrep fd-find ca-certificates curl
           # renovate: datasource=github-releases depName=rtk-ai/rtk
           RTK_VERSION="v1.0.1"
           RTK_ARCHIVE="rtk-x86_64-unknown-linux-musl.tar.gz"
@@ -172,6 +176,8 @@ jobs:
       - name: Run pre-bundled EPURE issue orchestrator
         id: orchestrate
         uses: ./actions/orchestrate-issue
+        env:
+          EPURE_JOB_STARTED_AT_MS: ${{ steps.job-start.outputs.ms }}
         with:
           repository: ${{ inputs.repository }}
           issue_number: ${{ inputs.issue_number }}

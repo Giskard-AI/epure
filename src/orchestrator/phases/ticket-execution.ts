@@ -1,3 +1,13 @@
+import {
+  AgentEngineError,
+  assertNoSecretMaterial,
+  type AgentEngine,
+  type AgentRole,
+  type AgentThinkingLevel,
+  type FileMode,
+  type SkippedPathReason
+} from "../../agent/engine.js";
+import { listTrackedPaths } from "../../agent/worktree-snapshot.js";
 import { redactSecrets } from "../../auth/issue-command-gate.js";
 import {
   discoverVerificationProfile,
@@ -6,6 +16,7 @@ import {
 import type { parseAgentsYaml } from "../../bootstrap/setup-repo.js";
 import {
   discoverExpectedExternalWorkflows,
+  resolveAgentEngineEscalationReason,
   resolveLlmEscalationReason,
   waitForExternalCiChecks,
   type NeedsHumanEscalationReason,
@@ -13,8 +24,11 @@ import {
 } from "../../execution/external-ci-gate.js";
 import { reconcileProvenTicketDependencies } from "../../execution/proven-dependency-unblocker.js";
 import { evaluateReviewFeedbackTrigger } from "../../execution/review-loop-guard.js";
+import { DEFAULT_LLM_REQUEST_TIMEOUT_MS } from "../../llm/client.js";
 import {
+  AuthenticationError,
   LLMError,
+  QuotaExhaustedError,
   StructuredOutputValidationError
 } from "../../llm/errors.js";
 import { runMultiAgentPrReviewPass } from "../../review/multi-agent-pr-review.js";
@@ -23,13 +37,16 @@ import {
   type ReviewerAgentName
 } from "../../review/reviewer-roster.js";
 import { generateSemanticSquashCommitFromDiff } from "../../review/squash-commit-generator.js";
-import type {
-  SandboxExecutionInput,
-  SandboxExecutionResult
+import {
+  collectRunnerSecretValues,
+  type SandboxExecutionInput,
+  type SandboxExecutionResult
 } from "../../sandbox/llm-sandbox.js";
 import {
   formatVerificationToolingGuideMarkdown,
+  isSensitiveTaskBranchPath,
   prepareRepositorySandboxWorkspace,
+  syncWorkspaceFiles,
   validateWorkspaceFileOperations
 } from "../../sandbox/polyglot-workspace-runner.js";
 import {
@@ -47,7 +64,7 @@ import {
 } from "../../state/git-ref-state.js";
 import { currentTokenUsage, withUsageAttribution } from "../../usage/token-usage.js";
 import { formatTicketUsageSuffix } from "../../usage/usage-report.js";
-import { appendEpureCommandsSpoiler } from "../formatting/comments.js";
+import { appendEpureCommandsSpoiler, fencedCodeBlock } from "../formatting/comments.js";
 import { callLlmJson } from "../llm-helper.js";
 import {
   syncBranchWithBase,
@@ -58,14 +75,20 @@ import {
   isConflictRefusal,
   loadOrchestratorStateFromGitRef,
   PullRequestHeadMovedError,
-  PullRequestNotMergeableError
+  PullRequestNotMergeableError,
+  TruncatedGitTreeError
 } from "../github/rest-client.js";
 import { EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT } from "../prompts/code-discipline.js";
 import { formatResumeContextPromptLines } from "../prompts/resume-context.js";
 import {
+  TICKET_SESSION_SUMMARY_SCHEMA,
+  type TicketSessionSummary
+} from "../prompts/schemas.js";
+import {
   createGeneratedTicketImplementationSchema,
   type EscalateToNeedsHumanFn,
   type GeneratedTicketImplementation,
+  type GitBlobRef,
   type GitHubRestHelper,
   type IssueMetadata,
   type OrchestrateIssueResult,
@@ -127,6 +150,10 @@ export interface RunTicketExecutionLoopParams {
   readonly resumeContextMarkdown?: string | undefined;
   // Moves the epic to `done` and returns its result when a human merged the feature PR meanwhile.
   readonly stopIfFeaturePrMerged: () => Promise<OrchestrateIssueResult | null>;
+  // Implementation, Stage 1 fixes and review/CI remediation run as sessions of this engine when set.
+  readonly agentEngine?: AgentEngine | undefined;
+  // Epoch ms at which the job's timeout kills the run; agent sessions end before it.
+  readonly jobDeadlineMs?: number | undefined;
 }
 
 export interface RunTicketExecutionLoopOutcome {
@@ -258,11 +285,240 @@ interface GenerateTicketImplementationWithFallbackParams {
   readonly phaseModels: ResolvedPhaseModels;
   readonly addTransientRetriesUsed: (delta: number) => void;
   readonly fetchImpl?: typeof fetch | undefined;
+  readonly agentSession?: TicketAgentSession | undefined;
+}
+
+// Shared by a ticket's sessions.
+interface TicketAgentSessionState {
+  // Carried to the commits: the text pipeline does not keep the executable bit.
+  readonly fileModes: Map<string, FileMode>;
+  // Reverted changes of the last session, told to the next one.
+  pendingFeedback: string[];
+  // Set when the last session counts as a failed attempt without running Stage 1.
+  failedAttempt: string | undefined;
+  lastSessionEmpty: boolean;
+}
+
+interface TicketAgentSession {
+  readonly engine: AgentEngine;
+  readonly role: AgentRole;
+  // The Stage 1 checkout; it is brought to the ticket's current files before the session.
+  readonly worktree: string;
+  readonly trackedPaths: readonly string[];
+  readonly jobDeadlineMs: number | undefined;
+  readonly maxLlmRequests: number;
+  readonly state: TicketAgentSessionState;
+}
+
+const TICKET_AGENT_SESSION_TIMEOUT_MS = 30 * 60 * 1000;
+// Kept after a session for Stage 1, the commit and an escalation before the job's timeout kills the run.
+const AGENT_SESSION_RESERVE_MS = 10 * 60 * 1000;
+const MIN_AGENT_SESSION_MS = 2 * 60 * 1000;
+// One Stage 1 install or test command at its timeout, then the commit or an escalation.
+const MIN_STAGE1_BUDGET_MS = 5 * 60 * 1000;
+export const DEFAULT_AGENT_MAX_LLM_REQUESTS = 200;
+
+export class JobBudgetExhaustedError extends Error {
+  constructor(
+    remainingMs: number,
+    step = "an agent session with Stage 1 and the commit",
+    neededMs = AGENT_SESSION_RESERVE_MS + MIN_AGENT_SESSION_MS
+  ) {
+    super(
+      `${Math.max(0, Math.floor(remainingMs / 1000))} s of the job's time budget remain: ${step} needs ${neededMs / 1000} s.`
+    );
+    this.name = "JobBudgetExhaustedError";
+  }
+}
+
+// min(session cap, what the job leaves after the reserve); undefined when that is too short to start.
+export function agentSessionTimeoutMs(jobDeadlineMs: number | undefined, nowMs: number): number | undefined {
+  const available =
+    jobDeadlineMs === undefined ? TICKET_AGENT_SESSION_TIMEOUT_MS : jobDeadlineMs - nowMs - AGENT_SESSION_RESERVE_MS;
+  return available < MIN_AGENT_SESSION_MS ? undefined : Math.min(TICKET_AGENT_SESSION_TIMEOUT_MS, available);
+}
+
+// The summary call leaves Stage 1 its floor; at least 1 s so the call can still fail over to the fallback message.
+export function summaryRequestTimeoutMs(
+  jobDeadlineMs: number | undefined,
+  nowMs: number,
+  requestTimeoutMs: number | undefined
+): number | undefined {
+  if (jobDeadlineMs === undefined) {
+    return requestTimeoutMs;
+  }
+  return Math.max(
+    1_000,
+    Math.min(requestTimeoutMs ?? DEFAULT_LLM_REQUEST_TIMEOUT_MS, jobDeadlineMs - nowMs - MIN_STAGE1_BUDGET_MS)
+  );
+}
+
+const SKIPPED_PATH_LABELS: Record<SkippedPathReason, string> = {
+  symlink: "lien symbolique",
+  submodule: "sous-module",
+  binary: "binaire ou texte non UTF-8",
+  ignored: "nouveau fichier ignoré (.gitignore, dépendances ou sortie de build)",
+  protected: "chemin protégé"
+};
+
+const TICKET_AGENT_ROLE_HEADLINES: Record<AgentRole, string> = {
+  implementer: "Tu es un ingénieur TDD EPURE implémentant un ticket approuvé.",
+  fixer:
+    "Tu es un ingénieur TDD EPURE corrigeant les échecs décrits dans le message (vérification Stage 1, constats 'must_fix' de revue, CI externe) en gardant 100% des cibles Stage 1 au vert."
+};
+
+function ticketAgentInstructions(role: AgentRole, reviewersDir: string): string {
+  return [
+    TICKET_AGENT_ROLE_HEADLINES[role],
+    PROMPT_INJECTION_IMMUNITY_CLAUSE,
+    "Tu travailles directement dans le checkout du dépôt (répertoire courant) avec tes outils : les fichiers que tu laisses modifiés, créés ou supprimés constituent le livrable. Les outils `*_repo_file` et le schéma JSON évoqués dans le message n'existent pas dans cette session.",
+    "Écris des tests paramétrés couvrant les critères d'acceptation et cas limites, et du code propre qui les fait passer. Lance les commandes de vérification du guide quand c'est possible ; le réseau est coupé (hors LLM), n'installe aucune dépendance.",
+    `Ne modifie JAMAIS ${reviewersDir}/**, .github/workflows/**, .github/agents.yml, .env* ni .git/.`,
+    "Termine par un court compte rendu : fichiers changés, tests ajoutés et commandes lancées avec leur résultat.",
+    "",
+    EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
+  ].join("\n");
+}
+
+// Agent session, then a direct structured-output call for the commit message: the diff is the worktree's.
+async function runTicketAgentSession(
+  params: GenerateTicketImplementationWithFallbackParams,
+  session: TicketAgentSession
+): Promise<GeneratedTicketImplementation> {
+  const nowMs = Date.now();
+  const timeoutMs = agentSessionTimeoutMs(session.jobDeadlineMs, nowMs);
+  if (timeoutMs === undefined) {
+    throw new JobBudgetExhaustedError((session.jobDeadlineMs ?? nowMs) - nowMs);
+  }
+  syncWorkspaceFiles(session.worktree, params.accumulatedFiles, params.deletedFilesSet, session.state.fileModes);
+  const { state } = session;
+  const feedback = state.pendingFeedback;
+  state.pendingFeedback = [];
+  const { finalMessage, diff } = await session.engine.run({
+    role: session.role,
+    toolPolicy: "write",
+    instructions: ticketAgentInstructions(session.role, params.reviewersDir),
+    prompt: feedback.length > 0 ? [params.prompt, "", ...feedback].join("\n") : params.prompt,
+    worktree: session.worktree,
+    timeoutMs,
+    model: params.phaseModels.implementationModel,
+    providers: params.phaseModels.providers,
+    thinking: params.thinkingLevel ? THINKING_LEVELS[params.thinkingLevel] : undefined,
+    trackedPaths: session.trackedPaths,
+    isProtectedPath: (path) => isSensitiveTaskBranchPath(path, params.reviewersDir),
+    maxLlmRequests: session.maxLlmRequests,
+    secrets: [params.gh.token]
+  });
+
+  for (const f of diff.files) {
+    state.fileModes.set(f.path, f.mode);
+  }
+  const reverted = diff.skipped.map((s) => `- ${s.path} (${SKIPPED_PATH_LABELS[s.reason]})`);
+  if (reverted.length > 0) {
+    state.pendingFeedback = [
+      "Changements de la session précédente annulés (non committables) ; le dépôt est revenu à leur état antérieur :",
+      ...reverted
+    ];
+  }
+  const protectedPaths = diff.skipped.filter((s) => s.reason === "protected").map((s) => s.path);
+  state.lastSessionEmpty = diff.files.length === 0 && diff.deleted_files.length === 0;
+  state.failedAttempt =
+    protectedPaths.length > 0
+      ? `Modification interdite de chemin(s) protégé(s), annulée : ${protectedPaths.join(", ")}. Ne modifie jamais ${params.reviewersDir}/**, .github/workflows/**, .github/agents.yml ni .env*.`
+      : session.role === "fixer" && state.lastSessionEmpty
+        ? "no changes left in worktree: la session de correction n'a laissé aucun changement dans le dépôt."
+        : undefined;
+
+  const changedPaths = [
+    ...diff.files.map((f) => `- ${f.path}`),
+    ...diff.deleted_files.map((p) => `- ${p} (supprimé)`)
+  ];
+  const summary = await summarizeAgentSession(params, changedPaths, finalMessage, session.jobDeadlineMs);
+  // The summary reaches the commit and the PR body.
+  assertNoSecretMaterial(
+    [
+      { label: "the commit message", text: summary.commit_message },
+      { label: "the test summary", text: summary.test_summary }
+    ],
+    [params.gh.token, params.llmApiKey, ...collectRunnerSecretValues(process.env)]
+  );
+
+  return {
+    commit_message: summary.commit_message,
+    test_summary: summary.test_summary,
+    files: diff.files.map(({ path, content }) => ({ path, content })),
+    patches: [],
+    deleted_files: [...diff.deleted_files]
+  };
+}
+
+const THINKING_LEVELS = {
+  MINIMAL: "minimal",
+  LOW: "low",
+  MEDIUM: "medium",
+  HIGH: "high"
+} as const satisfies Record<NonNullable<GenerateTicketImplementationWithFallbackParams["thinkingLevel"]>, AgentThinkingLevel>;
+
+const MAX_SUMMARIZED_FINAL_MESSAGE_CHARS = 16_000;
+
+// A failed summary call (other than auth or quota) falls back to a deterministic message instead of losing the session.
+async function summarizeAgentSession(
+  params: GenerateTicketImplementationWithFallbackParams,
+  changedPaths: readonly string[],
+  finalMessage: string,
+  jobDeadlineMs: number | undefined
+): Promise<TicketSessionSummary> {
+  const requestTimeoutMs = summaryRequestTimeoutMs(jobDeadlineMs, Date.now(), params.phaseModels.requestTimeoutMs);
+  try {
+    return await callLlmJson<TicketSessionSummary>({
+    apiKey: params.llmApiKey,
+    model: params.phaseModels.implementationModel,
+    providers: params.phaseModels.providers,
+    maxTransientRetries: params.phaseModels.maxTransientRetries,
+    transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
+    requestTimeoutMs,
+    onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
+    logLabel: params.logLabel ? `${params.logLabel}/summary` : undefined,
+    systemInstruction: [
+      "Tu rédiges le message de commit (Conventional Commits) et le résumé de tests des changements qu'une session d'agent a laissés dans le dépôt.",
+      PROMPT_INJECTION_IMMUNITY_CLAUSE,
+      'Renvoie un objet JSON : { "commit_message": "...", "test_summary": "..." }.'
+    ].join("\n"),
+    prompt: [
+      `Ticket #${params.ticket.ticketIssueNumber} : ${params.ticket.title}`,
+      "",
+      "Fichiers changés :",
+      changedPaths.length > 0 ? changedPaths.join("\n") : "(aucun)",
+      "",
+      "Compte rendu de la session :",
+      wrapUntrustedContent(
+        "untrusted_test_output",
+        finalMessage.length > MAX_SUMMARIZED_FINAL_MESSAGE_CHARS
+          ? `${finalMessage.slice(0, MAX_SUMMARIZED_FINAL_MESSAGE_CHARS)}\n[… compte rendu tronqué]`
+          : finalMessage
+      )
+    ].join("\n"),
+    temperature: 0.1,
+    responseSchema: TICKET_SESSION_SUMMARY_SCHEMA,
+    fetchImpl: params.fetchImpl
+    });
+  } catch (err) {
+    if (err instanceof AuthenticationError || err instanceof QuotaExhaustedError) {
+      throw err;
+    }
+    return {
+      commit_message: `feat(ticket-${params.ticket.ticketIssueNumber}): ${params.ticket.title}`,
+      test_summary: "Résumé indisponible : l'appel de synthèse de la session a échoué."
+    };
+  }
 }
 
 async function generateTicketImplementationWithFallback(
   params: GenerateTicketImplementationWithFallbackParams
 ): Promise<GeneratedTicketImplementation> {
+  if (params.agentSession) {
+    return runTicketAgentSession(params, params.agentSession);
+  }
   const stagedBuffer: StagedTicketImplementationBuffer =
     createStagedTicketImplementationBuffer(params.ensureBaselineLoaded);
   const schemaWithStaged = createGeneratedTicketImplementationSchema({
@@ -781,6 +1037,28 @@ export async function runTicketExecutionLoop(
         formatVerificationToolingGuideMarkdown(verificationProfile);
     }
     const bootstrappedTargets = new Set<string>();
+    const agentState: TicketAgentSessionState = {
+      fileModes: new Map(),
+      pendingFeedback: [],
+      failedAttempt: undefined,
+      lastSessionEmpty: false
+    };
+    let agentTrackedPaths: readonly string[] = [];
+    const agentSessionFor = (role: AgentRole): TicketAgentSession | undefined =>
+      params.agentEngine
+        ? {
+            engine: params.agentEngine,
+            role,
+            worktree: sandboxWorkspace.workDir,
+            trackedPaths: agentTrackedPaths,
+            jobDeadlineMs: params.jobDeadlineMs,
+            maxLlmRequests:
+              params.parsedDevAgentsConfig?.agent_max_llm_requests ?? DEFAULT_AGENT_MAX_LLM_REQUESTS,
+            state: agentState
+          }
+        : undefined;
+    const withFileModes = <T extends { path: string }>(files: readonly T[]) =>
+      files.map((f) => ({ ...f, mode: agentState.fileModes.get(f.path) }));
 
     let taskPr: { number: number; html_url: string; head_sha: string } | undefined;
     const initialTicketFixAttempts =
@@ -804,6 +1082,9 @@ export async function runTicketExecutionLoop(
     };
 
     try {
+      if (params.agentEngine) {
+        agentTrackedPaths = await listTrackedPaths(sandboxWorkspace.workDir);
+      }
       const ticketChangedFilesMap = new Map<string, string>();
       const ticketDeletedFilesSet = new Set<string>();
       let impl: {
@@ -855,6 +1136,7 @@ export async function runTicketExecutionLoop(
         }
       };
 
+      let lastStage1Output = "";
       const evaluateIntegrityAndStage1Suite = async (label: string) => {
         const integrityCheck = validateTicketIntegrityGuard({
           baseFiles: baseBranchFilesSnapshot,
@@ -863,6 +1145,21 @@ export async function runTicketExecutionLoop(
           ticketFilesToTouch: ticket.filesToTouch,
           ticketDescription: `${ticket.title}\n${ticket.description}\n${ticket.acceptanceCriteria.join("\n")}`
         });
+        const agentFailure = agentState.failedAttempt;
+        agentState.failedAttempt = undefined;
+        if (agentFailure !== undefined) {
+          return {
+            integrityCheck,
+            testCheck: {
+              passed: false,
+              output: [agentFailure, lastStage1Output].filter(Boolean).join("\n\n")
+            }
+          };
+        }
+        const remainingMs = params.jobDeadlineMs === undefined ? undefined : params.jobDeadlineMs - Date.now();
+        if (integrityCheck.passed && remainingMs !== undefined && remainingMs < MIN_STAGE1_BUDGET_MS) {
+          throw new JobBudgetExhaustedError(remainingMs, "Stage 1 with the commit", MIN_STAGE1_BUDGET_MS);
+        }
         const testCheck = !integrityCheck.passed
           ? {
               passed: false,
@@ -886,6 +1183,7 @@ export async function runTicketExecutionLoop(
               llmApiKey: params.llmApiKey,
               label
             });
+        lastStage1Output = testCheck.output;
         return { integrityCheck, testCheck };
       };
 
@@ -899,14 +1197,20 @@ export async function runTicketExecutionLoop(
           existingTaskPr.number
         );
         if (taskPrFiles.length > 0) {
+          const markRemoved = (cleanPath: string): void => {
+            params.accumulatedFiles.delete(cleanPath);
+            params.featureChangedFilesMap.delete(cleanPath);
+            ticketChangedFilesMap.delete(cleanPath);
+            params.featureDeletedFilesSet.add(cleanPath);
+            ticketDeletedFilesSet.add(cleanPath);
+          };
           for (const prFile of taskPrFiles) {
             const cleanPath = prFile.filename.replace(/^\/+/, "");
+            if (prFile.status === "renamed" && prFile.previous_filename) {
+              markRemoved(prFile.previous_filename.replace(/^\/+/, ""));
+            }
             if (prFile.status === "removed") {
-              params.accumulatedFiles.delete(cleanPath);
-              params.featureChangedFilesMap.delete(cleanPath);
-              ticketChangedFilesMap.delete(cleanPath);
-              params.featureDeletedFilesSet.add(cleanPath);
-              ticketDeletedFilesSet.add(cleanPath);
+              markRemoved(cleanPath);
             } else {
               const content =
                 (await params.gh.readSingleBranchFile(taskBranch, cleanPath)) ??
@@ -934,6 +1238,25 @@ export async function runTicketExecutionLoop(
             ticketChangedFilesMap.set(p, c);
           }
         }
+        // The reconcile commit and Stage 1 keep the task branch's executable bits.
+        const taskBranchBlobs = await params.gh.listBranchBlobs(taskBranch).catch((err: unknown) => {
+          if (err instanceof TruncatedGitTreeError) {
+            return new Map<string, GitBlobRef>();
+          }
+          throw err;
+        });
+        for (const path of ticketChangedFilesMap.keys()) {
+          const mode = taskBranchBlobs.get(path)?.mode;
+          if (mode === "100644" || mode === "100755") {
+            agentState.fileModes.set(path, mode);
+          }
+        }
+        syncWorkspaceFiles(
+          sandboxWorkspace.workDir,
+          params.accumulatedFiles,
+          params.featureDeletedFilesSet,
+          agentState.fileModes
+        );
 
         const existingPreCheck = validateWorkspaceFileOperations({
           workDir: sandboxWorkspace.workDir,
@@ -1080,8 +1403,23 @@ export async function runTicketExecutionLoop(
           llmApiKey: params.llmApiKey,
           phaseModels: params.phaseModels,
           addTransientRetriesUsed: params.addTransientRetriesUsed,
-          fetchImpl: params.fetchImpl
+          fetchImpl: params.fetchImpl,
+          agentSession: agentSessionFor("implementer")
         }));
+        if (params.agentEngine && agentState.lastSessionEmpty && agentState.failedAttempt === undefined) {
+          const escalated = await params.escalateToNeedsHuman({
+            reason: "agent_no_changes",
+            ticketNumber: ticket.ticketIssueNumber,
+            branch: taskBranch,
+            diagnosticExcerpt: agentState.pendingFeedback.join("\n") || undefined
+          });
+          return {
+            halted: true,
+            result: escalated,
+            verificationProfile,
+            verificationGuideMarkdown
+          };
+        }
 
         const preStage1Check = validateWorkspaceFileOperations({
           workDir: sandboxWorkspace.workDir,
@@ -1212,7 +1550,8 @@ export async function runTicketExecutionLoop(
             llmApiKey: params.llmApiKey,
             phaseModels: params.phaseModels,
             addTransientRetriesUsed: params.addTransientRetriesUsed,
-            fetchImpl: params.fetchImpl
+            fetchImpl: params.fetchImpl,
+            agentSession: agentSessionFor("fixer")
           }));
 
           const fixPreCheck = validateWorkspaceFileOperations({
@@ -1301,7 +1640,7 @@ export async function runTicketExecutionLoop(
           branch: taskBranch,
           fromBranch: params.featureBranch,
           commitMessage: impl.commit_message,
-          files: impl.files,
+          files: withFileModes(impl.files),
           deletedFiles: Array.from(ticketDeletedFilesSet)
         });
 
@@ -1315,7 +1654,9 @@ export async function runTicketExecutionLoop(
             "",
             "## TDD & Sandbox Verification",
             `- **Sandbox Test Execution**: \`passed\``,
-            `- **Summary**: ${impl.test_summary}`
+            "- **Summary**:",
+            "",
+            fencedCodeBlock(impl.test_summary)
           ].join("\n"),
           {
             phase: "implementation",
@@ -1327,7 +1668,7 @@ export async function runTicketExecutionLoop(
         taskPr = await params.gh.openPullRequest({
           head: taskBranch,
           base: params.featureBranch,
-          title: impl.commit_message,
+          title: impl.commit_message.split("\n", 1)[0]?.trim() || `feat(ticket-${ticket.ticketIssueNumber}): ${ticket.title}`,
           body: prBody
         });
 
@@ -1358,8 +1699,42 @@ export async function runTicketExecutionLoop(
             diagnosticExcerpt: resync.diagnosticExcerpt
           });
         }
+        const previousHeadSha = currentPrHeadSha;
         currentPrHeadSha = resync.headSha || currentPrHeadSha;
+        if (params.agentEngine && currentPrHeadSha !== previousHeadSha) {
+          await refreshTicketFilesAfterResync(previousHeadSha, currentPrHeadSha);
+        }
         return undefined;
+      };
+
+      // Without it the next session's worktree and the next commit would revert what the merge brought.
+      const refreshTicketFilesAfterResync = async (fromSha: string, toSha: string): Promise<void> => {
+        const { changedFiles } = await params.gh.compareCommits(fromSha, toSha);
+        const removed = new Set<string>();
+        for (const path of changedFiles) {
+          const content = await params.gh.readSingleBranchFile(toSha, path);
+          if (content === null) {
+            params.accumulatedFiles.delete(path);
+            ticketChangedFilesMap.delete(path);
+            removed.add(path);
+            continue;
+          }
+          // Binary files are left alone: they cannot be held as text.
+          if (content.includes("\u0000") || content.includes("\uFFFD")) {
+            continue;
+          }
+          params.accumulatedFiles.set(path, content);
+          if (ticketChangedFilesMap.has(path)) {
+            ticketChangedFilesMap.set(path, content);
+          } else {
+            baseBranchFilesSnapshot.set(path, content);
+          }
+        }
+        syncWorkspaceFiles(sandboxWorkspace.workDir, new Map(), removed);
+        impl = {
+          ...impl,
+          files: Array.from(ticketChangedFilesMap, ([path, content]) => ({ path, content }))
+        };
       };
 
       const runStage2AndStage3ForTaskPr = async (passParams: {
@@ -1712,7 +2087,8 @@ export async function runTicketExecutionLoop(
           llmApiKey: params.llmApiKey,
           phaseModels: params.phaseModels,
           addTransientRetriesUsed: params.addTransientRetriesUsed,
-          fetchImpl: params.fetchImpl
+          fetchImpl: params.fetchImpl,
+          agentSession: agentSessionFor("fixer")
         }));
 
         const remediationPreCheck = validateWorkspaceFileOperations({
@@ -1831,7 +2207,8 @@ export async function runTicketExecutionLoop(
             llmApiKey: params.llmApiKey,
             phaseModels: params.phaseModels,
             addTransientRetriesUsed: params.addTransientRetriesUsed,
-            fetchImpl: params.fetchImpl
+            fetchImpl: params.fetchImpl,
+            agentSession: agentSessionFor("fixer")
           }));
 
           const retryPreCheck = validateWorkspaceFileOperations({
@@ -1908,7 +2285,7 @@ export async function runTicketExecutionLoop(
               branch: taskBranch,
               fromBranch: params.featureBranch,
               commitMessage: `chore(wip): checkpoint review-fix attempt ${reviewFixAttempt} on #${ticket.ticketIssueNumber}`,
-              files: impl.files,
+              files: withFileModes(impl.files),
               deletedFiles: Array.from(ticketDeletedFilesSet)
             });
           }
@@ -1934,7 +2311,7 @@ export async function runTicketExecutionLoop(
           branch: taskBranch,
           fromBranch: params.featureBranch,
           commitMessage: `fix(review): address reviewer findings on #${ticket.ticketIssueNumber}`,
-          files: impl.files,
+          files: withFileModes(impl.files),
           deletedFiles: Array.from(ticketDeletedFilesSet)
         });
 
@@ -2213,9 +2590,14 @@ export async function runTicketExecutionLoop(
           formatTicketUsageSuffix(currentTokenUsage(), ticket.ticketIssueNumber, params.parsedDevAgentsConfig?.pricing)
       );
     } catch (err) {
-      if (err instanceof LLMError) {
+      if (err instanceof LLMError || err instanceof AgentEngineError || err instanceof JobBudgetExhaustedError) {
         const escalated = await params.escalateToNeedsHuman({
-          reason: resolveLlmEscalationReason(err),
+          reason:
+            err instanceof LLMError
+              ? resolveLlmEscalationReason(err)
+              : err instanceof AgentEngineError
+                ? resolveAgentEngineEscalationReason(err)
+                : "job_budget_exhausted",
           ticketNumber: ticket.ticketIssueNumber,
           branch: taskBranch,
           phase: "implementation",

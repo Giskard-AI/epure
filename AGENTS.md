@@ -98,6 +98,14 @@ Escalation classes (`tests/e2e/escalations.ts`): `internal` means EPURE or its c
 | `branch_update_conflict` | internal | EPURE's own branch update conflicted. |
 | `ambiguous_feature_branch` | internal | EPURE could not tell which feature branch is the plan's. |
 | `plan_manifest_missing` | internal | The plan manifest is missing from the state and the comments. |
+| `agent_timeout` | legitimate | An agent session ran past its time limit. |
+| `agent_request_cap_reached` | legitimate | An agent session sent more LLM requests than its cap. |
+| `agent_engine_failed` | internal | The agent engine failed to start, broke its protocol, or its sandbox or snapshot failed. |
+| `sandbox_isolation_unavailable` | internal | The runner lacks the kernel confinement agent sessions require. |
+| `agent_diff_too_large` | legitimate | An agent session changed more files or bytes than a commit accepts. |
+| `agent_secret_leak_blocked` | legitimate | The guard found a secret in an agent session's files. |
+| `agent_no_changes` | legitimate | The implementation session changed nothing. |
+| `job_budget_exhausted` | legitimate | Too little job time remained to run an agent session. |
 | `internal_error` | internal | Any other EPURE error. |
 | `GLOSSARY_MISSING_FOR_DOMAIN_TERMS` | legitimate | Spec gate: the generated glossary is missing. |
 | `ADR_MISSING_OR_INCOMPLETE` | legitimate | Spec gate: an ADR is missing or incomplete. |

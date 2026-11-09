@@ -48,6 +48,14 @@ Third-Party Attributions and Redistributed / Adapted Components (ADR-0018)
      offline showcase-quality IR validation and interactive HTML diagram rendering.
    - Copyright (c) tt-a1i and Archify contributors.
 
-5. External Tooling Integrations (Invoked via Composite Actions / Workflows)
+5. Pi Coding Agent (`@earendil-works/pi-coding-agent`)
+   - Upstream Repository: https://github.com/earendil-works/pi
+   - License: MIT License
+   - Pinned Reference: `package-lock.json`; the published bundle is redistributed
+     unmodified in `dist/vendor/pi/` (ADR-0036). Licenses of its dependency
+     closure: `dist/vendor/pi/THIRD_PARTY_LICENSES` and `dist/vendor/pi/LICENSES/`.
+   - Copyright (c) Mario Zechner and Pi contributors.
+
+6. External Tooling Integrations (Invoked via Composite Actions / Workflows)
    - Zizmor GitHub Actions Security Auditor: https://github.com/woodruffw/zizmor
    - Renovate Dependency Automation: https://github.com/renovatebot/renovate

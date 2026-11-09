@@ -334,6 +334,7 @@ type EscalationRecordInput = Omit<
 export async function orchestrateIssueCommand(
   input: OrchestrateIssueInput
 ): Promise<OrchestrateIssueResult> {
+  input = { ...input, jobStartedAtMs: input.jobStartedAtMs ?? Date.now() };
   let result = await runIssueCommand(input);
   // A CI completion that landed while this run held the lease was ignored: re-check each head this run left waiting.
   const checkedHeads = new Set<string>();
@@ -1001,6 +1002,10 @@ async function runMeteredIssueCommand(
             );
         return (await runLeaseMinutes) * 60_000;
       };
+      const resolveJobDeadlineMs = async (): Promise<number | undefined> =>
+        effectiveInput.jobStartedAtMs === undefined
+          ? undefined
+          : effectiveInput.jobStartedAtMs + (await resolveRunLeaseMs());
       const reviewersDir =
         parsedDevAgentsConfig?.reviewers_dir ?? DEFAULT_REVIEWERS_DIR;
 
@@ -2044,7 +2049,9 @@ async function runMeteredIssueCommand(
         initialCodeFixAttemptsByTicket,
         baseSyncGuard,
         resumeContextMarkdown,
-        stopIfFeaturePrMerged
+        stopIfFeaturePrMerged,
+        agentEngine: effectiveInput.agentEngine,
+        jobDeadlineMs: await resolveJobDeadlineMs()
       });
 
       if (loopOutcome.halted && loopOutcome.result) {
@@ -2223,7 +2230,9 @@ async function runMeteredIssueCommand(
             initialCodeFixAttemptsByTicket,
             baseSyncGuard,
             resumeContextMarkdown,
-            stopIfFeaturePrMerged
+            stopIfFeaturePrMerged,
+            agentEngine: effectiveInput.agentEngine,
+            jobDeadlineMs: await resolveJobDeadlineMs()
           });
 
           if (loopOutcome.halted && loopOutcome.result) {

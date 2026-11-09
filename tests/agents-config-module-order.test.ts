@@ -41,6 +41,14 @@ describe("agents.yml parsing when the orchestrator module graph loads first", ()
     ).rejects.toThrow("Invalid .github/agents.yml on 'dev'");
   });
 
+  it.each([
+    { id: "zero-clamps-to-one", raw: "0", expected: 1 },
+    { id: "negative-clamps-to-one", raw: "-5", expected: 1 },
+    { id: "positive-kept", raw: "40", expected: 40 }
+  ])("[$id] agent_max_llm_requests is at least 1", ({ raw, expected }) => {
+    expect(parseAgentsYaml(`agent_max_llm_requests: ${raw}\n`).agent_max_llm_requests).toBe(expected);
+  });
+
   const PROVIDERS_YAML = [
     "providers:",
     "  corp-gateway:",

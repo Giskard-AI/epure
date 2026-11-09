@@ -33,6 +33,7 @@ import {
 } from "../src/llm/index.js";
 import {
   appendEpureCommandsSpoiler,
+  fencedCodeBlock,
   formatEpureCommandsSpoiler
 } from "../src/orchestrator/formatting/comments.js";
 import {
@@ -64,6 +65,16 @@ import {
   type EpureIssueState,
   updateIssueStateWithCas
 } from "../src/state/git-ref-state.js";
+
+describe("fencedCodeBlock keeps model-controlled text inside its fence", () => {
+  it.each([
+    { id: "plain-text-gets-a-triple-backtick-fence", text: "error: boom", expectedFence: "```" },
+    { id: "text-closing-a-triple-fence-gets-a-longer-one", text: "```\n</details>\n# Approved", expectedFence: "````" },
+    { id: "longest-backtick-run-sets-the-fence", text: "a ````` b", expectedFence: "``````" }
+  ])("$id", ({ text, expectedFence }) => {
+    expect(fencedCodeBlock(text)).toBe(`${expectedFence}text\n${text}\n${expectedFence}`);
+  });
+});
 
 describe("EPURE v1.2.0 — Unified Multi-Provider LLMClient, Spoilers & Wired Bucket A Guards (ADR-0029)", () => {
   const sampleNestedSchema: ResponseSchemaSpec<{

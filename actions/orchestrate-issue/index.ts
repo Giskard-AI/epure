@@ -1,4 +1,5 @@
 import { appendFileSync } from "node:fs";
+import { createPiAgentEngine } from "../../src/agent/pi-engine.js";
 import { redactSecrets } from "../../src/auth/issue-command-gate.js";
 import {
   EscalationNotRecordedError,
@@ -83,6 +84,9 @@ async function run(): Promise<void> {
         }
       : undefined;
 
+  // Written by the job's first step, so the budget counts setup time too.
+  const jobStartedAtMs = Number.parseInt(process.env.EPURE_JOB_STARTED_AT_MS ?? "", 10);
+
   const secrets = [agentAppPrivateKey, fallbackGithubToken, llmApiKey].filter(
     (s) => s.length >= 4
   );
@@ -103,7 +107,11 @@ async function run(): Promise<void> {
       ...(triggerHeadSha ? { triggerHeadSha } : {}),
       ...(asyncCiContinuation ? { asyncCiContinuation } : {}),
       runId,
-      workflowJob
+      workflowJob,
+      ...(Number.isFinite(jobStartedAtMs) ? { jobStartedAtMs } : {}),
+      agentEngine: createPiAgentEngine({
+        runnerEnv: { ...process.env, ...(llmApiKey ? { LLM_API_KEY: llmApiKey } : {}) }
+      })
     });
 
     writeGitHubOutputs(

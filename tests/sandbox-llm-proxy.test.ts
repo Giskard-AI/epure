@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveProviderUpstream, type ProviderKind } from "../src/llm/index.js";
 import { runPolyglotStage1Verification } from "../src/sandbox/polyglot-workspace-runner.js";
 import {
+  buildAgentSessionEnv,
   buildKernelSandboxedCommand,
   buildSanitizedSandboxEnv,
   createLlmSandboxProxy,
@@ -255,6 +256,112 @@ describe("Sandbox LLM proxy & untrusted code credential isolation (#98)", () => 
     expect(Date.now() - started).toBeLessThan(15_000);
     expect(result.exit_code).toBe(expectedExitCode);
     expect(await exitsWithin(Number(result.stdout.trim()), 2_000)).toBe(true);
+  });
+
+  it("runInUntrustedCodeSandbox [interactive-session-talks-over-stdio-and-reads-proxy-aware-home-files]", async () => {
+    const upstream = await sseUpstream();
+    let reply = "";
+    const result = await runInUntrustedCodeSandbox({
+      isolationAvailable: true,
+      runnerEnv: { PATH: process.env.PATH, OPENAI_API_KEY: REAL_KEY, OPENAI_BASE_URL: upstream.url },
+      kernelCapabilities: { landrunAvailable: false, bubblewrapAvailable: false },
+      command: process.execPath,
+      args: [
+        "-e",
+        "process.stdin.once('data', (d) => { const cfg = JSON.parse(require('node:fs').readFileSync(process.env.HOME + '/.cfg/route.json', 'utf8')); process.stdout.write(JSON.stringify({ got: String(d).trim(), cfg, nonce: process.env.EPURE_LLM_PROXY_NONCE }) + '\\n'); })"
+      ],
+      llm: { model: "openai/gpt-x" },
+      agentSession: {
+        homeFiles: (proxy) => ({ ".cfg/route.json": JSON.stringify({ url: proxy?.proxyUrl, nonce: proxy?.proxyNonce }) })
+      },
+      interact: async ({ stdin, stdout }) => {
+        stdin.write("ping\n");
+        for await (const chunk of stdout) {
+          reply += String(chunk);
+          if (reply.includes("\n")) {
+            return;
+          }
+        }
+      }
+    });
+    const parsed = JSON.parse(reply) as { got: string; cfg: { url: string; nonce: string }; nonce: string };
+
+    expect(result.error_code).toBe("NONE");
+    expect(result.stdout).toBe("");
+    expect(parsed.got).toBe("ping");
+    expect(parsed.cfg).toEqual({ url: result.proxy_url, nonce: parsed.nonce });
+  });
+
+  it("runInUntrustedCodeSandbox [interactive-session-keeps-only-the-last-64-KiB-of-stderr]", async () => {
+    const result = await runInUntrustedCodeSandbox({
+      isolationAvailable: true,
+      runnerEnv: { PATH: process.env.PATH },
+      kernelCapabilities: { landrunAvailable: false, bubblewrapAvailable: false },
+      command: process.execPath,
+      args: ["-e", "for (let i = 0; i < 64; i++) process.stderr.write('x'.repeat(4095) + '\\n'); process.stderr.write('LAST-LINE\\n');"],
+      agentSession: {},
+      interact: async ({ stdout }) => {
+        for await (const _ of stdout) {
+          // drain
+        }
+      }
+    });
+
+    expect(result.stderr.length).toBeLessThanOrEqual(64 * 1024);
+    expect(result.stderr.trimEnd().endsWith("LAST-LINE")).toBe(true);
+  });
+
+  it.each([
+    {
+      id: "runner-variables-outside-the-allowlist-are-dropped",
+      runnerEnv: { PATH: "/usr/bin", LANG: "C.UTF-8", NODE_OPTIONS: "--require /tmp/evil.js", PI_CODING_AGENT_DIR: "/home/runner/.pi", GITHUB_TOKEN: "ghs_x", HOME: "/home/runner" },
+      sessionEnv: undefined,
+      expected: { PATH: "/usr/bin", LANG: "C.UTF-8", HOME: "/tmp/epure-agent-x", TMPDIR: "/tmp/epure-agent-x" },
+      absent: ["NODE_OPTIONS", "PI_CODING_AGENT_DIR", "GITHUB_TOKEN"]
+    },
+    {
+      id: "session-variables-are-set-explicitly-and-cannot-move-home",
+      runnerEnv: { PATH: "/usr/bin" },
+      sessionEnv: (home: string) => ({ PI_CODING_AGENT_DIR: `${home}/.pi/agent`, HOME: "/elsewhere" }),
+      expected: { PI_CODING_AGENT_DIR: "/tmp/epure-agent-x/.pi/agent", HOME: "/tmp/epure-agent-x" },
+      absent: []
+    }
+  ])("buildAgentSessionEnv [$id]", ({ runnerEnv, sessionEnv, expected, absent }) => {
+    const env = buildAgentSessionEnv(runnerEnv, "/tmp/epure-agent-x", { proxyUrl: "http://127.0.0.1:1", proxyNonce: "n" }, sessionEnv);
+
+    expect(env).toMatchObject({ ...expected, EPURE_LLM_PROXY_URL: "http://127.0.0.1:1", EPURE_LLM_PROXY_NONCE: "n" });
+    for (const name of absent) {
+      expect(env[name]).toBeUndefined();
+    }
+  });
+
+  it("createLlmSandboxProxy [requests-past-the-cap-get-429-and-never-reach-the-upstream]", async () => {
+    const upstream = await sseUpstream();
+    const onRequestCapReached = vi.fn();
+    const proxy = await createLlmSandboxProxy({
+      upstream: resolveProviderUpstream("anthropic", { base_url: upstream.url }),
+      apiKey: REAL_KEY,
+      maxRequests: 2,
+      onRequestCapReached
+    });
+    try {
+      const statuses: number[] = [];
+      for (let i = 0; i < 3; i++) {
+        const res = await rawProxyRequest(proxy.proxyUrl, {
+          method: "POST",
+          path: "/v1/messages",
+          headers: { "x-api-key": proxy.proxyNonce, "content-type": "application/json" },
+          body: "{}"
+        });
+        statuses.push(res.status);
+      }
+
+      expect(statuses).toEqual([200, 200, 429]);
+      expect(upstream.requests).toHaveLength(2);
+      expect(onRequestCapReached).toHaveBeenCalledTimes(1);
+    } finally {
+      await proxy.close();
+    }
   });
 
   const RUNNER_KEYS = {
@@ -1141,6 +1248,26 @@ describe("Sandbox LLM proxy & untrusted code credential isolation (#98)", () => 
           "/tmp/epure-agent-x"
         ]
       ]
+    },
+    {
+      id: "bubblewrap-under-landrun-mounts-the-root-read-only-and-binds-cwd-and-agent-dir",
+      networkPolicy: "proxy_only" as SandboxNetworkPolicy,
+      capabilities: { landrunAvailable: true, bubblewrapAvailable: true },
+      expectedSequences: [
+        ["--die-with-parent", "--ro-bind", "/", "/"],
+        ["--bind", "/tmp/epure-agent-x", "/tmp/epure-agent-x"],
+        ["--bind", "/tmp/epure-work", "/tmp/epure-work", "--chdir", "/tmp/epure-work"]
+      ]
+    },
+    {
+      id: "dependency-install-under-landrun-also-binds-the-package-caches",
+      networkPolicy: "https_only" as SandboxNetworkPolicy,
+      capabilities: { landrunAvailable: true, bubblewrapAvailable: true },
+      expectedSequences: [
+        ["--die-with-parent", "--ro-bind", "/", "/"],
+        ["--bind-try", "/tmp/epure-agent-x/.npm", "/tmp/epure-agent-x/.npm"],
+        ["--bind-try", "/tmp/epure-agent-x/.cache", "/tmp/epure-agent-x/.cache"]
+      ]
     }
   ])(
     "buildKernelSandboxedCommand [$id]: confines an agent session",
@@ -1163,6 +1290,23 @@ describe("Sandbox LLM proxy & untrusted code credential isolation (#98)", () => 
       }
     }
   );
+
+  it.each([
+    { id: "landrun-inside-bubblewrap-may-write-dev-null", capabilities: { landrunAvailable: true, bubblewrapAvailable: true }, writable: true },
+    { id: "landrun-alone-keeps-the-host-dev-read-only", capabilities: { landrunAvailable: true, bubblewrapAvailable: false }, writable: false }
+  ])("buildKernelSandboxedCommand [$id]", ({ capabilities, writable }) => {
+    const wrapped = buildKernelSandboxedCommand({
+      command: "pi",
+      args: [],
+      cwd: "/tmp/epure-work",
+      sanitizedEnv: { PATH: "/usr/bin:/bin" },
+      networkPolicy: "proxy_only",
+      proxyPort: 43120,
+      capabilities
+    });
+
+    expect(wrapped.args.join("\u0000").includes(["--rw", "/dev/null"].join("\u0000"))).toBe(writable);
+  });
 
   const NO_BACKEND: KernelSandboxCapabilities = {
     landrunAvailable: false,
@@ -1438,18 +1582,14 @@ describe("Kernel confinement of sandboxed runs (#98)", () => {
 
       const result = await runInUntrustedCodeSandbox({
         isolationAvailable: true,
-        runnerEnv: {
-          PATH: process.env.PATH,
-          ENGINE_FILE: engineFile,
-          ESCAPE_FILE: escapeFile
-        },
+        runnerEnv: { PATH: process.env.PATH },
         command: process.execPath,
         args: ["-e", PROBE],
         cwd: scratch("epure-work-"),
         networkPolicy,
         enforceKernelSandbox: true,
         readOnlyPaths: declareEngine ? [engineDir] : [],
-        agentSession: {}
+        agentSession: { env: () => ({ ENGINE_FILE: engineFile, ESCAPE_FILE: escapeFile }) }
       });
 
       expect(result.kernel_backend).toBe(backend);
@@ -1511,17 +1651,15 @@ describe("Kernel confinement of sandboxed runs (#98)", () => {
         }
         const result = await runInUntrustedCodeSandbox({
           isolationAvailable: true,
-          runnerEnv: {
-            PATH: process.env.PATH,
-            SOCKETS: JSON.stringify(sockets),
-            PARENT_PID: String(process.pid)
-          },
+          runnerEnv: { PATH: process.env.PATH },
           command: process.execPath,
           args: ["-e", SOCKET_PROBE],
           cwd: scratch("epure-work-"),
           networkPolicy,
           enforceKernelSandbox: true,
-          agentSession: {}
+          agentSession: {
+            env: () => ({ SOCKETS: JSON.stringify(sockets), PARENT_PID: String(process.pid) })
+          }
         });
 
         expect(result.kernel_backend).toBe(backend);

@@ -90,6 +90,8 @@ export interface AgentsConfig {
   readonly llm_request_timeout_seconds: number;
   readonly job_timeout_minutes: number;
   readonly review_timeout_minutes: number;
+  // LLM requests one agent session may send before it is aborted (200 when absent).
+  readonly agent_max_llm_requests?: number | undefined;
   readonly max_concurrent_tasks_per_feature: number;
   readonly trace_retention_days: number;
   readonly preview_retention_days: number;
@@ -126,6 +128,8 @@ export interface AgentsConfigOverrides {
   readonly llm_request_timeout_seconds?: number | undefined;
   readonly job_timeout_minutes?: number | undefined;
   readonly review_timeout_minutes?: number | undefined;
+  // LLM requests one agent session may send before it is aborted.
+  readonly agent_max_llm_requests?: number | undefined;
   readonly max_concurrent_tasks_per_feature?: number | undefined;
   readonly trace_retention_days?: number | undefined;
   readonly preview_retention_days?: number | undefined;
@@ -629,6 +633,9 @@ export function resolveAgentsConfig(
     max_code_fix_attempts:
       overrides.max_code_fix_attempts ??
       DEFAULT_AGENTS_CONFIG.max_code_fix_attempts,
+    ...(overrides.agent_max_llm_requests !== undefined
+      ? { agent_max_llm_requests: Math.max(1, Math.floor(overrides.agent_max_llm_requests)) }
+      : {}),
     ...(overrides.max_epic_phases !== undefined
       ? {
           max_epic_phases: Math.min(
@@ -1052,6 +1059,7 @@ export function parseAgentsYaml(yamlContent: string): ParsedAgentsConfig {
   let llm_request_timeout_seconds: number | undefined;
   let job_timeout_minutes: number | undefined;
   let review_timeout_minutes: number | undefined;
+  let agent_max_llm_requests: number | undefined;
   let max_concurrent_tasks_per_feature: number | undefined;
   let trace_retention_days: number | undefined;
   let preview_retention_days: number | undefined;
@@ -1264,6 +1272,9 @@ export function parseAgentsYaml(yamlContent: string): ParsedAgentsConfig {
         job_timeout_minutes = parseNum(val);
       } else if (key === "review_timeout_minutes") {
         review_timeout_minutes = parseNum(val);
+      } else if (key === "agent_max_llm_requests") {
+        const parsed = parseNum(val);
+        agent_max_llm_requests = parsed === undefined ? undefined : Math.max(1, parsed);
       } else if (key === "max_concurrent_tasks_per_feature") {
         max_concurrent_tasks_per_feature = parseNum(val);
       } else if (key === "trace_retention_days") {
@@ -1601,6 +1612,7 @@ export function parseAgentsYaml(yamlContent: string): ParsedAgentsConfig {
       : {}),
     ...(job_timeout_minutes !== undefined ? { job_timeout_minutes } : {}),
     ...(review_timeout_minutes !== undefined ? { review_timeout_minutes } : {}),
+    ...(agent_max_llm_requests !== undefined ? { agent_max_llm_requests } : {}),
     ...(max_concurrent_tasks_per_feature !== undefined
       ? { max_concurrent_tasks_per_feature }
       : {}),
@@ -1759,10 +1771,15 @@ function buildCallerWorkflows(
         "      pull-requests: write # open, review, and squash-merge task PRs",
         "      checks: read # the GITHUB_TOKEN fallback reads CI check runs; the Agent App publishes EPURE's with its own permissions",
         "    steps:",
+        "      - name: Record job start",
+        "        id: job-start",
+        '        run: echo "ms=$(date +%s%3N)" >> "$GITHUB_OUTPUT"',
         ...buildSandboxToolingSetupSteps(),
         "      - name: Run pre-bundled EPURE issue orchestrator",
         "        id: orchestrate",
         `        uses: Giskard-AI/epure/actions/orchestrate-issue@${pinnedSha} # v1.1.0`,
+        "        env:",
+        "          EPURE_JOB_STARTED_AT_MS: ${{ steps.job-start.outputs.ms }}",
         "        with:",
         "          repository: ${{ github.repository }}",
         "          issue_number: ${{ github.event.issue.number || 0 }}",

@@ -1097,6 +1097,35 @@ export const SQUASH_COMMIT_SCHEMA: ResponseSchemaSpec<SquashCommitPayload> = {
   }
 };
 
+export interface TicketSessionSummary {
+  readonly commit_message: string;
+  readonly test_summary: string;
+}
+
+export const TICKET_SESSION_SUMMARY_SCHEMA: ResponseSchemaSpec<TicketSessionSummary> = {
+  name: "ticket_session_summary",
+  description:
+    "Conventional Commit message and test summary for the changes an agent session left in the worktree.",
+  schema: {
+    type: "object",
+    properties: {
+      commit_message: { type: "string" },
+      test_summary: { type: "string" }
+    },
+    required: ["commit_message", "test_summary"]
+  },
+  validate(parsed: unknown): TicketSessionSummary {
+    const obj = asRecord(parsed, "TicketSessionSummary");
+    if (typeof obj.commit_message !== "string" || !obj.commit_message.trim()) {
+      throw new Error("TicketSessionSummary.commit_message must be a non-empty string.");
+    }
+    return {
+      commit_message: obj.commit_message.trim(),
+      test_summary: typeof obj.test_summary === "string" ? obj.test_summary.trim() : ""
+    };
+  }
+};
+
 export interface ConflictResolutionPayload {
   readonly commit_message: string;
   readonly resolution_summary: string;
