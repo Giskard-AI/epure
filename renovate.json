@@ -159,6 +159,16 @@
         "pin",
         "digest"
       ]
+    },
+    {
+      "description": "Pi coding agent is vendored into dist/vendor/pi and runs every agentic phase: own group, 7-day cooldown, manual approval from the dependency dashboard",
+      "groupName": "pi-coding-agent",
+      "matchPackageNames": [
+        "@earendil-works/pi-coding-agent"
+      ],
+      "minimumReleaseAge": "7 days",
+      "dependencyDashboardApproval": true,
+      "automerge": false
     }
   ]
 }

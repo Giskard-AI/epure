@@ -601,7 +601,7 @@ function buildSandboxToolingSetupSteps(rtkVersion = PINNED_RTK_VERSION) {
     "      - name: Provision Ubuntu 26.04 kernel sandbox (landrun + bubblewrap) & stateless RTK",
     "        run: |",
     "          sudo apt-get update -qq",
-    "          sudo apt-get install -y --no-install-recommends landrun bubblewrap ca-certificates curl",
+    "          sudo apt-get install -y --no-install-recommends landrun bubblewrap ripgrep fd-find ca-certificates curl",
     '          mkdir -p "$HOME/.npm" "$HOME/.cache" "$HOME/.cargo"',
     "          # renovate: datasource=github-releases depName=rtk-ai/rtk",
     `          RTK_VERSION="${safeRtkVersion}"`,
@@ -1953,6 +1953,7 @@ function resolveAgentsConfig(overrides = {}) {
     llm_environment: llmEnvironment,
     merge_policy: overrides.merge_policy ?? DEFAULT_AGENTS_CONFIG.merge_policy,
     max_code_fix_attempts: overrides.max_code_fix_attempts ?? DEFAULT_AGENTS_CONFIG.max_code_fix_attempts,
+    ...overrides.agent_max_llm_requests !== void 0 ? { agent_max_llm_requests: Math.max(1, Math.floor(overrides.agent_max_llm_requests)) } : {},
     ...overrides.max_epic_phases !== void 0 ? {
       max_epic_phases: Math.min(
         3,
@@ -2274,6 +2275,7 @@ function parseAgentsYaml(yamlContent) {
   let llm_request_timeout_seconds;
   let job_timeout_minutes;
   let review_timeout_minutes;
+  let agent_max_llm_requests;
   let max_concurrent_tasks_per_feature;
   let trace_retention_days;
   let preview_retention_days;
@@ -2419,6 +2421,8 @@ function parseAgentsYaml(yamlContent) {
         job_timeout_minutes = parseNum(val);
       } else if (key === "review_timeout_minutes") {
         review_timeout_minutes = parseNum(val);
+      } else if (key === "agent_max_llm_requests") {
+        agent_max_llm_requests = parseNum(val);
       } else if (key === "max_concurrent_tasks_per_feature") {
         max_concurrent_tasks_per_feature = parseNum(val);
       } else if (key === "trace_retention_days") {
@@ -2703,6 +2707,7 @@ function parseAgentsYaml(yamlContent) {
     ...llm_request_timeout_seconds !== void 0 ? { llm_request_timeout_seconds } : {},
     ...job_timeout_minutes !== void 0 ? { job_timeout_minutes } : {},
     ...review_timeout_minutes !== void 0 ? { review_timeout_minutes } : {},
+    ...agent_max_llm_requests !== void 0 ? { agent_max_llm_requests } : {},
     ...max_concurrent_tasks_per_feature !== void 0 ? { max_concurrent_tasks_per_feature } : {},
     ...trace_retention_days !== void 0 ? { trace_retention_days } : {},
     ...preview_retention_days !== void 0 ? { preview_retention_days } : {},

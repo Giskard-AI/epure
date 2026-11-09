@@ -83,7 +83,7 @@ export function buildSandboxToolingSetupSteps(
     "      - name: Provision Ubuntu 26.04 kernel sandbox (landrun + bubblewrap) & stateless RTK",
     "        run: |",
     "          sudo apt-get update -qq",
-    "          sudo apt-get install -y --no-install-recommends landrun bubblewrap ca-certificates curl",
+    "          sudo apt-get install -y --no-install-recommends landrun bubblewrap ripgrep fd-find ca-certificates curl",
     '          mkdir -p "$HOME/.npm" "$HOME/.cache" "$HOME/.cargo"',
     "          # renovate: datasource=github-releases depName=rtk-ai/rtk",
     `          RTK_VERSION="${safeRtkVersion}"`,

@@ -2,11 +2,114 @@
 import { appendFileSync } from "node:fs";
 
 // src/agent/pi-engine.ts
-import { existsSync, mkdtempSync as mkdtempSync3, rmSync as rmSync3, writeFileSync as writeFileSync2 } from "node:fs";
+import { existsSync as existsSync2, mkdtempSync as mkdtempSync3, rmSync as rmSync3, writeFileSync as writeFileSync3 } from "node:fs";
 import { tmpdir as tmpdir2 } from "node:os";
 import { dirname as dirname2, join as join2, resolve as resolve2 } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
+
+// src/auth/issue-command-gate.ts
+var SUPPORTED_COMMANDS = /* @__PURE__ */ new Set([
+  "status",
+  "plan",
+  "to-spec",
+  "to-tickets",
+  "approve",
+  "sync",
+  "rebase",
+  "continue",
+  "cancel",
+  "reply"
+]);
+var DEFAULT_KNOWN_BOT_ACTORS = [
+  "github-actions",
+  "epure-agent",
+  "epure-release",
+  "renovate",
+  "dependabot"
+];
+var SECRET_PATTERNS = [
+  /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g,
+  /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{16,255}\b/g,
+  /\bgithub_pat_[A-Za-z0-9_]{20,255}\b/g,
+  /\bsk-(?:ant-)?[A-Za-z0-9_-]{16,255}\b/g,
+  /\bAIza[0-9A-Za-z_-]{35}\b/g,
+  /\bAuthorization:\s*(?:Bearer|Basic|token)\s+[A-Za-z0-9._~+/=-]+/gi,
+  /\bBearer\s+[A-Za-z0-9._~+/=-]{12,512}\b/gi
+];
+function redactSecrets(text, extraSecrets = []) {
+  let result = text;
+  for (const secret of extraSecrets) {
+    const trimmed = secret.trim();
+    if (trimmed.length >= 4) {
+      result = result.split(trimmed).join("[REDACTED]");
+    }
+  }
+  for (const pattern of SECRET_PATTERNS) {
+    result = result.replace(pattern, (match) => {
+      const authHeaderMatch = /^(Authorization:\s*(?:Bearer|Basic|token))\s+/i.exec(match);
+      if (authHeaderMatch) {
+        return `${authHeaderMatch[1]} [REDACTED]`;
+      }
+      if (/^bearer\s+/i.test(match)) {
+        return "Bearer [REDACTED]";
+      }
+      return "[REDACTED]";
+    });
+  }
+  return result;
+}
+function stripFencedCodeBlocks(body) {
+  return body.replace(/```[\s\S]*?```/g, "");
+}
+function extractRawSlashEpureLine(commentBody) {
+  const cleaned = stripFencedCodeBlocks(commentBody);
+  for (const rawLine of cleaned.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    const match = /^\/epure(?:\s+([A-Za-z0-9_-]+))?(?:\s+(.*))?$/.exec(line);
+    if (match) {
+      return {
+        subcommand: (match[1] ?? "").toLowerCase(),
+        args: (match[2] ?? "").trim()
+      };
+    }
+  }
+  return null;
+}
+function parseEpureCommand(commentBody) {
+  const extracted = extractRawSlashEpureLine(commentBody);
+  if (!extracted) {
+    return null;
+  }
+  if (!SUPPORTED_COMMANDS.has(extracted.subcommand)) {
+    return null;
+  }
+  const normalizedCommand = extracted.subcommand === "rebase" ? "sync" : extracted.subcommand;
+  return {
+    command: normalizedCommand,
+    args: extracted.args
+  };
+}
+function isBotActor(actor, knownBotActors = DEFAULT_KNOWN_BOT_ACTORS) {
+  const loginLower = actor.login.trim().toLowerCase();
+  const typeLower = (actor.type ?? "").trim().toLowerCase();
+  if (typeLower === "bot" || loginLower.endsWith("[bot]")) {
+    return true;
+  }
+  const normalizedBotSet = new Set(
+    [...DEFAULT_KNOWN_BOT_ACTORS, ...knownBotActors].map(
+      (name) => name.trim().toLowerCase().replace(/\[bot\]$/, "")
+    )
+  );
+  return normalizedBotSet.has(loginLower);
+}
+
+// src/auth/github-apps.ts
+var GITHUB_ACTIONS_APP_ID = 15368;
+var PRIVATE_KEY_DETECTION_PATTERN = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|EPURE_(?:AGENT|RELEASE)_APP_PRIVATE_KEY\s*=\s*\S+/i;
+function containsPrivateKeyMaterial(text) {
+  return PRIVATE_KEY_DETECTION_PATTERN.test(text);
+}
 
 // src/llm/errors.ts
 var LLMError = class extends Error {
@@ -2109,109 +2212,6 @@ import { spawn, spawnSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { pipeline, Transform, Writable } from "node:stream";
 
-// src/auth/issue-command-gate.ts
-var SUPPORTED_COMMANDS = /* @__PURE__ */ new Set([
-  "status",
-  "plan",
-  "to-spec",
-  "to-tickets",
-  "approve",
-  "sync",
-  "rebase",
-  "continue",
-  "cancel",
-  "reply"
-]);
-var DEFAULT_KNOWN_BOT_ACTORS = [
-  "github-actions",
-  "epure-agent",
-  "epure-release",
-  "renovate",
-  "dependabot"
-];
-var SECRET_PATTERNS = [
-  /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g,
-  /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{16,255}\b/g,
-  /\bgithub_pat_[A-Za-z0-9_]{20,255}\b/g,
-  /\bsk-(?:ant-)?[A-Za-z0-9_-]{16,255}\b/g,
-  /\bAIza[0-9A-Za-z_-]{35}\b/g,
-  /\bAuthorization:\s*(?:Bearer|Basic|token)\s+[A-Za-z0-9._~+/=-]+/gi,
-  /\bBearer\s+[A-Za-z0-9._~+/=-]{12,512}\b/gi
-];
-function redactSecrets(text, extraSecrets = []) {
-  let result = text;
-  for (const secret of extraSecrets) {
-    const trimmed = secret.trim();
-    if (trimmed.length >= 4) {
-      result = result.split(trimmed).join("[REDACTED]");
-    }
-  }
-  for (const pattern of SECRET_PATTERNS) {
-    result = result.replace(pattern, (match) => {
-      const authHeaderMatch = /^(Authorization:\s*(?:Bearer|Basic|token))\s+/i.exec(match);
-      if (authHeaderMatch) {
-        return `${authHeaderMatch[1]} [REDACTED]`;
-      }
-      if (/^bearer\s+/i.test(match)) {
-        return "Bearer [REDACTED]";
-      }
-      return "[REDACTED]";
-    });
-  }
-  return result;
-}
-function stripFencedCodeBlocks(body) {
-  return body.replace(/```[\s\S]*?```/g, "");
-}
-function extractRawSlashEpureLine(commentBody) {
-  const cleaned = stripFencedCodeBlocks(commentBody);
-  for (const rawLine of cleaned.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    const match = /^\/epure(?:\s+([A-Za-z0-9_-]+))?(?:\s+(.*))?$/.exec(line);
-    if (match) {
-      return {
-        subcommand: (match[1] ?? "").toLowerCase(),
-        args: (match[2] ?? "").trim()
-      };
-    }
-  }
-  return null;
-}
-function parseEpureCommand(commentBody) {
-  const extracted = extractRawSlashEpureLine(commentBody);
-  if (!extracted) {
-    return null;
-  }
-  if (!SUPPORTED_COMMANDS.has(extracted.subcommand)) {
-    return null;
-  }
-  const normalizedCommand = extracted.subcommand === "rebase" ? "sync" : extracted.subcommand;
-  return {
-    command: normalizedCommand,
-    args: extracted.args
-  };
-}
-function isBotActor(actor, knownBotActors = DEFAULT_KNOWN_BOT_ACTORS) {
-  const loginLower = actor.login.trim().toLowerCase();
-  const typeLower = (actor.type ?? "").trim().toLowerCase();
-  if (typeLower === "bot" || loginLower.endsWith("[bot]")) {
-    return true;
-  }
-  const normalizedBotSet = new Set(
-    [...DEFAULT_KNOWN_BOT_ACTORS, ...knownBotActors].map(
-      (name) => name.trim().toLowerCase().replace(/\[bot\]$/, "")
-    )
-  );
-  return normalizedBotSet.has(loginLower);
-}
-
-// src/auth/github-apps.ts
-var GITHUB_ACTIONS_APP_ID = 15368;
-var PRIVATE_KEY_DETECTION_PATTERN = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|EPURE_(?:AGENT|RELEASE)_APP_PRIVATE_KEY\s*=\s*\S+/i;
-function containsPrivateKeyMaterial(text) {
-  return PRIVATE_KEY_DETECTION_PATTERN.test(text);
-}
-
 // src/sandbox/llm-proxy-usage.ts
 import { brotliDecompressSync, gunzipSync, inflateSync } from "node:zlib";
 function decodeBody(body, contentEncoding) {
@@ -2388,6 +2388,25 @@ function buildSanitizedSandboxEnv(runnerEnv, proxy) {
   sanitized.NO_COLOR = "1";
   return sanitized;
 }
+var AGENT_SESSION_INHERITED_ENV = ["PATH", "LANG"];
+function buildAgentSessionEnv(runnerEnv, home, proxy, sessionEnv) {
+  const env = {};
+  for (const name of AGENT_SESSION_INHERITED_ENV) {
+    const value = runnerEnv[name];
+    if (typeof value === "string") {
+      env[name] = value;
+    }
+  }
+  return {
+    ...env,
+    ...sessionEnv?.(home),
+    HOME: home,
+    TMPDIR: home,
+    EPURE_SANDBOX_ACTIVE: "true",
+    NO_COLOR: "1",
+    ...proxy ? { EPURE_LLM_PROXY_URL: proxy.proxyUrl, EPURE_LLM_PROXY_NONCE: proxy.proxyNonce } : {}
+  };
+}
 function buildLandrunInvocation(params) {
   const sanitizeLandrunPath = (p) => p.replace(/,/g, "");
   const resolvedCwd = sanitizeLandrunPath(resolve(params.cwd));
@@ -2408,16 +2427,9 @@ function buildLandrunInvocation(params) {
   }
   const rwxPaths = /* @__PURE__ */ new Set([
     resolvedCwd,
-    params.agentDir ? sanitizeLandrunPath(resolve(params.agentDir)) : "/tmp"
+    params.agentDir ? sanitizeLandrunPath(resolve(params.agentDir)) : "/tmp",
+    ...packageCacheDirs(params.networkPolicy, params.sanitizedEnv).map(sanitizeLandrunPath)
   ]);
-  if (params.networkPolicy === "https_only") {
-    const home = sanitizeLandrunPath(params.sanitizedEnv.HOME?.trim() ?? "");
-    if (home) {
-      rwxPaths.add(`${home}/.npm`);
-      rwxPaths.add(`${home}/.cache`);
-      rwxPaths.add(`${home}/.cargo`);
-    }
-  }
   const landrunArgs = [
     "--rox",
     Array.from(roxPaths).join(","),
@@ -2439,18 +2451,23 @@ function buildLandrunInvocation(params) {
   landrunArgs.push("--", params.command, ...params.args);
   return landrunArgs;
 }
+function packageCacheDirs(networkPolicy, env) {
+  const home = env.HOME?.trim() ?? "";
+  return networkPolicy === "https_only" && home ? [".npm", ".cache", ".cargo"].map((sub) => `${home}/${sub}`) : [];
+}
 function buildBubblewrapInvocation(params) {
   const resolvedCwd = resolve(params.cwd);
   const extraBinds = [
     ...(params.readOnlyPaths ?? []).flatMap((p) => ["--ro-bind", resolve(p), resolve(p)]),
-    ...params.agentDir ? ["--bind", resolve(params.agentDir), resolve(params.agentDir)] : []
+    ...params.agentDir ? ["--bind", resolve(params.agentDir), resolve(params.agentDir)] : [],
+    ...(params.writablePaths ?? []).flatMap((p) => ["--bind-try", resolve(p), resolve(p)])
   ];
   return [
     ...params.underLandrun ? [] : ["--unshare-net"],
     "--unshare-pid",
     "--unshare-ipc",
     "--die-with-parent",
-    params.underLandrun ? "--bind" : "--ro-bind",
+    "--ro-bind",
     "/",
     "/",
     "--dev",
@@ -2505,6 +2522,7 @@ function buildKernelSandboxedCommand(input) {
     cwd: input.cwd,
     readOnlyPaths: input.readOnlyPaths,
     agentDir: input.agentDir,
+    writablePaths: packageCacheDirs(input.networkPolicy, input.sanitizedEnv),
     underLandrun: backend === "bubblewrap+landrun"
   });
   switch (backend) {
@@ -2638,6 +2656,7 @@ async function createLlmSandboxProxy(options) {
   const nonceBytes = Buffer.from(proxyNonce);
   const reportUsage = usageReporter({ labelledBySandbox: true });
   const requestBodyTimeoutMs = options.requestBodyTimeoutMs ?? DEFAULT_LLM_REQUEST_TIMEOUT_MS;
+  let acceptedRequests = 0;
   const relay = (req, res) => {
     const rawUrl = req.url ?? "/";
     if (!rawUrl.startsWith("/")) {
@@ -2666,6 +2685,18 @@ async function createLlmSandboxProxy(options) {
         "PROXY_FORBIDDEN_ENDPOINT",
         `Sandbox LLM proxy forbids ${req.method ?? "?"} '${url.pathname}' on ${upstreamHost}.`
       );
+      return;
+    }
+    acceptedRequests += 1;
+    if (options.maxRequests !== void 0 && acceptedRequests > options.maxRequests) {
+      res.setHeader("connection", "close");
+      sendProxyError(
+        res,
+        429,
+        "PROXY_REQUEST_CAP_REACHED",
+        `Sandbox LLM proxy forwards at most ${options.maxRequests} requests per session.`
+      );
+      options.onRequestCapReached?.();
       return;
     }
     if (Number(req.headers["content-length"] ?? 0) > MAX_PROXY_REQUEST_BYTES) {
@@ -2991,17 +3022,12 @@ async function runInUntrustedCodeSandbox(input) {
   const cwd = input.cwd ?? process.cwd();
   const timeoutMs = input.timeoutMs ?? 60 * 60 * 1e3;
   const agentDir = input.agentSession ? mkdtempSync("/tmp/epure-agent-") : void 0;
-  const agentEnv = agentDir ? { HOME: agentDir, TMPDIR: agentDir } : {};
+  const installHomeEnv = agentDir ? { HOME: agentDir, TMPDIR: agentDir } : {};
   const runConfined = (command, policy, env, proxyPort, interact) => {
-    if (policy === "https_only") {
-      const home = env.HOME?.trim() ?? "";
-      if (home) {
-        for (const sub of [".npm", ".cache", ".cargo"]) {
-          try {
-            mkdirSync(resolve(home, sub), { recursive: true });
-          } catch {
-          }
-        }
+    for (const dir of packageCacheDirs(policy, env)) {
+      try {
+        mkdirSync(dir, { recursive: true });
+      } catch {
       }
     }
     const wrapped = buildKernelSandboxedCommand({
@@ -3015,11 +3041,15 @@ async function runInUntrustedCodeSandbox(input) {
       readOnlyPaths: input.readOnlyPaths,
       agentDir
     });
-    return spawnCaptured(wrapped.command, wrapped.args, cwd, env, timeoutMs, interact);
+    return spawnCaptured(wrapped.command, wrapped.args, cwd, env, timeoutMs, interact, (kill) => {
+      killChild = kill;
+    });
   };
+  let killChild;
+  let requestCapReached = false;
   let proxy;
   try {
-    const installEnv = { ...buildSanitizedSandboxEnv(input.runnerEnv), ...agentEnv };
+    const installEnv = { ...buildSanitizedSandboxEnv(input.runnerEnv), ...installHomeEnv };
     for (const install of installCommands) {
       const installed = await runConfined(install, "https_only", installEnv);
       if (installed.exitCode !== 0) {
@@ -3041,7 +3071,12 @@ async function runInUntrustedCodeSandbox(input) {
     proxy = llmTarget ? await createLlmSandboxProxy({
       upstream: llmTarget.upstream,
       apiKey: llmTarget.apiKey,
-      observeResponse: input.observeLlmResponse
+      observeResponse: input.observeLlmResponse,
+      maxRequests: input.maxLlmRequests,
+      onRequestCapReached: () => {
+        requestCapReached = true;
+        killChild?.();
+      }
     }) : void 0;
     if (agentDir) {
       for (const [relPath, content] of Object.entries(input.agentSession?.homeFiles?.(proxy) ?? {})) {
@@ -3053,15 +3088,15 @@ async function runInUntrustedCodeSandbox(input) {
     const childResult = await runConfined(
       { command: input.command, args: input.args },
       networkPolicy,
-      { ...buildSanitizedSandboxEnv(input.runnerEnv, proxy), ...agentEnv },
+      agentDir ? buildAgentSessionEnv(input.runnerEnv, agentDir, proxy, input.agentSession?.env) : buildSanitizedSandboxEnv(input.runnerEnv, proxy),
       proxy ? parsePortFromProxyUrl(proxy.proxyUrl) : void 0,
       input.interact
     );
-    const ok = childResult.exitCode === 0;
+    const ok = childResult.exitCode === 0 && !requestCapReached;
     return {
       isolated: true,
-      error_code: ok ? "NONE" : "SANDBOX_COMMAND_FAILED",
-      error_message: ok ? "" : `Sandboxed command exited with code ${childResult.exitCode}.`,
+      error_code: requestCapReached ? "LLM_REQUEST_CAP_REACHED" : ok ? "NONE" : "SANDBOX_COMMAND_FAILED",
+      error_message: requestCapReached ? `Sandboxed command was killed after its ${input.maxLlmRequests ?? 0} allowed LLM requests.` : ok ? "" : `Sandboxed command exited with code ${childResult.exitCode}.`,
       exit_code: childResult.exitCode,
       stdout: redactSecrets(childResult.stdout, secretValues),
       stderr: redactSecrets(childResult.stderr, secretValues),
@@ -3084,7 +3119,8 @@ function isCiRunner(runnerEnv) {
     (env) => flagged(env.GITHUB_ACTIONS) || flagged(env.CI)
   );
 }
-function spawnCaptured(command, args, cwd, env, timeoutMs, interact) {
+var MAX_SESSION_STDERR_BYTES = 64 * 1024;
+function spawnCaptured(command, args, cwd, env, timeoutMs, interact, onSpawn) {
   return new Promise((resolvePromise) => {
     const child = spawn(command, [...args], {
       cwd,
@@ -3102,12 +3138,14 @@ function spawnCaptured(command, args, cwd, env, timeoutMs, interact) {
         }
       }
     };
+    onSpawn(killGroup);
     const stdoutChunks = [];
-    const stderrChunks = [];
+    let stderrChunks = [];
+    let stderrBytes = 0;
     const timer = setTimeout(killGroup, timeoutMs);
     child.on("exit", killGroup);
     if (interact) {
-      void interact({ stdin: child.stdin, stdout: child.stdout }).then(
+      void interact({ stdin: child.stdin, stdout: child.stdout, kill: killGroup }).then(
         () => child.stdin.end(),
         () => killGroup()
       );
@@ -3115,7 +3153,15 @@ function spawnCaptured(command, args, cwd, env, timeoutMs, interact) {
       child.stdin.end();
       child.stdout.on("data", (chunk) => stdoutChunks.push(chunk));
     }
-    child.stderr.on("data", (chunk) => stderrChunks.push(chunk));
+    child.stderr.on("data", (chunk) => {
+      stderrChunks.push(chunk);
+      stderrBytes += chunk.length;
+      if (interact && stderrBytes > MAX_SESSION_STDERR_BYTES) {
+        const tail = Buffer.concat(stderrChunks).subarray(-MAX_SESSION_STDERR_BYTES);
+        stderrChunks = [tail];
+        stderrBytes = tail.length;
+      }
+    });
     child.on("error", (err) => {
       clearTimeout(timer);
       resolvePromise({
@@ -3197,75 +3243,287 @@ function translateModelForPi(model, providers, env) {
 }
 
 // src/agent/worktree-snapshot.ts
-import { execFileSync } from "node:child_process";
-import { mkdtempSync as mkdtempSync2, rmSync as rmSync2 } from "node:fs";
+import { spawn as spawn2 } from "node:child_process";
+import { existsSync, lstatSync, mkdirSync as mkdirSync2, mkdtempSync as mkdtempSync2, rmSync as rmSync2, writeFileSync as writeFileSync2 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+var DEFAULT_WORKTREE_DIFF_LIMITS = {
+  maxFiles: 500,
+  maxFileBytes: 1024 * 1024,
+  maxTotalBytes: 10 * 1024 * 1024
+};
+var DEFAULT_UNTRACKED_EXCLUDES = [
+  "node_modules/",
+  "dist/",
+  "build/",
+  "coverage/",
+  ".venv/",
+  "__pycache__/",
+  "target/",
+  "*.tsbuildinfo"
+];
+var CACHE_DIR_NAMES = new Set(DEFAULT_UNTRACKED_EXCLUDES.filter((p) => p.endsWith("/")).map((p) => p.slice(0, -1)));
+var GIT_TIMEOUT_MS = 12e4;
 var MAX_GIT_OUTPUT_BYTES = 256 * 1024 * 1024;
-function snapshotWorktree(worktree) {
-  const gitDir = mkdtempSync2(join(tmpdir(), "epure-snapshot-"));
-  const git = (args) => execFileSync(
-    "git",
-    [
-      "-c",
-      "core.hooksPath=/dev/null",
-      "-c",
-      "core.fsmonitor=false",
-      "-c",
-      "core.autocrlf=false",
-      "-c",
-      "core.symlinks=true",
-      `--git-dir=${gitDir}`,
-      `--work-tree=${worktree}`,
-      ...args
-    ],
-    {
-      cwd: worktree,
-      env: {
-        PATH: process.env.PATH ?? "/usr/bin:/bin",
-        HOME: gitDir,
-        GIT_CONFIG_NOSYSTEM: "1",
-        GIT_CONFIG_GLOBAL: "/dev/null"
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-      maxBuffer: MAX_GIT_OUTPUT_BYTES
-    }
-  );
-  const writeTree = () => {
-    git(["add", "--all"]);
-    return git(["write-tree"]).toString("utf8").trim();
-  };
-  git(["init", "--quiet"]);
-  const before = writeTree();
-  return {
-    diff() {
-      const after = writeTree();
-      const raw = git(["diff-tree", "-r", "-z", "--no-renames", before, after]).toString("utf8");
-      const files = [];
-      const deleted = [];
-      const fields = raw.split("\0").filter((field) => field.length > 0);
-      for (let i = 0; i + 1 < fields.length; i += 2) {
-        const [, newMode = "", , newSha = "", status = ""] = (fields[i] ?? "").split(" ");
-        const path = fields[i + 1] ?? "";
-        if (status === "D") {
-          deleted.push(path);
-          continue;
-        }
-        if (newMode !== "100644" && newMode !== "100755") {
-          continue;
-        }
-        const blob = git(["cat-file", "blob", newSha]);
-        if (blob.includes(0)) {
-          continue;
-        }
-        files.push({ path, content: blob.toString("utf8") });
+var GIT_STDERR_TAIL_CHARS = 2e3;
+function gitRunner(gitDir, worktree, extraEnv = {}) {
+  return (args, input = "") => new Promise((resolvePromise, reject) => {
+    const fail = (why) => reject(new AgentEngineError("AGENT_SNAPSHOT_FAILED", `Worktree snapshot: git ${args[0] ?? ""} ${why}`));
+    const child = spawn2(
+      "git",
+      [
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.autocrlf=false",
+        "-c",
+        "core.symlinks=true",
+        `--git-dir=${gitDir}`,
+        `--work-tree=${worktree}`,
+        ...args
+      ],
+      {
+        cwd: worktree,
+        env: {
+          PATH: process.env.PATH ?? "/usr/bin:/bin",
+          HOME: gitDir,
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_CONFIG_GLOBAL: "/dev/null",
+          GIT_LITERAL_PATHSPECS: "1",
+          ...extraEnv
+        },
+        stdio: ["pipe", "pipe", "pipe"]
       }
-      return { files, deleted_files: deleted };
+    );
+    const out = [];
+    let outBytes = 0;
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      fail(`timed out after ${GIT_TIMEOUT_MS} ms`);
+    }, GIT_TIMEOUT_MS);
+    child.stdout.on("data", (chunk) => {
+      outBytes += chunk.length;
+      if (outBytes > MAX_GIT_OUTPUT_BYTES) {
+        child.kill("SIGKILL");
+        fail("output exceeded its cap");
+        return;
+      }
+      out.push(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr = (stderr + chunk.toString("utf8")).slice(-GIT_STDERR_TAIL_CHARS);
+    });
+    child.stdin.on("error", () => {
+    });
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      fail(`could not run: ${err.message}`);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) {
+        resolvePromise(Buffer.concat(out));
+      } else {
+        fail(`exited with code ${code ?? "?"}: ${stderr.trim()}`);
+      }
+    });
+    child.stdin.end(input);
+  });
+}
+async function listTrackedPaths(worktree) {
+  const index = join(worktree, ".git", "index");
+  if (!existsSync(index)) {
+    return [];
+  }
+  const gitDir = mkdtempSync2(join(tmpdir(), "epure-tracked-"));
+  try {
+    const git = gitRunner(gitDir, worktree, { GIT_INDEX_FILE: index });
+    await git(["init", "--quiet"]);
+    return splitNul(await git(["ls-files", "-z"]));
+  } finally {
+    rmSync2(gitDir, { recursive: true, force: true });
+  }
+}
+async function snapshotWorktree(worktree, options = {}) {
+  const gitDir = mkdtempSync2(join(tmpdir(), "epure-snapshot-"));
+  const git = gitRunner(gitDir, worktree);
+  const limits = options.limits ?? DEFAULT_WORKTREE_DIFF_LIMITS;
+  const isProtected = options.isProtectedPath ?? (() => false);
+  const listIgnored = async () => new Set(splitNul(await git(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory"])));
+  let before = "";
+  let ignoredBefore = /* @__PURE__ */ new Set();
+  try {
+    await git(["init", "--quiet"]);
+    mkdirSync2(join(gitDir, "info"), { recursive: true });
+    writeFileSync2(join(gitDir, "info", "exclude"), `${DEFAULT_UNTRACKED_EXCLUDES.join("\n")}
+`);
+    await git(["add", "--all"]);
+    const tracked = (options.trackedPaths ?? []).filter((p) => isFileOrSymlink(join(worktree, p)));
+    if (tracked.length > 0) {
+      await git(["add", "--force", "--pathspec-from-file=-", "--pathspec-file-nul"], tracked.join("\0"));
+    }
+    before = (await git(["write-tree"])).toString("utf8").trim();
+    ignoredBefore = await listIgnored();
+  } catch (err) {
+    rmSync2(gitDir, { recursive: true, force: true });
+    throw err;
+  }
+  return {
+    async collect() {
+      await git(["add", "--all"]);
+      const after = (await git(["write-tree"])).toString("utf8").trim();
+      const entries = parseDiffTree(await git(["diff-tree", "-r", "-z", "--no-renames", before, after]));
+      const skipped = [];
+      const deleted = [];
+      const candidates = [];
+      for (const entry of entries) {
+        const existedBefore = entry.status !== "A";
+        if (isProtected(entry.path)) {
+          skipped.push({ path: entry.path, reason: "protected", existedBefore });
+        } else if (entry.status === "D") {
+          deleted.push(entry.path);
+        } else if (entry.newMode === "120000") {
+          skipped.push({ path: entry.path, reason: "symlink", existedBefore });
+        } else if (entry.newMode === "160000") {
+          skipped.push({ path: entry.path, reason: "submodule", existedBefore });
+        } else {
+          candidates.push(entry);
+        }
+      }
+      if (candidates.length + deleted.length > limits.maxFiles) {
+        throw new AgentEngineError(
+          "AGENT_DIFF_TOO_LARGE",
+          `The session changed ${candidates.length + deleted.length} files; at most ${limits.maxFiles} are accepted.`
+        );
+      }
+      const sizes = await blobSizes(git, candidates.map((c) => c.newSha));
+      let totalBytes = 0;
+      for (const [i, entry] of candidates.entries()) {
+        const size = sizes[i] ?? 0;
+        if (size > limits.maxFileBytes) {
+          throw new AgentEngineError(
+            "AGENT_DIFF_TOO_LARGE",
+            `The session left ${entry.path} at ${size} bytes; at most ${limits.maxFileBytes} bytes per file are accepted.`
+          );
+        }
+        totalBytes += size;
+      }
+      if (totalBytes > limits.maxTotalBytes) {
+        throw new AgentEngineError(
+          "AGENT_DIFF_TOO_LARGE",
+          `The session changed ${totalBytes} bytes; at most ${limits.maxTotalBytes} bytes are accepted.`
+        );
+      }
+      const files = [];
+      const blobs = await blobContents(git, candidates.map((c) => c.newSha));
+      for (const [i, entry] of candidates.entries()) {
+        const text = decodeText(blobs[i] ?? Buffer.alloc(0));
+        if (text === void 0) {
+          skipped.push({ path: entry.path, reason: "binary", existedBefore: entry.status !== "A" });
+        } else {
+          files.push({ path: entry.path, content: text, mode: entry.newMode === "100755" ? "100755" : "100644" });
+        }
+      }
+      for (const path of await listIgnored()) {
+        if (!ignoredBefore.has(path) && !isDefaultExcluded(path)) {
+          skipped.push({ path: path.replace(/\/$/, ""), reason: "ignored", existedBefore: false });
+        }
+      }
+      for (const s of skipped) {
+        removeInsideWorktree(worktree, s.path);
+      }
+      const restore = skipped.filter((s) => s.existedBefore).map((s) => s.path);
+      if (restore.length > 0) {
+        await git(["checkout", before, "--pathspec-from-file=-", "--pathspec-file-nul"], restore.join("\0"));
+      }
+      return {
+        files,
+        deleted_files: deleted,
+        skipped: skipped.map(({ path, reason }) => ({ path, reason }))
+      };
     },
     dispose() {
       rmSync2(gitDir, { recursive: true, force: true });
     }
   };
+}
+function parseDiffTree(raw) {
+  const fields = splitNul(raw);
+  const entries = [];
+  for (let i = 0; i + 1 < fields.length; i += 2) {
+    const [, newMode = "", , newSha = "", status = ""] = (fields[i] ?? "").split(" ");
+    entries.push({ newMode, newSha, status, path: fields[i + 1] ?? "" });
+  }
+  return entries;
+}
+async function blobSizes(git, shas) {
+  if (shas.length === 0) {
+    return [];
+  }
+  const out = (await git(["cat-file", "--batch-check=%(objectsize)"], `${shas.join("\n")}
+`)).toString("utf8");
+  return out.split("\n").slice(0, shas.length).map((line) => Number.parseInt(line, 10));
+}
+async function blobContents(git, shas) {
+  if (shas.length === 0) {
+    return [];
+  }
+  const out = await git(["cat-file", "--batch"], `${shas.join("\n")}
+`);
+  const blobs = [];
+  let offset = 0;
+  for (let i = 0; i < shas.length; i += 1) {
+    const headerEnd = out.indexOf(10, offset);
+    const size = Number.parseInt(out.subarray(offset, headerEnd).toString("utf8").split(" ")[2] ?? "0", 10);
+    blobs.push(out.subarray(headerEnd + 1, headerEnd + 1 + size));
+    offset = headerEnd + 1 + size + 1;
+  }
+  return blobs;
+}
+function decodeText(blob) {
+  if (blob.includes(0)) {
+    return void 0;
+  }
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(blob);
+  } catch {
+    return void 0;
+  }
+}
+function splitNul(raw) {
+  return raw.toString("utf8").split("\0").filter((field) => field.length > 0);
+}
+function isFileOrSymlink(path) {
+  try {
+    const stat = lstatSync(path);
+    return stat.isFile() || stat.isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+function isDefaultExcluded(path) {
+  const isDir = path.endsWith("/");
+  const segments = path.replace(/\/$/, "").split("/");
+  const dirs = isDir ? segments : segments.slice(0, -1);
+  return dirs.some((s) => CACHE_DIR_NAMES.has(s)) || !isDir && path.endsWith(".tsbuildinfo");
+}
+function removeInsideWorktree(worktree, relPath) {
+  const segments = relPath.split("/");
+  let current = worktree;
+  for (const segment of segments.slice(0, -1)) {
+    current = join(current, segment);
+    try {
+      if (lstatSync(current).isSymbolicLink()) {
+        return;
+      }
+    } catch {
+      return;
+    }
+  }
+  rmSync2(join(worktree, relPath), { recursive: true, force: true });
 }
 
 // src/agent/pi-engine.ts
@@ -3281,9 +3539,10 @@ var PI_SETTINGS = JSON.stringify({
 var SHUTDOWN_GRACE_MS = 3e4;
 var MAX_ERROR_BODY_CHARS = 16 * 1024;
 var STDERR_TAIL_CHARS = 2e3;
+var MAX_RPC_LINE_BYTES = 8 * 1024 * 1024;
 function resolveVendoredPiDir() {
   const here = dirname2(fileURLToPath(import.meta.url));
-  const found = ["../vendor/pi", "../../vendor/pi", "../../dist/vendor/pi"].map((rel) => resolve2(here, rel)).find((dir) => existsSync(join2(dir, "rpc-entry.js")));
+  const found = ["../vendor/pi", "../../vendor/pi", "../../dist/vendor/pi"].map((rel) => resolve2(here, rel)).find((dir) => existsSync2(join2(dir, "rpc-entry.js")));
   if (!found) {
     throw new AgentEngineError(
       "AGENT_ENGINE_UNAVAILABLE",
@@ -3301,19 +3560,20 @@ function createPiAgentEngine(options) {
       const route = translateModelForPi(request.model, request.providers, options.runnerEnv);
       const sessionDir = mkdtempSync3(join2(tmpdir2(), "epure-pi-session-"));
       const instructionsPath = join2(sessionDir, "instructions.md");
-      writeFileSync2(instructionsPath, request.instructions, "utf8");
-      const snapshot = snapshotWorktree(request.worktree);
-      const outcome = { settled: false, timedOut: false, finalMessage: "" };
+      writeFileSync3(instructionsPath, request.instructions, "utf8");
+      const outcome = { settled: false, timedOut: false, lineTooLong: false, finalMessage: "" };
       let upstreamError;
+      let proxyNonce = "";
+      let snapshot;
       try {
+        snapshot = await snapshotWorktree(request.worktree, {
+          trackedPaths: request.trackedPaths,
+          isProtectedPath: request.isProtectedPath
+        });
         const result = await sandboxRunner({
           isolationAvailable: true,
-          runnerEnv: {
-            ...options.runnerEnv,
-            PI_OFFLINE: "1",
-            PI_TELEMETRY: "0",
-            PI_SKIP_VERSION_CHECK: "1"
-          },
+          runnerEnv: options.runnerEnv,
+          enforceKernelSandbox: options.enforceKernelSandbox ?? true,
           command: process.execPath,
           args: [
             join2(piDir, "rpc-entry.js"),
@@ -3330,6 +3590,7 @@ function createPiAgentEngine(options) {
             route.provider,
             "--model",
             route.modelId,
+            ...request.thinking ? ["--thinking", request.thinking] : [],
             "--tools",
             PI_TOOLS[request.toolPolicy],
             "--append-system-prompt",
@@ -3339,12 +3600,22 @@ function createPiAgentEngine(options) {
           networkPolicy: "proxy_only",
           timeoutMs: request.timeoutMs + SHUTDOWN_GRACE_MS,
           llm: { model: request.model, providers: request.providers },
+          maxLlmRequests: request.maxLlmRequests,
           readOnlyPaths: [piDir, sessionDir],
           agentSession: {
-            homeFiles: (proxy) => proxy ? {
-              ".pi/agent/models.json": route.modelsJson(proxy.proxyUrl),
-              ".pi/agent/settings.json": PI_SETTINGS
-            } : {}
+            homeFiles: (proxy) => {
+              proxyNonce = proxy?.proxyNonce ?? "";
+              return proxy ? {
+                ".pi/agent/models.json": route.modelsJson(proxy.proxyUrl),
+                ".pi/agent/settings.json": PI_SETTINGS
+              } : {};
+            },
+            env: (home) => ({
+              PI_CODING_AGENT_DIR: `${home}/.pi/agent`,
+              PI_OFFLINE: "1",
+              PI_TELEMETRY: "0",
+              PI_SKIP_VERSION_CHECK: "1"
+            })
           },
           observeLlmResponse: (exchange) => {
             if (exchange.status < 400) {
@@ -3357,13 +3628,28 @@ function createPiAgentEngine(options) {
           },
           interact: (io) => driveRpcSession(io, request.prompt, request.timeoutMs, outcome)
         });
+        if (result.error_code === "SANDBOX_ISOLATION_UNAVAILABLE") {
+          throw new AgentEngineError("AGENT_ISOLATION_UNAVAILABLE", result.error_message);
+        }
         if (!result.isolated) {
           throw new AgentEngineError("AGENT_SANDBOX_FAILED", result.error_message);
+        }
+        if (result.error_code === "LLM_REQUEST_CAP_REACHED") {
+          throw new AgentEngineError(
+            "AGENT_REQUEST_CAP_REACHED",
+            `Agent session (${request.role}) was aborted after ${request.maxLlmRequests ?? 0} LLM requests.`
+          );
         }
         if (outcome.timedOut) {
           throw new AgentEngineError(
             "AGENT_TIMEOUT",
             `Agent session (${request.role}) exceeded ${request.timeoutMs} ms and was aborted.`
+          );
+        }
+        if (outcome.lineTooLong) {
+          throw new AgentEngineError(
+            "AGENT_PROTOCOL_ERROR",
+            `Pi wrote an RPC line over ${MAX_RPC_LINE_BYTES} bytes; the session was killed.`
           );
         }
         if (outcome.rejected !== void 0) {
@@ -3378,13 +3664,34 @@ function createPiAgentEngine(options) {
         if (outcome.lastStopReason === "error" || outcome.lastStopReason === "aborted") {
           throw sessionProviderError(request, upstreamError, outcome.lastErrorMessage, options.runnerEnv);
         }
-        return { finalMessage: outcome.finalMessage, diff: snapshot.diff() };
+        const diff = await snapshot.collect();
+        assertNoSecrets(diff, [
+          ...collectRunnerSecretValues(options.runnerEnv),
+          ...providerKeys(request, options.runnerEnv),
+          ...options.extraSecrets ?? [],
+          proxyNonce
+        ]);
+        return { finalMessage: outcome.finalMessage, diff };
       } finally {
-        snapshot.dispose();
+        snapshot?.dispose();
         rmSync3(sessionDir, { recursive: true, force: true });
       }
     }
   };
+}
+function providerKeys(request, env) {
+  const { providerConfig } = parseModelIdentifier(request.model, request.providers, env);
+  return providerConfig?.apiKey ? [providerConfig.apiKey] : [];
+}
+function assertNoSecrets(diff, secrets) {
+  const values = secrets.map((s) => s.trim()).filter((s) => s.length >= 8);
+  const leaking = diff.files.filter((f) => containsPrivateKeyMaterial(f.content) || values.some((v) => f.content.includes(v))).map((f) => redactSecrets(f.path, values));
+  if (leaking.length > 0) {
+    throw new AgentEngineError(
+      "AGENT_SECRET_IN_DIFF",
+      `The session left secret material (a runner secret, the proxy nonce or a private key) in ${leaking.join(", ")}; nothing was committed.`
+    );
+  }
 }
 function collectErrorBody(exchange, record) {
   let body = "";
@@ -3415,6 +3722,16 @@ async function driveRpcSession(io, prompt, timeoutMs, outcome) {
     io.stdin.write(`${JSON.stringify(command)}
 `);
   };
+  let bytesSinceNewline = 0;
+  const watchLineLength = (chunk) => {
+    const lastNewline = chunk.lastIndexOf(10);
+    bytesSinceNewline = lastNewline >= 0 ? chunk.length - lastNewline - 1 : bytesSinceNewline + chunk.length;
+    if (bytesSinceNewline > MAX_RPC_LINE_BYTES && !outcome.lineTooLong) {
+      outcome.lineTooLong = true;
+      io.kill();
+    }
+  };
+  io.stdout.on("data", watchLineLength);
   const lines = createInterface({ input: io.stdout, crlfDelay: Infinity });
   const timer = setTimeout(() => {
     outcome.timedOut = true;
@@ -3423,6 +3740,9 @@ async function driveRpcSession(io, prompt, timeoutMs, outcome) {
   try {
     send({ id: "prompt", type: "prompt", message: prompt });
     for await (const line of lines) {
+      if (outcome.lineTooLong) {
+        return;
+      }
       const record = parseRecord(line);
       if (record?.type === "response" && record.id === "prompt") {
         if (record.success !== true) {
@@ -3449,6 +3769,7 @@ async function driveRpcSession(io, prompt, timeoutMs, outcome) {
     }
   } finally {
     clearTimeout(timer);
+    io.stdout.off("data", watchLineLength);
     lines.close();
     io.stdout.resume();
   }
@@ -3580,7 +3901,7 @@ async function revokeGitHubInstallationToken(params) {
 }
 
 // src/bootstrap/ci-and-renovate.ts
-import { existsSync as existsSync2, readdirSync, readFileSync } from "node:fs";
+import { existsSync as existsSync3, readdirSync, readFileSync } from "node:fs";
 import { basename, join as join3 } from "node:path";
 var PINNED_ACTIONS_CHECKOUT_SHA = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1";
 var PINNED_ACTIONS_SETUP_NODE_SHA = "actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0";
@@ -3961,14 +4282,14 @@ function createRepoFileReader(root, targetFilesHint) {
     if (hints.includes(clean)) {
       return true;
     }
-    if (root && existsSync2(join3(root, clean))) {
+    if (root && existsSync3(join3(root, clean))) {
       return true;
     }
     return false;
   };
   const readFileSafe = (relPath) => {
     const clean = relPath.replace(/^\.\/+/, "");
-    if (root && existsSync2(join3(root, clean))) {
+    if (root && existsSync3(join3(root, clean))) {
       try {
         return readFileSync(join3(root, clean), "utf8");
       } catch {
@@ -3992,7 +4313,7 @@ function discoverVerificationProfile(params) {
       workflowMap.set(normalizedPath, content);
     }
   }
-  if (root && existsSync2(join3(root, ".github", "workflows"))) {
+  if (root && existsSync3(join3(root, ".github", "workflows"))) {
     try {
       const entries = readdirSync(join3(root, ".github", "workflows")).sort();
       for (const entry of entries) {
@@ -4028,7 +4349,7 @@ function discoverVerificationProfile(params) {
   }
   const secondLevelParents = ["packages", "services", "apps", "crates", "cmd"];
   for (const parent of secondLevelParents) {
-    if (root && existsSync2(join3(root, parent))) {
+    if (root && existsSync3(join3(root, parent))) {
       try {
         const subEntries = readdirSync(join3(root, parent), {
           withFileTypes: true
@@ -4220,7 +4541,7 @@ function discoverVerificationProfile(params) {
         scriptFiles.add(h);
       }
     }
-    if (root && existsSync2(join3(root, "scripts"))) {
+    if (root && existsSync3(join3(root, "scripts"))) {
       try {
         for (const entry of readdirSync(join3(root, "scripts")).sort()) {
           if (entry.endsWith(".py")) {
@@ -5982,7 +6303,7 @@ function createGitHubRestHelper(params) {
         seenTreePaths.add(cleanPath);
         treeEntries.push({
           path: cleanPath,
-          mode: "100644",
+          mode: file.mode ?? "100644",
           type: "blob",
           sha: blobRes.data.sha
         });
@@ -8247,6 +8568,7 @@ function resolveAgentsConfig(overrides = {}) {
     llm_environment: llmEnvironment,
     merge_policy: overrides.merge_policy ?? DEFAULT_AGENTS_CONFIG.merge_policy,
     max_code_fix_attempts: overrides.max_code_fix_attempts ?? DEFAULT_AGENTS_CONFIG.max_code_fix_attempts,
+    ...overrides.agent_max_llm_requests !== void 0 ? { agent_max_llm_requests: Math.max(1, Math.floor(overrides.agent_max_llm_requests)) } : {},
     ...overrides.max_epic_phases !== void 0 ? {
       max_epic_phases: Math.min(
         3,
@@ -8377,6 +8699,7 @@ function parseAgentsYaml(yamlContent) {
   let llm_request_timeout_seconds;
   let job_timeout_minutes;
   let review_timeout_minutes;
+  let agent_max_llm_requests;
   let max_concurrent_tasks_per_feature;
   let trace_retention_days;
   let preview_retention_days;
@@ -8522,6 +8845,8 @@ function parseAgentsYaml(yamlContent) {
         job_timeout_minutes = parseNum(val);
       } else if (key === "review_timeout_minutes") {
         review_timeout_minutes = parseNum(val);
+      } else if (key === "agent_max_llm_requests") {
+        agent_max_llm_requests = parseNum(val);
       } else if (key === "max_concurrent_tasks_per_feature") {
         max_concurrent_tasks_per_feature = parseNum(val);
       } else if (key === "trace_retention_days") {
@@ -8806,6 +9131,7 @@ function parseAgentsYaml(yamlContent) {
     ...llm_request_timeout_seconds !== void 0 ? { llm_request_timeout_seconds } : {},
     ...job_timeout_minutes !== void 0 ? { job_timeout_minutes } : {},
     ...review_timeout_minutes !== void 0 ? { review_timeout_minutes } : {},
+    ...agent_max_llm_requests !== void 0 ? { agent_max_llm_requests } : {},
     ...max_concurrent_tasks_per_feature !== void 0 ? { max_concurrent_tasks_per_feature } : {},
     ...trace_retention_days !== void 0 ? { trace_retention_days } : {},
     ...preview_retention_days !== void 0 ? { preview_retention_days } : {},
@@ -8895,6 +9221,13 @@ function formatEpureCommandsSpoiler(context) {
     "</details>"
   ].join("\n");
 }
+function fencedCodeBlock(text, language = "text") {
+  const longestRun = Math.max(0, ...Array.from(text.matchAll(/`+/g), (m) => m[0].length));
+  const fence = "`".repeat(Math.max(3, longestRun + 1));
+  return `${fence}${language}
+${text}
+${fence}`;
+}
 function appendEpureCommandsSpoiler(markdown, context) {
   const trimmed = markdown.trimEnd();
   if (trimmed.includes(EPURE_COMMANDS_SPOILER_SUMMARY)) {
@@ -8907,18 +9240,18 @@ ${spoiler}` : spoiler;
 }
 
 // src/sandbox/polyglot-workspace-runner.ts
-import { execFileSync as execFileSync2 } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import {
   cpSync,
-  existsSync as existsSync3,
-  lstatSync,
-  mkdirSync as mkdirSync2,
+  existsSync as existsSync4,
+  lstatSync as lstatSync2,
+  mkdirSync as mkdirSync3,
   mkdtempSync as mkdtempSync4,
   readFileSync as readFileSync2,
   realpathSync,
   rmSync as rmSync4,
   unlinkSync,
-  writeFileSync as writeFileSync3
+  writeFileSync as writeFileSync4
 } from "node:fs";
 import { tmpdir as tmpdir3 } from "node:os";
 import { dirname as dirname3, join as join4, resolve as resolve3, sep } from "node:path";
@@ -9019,7 +9352,7 @@ function isSensitiveTaskBranchPath(rawPath, reviewersDir = DEFAULT_REVIEWERS_DIR
   return SENSITIVE_TASK_BRANCH_PATH_PATTERNS.some((re) => re.test(norm)) || isSensitiveReviewerRosterPath(norm, reviewersDir);
 }
 function hasSymlinkEscapeAlongPath(resolvedRoot, rawRelPath) {
-  if (!existsSync3(resolvedRoot)) {
+  if (!existsSync4(resolvedRoot)) {
     return false;
   }
   let realRoot = resolvedRoot;
@@ -9032,11 +9365,11 @@ function hasSymlinkEscapeAlongPath(resolvedRoot, rawRelPath) {
   let current = resolvedRoot;
   for (const seg of segments) {
     current = join4(current, seg);
-    if (!existsSync3(current)) {
+    if (!existsSync4(current)) {
       break;
     }
     try {
-      const stat = lstatSync(current);
+      const stat = lstatSync2(current);
       if (stat.isSymbolicLink()) {
         const realTarget = realpathSync(current);
         if (realTarget !== realRoot && !realTarget.startsWith(realRoot + sep)) {
@@ -9132,12 +9465,12 @@ function validateWorkspaceFileOperations(input) {
 function sanitizeGitConfigFile(workDir, cleanRemoteUrl) {
   const gitDir = join4(workDir, ".git");
   const gitConfigPath = join4(gitDir, "config");
-  if (!existsSync3(gitDir)) {
+  if (!existsSync4(gitDir)) {
     return;
   }
-  if (!existsSync3(gitConfigPath)) {
+  if (!existsSync4(gitConfigPath)) {
     if (cleanRemoteUrl) {
-      writeFileSync3(
+      writeFileSync4(
         gitConfigPath,
         [
           "[core]",
@@ -9173,7 +9506,7 @@ function sanitizeGitConfigFile(workDir, cleanRemoteUrl) {
     if (!replacedUrl && cleanRemoteUrl) {
       cleanedLines.push('[remote "origin"]', `	url = ${cleanRemoteUrl}`);
     }
-    writeFileSync3(gitConfigPath, `${cleanedLines.join("\n").trim()}
+    writeFileSync4(gitConfigPath, `${cleanedLines.join("\n").trim()}
 `, "utf8");
   } catch {
   }
@@ -9205,8 +9538,8 @@ function materializeSeedFilesIntoWorkspace(workDir, seedFiles) {
       continue;
     }
     const targetPath = resolve3(resolvedRoot, cleanRel);
-    mkdirSync2(dirname3(targetPath), { recursive: true });
-    writeFileSync3(targetPath, content, "utf8");
+    mkdirSync3(dirname3(targetPath), { recursive: true });
+    writeFileSync4(targetPath, content, "utf8");
   }
 }
 function syncWorkspaceFiles(workDir, files, deletedFiles) {
@@ -9221,13 +9554,13 @@ function syncWorkspaceFiles(workDir, files, deletedFiles) {
 }
 function prepareRepositorySandboxWorkspace(input) {
   const workDir = input.workDir ?? mkdtempSync4(join4(tmpdir3(), "epure-polyglot-sandbox-"));
-  mkdirSync2(workDir, { recursive: true });
+  mkdirSync3(workDir, { recursive: true });
   const repoSlug = (input.repository ?? "").trim();
   const [owner, repo] = repoSlug.split("/");
   const cleanRemoteUrl = owner && repo ? `https://github.com/${owner}/${repo}.git` : "";
   let clonedFromRemote = false;
   try {
-    if (input.localSourceRepoDir && existsSync3(input.localSourceRepoDir)) {
+    if (input.localSourceRepoDir && existsSync4(input.localSourceRepoDir)) {
       cpSync(input.localSourceRepoDir, workDir, { recursive: true });
     }
     const shouldAttemptClone = Boolean(cleanRemoteUrl && input.branch && input.githubToken) && (input.enableRemoteClone === true || Boolean(input.execGitImpl));
@@ -9249,15 +9582,15 @@ function prepareRepositorySandboxWorkspace(input) {
         cleanRemoteUrl,
         workDir
       ];
-      const gitRunner = input.execGitImpl ?? ((args, opts) => {
-        execFileSync2("git", [...args], {
+      const gitRunner2 = input.execGitImpl ?? ((args, opts) => {
+        execFileSync("git", [...args], {
           cwd: opts.cwd,
           stdio: "pipe",
           timeout: 12e4
         });
       });
       try {
-        gitRunner(cloneArgs, {});
+        gitRunner2(cloneArgs, {});
         clonedFromRemote = true;
       } catch {
         clonedFromRemote = false;
@@ -9268,8 +9601,8 @@ function prepareRepositorySandboxWorkspace(input) {
     }
   } finally {
     if (cleanRemoteUrl) {
-      if (clonedFromRemote && !existsSync3(join4(workDir, ".git"))) {
-        mkdirSync2(join4(workDir, ".git"), { recursive: true });
+      if (clonedFromRemote && !existsSync4(join4(workDir, ".git"))) {
+        mkdirSync3(join4(workDir, ".git"), { recursive: true });
       }
       sanitizeGitConfigFile(workDir, cleanRemoteUrl);
     }
@@ -9489,7 +9822,7 @@ function shouldSkipDefaultNodeStepInOfflineTempDir(params) {
     return { skip: false, skipEntireTarget: false };
   }
   const pkgJsonPath = join4(params.targetCwd, "package.json");
-  if (!existsSync3(pkgJsonPath)) {
+  if (!existsSync4(pkgJsonPath)) {
     return { skip: true, skipEntireTarget: true };
   }
   let scripts = {};
@@ -9501,15 +9834,15 @@ function shouldSkipDefaultNodeStepInOfflineTempDir(params) {
   } catch {
     return { skip: false, skipEntireTarget: false };
   }
-  const hasLockfile = existsSync3(join4(params.targetCwd, "package-lock.json")) || existsSync3(join4(params.targetCwd, "pnpm-lock.yaml")) || existsSync3(join4(params.targetCwd, "yarn.lock"));
-  const hasNodeModules = existsSync3(join4(params.targetCwd, "node_modules"));
+  const hasLockfile = existsSync4(join4(params.targetCwd, "package-lock.json")) || existsSync4(join4(params.targetCwd, "pnpm-lock.yaml")) || existsSync4(join4(params.targetCwd, "yarn.lock"));
+  const hasNodeModules = existsSync4(join4(params.targetCwd, "node_modules"));
   if (params.step === "install") {
     if (depCount === 0 && !hasLockfile || hasNodeModules) {
       return { skip: true, skipEntireTarget: false };
     }
   }
   if (params.step === "typecheck") {
-    const hasTsconfig = existsSync3(join4(params.targetCwd, "tsconfig.json"));
+    const hasTsconfig = existsSync4(join4(params.targetCwd, "tsconfig.json"));
     if (!hasTsconfig && !scripts.typecheck) {
       return { skip: true, skipEntireTarget: false };
     }
@@ -9529,7 +9862,7 @@ function shouldSkipDefaultNodeStepInOfflineTempDir(params) {
 async function runPolyglotStage1Verification(input) {
   const ownsTempWorkDir = !input.workDir;
   const workDir = input.workDir ?? mkdtempSync4(join4(tmpdir3(), "epure-stage1-sandbox-"));
-  mkdirSync2(workDir, { recursive: true });
+  mkdirSync3(workDir, { recursive: true });
   const hasCustomSandboxRunner = Boolean(input.sandboxRunner);
   const sandboxRunner = input.sandboxRunner ?? runInUntrustedCodeSandbox;
   const bootstrapped = input.bootstrappedTargets ?? /* @__PURE__ */ new Set();
@@ -9570,13 +9903,13 @@ async function runPolyglotStage1Verification(input) {
     for (const file of input.files ?? []) {
       const cleanRel = file.path.replace(/^\/+/, "");
       const fullPath = resolve3(resolvedRoot, cleanRel);
-      mkdirSync2(dirname3(fullPath), { recursive: true });
-      writeFileSync3(fullPath, file.content, "utf8");
+      mkdirSync3(dirname3(fullPath), { recursive: true });
+      writeFileSync4(fullPath, file.content, "utf8");
     }
     for (const del of input.deleted_files ?? []) {
       const cleanRel = del.replace(/^\/+/, "");
       const fullPath = resolve3(resolvedRoot, cleanRel);
-      if (existsSync3(fullPath)) {
+      if (existsSync4(fullPath)) {
         unlinkSync(fullPath);
       }
     }
@@ -9598,7 +9931,7 @@ async function runPolyglotStage1Verification(input) {
     };
     for (const target of affectedTargets) {
       const targetCwd = target.working_directory === "." ? resolvedRoot : resolve3(resolvedRoot, target.working_directory);
-      if (!existsSync3(targetCwd)) {
+      if (!existsSync4(targetCwd)) {
         if (!hasCustomSandboxRunner) {
           targetResults.push({
             target_name: target.name,
@@ -9611,7 +9944,7 @@ async function runPolyglotStage1Verification(input) {
           });
           continue;
         }
-        mkdirSync2(targetCwd, { recursive: true });
+        mkdirSync3(targetCwd, { recursive: true });
       }
       if (target.kind === "node") {
         const nodeCheck = shouldSkipDefaultNodeStepInOfflineTempDir({
@@ -9827,6 +10160,25 @@ var RESUME_CONTEXT_MAX_CHARS = 8e3;
 var RESUME_CONTEXT_MAX_PERMISSION_LOOKUPS = 10;
 
 // src/execution/external-ci-gate.ts
+function resolveAgentEngineEscalationReason(err) {
+  switch (err.code) {
+    case "AGENT_TIMEOUT":
+      return "agent_timeout";
+    case "AGENT_REQUEST_CAP_REACHED":
+      return "agent_request_cap_reached";
+    case "AGENT_ISOLATION_UNAVAILABLE":
+      return "sandbox_isolation_unavailable";
+    case "AGENT_DIFF_TOO_LARGE":
+      return "agent_diff_too_large";
+    case "AGENT_SECRET_IN_DIFF":
+      return "agent_secret_leak_blocked";
+    case "AGENT_ENGINE_UNAVAILABLE":
+    case "AGENT_SANDBOX_FAILED":
+    case "AGENT_PROTOCOL_ERROR":
+    case "AGENT_SNAPSHOT_FAILED":
+      return "agent_engine_failed";
+  }
+}
 function resolveLlmEscalationReason(err) {
   if (err instanceof AuthenticationError || err instanceof QuotaExhaustedError) {
     return "llm_quota_or_auth_failure";
@@ -10575,6 +10927,22 @@ function formatNeedsHumanEscalationComment(input) {
     reasonHeadline = "Several `feature/<N>-*` branches match this plan and no single one has an open or merged PR to `dev` (`ambiguous_feature_branch`) \u2014 EPURE does not guess; code-fix budget preserved";
   } else if (input.reason === "plan_manifest_missing") {
     reasonHeadline = "The ticket graph EPURE generated for this plan cannot be read (`plan_manifest_missing`) \u2014 EPURE does not implement the issue body in its place. Before implementation, `/epure to-tickets` regenerates the graph; once implementation has started, close the plan and open a new one";
+  } else if (input.reason === "agent_timeout") {
+    reasonHeadline = "The agent session exceeded its time limit and was aborted (`agent_timeout`) \u2014 nothing from it was committed";
+  } else if (input.reason === "agent_request_cap_reached") {
+    reasonHeadline = "The agent session reached its LLM request cap (`agent_max_llm_requests`) and was aborted (`agent_request_cap_reached`) \u2014 nothing from it was committed";
+  } else if (input.reason === "agent_engine_failed") {
+    reasonHeadline = "The agent engine failed (start-up, RPC protocol, sandbox or worktree snapshot) (`agent_engine_failed`) \u2014 nothing from the session was committed";
+  } else if (input.reason === "sandbox_isolation_unavailable") {
+    reasonHeadline = "Kernel confinement (bubblewrap + landrun) is unavailable on this runner, and agent sessions require it (`sandbox_isolation_unavailable`)";
+  } else if (input.reason === "agent_diff_too_large") {
+    reasonHeadline = "The agent session changed more files or bytes than a commit accepts (`agent_diff_too_large`) \u2014 nothing from it was committed";
+  } else if (input.reason === "agent_secret_leak_blocked") {
+    reasonHeadline = "The agent session left a runner secret, the proxy nonce or a private key in its files (`agent_secret_leak_blocked`) \u2014 nothing was committed";
+  } else if (input.reason === "agent_no_changes") {
+    reasonHeadline = "The implementation session left no change in the worktree (`agent_no_changes`)";
+  } else if (input.reason === "job_budget_exhausted") {
+    reasonHeadline = "Too little of the job's time budget (`job_timeout_minutes`) remains to start an agent session and verify it (`job_budget_exhausted`)";
   } else if (input.reason === "internal_error") {
     reasonHeadline = "Internal orchestrator error \u2014 code-fix budget preserved";
   } else {
@@ -10659,9 +11027,7 @@ function formatNeedsHumanEscalationComment(input) {
       "<details>",
       "<summary>\u{1F4CB} Diagnostic CI & extrait des journaux assainis</summary>",
       "",
-      "```text",
-      input.diagnosticExcerpt.trim().slice(0, 6e3),
-      "```",
+      fencedCodeBlock(input.diagnosticExcerpt.trim().slice(0, 6e3)),
       "</details>"
     );
   }
@@ -17230,6 +17596,28 @@ function isLikelyTestTargetPath(filePath) {
   return /(?:^|\/)(?:__tests__|tests?|specs?)\//i.test(clean) || /(?:\.test|\.spec|_test|_spec)\.[a-z0-9]+$/i.test(baseName) || /^test_[^/]+\.py$/i.test(baseName);
 }
 var TICKET_AGENT_SESSION_TIMEOUT_MS = 30 * 60 * 1e3;
+var AGENT_SESSION_RESERVE_MS = 10 * 60 * 1e3;
+var MIN_AGENT_SESSION_MS = 2 * 60 * 1e3;
+var DEFAULT_AGENT_MAX_LLM_REQUESTS = 200;
+var JobBudgetExhaustedError = class extends Error {
+  constructor(remainingMs) {
+    super(
+      `${Math.max(0, Math.floor(remainingMs / 1e3))} s of the job's time budget remain: an agent session needs ${(AGENT_SESSION_RESERVE_MS + MIN_AGENT_SESSION_MS) / 1e3} s with Stage 1 and the commit.`
+    );
+    this.name = "JobBudgetExhaustedError";
+  }
+};
+function agentSessionTimeoutMs(jobDeadlineMs, nowMs) {
+  const available = jobDeadlineMs === void 0 ? TICKET_AGENT_SESSION_TIMEOUT_MS : jobDeadlineMs - nowMs - AGENT_SESSION_RESERVE_MS;
+  return available < MIN_AGENT_SESSION_MS ? void 0 : Math.min(TICKET_AGENT_SESSION_TIMEOUT_MS, available);
+}
+var SKIPPED_PATH_LABELS = {
+  symlink: "lien symbolique",
+  submodule: "sous-module",
+  binary: "binaire ou texte non UTF-8",
+  ignored: "nouveau fichier ignor\xE9 par .gitignore",
+  protected: "chemin prot\xE9g\xE9"
+};
 var TICKET_AGENT_ROLE_HEADLINES = {
   implementer: "Tu es un ing\xE9nieur TDD EPURE impl\xE9mentant un ticket approuv\xE9.",
   fixer: "Tu es un ing\xE9nieur TDD EPURE corrigeant les \xE9checs d\xE9crits dans le message (v\xE9rification Stage 1, constats 'must_fix' de revue, CI externe) en gardant 100% des cibles Stage 1 au vert."
@@ -17247,55 +17635,99 @@ function ticketAgentInstructions(role, reviewersDir) {
   ].join("\n");
 }
 async function runTicketAgentSession(params, session) {
+  const nowMs = Date.now();
+  const timeoutMs = agentSessionTimeoutMs(session.jobDeadlineMs, nowMs);
+  if (timeoutMs === void 0) {
+    throw new JobBudgetExhaustedError((session.jobDeadlineMs ?? nowMs) - nowMs);
+  }
   syncWorkspaceFiles(session.worktree, params.accumulatedFiles, params.deletedFilesSet);
+  const { state } = session;
+  const feedback = state.pendingFeedback;
+  state.pendingFeedback = [];
   const { finalMessage, diff } = await session.engine.run({
     role: session.role,
     toolPolicy: "write",
     instructions: ticketAgentInstructions(session.role, params.reviewersDir),
-    prompt: params.prompt,
+    prompt: feedback.length > 0 ? [params.prompt, "", ...feedback].join("\n") : params.prompt,
     worktree: session.worktree,
-    timeoutMs: TICKET_AGENT_SESSION_TIMEOUT_MS,
+    timeoutMs,
     model: params.phaseModels.implementationModel,
-    providers: params.phaseModels.providers
+    providers: params.phaseModels.providers,
+    thinking: params.thinkingLevel ? THINKING_LEVELS[params.thinkingLevel] : void 0,
+    trackedPaths: session.trackedPaths,
+    isProtectedPath: (path) => isSensitiveTaskBranchPath(path, params.reviewersDir),
+    maxLlmRequests: session.maxLlmRequests
   });
+  for (const f of diff.files) {
+    state.fileModes.set(f.path, f.mode);
+  }
+  const reverted = diff.skipped.map((s) => `- ${s.path} (${SKIPPED_PATH_LABELS[s.reason]})`);
+  if (reverted.length > 0) {
+    state.pendingFeedback = [
+      "Changements de la session pr\xE9c\xE9dente annul\xE9s (non committables) ; le d\xE9p\xF4t est revenu \xE0 leur \xE9tat ant\xE9rieur :",
+      ...reverted
+    ];
+  }
+  const protectedPaths = diff.skipped.filter((s) => s.reason === "protected").map((s) => s.path);
+  state.lastSessionEmpty = diff.files.length === 0 && diff.deleted_files.length === 0;
+  state.failedAttempt = protectedPaths.length > 0 ? `Modification interdite de chemin(s) prot\xE9g\xE9(s), annul\xE9e : ${protectedPaths.join(", ")}. Ne modifie jamais ${params.reviewersDir}/**, .github/workflows/**, .github/agents.yml ni .env*.` : session.role === "fixer" && state.lastSessionEmpty ? "no changes left in worktree: la session de correction n'a laiss\xE9 aucun changement dans le d\xE9p\xF4t." : void 0;
   const changedPaths = [
     ...diff.files.map((f) => `- ${f.path}`),
     ...diff.deleted_files.map((p) => `- ${p} (supprim\xE9)`)
   ];
-  const summary = await callLlmJson({
-    apiKey: params.llmApiKey,
-    model: params.phaseModels.implementationModel,
-    providers: params.phaseModels.providers,
-    maxTransientRetries: params.phaseModels.maxTransientRetries,
-    transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
-    requestTimeoutMs: params.phaseModels.requestTimeoutMs,
-    onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
-    logLabel: params.logLabel ? `${params.logLabel}/summary` : void 0,
-    systemInstruction: [
-      "Tu r\xE9diges le message de commit (Conventional Commits) et le r\xE9sum\xE9 de tests des changements qu'une session d'agent a laiss\xE9s dans le d\xE9p\xF4t.",
-      PROMPT_INJECTION_IMMUNITY_CLAUSE,
-      'Renvoie un objet JSON : { "commit_message": "...", "test_summary": "..." }.'
-    ].join("\n"),
-    prompt: [
-      `Ticket #${params.ticket.ticketIssueNumber} : ${params.ticket.title}`,
-      "",
-      "Fichiers chang\xE9s :",
-      changedPaths.length > 0 ? changedPaths.join("\n") : "(aucun)",
-      "",
-      "Compte rendu de la session :",
-      wrapUntrustedContent("untrusted_test_output", finalMessage)
-    ].join("\n"),
-    temperature: 0.1,
-    responseSchema: TICKET_SESSION_SUMMARY_SCHEMA,
-    fetchImpl: params.fetchImpl
-  });
+  const summary = await summarizeAgentSession(params, changedPaths, finalMessage);
   return {
     commit_message: summary.commit_message,
     test_summary: summary.test_summary,
-    files: [...diff.files],
+    files: diff.files.map(({ path, content }) => ({ path, content })),
     patches: [],
     deleted_files: [...diff.deleted_files]
   };
+}
+var THINKING_LEVELS = {
+  MINIMAL: "minimal",
+  LOW: "low",
+  MEDIUM: "medium",
+  HIGH: "high"
+};
+async function summarizeAgentSession(params, changedPaths, finalMessage) {
+  try {
+    return await callLlmJson({
+      apiKey: params.llmApiKey,
+      model: params.phaseModels.implementationModel,
+      providers: params.phaseModels.providers,
+      maxTransientRetries: params.phaseModels.maxTransientRetries,
+      transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
+      requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+      onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
+      logLabel: params.logLabel ? `${params.logLabel}/summary` : void 0,
+      systemInstruction: [
+        "Tu r\xE9diges le message de commit (Conventional Commits) et le r\xE9sum\xE9 de tests des changements qu'une session d'agent a laiss\xE9s dans le d\xE9p\xF4t.",
+        PROMPT_INJECTION_IMMUNITY_CLAUSE,
+        'Renvoie un objet JSON : { "commit_message": "...", "test_summary": "..." }.'
+      ].join("\n"),
+      prompt: [
+        `Ticket #${params.ticket.ticketIssueNumber} : ${params.ticket.title}`,
+        "",
+        "Fichiers chang\xE9s :",
+        changedPaths.length > 0 ? changedPaths.join("\n") : "(aucun)",
+        "",
+        "Compte rendu de la session :",
+        wrapUntrustedContent("untrusted_test_output", finalMessage)
+      ].join("\n"),
+      temperature: 0.1,
+      responseSchema: TICKET_SESSION_SUMMARY_SCHEMA,
+      fetchImpl: params.fetchImpl
+    });
+  } catch (err) {
+    if (err instanceof AuthenticationError || err instanceof QuotaExhaustedError) {
+      throw err;
+    }
+    return {
+      commit_message: `feat(ticket-${params.ticket.ticketIssueNumber}): ${params.ticket.title}`,
+      test_summary: "R\xE9sum\xE9 indisponible : l'appel de synth\xE8se de la session a \xE9chou\xE9."
+    };
+  }
 }
 async function generateTicketImplementationWithFallback(params) {
   if (params.agentSession) {
@@ -17725,7 +18157,23 @@ async function runTicketExecutionLoop(params) {
       verificationGuideMarkdown = formatVerificationToolingGuideMarkdown(verificationProfile);
     }
     const bootstrappedTargets = /* @__PURE__ */ new Set();
-    const agentSessionFor = (role) => params.agentEngine ? { engine: params.agentEngine, role, worktree: sandboxWorkspace.workDir } : void 0;
+    const agentState = {
+      fileModes: /* @__PURE__ */ new Map(),
+      pendingFeedback: [],
+      failedAttempt: void 0,
+      lastSessionEmpty: false
+    };
+    let agentTrackedPaths = [];
+    const agentSessionFor = (role) => params.agentEngine ? {
+      engine: params.agentEngine,
+      role,
+      worktree: sandboxWorkspace.workDir,
+      trackedPaths: agentTrackedPaths,
+      jobDeadlineMs: params.jobDeadlineMs,
+      maxLlmRequests: params.parsedDevAgentsConfig?.agent_max_llm_requests ?? DEFAULT_AGENT_MAX_LLM_REQUESTS,
+      state: agentState
+    } : void 0;
+    const withFileModes = (files) => files.map((f) => ({ ...f, mode: agentState.fileModes.get(f.path) }));
     let taskPr;
     const initialTicketFixAttempts = params.initialCodeFixAttemptsByTicket[String(ticket.ticketIssueNumber)] ?? 0;
     let reviewFixAttempt = initialTicketFixAttempts;
@@ -17745,6 +18193,9 @@ async function runTicketExecutionLoop(params) {
       });
     };
     try {
+      if (params.agentEngine) {
+        agentTrackedPaths = await listTrackedPaths(sandboxWorkspace.workDir);
+      }
       const ticketChangedFilesMap = /* @__PURE__ */ new Map();
       const ticketDeletedFilesSet = /* @__PURE__ */ new Set();
       let impl;
@@ -17785,6 +18236,7 @@ async function runTicketExecutionLoop(params) {
           }
         }
       };
+      let lastStage1Output = "";
       const evaluateIntegrityAndStage1Suite = async (label) => {
         const integrityCheck = validateTicketIntegrityGuard({
           baseFiles: baseBranchFilesSnapshot,
@@ -17795,6 +18247,17 @@ async function runTicketExecutionLoop(params) {
 ${ticket.description}
 ${ticket.acceptanceCriteria.join("\n")}`
         });
+        const agentFailure = agentState.failedAttempt;
+        agentState.failedAttempt = void 0;
+        if (agentFailure !== void 0) {
+          return {
+            integrityCheck,
+            testCheck: {
+              passed: false,
+              output: [agentFailure, lastStage1Output].filter(Boolean).join("\n\n")
+            }
+          };
+        }
         const testCheck = !integrityCheck.passed ? {
           passed: false,
           output: integrityCheck.diagnosticMarkdown
@@ -17816,6 +18279,7 @@ ${ticket.acceptanceCriteria.join("\n")}`
           llmApiKey: params.llmApiKey,
           label
         });
+        lastStage1Output = testCheck.output;
         return { integrityCheck, testCheck };
       };
       const existingTaskPr = await params.gh.findOpenPullRequestByHead(
@@ -17999,6 +18463,20 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
           fetchImpl: params.fetchImpl,
           agentSession: agentSessionFor("implementer")
         }));
+        if (params.agentEngine && agentState.lastSessionEmpty && agentState.failedAttempt === void 0) {
+          const escalated = await params.escalateToNeedsHuman({
+            reason: "agent_no_changes",
+            ticketNumber: ticket.ticketIssueNumber,
+            branch: taskBranch,
+            diagnosticExcerpt: agentState.pendingFeedback.join("\n") || void 0
+          });
+          return {
+            halted: true,
+            result: escalated,
+            verificationProfile,
+            verificationGuideMarkdown
+          };
+        }
         const preStage1Check = validateWorkspaceFileOperations({
           workDir: sandboxWorkspace.workDir,
           files: [
@@ -18203,7 +18681,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
           branch: taskBranch,
           fromBranch: params.featureBranch,
           commitMessage: impl.commit_message,
-          files: impl.files,
+          files: withFileModes(impl.files),
           deletedFiles: Array.from(ticketDeletedFilesSet)
         });
         const prBody = appendEpureCommandsSpoiler(
@@ -18216,7 +18694,9 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
             "",
             "## TDD & Sandbox Verification",
             `- **Sandbox Test Execution**: \`passed\``,
-            `- **Summary**: ${impl.test_summary}`
+            "- **Summary**:",
+            "",
+            fencedCodeBlock(impl.test_summary)
           ].join("\n"),
           {
             phase: "implementation",
@@ -18227,7 +18707,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
         taskPr = await params.gh.openPullRequest({
           head: taskBranch,
           base: params.featureBranch,
-          title: impl.commit_message,
+          title: impl.commit_message.split("\n", 1)[0]?.trim() || `feat(ticket-${ticket.ticketIssueNumber}): ${ticket.title}`,
           body: prBody
         });
         currentPrHeadSha = taskPr.head_sha;
@@ -18252,8 +18732,39 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
             diagnosticExcerpt: resync.diagnosticExcerpt
           });
         }
+        const previousHeadSha = currentPrHeadSha;
         currentPrHeadSha = resync.headSha || currentPrHeadSha;
+        if (params.agentEngine && currentPrHeadSha !== previousHeadSha) {
+          await refreshTicketFilesAfterResync(previousHeadSha, currentPrHeadSha);
+        }
         return void 0;
+      };
+      const refreshTicketFilesAfterResync = async (fromSha, toSha) => {
+        const { changedFiles } = await params.gh.compareCommits(fromSha, toSha);
+        const removed = /* @__PURE__ */ new Set();
+        for (const path of changedFiles) {
+          const content = await params.gh.readSingleBranchFile(toSha, path);
+          if (content === null) {
+            params.accumulatedFiles.delete(path);
+            ticketChangedFilesMap.delete(path);
+            removed.add(path);
+            continue;
+          }
+          if (content.includes("\0") || content.includes("\uFFFD")) {
+            continue;
+          }
+          params.accumulatedFiles.set(path, content);
+          if (ticketChangedFilesMap.has(path)) {
+            ticketChangedFilesMap.set(path, content);
+          } else {
+            baseBranchFilesSnapshot.set(path, content);
+          }
+        }
+        syncWorkspaceFiles(sandboxWorkspace.workDir, /* @__PURE__ */ new Map(), removed);
+        impl = {
+          ...impl,
+          files: Array.from(ticketChangedFilesMap, ([path, content]) => ({ path, content }))
+        };
       };
       const runStage2AndStage3ForTaskPr = async (passParams) => {
         const reviewGuard = evaluateReviewFeedbackTrigger({
@@ -18738,7 +19249,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
               branch: taskBranch,
               fromBranch: params.featureBranch,
               commitMessage: `chore(wip): checkpoint review-fix attempt ${reviewFixAttempt} on #${ticket.ticketIssueNumber}`,
-              files: impl.files,
+              files: withFileModes(impl.files),
               deletedFiles: Array.from(ticketDeletedFilesSet)
             });
           }
@@ -18763,7 +19274,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
           branch: taskBranch,
           fromBranch: params.featureBranch,
           commitMessage: `fix(review): address reviewer findings on #${ticket.ticketIssueNumber}`,
-          files: impl.files,
+          files: withFileModes(impl.files),
           deletedFiles: Array.from(ticketDeletedFilesSet)
         });
         const nextConflictEscalation = await resyncTaskPrIfConflicting();
@@ -19008,9 +19519,9 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
         `- **#${ticket.ticketIssueNumber}** (${ticket.title}) \u2014 PR #${taskPr.number} squash-merged into \`${params.featureBranch}\` as \`${squashCommit.commit_title}\` (Reviewers: ${reviewResult.selected_reviewers.map((r) => `\`${r}\``).join(", ")})` + formatTicketUsageSuffix(currentTokenUsage(), ticket.ticketIssueNumber, params.parsedDevAgentsConfig?.pricing)
       );
     } catch (err) {
-      if (err instanceof LLMError) {
+      if (err instanceof LLMError || err instanceof AgentEngineError || err instanceof JobBudgetExhaustedError) {
         const escalated = await params.escalateToNeedsHuman({
-          reason: resolveLlmEscalationReason(err),
+          reason: err instanceof LLMError ? resolveLlmEscalationReason(err) : err instanceof AgentEngineError ? resolveAgentEngineEscalationReason(err) : "job_budget_exhausted",
           ticketNumber: ticket.ticketIssueNumber,
           branch: taskBranch,
           phase: "implementation",
@@ -19162,6 +19673,7 @@ function resumesImplementationRun(state) {
   return IMPLEMENTATION_PHASES.has(state.phase) && (state.status === "active" || state.status === "suspended");
 }
 async function orchestrateIssueCommand(input) {
+  input = { ...input, jobStartedAtMs: input.jobStartedAtMs ?? Date.now() };
   let result = await runIssueCommand(input);
   const checkedHeads = /* @__PURE__ */ new Set();
   while (result.waiting_ci_head_sha && !checkedHeads.has(result.waiting_ci_head_sha)) {
@@ -19647,6 +20159,7 @@ async function runMeteredIssueCommand(input, ledger) {
         );
         return await runLeaseMinutes * 6e4;
       };
+      const resolveJobDeadlineMs = async () => effectiveInput.jobStartedAtMs === void 0 ? void 0 : effectiveInput.jobStartedAtMs + await resolveRunLeaseMs();
       const reviewersDir = parsedDevAgentsConfig?.reviewers_dir ?? DEFAULT_REVIEWERS_DIR;
       if (effectiveInput.command === "plan" || effectiveInput.command === "to-spec" || effectiveInput.command === "to-tickets" || effectiveInput.command === "reply" && (currentState?.phase === "grilling" || currentState?.phase === "spec") && currentState?.status !== "cancelled") {
         const phaseModels = requirePhaseModels();
@@ -20489,7 +21002,8 @@ ${t.filesToTouch.join(" ")}`
           baseSyncGuard,
           resumeContextMarkdown,
           stopIfFeaturePrMerged,
-          agentEngine: effectiveInput.agentEngine
+          agentEngine: effectiveInput.agentEngine,
+          jobDeadlineMs: await resolveJobDeadlineMs()
         });
         if (loopOutcome.halted && loopOutcome.result) {
           return loopOutcome.result;
@@ -20646,7 +21160,8 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
               baseSyncGuard,
               resumeContextMarkdown,
               stopIfFeaturePrMerged,
-              agentEngine: effectiveInput.agentEngine
+              agentEngine: effectiveInput.agentEngine,
+              jobDeadlineMs: await resolveJobDeadlineMs()
             });
             if (loopOutcome.halted && loopOutcome.result) {
               return loopOutcome.result;
