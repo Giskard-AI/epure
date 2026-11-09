@@ -17808,6 +17808,38 @@ async function runMultiAgentPrReviewPass(input) {
   };
 }
 
+// src/security/audit-trace.ts
+function splitProviderAndModel(modelSpec, explicitProvider) {
+  const trimmed = modelSpec.trim();
+  const slashIdx = trimmed.indexOf("/");
+  if (explicitProvider?.trim()) {
+    const provider = explicitProvider.trim();
+    const prefix = `${provider}/`;
+    return {
+      provider,
+      model: trimmed.startsWith(prefix) ? trimmed.slice(prefix.length) : trimmed
+    };
+  }
+  if (slashIdx > 0 && slashIdx < trimmed.length - 1) {
+    return {
+      provider: trimmed.slice(0, slashIdx),
+      model: trimmed.slice(slashIdx + 1)
+    };
+  }
+  return {
+    provider: "default",
+    model: trimmed
+  };
+}
+function formatAgentProvenanceLine(input) {
+  const engine = input.engine.trim() || "pi";
+  const { provider, model } = splitProviderAndModel(
+    input.model,
+    input.provider
+  );
+  return `- **Agent Provenance**: engine \`${engine}\` | provider \`${provider}\` | model \`${model}\``;
+}
+
 // src/orchestrator/prompts/resume-context.ts
 function formatResumeContextPromptLines(resumeContextMarkdown) {
   return resumeContextMarkdown ? [
@@ -17916,6 +17948,10 @@ async function runFeatureIntegrationPhase(params) {
     fetchImpl: params.fetchImpl
   });
   const existingFeaturePr = params.existingFeaturePrAtStart ?? await params.gh.findOpenPullRequestByHead(params.featureBranch, "dev");
+  const provenanceLine = formatAgentProvenanceLine({
+    engine: params.agentEngine?.name ?? "pi",
+    model: params.phaseModels.implementationModel
+  });
   const featurePrBody = appendEpureCommandsSpoiler(
     [
       "## Summary",
@@ -17937,6 +17973,7 @@ async function runFeatureIntegrationPhase(params) {
       formatPrUsageSection(currentTokenUsage(), pricing),
       "",
       "## Governance",
+      provenanceLine,
       "- Requires human review and squash-merge into `dev` in the GitHub UI (ADR-0001, ADR-0027, Q45, Q91, Q95)."
     ].join("\n"),
     {
@@ -20200,6 +20237,10 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
           files: withFileModes(impl.files),
           deletedFiles: Array.from(ticketDeletedFilesSet)
         });
+        const provenanceLine = formatAgentProvenanceLine({
+          engine: params.agentEngine?.name ?? "pi",
+          model: params.phaseModels.implementationModel
+        });
         const prBody = appendEpureCommandsSpoiler(
           [
             "## Summary",
@@ -20210,6 +20251,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
             "",
             "## TDD & Sandbox Verification",
             `- **Sandbox Test Execution**: \`passed\``,
+            provenanceLine,
             "- **Summary**:",
             "",
             fencedCodeBlock(impl.test_summary)

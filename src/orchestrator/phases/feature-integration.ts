@@ -24,6 +24,7 @@ import {
   type ReviewerAgentName
 } from "../../review/reviewer-roster.js";
 import { generateSemanticSquashCommitFromDiff } from "../../review/squash-commit-generator.js";
+import { formatAgentProvenanceLine } from "../../security/audit-trace.js";
 import {
   collectRunnerSecretValues,
   type SandboxExecutionInput,
@@ -267,6 +268,10 @@ export async function runFeatureIntegrationPhase(
     params.existingFeaturePrAtStart ??
     (await params.gh.findOpenPullRequestByHead(params.featureBranch, "dev"));
 
+  const provenanceLine = formatAgentProvenanceLine({
+    engine: params.agentEngine?.name ?? "pi",
+    model: params.phaseModels.implementationModel
+  });
   const featurePrBody = appendEpureCommandsSpoiler(
     [
       "## Summary",
@@ -290,6 +295,7 @@ export async function runFeatureIntegrationPhase(
       formatPrUsageSection(currentTokenUsage(), pricing),
       "",
       "## Governance",
+      provenanceLine,
       "- Requires human review and squash-merge into `dev` in the GitHub UI (ADR-0001, ADR-0027, Q45, Q91, Q95)."
     ].join("\n"),
     {

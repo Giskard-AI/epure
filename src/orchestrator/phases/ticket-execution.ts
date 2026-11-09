@@ -37,6 +37,7 @@ import {
   type ReviewerAgentName
 } from "../../review/reviewer-roster.js";
 import { generateSemanticSquashCommitFromDiff } from "../../review/squash-commit-generator.js";
+import { formatAgentProvenanceLine } from "../../security/audit-trace.js";
 import {
   collectRunnerSecretValues,
   type SandboxExecutionInput,
@@ -1663,6 +1664,10 @@ export async function runTicketExecutionLoop(
           deletedFiles: Array.from(ticketDeletedFilesSet)
         });
 
+        const provenanceLine = formatAgentProvenanceLine({
+          engine: params.agentEngine?.name ?? "pi",
+          model: params.phaseModels.implementationModel
+        });
         const prBody = appendEpureCommandsSpoiler(
           [
             "## Summary",
@@ -1673,6 +1678,7 @@ export async function runTicketExecutionLoop(
             "",
             "## TDD & Sandbox Verification",
             `- **Sandbox Test Execution**: \`passed\``,
+            provenanceLine,
             "- **Summary**:",
             "",
             fencedCodeBlock(impl.test_summary)

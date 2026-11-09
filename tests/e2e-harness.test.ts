@@ -1239,10 +1239,10 @@ describe("deriveEngine", () => {
       expected: { executed: "pi", workflow_actions: ["authorize-command", "orchestrate-issue"], agents_yml_harness: null }
     },
     {
-      id: "run-agent-uses-the-configured-harness",
-      workflow: `        uses: Giskard-AI/epure/actions/run-agent@${sha}`,
+      id: "issue-command-uses-the-configured-harness",
+      workflow: `        uses: Giskard-AI/epure/actions/orchestrate-issue@${sha}`,
       agents: "harness: codex\n",
-      expected: { executed: "agent harness (codex)", workflow_actions: ["run-agent"], agents_yml_harness: "codex" }
+      expected: { executed: "codex", workflow_actions: ["orchestrate-issue"], agents_yml_harness: "codex" }
     },
     {
       id: "no-epure-action",
@@ -1358,7 +1358,7 @@ describe("renderMarkdownReport", () => {
       code_under_test: { epure_ref: "dev", epure_sha: "0123456789abcdef", harness_commit: "0123456789abcdef" },
       seed: { tree_sha: "feedfacecafebeef", commit_sha: "c0ffee" },
       install_commit_sha: "deadbeef",
-      engine: { executed: "epure-in-house-loop", workflow_actions: ["orchestrate-issue"], agents_yml_harness: "pi" },
+      engine: { executed: "pi", workflow_actions: ["orchestrate-issue"], agents_yml_harness: "pi" },
       settings: {
         model: "google/gemini-3.8-flash",
         thinking_level: "HIGH",
@@ -1404,7 +1404,7 @@ describe("renderMarkdownReport", () => {
     { id: "failed-check", expected: "- [ ] feature-pr-open: no open feature/* -> dev pull request" },
     { id: "both-shas", expected: "- EPURE under test: `dev` (0123456789ab); harness commit 0123456789ab" },
     { id: "seed-tree", expected: "- Seed tree: feedfacecafe; install commit: deadbeef" },
-    { id: "engine-that-ran", expected: "- Engine: epure-in-house-loop (agents.yml harness: pi)" },
+    { id: "engine-that-ran", expected: "- Engine: pi (agents.yml harness: pi)" },
     { id: "actions-minutes", expected: "Actions: 12.5 min over 4 jobs (14 billable)" },
     { id: "comparable-flag", expected: "- Comparable: no (no review on a task pull request)" },
     { id: "phase-duration", expected: "| plan | 1.5 min | ok |" },
