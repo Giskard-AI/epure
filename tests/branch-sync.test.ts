@@ -946,6 +946,18 @@ describe("continue on green ticket CI — a task PR merge refused with 405 re-sy
     }
   });
 
+  it("github-token-fallback-publishes-ai-review-but-no-pr-title-check-run-that-would-satisfy-the-rulesets", async () => {
+    const run = await runGreenTicketContinue({
+      taskChange: CONFLICTING_SERVICE.ours["src/service.ts"]!,
+      featureFiles: { "src/other.ts": "export const o = 1;\n" },
+      resolution: RESOLVED_SERVICE,
+      mergeableState: "behind",
+      ciRunningOnNewHead: false
+    });
+
+    expect(new Set(run.checkRuns.map((c) => c.name))).toEqual(new Set(["ai-review"]));
+  });
+
   it.each([
     {
       id: "llm-resolved-conflict-is-reviewed-on-the-new-head-before-it-is-merged",

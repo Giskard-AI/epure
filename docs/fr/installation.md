@@ -76,6 +76,7 @@ Le skill `/setup-repo` invoque d'abord la CLI sous-jacente en mode `--dry-run` e
 node dist/cli/setup-repo.mjs \
   --repo my-org/craft-calculator \
   --target-dir /chemin/vers/craft-calculator \
+  --pinned-sha "$(git -C /chemin/vers/epure rev-parse HEAD)" \
   --agent-app-id 123456 \
   --release-app-id 654321 \
   --dry-run
@@ -89,6 +90,7 @@ Après votre validation, le skill `/setup-repo` applique la gouvernance via `--a
 node dist/cli/setup-repo.mjs \
   --repo my-org/craft-calculator \
   --target-dir /chemin/vers/craft-calculator \
+  --pinned-sha "$(git -C /chemin/vers/epure rev-parse HEAD)" \
   --agent-app-id 123456 \
   --release-app-id 654321 \
   --apply \
@@ -102,6 +104,8 @@ git add .github/ .agents/reviewers/ renovate.json
 git commit -m "chore(epure): bootstrap repository governance and workflows"
 git push origin dev
 ```
+
+**Mise à jour d'une installation existante** : lancez `--apply` et fusionnez les workflows régénérés dans `dev` avant, ou en même temps que, `--apply-github-settings`. Les installations antérieures à v1.2.12 publient le check du contrat sous le nom `verify-contract / Verify EPURE Consumer Contract`, que les nouveaux Rulesets n'acceptent pas : toute PR vers `dev` reste bloquée jusqu'à ce que le `epure-check.yml` régénéré atteigne `dev`. Une PR dont les checks ont déjà tourné avec les anciens noms a besoin d'un nouveau push pour publier les nouveaux.
 
 ---
 
@@ -126,6 +130,7 @@ git push origin dev
      - `epure-feature-integrity` (`refs/heads/feature/*`) : interdit suppression et force-push sans aucun Bypass Actor, si bien que même l'`Agent App` ne peut ni réécrire ni supprimer une branche de fonctionnalité. Conséquence : les branches `feature/*` fusionnées restent sur GitHub. `delete_branch_on_merge` ne peut pas les supprimer, un administrateur non plus ; pour les élaguer, désactivez temporairement ce Ruleset (Settings → Rules → Rulesets), supprimez les branches fusionnées, puis réactivez-le.
      - `epure-feature-governance` (`refs/heads/feature/*`) : `Agent App` en bypass `always` pour le squash-merge autonome des PRs `task/* -> feature/*` et les écritures directes d'EPURE (intégration du plan, synchronisations depuis `dev` en commits de merge, résolutions de conflits) ; les humains passent toujours par une PR.
      - `epure-dev-governance` (`refs/heads/dev`) : aucun bypass pour l'`Agent App` (`required_approving_review_count: 0` par défaut pour permettre à un mainteneur solo de merger ses PRs ; configurable via `--require-pr-approvals <N>`).
+     - `epure-feature-governance` et `epure-dev-governance` exigent les checks des workflows générés avant tout merge : `Verify EPURE Consumer Contract / Verify EPURE Consumer Contract`, `PR title`, `Quality (Format, Lint, Typecheck, Test & Build)` et `Zizmor`. Seul un check run de GitHub Actions compte : un résultat homonyme publié par une autre App (le check run `PR title` d'EPURE) ou par un token personnel ne compte pas. Cela ne protège pas du contenu de la PR : `pull_request` exécute les workflows du commit de merge de la PR, donc une PR qui modifie ou ajoute un workflow, ou qui modifie `package.json` ou la configuration des tests exécutés par `Quality`, peut faire passer ces checks elle-même. Pour couvrir ce cas, placez `.github/workflows/**`, `package.json` et votre configuration de test sous `CODEOWNERS` et exigez la revue des code owners dans un Ruleset distinct sur `dev` (quand `setup-repo` met à jour `epure-dev-governance`, il écrase les modifications qui y ont été faites), ou utilisez des required workflows d'organisation. `ai-review` n'est pas exigé : seul EPURE le publie, il n'apparaît donc jamais sur une PR Renovate ou humaine. Une PR n'a pas besoin d'être à jour avec sa branche de base, et la création d'une branche n'exige aucun check. L'`Agent App` contourne ces checks sur `feature/*` uniquement. Relancer `--apply-github-settings` met à jour en place les Rulesets créés par une version antérieure.
      - `epure-release-immutability` (`refs/heads/main`) : ni mise à jour (merges de PR compris), ni push direct, ni force-push, ni suppression ; `Release App` comme unique Bypass Actor, seule une release fait avancer `main`. Un hotfix manuel urgent sur `main` exige qu'un admin désactive temporairement ce ruleset.
      - `epure-release-tags` (`refs/tags/v*`, ruleset de tags) : ni création, ni déplacement, ni suppression de tags `v*` ; `Release App` comme unique Bypass Actor.
 

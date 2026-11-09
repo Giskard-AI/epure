@@ -3,6 +3,7 @@ import {
   mintRepositoryInstallationToken,
   revokeGitHubInstallationToken
 } from "../auth/github-app-jwt.js";
+import { GITHUB_ACTIONS_APP_ID } from "../auth/github-apps.js";
 import { redactSecrets } from "../auth/issue-command-gate.js";
 import {
   discoverVerificationProfile,
@@ -131,7 +132,6 @@ import {
 } from "./types.js";
 import { resolveJobTimeoutMinutes } from "./job-timeout.js";
 import {
-  GITHUB_ACTIONS_APP_ID,
   parsePlanManifestFromComments,
   resolvePlanManifest,
   resolveSpecManifest,
@@ -385,11 +385,19 @@ async function runIssueCommand(
       fetchImpl: countedFetch,
       sleepFn: input.sleepFn
     });
-    const gh = createGitHubRestHelper({
+    const restHelper = createGitHubRestHelper({
       repository: input.repository,
       token: activeToken,
       fetchImpl: githubFetch
     });
+    // The rulesets require a "PR title" check from GitHub Actions: published with GITHUB_TOKEN, EPURE's
+    // unconditional green run would stand in for the real pr-title.yml check.
+    const gh: GitHubRestHelper = mintedAppToken
+      ? restHelper
+      : {
+          ...restHelper,
+          publishCheckRun: async (run) => (run.name === "PR title" ? undefined : restHelper.publishCheckRun(run))
+        };
 
     const rawStore =
       input.stateStore ??

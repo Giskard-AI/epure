@@ -184,6 +184,7 @@ The `/setup-repo` skill first runs the underlying CLI in `--dry-run` mode and pr
 node dist/cli/setup-repo.mjs \
   --repo my-org/craft-calculator \
   --target-dir /path/to/craft-calculator \
+  --pinned-sha "$(git -C /path/to/epure rev-parse HEAD)" \
   --agent-app-id 123456 \
   --release-app-id 654321 \
   --dry-run
@@ -197,6 +198,7 @@ Once you confirm the dry-run report, the `/setup-repo` skill applies the reposit
 node dist/cli/setup-repo.mjs \
   --repo my-org/craft-calculator \
   --target-dir /path/to/craft-calculator \
+  --pinned-sha "$(git -C /path/to/epure rev-parse HEAD)" \
   --agent-app-id 123456 \
   --release-app-id 654321 \
   --apply \
@@ -210,6 +212,8 @@ git add .github/ .agents/reviewers/ renovate.json
 git commit -m "chore(epure): bootstrap repository governance and workflows"
 git push origin dev
 ```
+
+**Upgrading an existing setup**: run `--apply` and merge the regenerated workflows into `dev` before, or together with, `--apply-github-settings`. Setups older than v1.2.12 report the contract check as `verify-contract / Verify EPURE Consumer Contract`, a name the new rulesets do not accept, so every PR into `dev` stays blocked until the regenerated `epure-check.yml` reaches `dev`. A PR whose checks already ran with the old names needs a new push to report the new ones.
 
 ---
 
@@ -234,6 +238,7 @@ git push origin dev
      - `epure-feature-integrity` (`refs/heads/feature/*`): blocks deletion and force-push with no bypass actor, so not even the `Agent App` can rewrite or delete a feature branch. Consequence: merged `feature/*` branches stay on GitHub. `delete_branch_on_merge` cannot remove them and neither can an admin; to prune them, temporarily disable this ruleset (Settings → Rules → Rulesets), delete the merged branches, then re-enable it.
      - `epure-feature-governance` (`refs/heads/feature/*`): `Agent App` in `always` bypass for autonomous `task/* -> feature/*` squash-merges once checks pass and for EPURE's direct writes (plan integration, `dev` merge syncs, conflict resolutions); humans still go through PRs.
      - `epure-dev-governance` (`refs/heads/dev`): No `Agent App` bypass (`required_approving_review_count: 0` by default for solo-maintainer compatibility; configurable via `--require-pr-approvals <N>`).
+     - Both `epure-feature-governance` and `epure-dev-governance` require the checks of the generated workflows before a merge: `Verify EPURE Consumer Contract / Verify EPURE Consumer Contract`, `PR title`, `Quality (Format, Lint, Typecheck, Test & Build)` and `Zizmor`. Only a check run from GitHub Actions counts: a result of the same name from another App (EPURE's own `PR title` check run) or from a personal token does not. This does not protect against the PR's own content: `pull_request` runs the workflows of the PR's merge commit, so a PR that edits or adds a workflow, or changes `package.json` or the test configuration that `Quality` runs, can turn these checks green itself. To cover that case, put `.github/workflows/**`, `package.json` and your test configuration under `CODEOWNERS` and require code owner review in a ruleset of your own on `dev` (when `setup-repo` updates `epure-dev-governance`, it resets changes made to it), or use organization required workflows. `ai-review` is not required: only EPURE publishes it, so it never reports on a Renovate or human PR. A PR does not have to be up to date with its base branch, and creating a branch skips the checks. The `Agent App` bypasses these checks on `feature/*` only. Re-running `--apply-github-settings` updates rulesets created by an earlier version in place.
      - `epure-release-immutability` (`refs/heads/main`): no update (PR merges included), direct push, force-push or deletion; `Release App` as sole Bypass Actor, so only a release moves `main`. An urgent manual hotfix on `main` requires an admin to disable this ruleset temporarily.
      - `epure-release-tags` (`refs/tags/v*`, a tag ruleset): no creation, move or deletion of `v*` tags; `Release App` as sole Bypass Actor.
 
@@ -500,7 +505,7 @@ Invoked automatically by the `/setup-repo` skill (or runnable directly from a te
 node dist/cli/setup-repo.mjs \
   --repo <owner>/<name> \
   --target-dir <path> \
-  [--pinned-sha <40-char-sha>] \
+  --pinned-sha <40-char-sha> \
   [--dry-run | --apply] \
   [--apply-github-settings] \
   [--no-frontend-reviewers] \
@@ -521,7 +526,7 @@ node dist/cli/setup-repo.mjs \
 | --- | --- | --- |
 | `--repo <owner/name>` | *(Required)* | Target GitHub repository slug (e.g., `my-org/craft-calculator`). |
 | `--target-dir <path>` (aliases `--dir`, `--repo-root`) | Current directory | Local checkout path where `.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`, workflows, and the reviewer prompts (`<reviewers_dir>/*.md`) are written. |
-| `--pinned-sha <sha>` | Latest EPURE SHA | Immutable 40-character Git commit SHA of `Giskard-AI/epure` used to pin generated caller workflows. |
+| `--pinned-sha <sha>` | *(Required with `--apply` or `--apply-github-settings`)* | Immutable 40-character Git commit SHA of `Giskard-AI/epure` used to pin generated caller workflows, usually the commit of the EPURE checkout you run (`git -C <epure-checkout> rev-parse HEAD`). The commit must exist on GitHub: otherwise the generated `epure-check.yml` fails at startup, the required check `Verify EPURE Consumer Contract / Verify EPURE Consumer Contract` never reports and every PR into `dev` stays blocked. Without it, `--apply` and `--apply-github-settings` fail before any write; a dry-run warns and pins a placeholder commit. |
 | `--dry-run` | `true` (if `--apply` omitted) | Prints the complete bootstrap plan without modifying local files or calling write APIs. With `--apply-github-settings`, reads the existing rulesets and reports `create`, `update` or `noop` for each. |
 | `--apply` | `false` | Writes configuration files (`.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`), caller workflows, and base reviewer prompts (`<reviewers_dir>/*.md`, default `.agents/reviewers/*.md`). |
 | `--apply-github-settings` | `false` | Applies squash-only repository settings and the 5 Repository Rulesets (`epure-feature-integrity`, `epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`, `epure-release-tags`) via the GitHub REST API. |
@@ -895,6 +900,7 @@ The agent inspects the repository's elements (language, build scripts, UI presen
 node dist/cli/setup-repo.mjs \
   --repo my-org/craft-calculator \
   --target-dir /path/to/craft-calculator \
+  --pinned-sha "$(git -C /path/to/epure rev-parse HEAD)" \
   --agent-app-id 123456 \
   --release-app-id 654321 \
   --dry-run
@@ -917,6 +923,7 @@ Once you confirm, the `/setup-repo` skill runs `--apply --apply-github-settings`
 node dist/cli/setup-repo.mjs \
   --repo my-org/craft-calculator \
   --target-dir /path/to/craft-calculator \
+  --pinned-sha "$(git -C /path/to/epure rev-parse HEAD)" \
   --agent-app-id 123456 \
   --release-app-id 654321 \
   --apply \
@@ -1090,7 +1097,7 @@ Inputs: `semver_tag` (`vMAJOR.MINOR.PATCH`), `expected_dev_sha` (the full 40-cha
 ## 1. One-Time Setup
 
 1. **Create and install the Release App.** Stage 3 of `scripts/wizards/setup-github-apps-wizard.sh --repo <owner>/<repo>` creates `<owner>-epure-release` (repository permissions `Contents: Read and write`, `Metadata: Read-only`, no webhook), installs it on that repository only, and stores two **secrets** in the `release` environment: `EPURE_RELEASE_APP_ID` (numeric App ID) and `EPURE_RELEASE_APP_PRIVATE_KEY` (PEM). The wizard always runs all stages, including the Agent App; if you only need the Release App, follow the same steps by hand and set the secrets with `gh secret set <NAME> -R <owner>/<repo> --env release`.
-2. **Add the Release App as bypass actor** (`actor_type: Integration`, `actor_id: <App ID>`, `bypass_mode: always`) on every ruleset that covers `main` and `v*` tags (see the table above). In consumer repositories, `node dist/cli/setup-repo.mjs --repo <owner>/<repo> --release-app-id <App ID> --apply --apply-github-settings` does it for `epure-release-immutability` and `epure-release-tags`. Elsewhere, add the actor with `gh api` while keeping the existing actors:
+2. **Add the Release App as bypass actor** (`actor_type: Integration`, `actor_id: <App ID>`, `bypass_mode: always`) on every ruleset that covers `main` and `v*` tags (see the table above). In consumer repositories, `node dist/cli/setup-repo.mjs --repo <owner>/<repo> --pinned-sha <EPURE commit SHA> --agent-app-id <Agent App ID> --release-app-id <App ID> --apply --apply-github-settings` does it for `epure-release-immutability` and `epure-release-tags`. Elsewhere, add the actor with `gh api` while keeping the existing actors:
 
    ```bash
    gh api repos/<owner>/<repo>/rulesets/<ruleset-id> \
@@ -1410,6 +1417,7 @@ Le skill `/setup-repo` invoque d'abord la CLI sous-jacente en mode `--dry-run` e
 node dist/cli/setup-repo.mjs \
   --repo my-org/craft-calculator \
   --target-dir /chemin/vers/craft-calculator \
+  --pinned-sha "$(git -C /chemin/vers/epure rev-parse HEAD)" \
   --agent-app-id 123456 \
   --release-app-id 654321 \
   --dry-run
@@ -1423,6 +1431,7 @@ Après votre validation, le skill `/setup-repo` applique la gouvernance via `--a
 node dist/cli/setup-repo.mjs \
   --repo my-org/craft-calculator \
   --target-dir /chemin/vers/craft-calculator \
+  --pinned-sha "$(git -C /chemin/vers/epure rev-parse HEAD)" \
   --agent-app-id 123456 \
   --release-app-id 654321 \
   --apply \
@@ -1436,6 +1445,8 @@ git add .github/ .agents/reviewers/ renovate.json
 git commit -m "chore(epure): bootstrap repository governance and workflows"
 git push origin dev
 ```
+
+**Mise à jour d'une installation existante** : lancez `--apply` et fusionnez les workflows régénérés dans `dev` avant, ou en même temps que, `--apply-github-settings`. Les installations antérieures à v1.2.12 publient le check du contrat sous le nom `verify-contract / Verify EPURE Consumer Contract`, que les nouveaux Rulesets n'acceptent pas : toute PR vers `dev` reste bloquée jusqu'à ce que le `epure-check.yml` régénéré atteigne `dev`. Une PR dont les checks ont déjà tourné avec les anciens noms a besoin d'un nouveau push pour publier les nouveaux.
 
 ---
 
@@ -1460,6 +1471,7 @@ git push origin dev
      - `epure-feature-integrity` (`refs/heads/feature/*`) : interdit suppression et force-push sans aucun Bypass Actor, si bien que même l'`Agent App` ne peut ni réécrire ni supprimer une branche de fonctionnalité. Conséquence : les branches `feature/*` fusionnées restent sur GitHub. `delete_branch_on_merge` ne peut pas les supprimer, un administrateur non plus ; pour les élaguer, désactivez temporairement ce Ruleset (Settings → Rules → Rulesets), supprimez les branches fusionnées, puis réactivez-le.
      - `epure-feature-governance` (`refs/heads/feature/*`) : `Agent App` en bypass `always` pour le squash-merge autonome des PRs `task/* -> feature/*` et les écritures directes d'EPURE (intégration du plan, synchronisations depuis `dev` en commits de merge, résolutions de conflits) ; les humains passent toujours par une PR.
      - `epure-dev-governance` (`refs/heads/dev`) : aucun bypass pour l'`Agent App` (`required_approving_review_count: 0` par défaut pour permettre à un mainteneur solo de merger ses PRs ; configurable via `--require-pr-approvals <N>`).
+     - `epure-feature-governance` et `epure-dev-governance` exigent les checks des workflows générés avant tout merge : `Verify EPURE Consumer Contract / Verify EPURE Consumer Contract`, `PR title`, `Quality (Format, Lint, Typecheck, Test & Build)` et `Zizmor`. Seul un check run de GitHub Actions compte : un résultat homonyme publié par une autre App (le check run `PR title` d'EPURE) ou par un token personnel ne compte pas. Cela ne protège pas du contenu de la PR : `pull_request` exécute les workflows du commit de merge de la PR, donc une PR qui modifie ou ajoute un workflow, ou qui modifie `package.json` ou la configuration des tests exécutés par `Quality`, peut faire passer ces checks elle-même. Pour couvrir ce cas, placez `.github/workflows/**`, `package.json` et votre configuration de test sous `CODEOWNERS` et exigez la revue des code owners dans un Ruleset distinct sur `dev` (quand `setup-repo` met à jour `epure-dev-governance`, il écrase les modifications qui y ont été faites), ou utilisez des required workflows d'organisation. `ai-review` n'est pas exigé : seul EPURE le publie, il n'apparaît donc jamais sur une PR Renovate ou humaine. Une PR n'a pas besoin d'être à jour avec sa branche de base, et la création d'une branche n'exige aucun check. L'`Agent App` contourne ces checks sur `feature/*` uniquement. Relancer `--apply-github-settings` met à jour en place les Rulesets créés par une version antérieure.
      - `epure-release-immutability` (`refs/heads/main`) : ni mise à jour (merges de PR compris), ni push direct, ni force-push, ni suppression ; `Release App` comme unique Bypass Actor, seule une release fait avancer `main`. Un hotfix manuel urgent sur `main` exige qu'un admin désactive temporairement ce ruleset.
      - `epure-release-tags` (`refs/tags/v*`, ruleset de tags) : ni création, ni déplacement, ni suppression de tags `v*` ; `Release App` comme unique Bypass Actor.
 
@@ -1726,7 +1738,7 @@ Invoquée automatiquement par le skill `/setup-repo` (ou exécutable manuellemen
 node dist/cli/setup-repo.mjs \
   --repo <owner>/<name> \
   --target-dir <chemin> \
-  [--pinned-sha <sha-40-caracteres>] \
+  --pinned-sha <sha-40-caracteres> \
   [--dry-run | --apply] \
   [--apply-github-settings] \
   [--no-frontend-reviewers] \
@@ -1747,7 +1759,7 @@ node dist/cli/setup-repo.mjs \
 | --- | --- | --- |
 | `--repo <owner/name>` | *(Obligatoire)* | Identifiant du dépôt GitHub cible (ex. `my-org/craft-calculator`). |
 | `--target-dir <chemin>` (alias `--dir`, `--repo-root`) | Répertoire courant | Chemin local où sont écrits `.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`, les workflows et les prompts des reviewers (`<reviewers_dir>/*.md`). |
-| `--pinned-sha <sha>` | Dernier SHA EPURE | SHA Git immuable de 40 caractères de `Giskard-AI/epure` utilisé pour épingler les workflows appelants générés. |
+| `--pinned-sha <sha>` | *(Requis avec `--apply` ou `--apply-github-settings`)* | SHA Git immuable de 40 caractères de `Giskard-AI/epure` utilisé pour épingler les workflows appelants générés, en général le commit du checkout EPURE exécuté (`git -C <checkout-epure> rev-parse HEAD`). Le commit doit exister sur GitHub : sinon le `epure-check.yml` généré échoue au démarrage, le check requis `Verify EPURE Consumer Contract / Verify EPURE Consumer Contract` n'est jamais publié et toute PR vers `dev` reste bloquée. Sans lui, `--apply` et `--apply-github-settings` échouent avant toute écriture ; un dry-run avertit et épingle un commit fictif. |
 | `--dry-run` | `true` (si `--apply` omis) | Affiche le plan complet de bootstrap sans modifier aucun fichier ni appeler d'API d'écriture. Avec `--apply-github-settings`, lit les Rulesets existants et indique pour chacun `create`, `update` ou `noop`. |
 | `--apply` | `false` | Écrit les fichiers de configuration (`.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`), les workflows appelants et le socle des prompts de reviewers (`<reviewers_dir>/*.md`, par défaut `.agents/reviewers/*.md`). |
 | `--apply-github-settings` | `false` | Applique le mode squash-only et les 5 Repository Rulesets (`epure-feature-integrity`, `epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`, `epure-release-tags`) via l'API REST GitHub. |
@@ -2121,6 +2133,7 @@ L'agent inspecte les éléments du dépôt (langage, scripts de build, présence
 node dist/cli/setup-repo.mjs \
   --repo my-org/craft-calculator \
   --target-dir /chemin/vers/craft-calculator \
+  --pinned-sha "$(git -C /chemin/vers/epure rev-parse HEAD)" \
   --agent-app-id 123456 \
   --release-app-id 654321 \
   --dry-run
@@ -2143,6 +2156,7 @@ Après votre accord, le skill `/setup-repo` exécute `--apply --apply-github-set
 node dist/cli/setup-repo.mjs \
   --repo my-org/craft-calculator \
   --target-dir /chemin/vers/craft-calculator \
+  --pinned-sha "$(git -C /chemin/vers/epure rev-parse HEAD)" \
   --agent-app-id 123456 \
   --release-app-id 654321 \
   --apply \
@@ -2316,7 +2330,7 @@ Entrées : `semver_tag` (`vMAJOR.MINOR.PATCH`), `expected_dev_sha` (le SHA compl
 ## 1. Configuration Initiale (une seule fois)
 
 1. **Créer et installer la Release App.** L'étape 3 de `scripts/wizards/setup-github-apps-wizard.sh --repo <owner>/<repo>` crée `<owner>-epure-release` (permissions de dépôt `Contents: Read and write`, `Metadata: Read-only`, sans webhook), l'installe sur ce seul dépôt et enregistre deux **secrets** dans l'environnement `release` : `EPURE_RELEASE_APP_ID` (identifiant numérique de l'App) et `EPURE_RELEASE_APP_PRIVATE_KEY` (PEM). L'assistant enchaîne toujours toutes les étapes, y compris l'Agent App ; si seule la Release App vous intéresse, suivez les mêmes étapes à la main puis enregistrez les secrets avec `gh secret set <NAME> -R <owner>/<repo> --env release`.
-2. **Déclarer la Release App comme Bypass Actor** (`actor_type: Integration`, `actor_id: <App ID>`, `bypass_mode: always`) sur chaque ruleset couvrant `main` et les tags `v*` (voir le tableau ci-dessus). Dans un dépôt consommateur, `node dist/cli/setup-repo.mjs --repo <owner>/<repo> --release-app-id <App ID> --apply --apply-github-settings` le fait pour `epure-release-immutability` et `epure-release-tags`. Ailleurs, ajoutez l'acteur avec `gh api` en conservant les acteurs existants :
+2. **Déclarer la Release App comme Bypass Actor** (`actor_type: Integration`, `actor_id: <App ID>`, `bypass_mode: always`) sur chaque ruleset couvrant `main` et les tags `v*` (voir le tableau ci-dessus). Dans un dépôt consommateur, `node dist/cli/setup-repo.mjs --repo <owner>/<repo> --pinned-sha <SHA du commit EPURE> --agent-app-id <ID Agent App> --release-app-id <App ID> --apply --apply-github-settings` le fait pour `epure-release-immutability` et `epure-release-tags`. Ailleurs, ajoutez l'acteur avec `gh api` en conservant les acteurs existants :
 
    ```bash
    gh api repos/<owner>/<repo>/rulesets/<ruleset-id> \

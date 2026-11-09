@@ -11,9 +11,6 @@ import type {
   TrackedTicketCommentMetadata
 } from "./types.js";
 
-/** GitHub Actions' App: it authors what EPURE writes with the fallback `GITHUB_TOKEN`. */
-export const GITHUB_ACTIONS_APP_ID = 15368;
-
 /** The GitHub App EPURE writes as: only its comments and issues are EPURE's. */
 export interface EpureIdentity {
   readonly appId: number;

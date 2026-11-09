@@ -1,8 +1,9 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync
@@ -870,6 +871,27 @@ describe("5. Pre-bundled CLI (dist/cli/setup-repo.mjs) & skill (.agents/skills/s
     expect(parsed.status).toBe("dry_run");
     expect(parsed.dry_run).toBe(true);
     expect(parsed.release_rulesets.map((r) => r.targetRefs)).toEqual([["refs/tags/v*"], ["refs/heads/main"]]);
+  });
+
+  it.each([
+    { id: "apply-without-pinned-sha-refuses-before-writing-any-file", args: ["--apply"], expected: { status: 1, wroteFiles: false }, stderr: /need --pinned-sha/ },
+    { id: "apply-github-settings-without-pinned-sha-refuses-before-calling-github", args: ["--apply-github-settings"], expected: { status: 1, wroteFiles: false }, stderr: /need --pinned-sha/ },
+    { id: "apply-with-an-abbreviated-pinned-sha-refuses", args: ["--apply", "--pinned-sha", "a1b2c3d"], expected: { status: 1, wroteFiles: false }, stderr: /need --pinned-sha/ },
+    { id: "dry-run-without-pinned-sha-warns-about-the-placeholder-commit", args: ["--dry-run"], expected: { status: 0, wroteFiles: false }, stderr: /placeholder commit/ },
+    { id: "apply-with-a-full-pinned-sha-writes-the-files", args: ["--apply", "--pinned-sha", "0123456789abcdef0123456789abcdef01234567"], expected: { status: 0, wroteFiles: true }, stderr: /^$/ }
+  ])("$id", ({ args, expected, stderr }) => {
+    const dir = mkdtempSync(join(tmpdir(), "epure-cli-pinned-sha-"));
+    try {
+      const run = spawnSync(process.execPath, [BUNDLED_SETUP_REPO_CLI_PATH, "--repo", "acme-org/payments", "--dir", dir, "--json", ...args], {
+        encoding: "utf8",
+        env: { ...process.env, GITHUB_TOKEN: "", GH_TOKEN: "" }
+      });
+
+      expect({ status: run.status, wroteFiles: readdirSync(dir).length > 0 }).toEqual(expected);
+      expect(run.stderr).toMatch(stderr);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it.each([

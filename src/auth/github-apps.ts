@@ -2,6 +2,9 @@ import { redactSecrets } from "./issue-command-gate.js";
 
 export type EpureAppRole = "agent" | "release";
 
+/** GitHub Actions' App: it authors the check runs of workflow jobs and what EPURE writes with the fallback `GITHUB_TOKEN`. */
+export const GITHUB_ACTIONS_APP_ID = 15368;
+
 export type EpureAppOperation =
   | "issue_comment"
   | "push_branch"

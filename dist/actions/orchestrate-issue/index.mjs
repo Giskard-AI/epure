@@ -214,6 +214,13 @@ async function revokeGitHubInstallationToken(params) {
   });
 }
 
+// src/auth/github-apps.ts
+var GITHUB_ACTIONS_APP_ID = 15368;
+var PRIVATE_KEY_DETECTION_PATTERN = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|EPURE_(?:AGENT|RELEASE)_APP_PRIVATE_KEY\s*=\s*\S+/i;
+function containsPrivateKeyMaterial(text) {
+  return PRIVATE_KEY_DETECTION_PATTERN.test(text);
+}
+
 // src/bootstrap/ci-and-renovate.ts
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
@@ -1327,12 +1334,6 @@ function buildStackAwareCiWorkflowYaml(params) {
       ""
     ].join("\n")
   };
-}
-
-// src/auth/github-apps.ts
-var PRIVATE_KEY_DETECTION_PATTERN = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|EPURE_(?:AGENT|RELEASE)_APP_PRIVATE_KEY\s*=\s*\S+/i;
-function containsPrivateKeyMaterial(text) {
-  return PRIVATE_KEY_DETECTION_PATTERN.test(text);
 }
 
 // src/security/prompt-injection-guard.ts
@@ -12473,7 +12474,6 @@ async function handleEpicClosedByHuman(params) {
 }
 
 // src/orchestrator/plan-manifest.ts
-var GITHUB_ACTIONS_APP_ID = 15368;
 function isEpureAuthored(item, identity) {
   return item.performed_via_github_app?.id === identity.appId;
 }
@@ -17799,11 +17799,15 @@ async function runIssueCommand(input) {
       fetchImpl: countedFetch,
       sleepFn: input.sleepFn
     });
-    const gh = createGitHubRestHelper({
+    const restHelper = createGitHubRestHelper({
       repository: input.repository,
       token: activeToken,
       fetchImpl: githubFetch
     });
+    const gh = mintedAppToken ? restHelper : {
+      ...restHelper,
+      publishCheckRun: async (run2) => run2.name === "PR title" ? void 0 : restHelper.publishCheckRun(run2)
+    };
     const rawStore = input.stateStore ?? createGitHubApiRefStateStore({
       repository: input.repository,
       githubToken: activeToken,

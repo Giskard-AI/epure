@@ -8,6 +8,7 @@ import { existsSync as existsSync2, mkdirSync, readFileSync as readFileSync2, wr
 import { dirname, join as join2 } from "node:path";
 
 // src/auth/github-apps.ts
+var GITHUB_ACTIONS_APP_ID = 15368;
 function buildConsumerAppManifests(params) {
   const cleanOwner = params.ownerSlug.trim().toLowerCase().replace(/[^a-z0-9-]/g, "-");
   const agentApp = {
@@ -2730,7 +2731,7 @@ function buildCallerWorkflows(pinnedSha, stack, jobTimeoutMinutes = DEFAULT_AGEN
         "      contents: write # push task/feature branches and update refs/epure/state/*",
         "      issues: write # create child tickets and post state mirror comments",
         "      pull-requests: write # open, review, and squash-merge task PRs",
-        "      checks: write # publish ai-review, impeccable-gate, and PR title check runs",
+        "      checks: read # the GITHUB_TOKEN fallback reads CI check runs; the Agent App publishes EPURE's with its own permissions",
         "    steps:",
         ...buildSandboxToolingSetupSteps(),
         "      - name: Run pre-bundled EPURE issue orchestrator",
@@ -2853,14 +2854,14 @@ function computeFilePlanAction(repoRootDir, relPath, desiredContent) {
   const existing = readFileSync2(fullPath, "utf8");
   return existing === desiredContent ? "noop" : "update";
 }
+var REQUIRED_CI_CHECKS = [
+  "Verify EPURE Consumer Contract / Verify EPURE Consumer Contract",
+  "PR title",
+  "Quality (Format, Lint, Typecheck, Test & Build)",
+  "Zizmor"
+];
 function buildGovernanceRulesets(params) {
-  const requiredChecks = [
-    "verify-contract / Verify EPURE Consumer Contract",
-    "PR title",
-    "ai-review",
-    "Quality (Format, Lint, Typecheck, Test & Build)",
-    "Zizmor"
-  ];
+  const requiredChecks = REQUIRED_CI_CHECKS;
   const featureIntegrity = {
     name: "epure-feature-integrity",
     target: "branch",
@@ -2975,7 +2976,7 @@ function planAndApplyRepoSetup(input) {
       pattern: "dev",
       requirePullRequest: true,
       requireStatusChecks: true,
-      requiredChecks: ["verify-contract", "PR title", "ai-review", "Quality (Format, Lint, Typecheck, Test & Build)", "Zizmor"],
+      requiredChecks: REQUIRED_CI_CHECKS,
       requireHumanApproval: true,
       allowedMergeMethods: ["squash"],
       allowMergeCommit: false,
@@ -2985,7 +2986,7 @@ function planAndApplyRepoSetup(input) {
       pattern: "feature/*",
       requirePullRequest: true,
       requireStatusChecks: true,
-      requiredChecks: ["verify-contract", "PR title", "ai-review", "Quality (Format, Lint, Typecheck, Test & Build)", "Zizmor"],
+      requiredChecks: REQUIRED_CI_CHECKS,
       requireHumanApproval: false,
       allowedMergeMethods: ["squash"],
       allowMergeCommit: false,
@@ -3384,6 +3385,23 @@ function buildGitHubRulesetApiPayload(spec, appIntegrationIds) {
       }
     });
   }
+  if (spec.requiredStatusChecks && spec.requiredStatusChecks.length > 0) {
+    rules.push({
+      type: "required_status_checks",
+      parameters: {
+        // Not strict: bringing a feature/* head up to date is a push epure-feature-governance refuses to humans,
+        // so a strict dev rule would leave the feature PR unmergeable each time dev moves.
+        strict_required_status_checks_policy: false,
+        // A new feature/* branch starts on a dev commit that never ran the PR-only checks.
+        do_not_enforce_on_create: true,
+        required_status_checks: spec.requiredStatusChecks.map((context) => ({
+          context,
+          // A check run another App publishes under the same name (EPURE's own "PR title") must not satisfy the rule.
+          integration_id: GITHUB_ACTIONS_APP_ID
+        }))
+      }
+    });
+  }
   if (spec.commitMessagePattern) {
     rules.push({
       type: "commit_message_pattern",
@@ -3409,11 +3427,23 @@ function buildGitHubRulesetApiPayload(spec, appIntegrationIds) {
     rules
   };
 }
+function ruleFingerprint(rule) {
+  if (rule.type !== "required_status_checks") {
+    return rule.type;
+  }
+  const checks = (rule.parameters?.required_status_checks ?? []).map((c) => `${c.context}@${c.integration_id ?? "any"}`).sort();
+  return JSON.stringify([
+    rule.type,
+    rule.parameters?.strict_required_status_checks_policy === true,
+    rule.parameters?.do_not_enforce_on_create === true,
+    checks
+  ]);
+}
 function rulesetFingerprint(ruleset) {
   return JSON.stringify({
     target: ruleset.target,
     include: [...ruleset.conditions?.ref_name?.include ?? []].sort(),
-    rules: (ruleset.rules ?? []).map((r) => r.type).sort(),
+    rules: (ruleset.rules ?? []).map(ruleFingerprint).sort(),
     bypass: (ruleset.bypass_actors ?? []).map((a) => `${a.actor_type}:${a.actor_id}:${a.bypass_mode}`).sort()
   });
 }
@@ -3696,8 +3726,19 @@ function resolveGitHubToken(explicitToken) {
     return "";
   }
 }
+var PINNED_SHA_PATTERN = /^[0-9a-f]{40}$/;
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (!PINNED_SHA_PATTERN.test(args.epurePinnedSha?.trim() ?? "")) {
+    if (!args.dryRun || args.applyGithubSettings) {
+      throw new Error(
+        '--apply and --apply-github-settings need --pinned-sha <40-hex commit SHA of Giskard-AI/epure on GitHub>, e.g. --pinned-sha "$(git -C <epure-checkout> rev-parse HEAD)".'
+      );
+    }
+    process.stderr.write(
+      "setup-repo: warning: no valid --pinned-sha; this dry-run pins a placeholder commit that does not exist. Pass --pinned-sha before --apply.\n"
+    );
+  }
   const result = planAndApplyRepoSetup({
     repository: args.repository,
     repoRootDir: args.repoRootDir,

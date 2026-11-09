@@ -34,10 +34,10 @@ Running `setup-repo` scaffolds **18 files** on a standard full-stack repository 
 | `--dir <path>` / `--target-dir <path>` | Target repository checkout directory where the 18 files are planned/written (alias: `--repo-root <path>`). |
 | `--dry-run` | Default mode; previews all planned files, discovered `verification.targets`, and 5 Repository Rulesets without mutating disk or calling write APIs. |
 | `--apply` | Writes `.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`, the 5 caller workflows, and `<reviewers_dir>/*.md` to disk (idempotent `noop` on unchanged files). |
-| `--apply-github-settings` | Applies squash-only merge settings (`allow_squash_merge: true`, `allow_merge_commit: false`, `allow_rebase_merge: false`, `delete_branch_on_merge: true`) and creates/updates the 5 Repository Rulesets (`epure-feature-integrity`, `epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`, `epure-release-tags`) via the GitHub REST API. |
+| `--apply-github-settings` | Applies squash-only merge settings (`allow_squash_merge: true`, `allow_merge_commit: false`, `allow_rebase_merge: false`, `delete_branch_on_merge: true`) and creates/updates the 5 Repository Rulesets (`epure-feature-integrity`, `epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`, `epure-release-tags`) via the GitHub REST API. `epure-feature-governance` and `epure-dev-governance` require the GitHub Actions checks `Verify EPURE Consumer Contract / Verify EPURE Consumer Contract`, `PR title`, `Quality (Format, Lint, Typecheck, Test & Build)` and `Zizmor` (not `ai-review`, which only EPURE publishes; PRs need not be up to date with their base). Rulesets from an earlier version are updated in place. |
 | `--agent-app-id <id>` | Numeric GitHub App ID of `<owner>-epure-agent`, wired as Bypass Actor (`always`) on `epure-feature-governance` (`refs/heads/feature/*`) so EPURE can push plan integrations, `dev` syncs and conflict resolutions directly. `epure-feature-integrity` (deletion, force-push) has no bypass actor, the App included: merged `feature/*` branches are never deleted (not by `delete_branch_on_merge`, not by an admin); pruning them requires temporarily disabling that ruleset. |
 | `--release-app-id <id>` | Numeric GitHub App ID of `<owner>-epure-release`, wired as sole `always` Bypass Actor on `epure-release-immutability` (`refs/heads/main`) and `epure-release-tags` (`refs/tags/v*`). Both App IDs are required with `--apply-github-settings`: without one, the command (dry-run included) fails before any GitHub call. |
-| `--pinned-sha <40-char-sha>` | Overrides the 40-character commit SHA of `Giskard-AI/epure` used to pin reusable workflows and actions. |
+| `--pinned-sha <40-char-sha>` | 40-character commit SHA of `Giskard-AI/epure` that the generated workflows and actions are pinned to, usually the commit of the EPURE checkout you run (`git -C <epure-checkout> rev-parse HEAD`). The commit must exist on GitHub. Required with `--apply` and `--apply-github-settings`: without it the command fails before any write. A dry-run without it warns and pins a placeholder commit that does not exist. |
 | `--require-pr-approvals <count>` | Number of required human PR approvals on `epure-dev-governance` (`0` by default for solo-maintainer compatibility; set `>=1` for teams). |
 | `--no-frontend-reviewers` | Omits `frontend-reviewer.md`, `accessibility-reviewer.md`, and `design-reviewer.md` for headless / backend-only repositories. |
 | `--domain-reviewers <list>` | Comma-separated list of custom domain specialist slugs (e.g., `realtime,billing`) to scaffold in `<reviewers_dir>/<slug>-reviewer.md`. |
@@ -64,7 +64,7 @@ Running `setup-repo` scaffolds **18 files** on a standard full-stack repository 
 2. **Dry-Run Simulation (First Step)**
    Run the pre-bundled CLI in `--dry-run` mode to preview caller workflows pinned by 40-char SHA (including `.github/workflows/pr-title.yml`, `.github/workflows/ci.yml`, `.github/zizmor.yml`, and `renovate.json`), `.github/agents.yml` defaults, the dynamically composed `<reviewers_dir>/*.md` reviewer roster, squash-only merge settings, and the 5 Repository Rulesets (`epure-feature-integrity`, `epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`, `epure-release-tags`):
    ```bash
-   node dist/cli/setup-repo.mjs --repo <owner>/<repo> --target-dir . --dry-run
+   node dist/cli/setup-repo.mjs --repo <owner>/<repo> --target-dir . --pinned-sha "$(git -C <epure-checkout> rev-parse HEAD)" --dry-run
    ```
    - Pass `--no-frontend-reviewers` if the repository has no UI surface (omits `frontend-reviewer`, `accessibility-reviewer`, and `design-reviewer`).
    - Pass `--domain-reviewers <slug1,slug2>` to generate additional domain-specific specialist reviewers in `<reviewers_dir>/`.
@@ -73,7 +73,7 @@ Running `setup-repo` scaffolds **18 files** on a standard full-stack repository 
 3. **Guided Application (Disk + GitHub API Governance + Dynamic Prompt Tailoring)**
    Write `.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`, caller workflows (`.github/workflows/epure-issue-command.yml`, `.github/workflows/epure-check.yml`, `.github/workflows/pr-title.yml`, `.github/workflows/ci.yml`, `.github/workflows/release.yml`), and `<reviewers_dir>/*.md` while applying squash-only repository settings and the 5 Repository Rulesets via the GitHub REST API:
    ```bash
-   node dist/cli/setup-repo.mjs --repo <owner>/<repo> --target-dir . --agent-app-id <agent-id> --release-app-id <release-id> --apply --apply-github-settings
+   node dist/cli/setup-repo.mjs --repo <owner>/<repo> --target-dir . --pinned-sha "$(git -C <epure-checkout> rev-parse HEAD)" --agent-app-id <agent-id> --release-app-id <release-id> --apply --apply-github-settings
    ```
    - **Dynamic Reviewer Roster Design by the Agent (`<reviewers_dir>/*.md`, default `.agents/reviewers/*.md`)**:
      - **Always-On Core (Cross-Cutting & Persona)**: `architecture-reviewer.md`, `security-reviewer.md`, `spec-parity-reviewer.md`, `standards-reviewer.md` (automatically adapted to TypeScript/Node, Python, Rust, or Go), and `user-advocate.md`.

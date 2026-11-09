@@ -8,6 +8,7 @@ import {
   mintRepositoryInstallationToken,
   revokeGitHubInstallationToken
 } from "../../src/auth/github-app-jwt.js";
+import { GITHUB_ACTIONS_APP_ID } from "../../src/auth/github-apps.js";
 import {
   buildGitHubRulesetApiPayload,
   buildGovernanceRulesets,
@@ -898,6 +899,24 @@ describeLive(
         expect(reapplied).toEqual(specs.map(() => 200));
       });
 
+      it("previous-dev-ruleset-without-required-checks-is-updated-in-place-and-a-rerun-changes-nothing", async () => {
+        const spec = scopeToRun(generated.devGovernance, "checks-upgrade");
+        const plan = async () => (await planGitHubRulesetChanges({ repository: cfg.repository, githubToken: ADMIN_TOKEN, governanceRulesets: [spec] }))[0]?.action;
+        const created = await createRuleset({ ...spec, requiredStatusChecks: undefined }, {});
+        expect(created.status).toBe(201);
+
+        const before = await plan();
+        const updated = await adminApi("PUT", `${R}/rulesets/${created.data.id}`, buildGitHubRulesetApiPayload(spec, {}));
+        const after = await plan();
+        const stored = await adminApi<{ rules: Array<{ type: string; parameters?: Record<string, unknown> }> }>("GET", `${R}/rulesets/${created.data.id}`);
+
+        expect({ before, updated: updated.status, after }).toEqual({ before: "update", updated: 200, after: "noop" });
+        expect(stored.data.rules.find((r) => r.type === "required_status_checks")?.parameters).toMatchObject({
+          strict_required_status_checks_policy: false,
+          required_status_checks: (spec.requiredStatusChecks ?? []).map((context) => ({ context, integration_id: GITHUB_ACTIONS_APP_ID }))
+        });
+      });
+
       it("previous-main-and-v-tags-branch-ruleset-is-rejected-with-422", async () => {
         const previous = scopeToRun({ ...generated.releaseImmutability, targetRefs: ["refs/heads/main", "refs/tags/v*"] }, "previous");
 
@@ -1096,6 +1115,167 @@ describeLive(
 
         expect(sync.status).toBe("merged");
         expect(merge.data.parents).toHaveLength(2);
+      });
+    });
+
+    // Merging a PR that adds a workflow needs `workflows: write`, waiting for its run `actions: read`.
+    (ADMIN_TOKEN ? describe : describe.skip)("required CI checks on the generated dev and feature rulesets (#123)", () => {
+      const CHECK = "live-ci";
+      const RUN_TIMEOUT_MS = 240_000;
+      const rulesetIds: number[] = [];
+      let checksToken = "";
+      let missingPermission = "";
+
+      beforeAll(async () => {
+        try {
+          checksToken = (
+            await mintRepositoryInstallationToken({
+              appId: cfg.appId,
+              privateKeyPem: cfg.privateKey,
+              repository: cfg.repository,
+              permissions: { contents: "write", pull_requests: "write", workflows: "write", actions: "read" }
+            })
+          ).token;
+        } catch (err: unknown) {
+          if (!(err instanceof Error && /HTTP 422/.test(err.message))) {
+            throw err;
+          }
+          missingPermission = "the sandbox App lacks workflows: write or actions: read; grant them and rerun";
+        }
+      }, HOOK_TIMEOUT_MS);
+
+      afterEach(async () => {
+        for (const id of rulesetIds.splice(0)) {
+          await adminApi("DELETE", `${R}/rulesets/${id}`);
+        }
+      });
+
+      afterAll(async () => {
+        if (checksToken) {
+          await revokeGitHubInstallationToken({ token: checksToken });
+        }
+      }, HOOK_TIMEOUT_MS);
+
+      it("feature-rulesets-let-a-non-bypass-actor-create-a-feature-branch-on-a-commit-without-the-required-checks", async () => {
+        const generated = buildGovernanceRulesets({ agentAppName: "agent", releaseAppName: "release" });
+        for (const spec of [generated.featureIntegrity, generated.featureGovernance]) {
+          const created = await adminApi<{ id: number }>(
+            "POST",
+            `${R}/rulesets`,
+            buildGitHubRulesetApiPayload({ ...spec, name: `${spec.name}-${RUN_ID}-create`, targetRefs: [`refs/heads/${NS}/create/feature/*`] }, {})
+          );
+          expect(created.status).toBe(201);
+          rulesetIds.push(created.data.id);
+        }
+
+        const created = await api<{ message?: string }>("POST", `${R}/git/refs`, { ref: `refs/heads/${NS}/create/feature/1-new`, sha: baseSha });
+
+        expect({ status: created.status, message: created.data?.message }).toEqual({ status: 201, message: undefined });
+      });
+
+      it.for([
+        { id: "dev-ruleset-refuses-a-squash-merge-while-the-required-check-is-red", ruleset: "devGovernance" as const, ciPasses: false, bypass: false, expectedMerge: 405 },
+        { id: "dev-ruleset-lets-a-squash-merge-through-once-the-required-check-is-green", ruleset: "devGovernance" as const, ciPasses: true, bypass: false, expectedMerge: 200 },
+        { id: "feature-ruleset-refuses-a-squash-merge-without-bypass-while-the-required-check-is-red", ruleset: "featureGovernance" as const, ciPasses: false, bypass: false, expectedMerge: 405 },
+        { id: "feature-ruleset-lets-the-agent-app-merge-a-task-pr-with-green-ci", ruleset: "featureGovernance" as const, ciPasses: true, bypass: true, expectedMerge: 200 }
+      ])("$id", { timeout: RUN_TIMEOUT_MS + 60_000 }, async ({ ruleset, ciPasses, bypass, expectedMerge }, ctx) => {
+        if (missingPermission) {
+          ctx.skip(missingPermission);
+        }
+        const slug = `${ruleset === "devGovernance" ? "dev" : "feature"}-${ciPasses ? "green" : "red"}-${bypass ? "bypass" : "writer"}`;
+        const workflowPath = `.github/workflows/live-${RUN_ID}-${slug}.yml`;
+        const workflow = [
+          `name: live-${RUN_ID}-${slug}`,
+          "on:",
+          "  pull_request:",
+          `    branches: ["${NS}/**"]`,
+          "jobs:",
+          "  ci:",
+          `    name: ${CHECK}`,
+          "    runs-on: ubuntu-latest",
+          "    timeout-minutes: 5",
+          "    steps:",
+          `      - run: exit ${ciPasses ? 0 : 1}`,
+          ""
+        ].join("\n");
+        const base = await createBranch(`ci-${slug}-base`, baseSha, checksToken);
+        const headSha = await commitOnTop([baseSha], workflowPath, workflow, checksToken);
+        const head = await createBranch(`ci-${slug}-head`, headSha, checksToken);
+        const spec = buildGovernanceRulesets({ agentAppName: "agent", releaseAppName: "release" })[ruleset];
+        const created = await adminApi<{ id: number }>(
+          "POST",
+          `${R}/rulesets`,
+          buildGitHubRulesetApiPayload(
+            { ...spec, name: `${spec.name}-${RUN_ID}-${slug}`, targetRefs: [`refs/heads/${base}`], requiredStatusChecks: [CHECK] },
+            bypass ? { agentAppIntegrationId: Number(cfg.appId) } : {}
+          )
+        );
+        expect(created.status).toBe(201);
+        rulesetIds.push(created.data.id);
+        const pr = await api<{ number: number }>("POST", `${R}/pulls`, { title: `test(${NS}): ${slug}`, head, base }, checksToken);
+        expect(pr.status).toBe(201);
+
+        type Run = { path: string; status: string; conclusion: string | null };
+        let run: Run | undefined;
+        for (const deadline = Date.now() + RUN_TIMEOUT_MS; run?.status !== "completed" && Date.now() < deadline; ) {
+          await new Promise((r) => setTimeout(r, 5000));
+          const listed = await api<{ workflow_runs: Run[] }>("GET", `${R}/actions/runs?event=pull_request&head_sha=${headSha}`, undefined, checksToken);
+          run = listed.data.workflow_runs.find((r) => r.path === workflowPath);
+        }
+        const merge = await api<{ message?: string }>(
+          "PUT",
+          `${R}/pulls/${pr.data.number}/merge`,
+          { merge_method: "squash", sha: headSha, commit_title: `test(${NS}): ${slug}` },
+          checksToken
+        );
+
+        expect({ ci: run?.conclusion, merge: merge.status }).toEqual({ ci: ciPasses ? "success" : "failure", merge: expectedMerge });
+      });
+
+      it("dev-ruleset-refuses-a-squash-merge-whose-only-green-pr-title-check-run-comes-from-the-agent-app", async (ctx) => {
+        let appChecksToken: string;
+        try {
+          appChecksToken = (
+            await mintRepositoryInstallationToken({
+              appId: cfg.appId,
+              privateKeyPem: cfg.privateKey,
+              repository: cfg.repository,
+              permissions: { contents: "write", pull_requests: "write", checks: "write" }
+            })
+          ).token;
+        } catch (err: unknown) {
+          if (!(err instanceof Error && /HTTP 422/.test(err.message))) {
+            throw err;
+          }
+          return ctx.skip("the sandbox App lacks checks: write; grant it and rerun");
+        }
+        try {
+          const base = await createBranch("app-pr-title-base", baseSha, appChecksToken);
+          const headSha = await commitOnTop([baseSha], `${NS}/app-pr-title.txt`, "title\n", appChecksToken);
+          const head = await createBranch("app-pr-title-head", headSha, appChecksToken);
+          const spec = buildGovernanceRulesets({ agentAppName: "agent", releaseAppName: "release" }).devGovernance;
+          const created = await adminApi<{ id: number }>(
+            "POST",
+            `${R}/rulesets`,
+            buildGitHubRulesetApiPayload({ ...spec, name: `${spec.name}-${RUN_ID}-app-pr-title`, targetRefs: [`refs/heads/${base}`], requiredStatusChecks: ["PR title"] }, {})
+          );
+          expect(created.status).toBe(201);
+          rulesetIds.push(created.data.id);
+          const pr = await api<{ number: number }>("POST", `${R}/pulls`, { title: `test(${NS}): app PR title`, head, base }, appChecksToken);
+          expect(pr.status).toBe(201);
+          const check = await api(
+            "POST",
+            `${R}/check-runs`,
+            { name: "PR title", head_sha: headSha, status: "completed", conclusion: "success", output: { title: "PR title", summary: "synthetic" } },
+            appChecksToken
+          );
+
+          const merge = await api("PUT", `${R}/pulls/${pr.data.number}/merge`, { merge_method: "squash", sha: headSha }, appChecksToken);
+
+          expect({ check: check.status, merge: merge.status }).toEqual({ check: 201, merge: 405 });
+        } finally {
+          await revokeGitHubInstallationToken({ token: appChecksToken });
+        }
       });
     });
 

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { GITHUB_ACTIONS_APP_ID } from "../src/auth/github-apps.js";
 import { parseAgentsYaml } from "../src/bootstrap/setup-repo.js";
 import { formatNeedsHumanEscalationComment } from "../src/execution/external-ci-gate.js";
 import type { ProviderConfig } from "../src/llm/index.js";
@@ -27,7 +28,6 @@ import type {
 } from "../src/orchestrator/types.js";
 import { validateTicketIntegrityGuard } from "../src/orchestrator/workspace/repo-tools.js";
 import {
-  GITHUB_ACTIONS_APP_ID,
   embedManifestJson,
   parsePlanManifestFromComments
 } from "../src/orchestrator/plan-manifest.js";
