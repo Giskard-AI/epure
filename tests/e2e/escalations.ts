@@ -25,6 +25,14 @@ export const RECORDED_REASON_CLASS: Readonly<Record<NeedsHumanEscalationReason, 
   branch_update_conflict: "internal",
   ambiguous_feature_branch: "internal",
   plan_manifest_missing: "internal",
+  agent_timeout: "legitimate",
+  agent_request_cap_reached: "legitimate",
+  agent_engine_failed: "internal",
+  sandbox_isolation_unavailable: "internal",
+  agent_diff_too_large: "legitimate",
+  agent_secret_leak_blocked: "legitimate",
+  agent_no_changes: "legitimate",
+  job_budget_exhausted: "legitimate",
   internal_error: "internal"
 };
 

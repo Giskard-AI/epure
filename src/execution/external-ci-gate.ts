@@ -1,6 +1,7 @@
 import { basename } from "node:path";
 import { redactSecrets } from "../auth/issue-command-gate.js";
-import { appendEpureCommandsSpoiler } from "../orchestrator/formatting/comments.js";
+import type { AgentEngineError } from "../agent/engine.js";
+import { appendEpureCommandsSpoiler, fencedCodeBlock } from "../orchestrator/formatting/comments.js";
 import {
   AuthenticationError,
   isTransientLLMError,
@@ -174,7 +175,37 @@ export type NeedsHumanEscalationReason =
   | "branch_update_conflict"
   | "ambiguous_feature_branch"
   | "plan_manifest_missing"
+  | "agent_timeout"
+  | "agent_request_cap_reached"
+  | "agent_engine_failed"
+  | "sandbox_isolation_unavailable"
+  | "agent_diff_too_large"
+  | "agent_secret_leak_blocked"
+  | "agent_no_changes"
+  | "job_budget_exhausted"
   | "internal_error";
+
+export function resolveAgentEngineEscalationReason(
+  err: AgentEngineError
+): NeedsHumanEscalationReason {
+  switch (err.code) {
+    case "AGENT_TIMEOUT":
+      return "agent_timeout";
+    case "AGENT_REQUEST_CAP_REACHED":
+      return "agent_request_cap_reached";
+    case "AGENT_ISOLATION_UNAVAILABLE":
+      return "sandbox_isolation_unavailable";
+    case "AGENT_DIFF_TOO_LARGE":
+      return "agent_diff_too_large";
+    case "AGENT_SECRET_IN_DIFF":
+      return "agent_secret_leak_blocked";
+    case "AGENT_ENGINE_UNAVAILABLE":
+    case "AGENT_SANDBOX_FAILED":
+    case "AGENT_PROTOCOL_ERROR":
+    case "AGENT_SNAPSHOT_FAILED":
+      return "agent_engine_failed";
+  }
+}
 
 /**
  * Maps an LLM error to its needs-human reason. Only transient failures (5xx, 408,
@@ -1281,6 +1312,30 @@ export function formatNeedsHumanEscalationComment(
   } else if (input.reason === "plan_manifest_missing") {
     reasonHeadline =
       "The ticket graph EPURE generated for this plan cannot be read (`plan_manifest_missing`) — EPURE does not implement the issue body in its place. Before implementation, `/epure to-tickets` regenerates the graph; once implementation has started, close the plan and open a new one";
+  } else if (input.reason === "agent_timeout") {
+    reasonHeadline =
+      "The agent session exceeded its time limit and was aborted (`agent_timeout`) — nothing from it was committed";
+  } else if (input.reason === "agent_request_cap_reached") {
+    reasonHeadline =
+      "The agent session reached its LLM request cap (`agent_max_llm_requests`) and was aborted (`agent_request_cap_reached`) — nothing from it was committed";
+  } else if (input.reason === "agent_engine_failed") {
+    reasonHeadline =
+      "The agent engine failed (start-up, RPC protocol, sandbox or worktree snapshot) (`agent_engine_failed`) — nothing from the session was committed";
+  } else if (input.reason === "sandbox_isolation_unavailable") {
+    reasonHeadline =
+      "Kernel confinement (bubblewrap + landrun) is unavailable on this runner, and agent sessions require it (`sandbox_isolation_unavailable`)";
+  } else if (input.reason === "agent_diff_too_large") {
+    reasonHeadline =
+      "The agent session changed more files or bytes than a commit accepts (`agent_diff_too_large`) — nothing from it was committed";
+  } else if (input.reason === "agent_secret_leak_blocked") {
+    reasonHeadline =
+      "The agent session left a runner secret, the proxy nonce or a private key in its files (`agent_secret_leak_blocked`) — nothing was committed";
+  } else if (input.reason === "agent_no_changes") {
+    reasonHeadline =
+      "The implementation session left no change in the worktree (`agent_no_changes`)";
+  } else if (input.reason === "job_budget_exhausted") {
+    reasonHeadline =
+      "Too little of the job's time budget (`job_timeout_minutes`) remains to start an agent session and verify it (`job_budget_exhausted`)";
   } else if (input.reason === "internal_error") {
     reasonHeadline =
       "Internal orchestrator error — code-fix budget preserved";
@@ -1390,9 +1445,7 @@ export function formatNeedsHumanEscalationComment(
       "<details>",
       "<summary>📋 Diagnostic CI & extrait des journaux assainis</summary>",
       "",
-      "```text",
-      input.diagnosticExcerpt.trim().slice(0, 6000),
-      "```",
+      fencedCodeBlock(input.diagnosticExcerpt.trim().slice(0, 6000)),
       "</details>"
     );
   }

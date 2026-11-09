@@ -158,6 +158,8 @@ export interface OrchestrateIssueInput {
   readonly asyncCiContinuation?: boolean | undefined;
   // Runs implementation, Stage 1 fixes and review/CI remediation; without it they use the in-house tool loop.
   readonly agentEngine?: AgentEngine | undefined;
+  // Epoch ms the job started at (now when absent): agent sessions end before the job's timeout from it.
+  readonly jobStartedAtMs?: number | undefined;
   readonly triggerHeadSha?: string | undefined;
   // Identifies this run in the plan's lease (`claimed_by_run_id`); a random id when absent.
   readonly runId?: string | undefined;
@@ -256,7 +258,8 @@ export interface GitHubRestHelper {
     branch: string;
     fromBranch?: string;
     commitMessage: string;
-    files: ReadonlyArray<{ path: string; content: string }>;
+    // Committed as 100644 unless `mode` says otherwise.
+    files: ReadonlyArray<{ path: string; content: string; mode?: "100644" | "100755" | undefined }>;
     // Files committed as the existing blob (SHA and mode kept), e.g. base-only files carried by a sync merge.
     readonly blobs?: ReadonlyArray<{ readonly path: string } & GitBlobRef> | undefined;
     readonly deletedFiles?: readonly string[] | undefined;

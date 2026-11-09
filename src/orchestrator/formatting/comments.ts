@@ -112,6 +112,13 @@ export function formatEpureCommandsSpoiler(
   ].join("\n");
 }
 
+// A fence longer than any backtick run in `text`, so model or log output cannot close it and inject markdown.
+export function fencedCodeBlock(text: string, language = "text"): string {
+  const longestRun = Math.max(0, ...Array.from(text.matchAll(/`+/g), (m) => m[0].length));
+  const fence = "`".repeat(Math.max(3, longestRun + 1));
+  return `${fence}${language}\n${text}\n${fence}`;
+}
+
 /**
  * Appends the collapsible `/epure` command cheat-sheet spoiler to `markdown`
  * idempotently (no-op if the spoiler is already present).

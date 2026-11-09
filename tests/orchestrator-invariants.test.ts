@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import type { AgentEngine, AgentSessionRequest } from "../src/agent/engine.js";
+import { AgentEngineError, type AgentEngine, type AgentSessionRequest, type AgentSessionResult } from "../src/agent/engine.js";
 import { ClosureNotProcessedError, EscalationNotRecordedError, orchestrateIssueCommand } from "../src/orchestrator/issue-orchestrator.js";
 import { GitHubRateLimitError } from "../src/orchestrator/github/rate-limit.js";
 import { AmbiguousFeatureBranchError, findExistingFeatureBranch } from "../src/orchestrator/phases/epic-closure.js";
+import { agentSessionTimeoutMs } from "../src/orchestrator/phases/ticket-execution.js";
 import type { OrchestrateIssueInput } from "../src/orchestrator/types.js";
 import {
   claimForRun,
@@ -1219,7 +1220,7 @@ describe("Implementation, Stage 1 fixes and review/CI remediation run as agent e
           requests.push(request);
           return {
             finalMessage: "Wrote src/a.ts; vitest green.",
-            diff: { files: [{ path: "src/a.ts", content: "export const a = 2;\n" }], deleted_files: [] }
+            diff: { files: [{ path: "src/a.ts", content: "export const a = 2;\n", mode: "100644" }], deleted_files: [], skipped: [] }
           };
         }
       }
@@ -1293,6 +1294,261 @@ describe("Implementation, Stage 1 fixes and review/CI remediation run as agent e
     expect(implementationCalls(router)).toBe(0);
     expect(summaryCalls(router)).toBe(expectedRoles.length);
     expect(await readState(store)).toMatchObject({ status: expectedStatus });
+  });
+
+  type SessionOutcome = AgentSessionResult | Error;
+  const changed = (path: string, mode: "100644" | "100755" = "100644"): SessionOutcome => ({
+    finalMessage: `Wrote ${path}.`,
+    diff: { files: [{ path, content: "export const a = 2;\n", mode }], deleted_files: [], skipped: [] }
+  });
+  const unchanged = (skipped: AgentSessionResult["diff"]["skipped"] = []): SessionOutcome => ({
+    finalMessage: "Nothing to do.",
+    diff: { files: [], deleted_files: [], skipped }
+  });
+  // Plays one outcome per session; the last one repeats.
+  function scriptedEngine(outcomes: readonly SessionOutcome[]): { readonly engine: AgentEngine; readonly requests: AgentSessionRequest[] } {
+    const requests: AgentSessionRequest[] = [];
+    return {
+      requests,
+      engine: {
+        name: "scripted",
+        run: async (request) => {
+          requests.push(request);
+          const outcome = outcomes[Math.min(requests.length, outcomes.length) - 1]!;
+          if (outcome instanceof Error) {
+            throw outcome;
+          }
+          return outcome;
+        }
+      }
+    };
+  }
+  const PASSING_SANDBOX: NonNullable<OrchestrateIssueInput["sandboxRunner"]> = async () => ({
+    ...(await FAILING_SANDBOX({} as never)),
+    exit_code: 0,
+    stderr: ""
+  });
+  const declareFreshTicketFlow = (): GitHubMockRouter =>
+    answeringSessionSummaries(
+      declareImplementationFlow(createGitHubMockRouter(), "success", { taskPr: false, featurePr: false })
+        .on("GET", /\/git\/commits\/[^/]+$/, json({ sha: "branch-sha", tree: { sha: "tree-sha" } }))
+        .on("POST", `${R}/git/blobs`, json({ sha: "blob-sha" }, 201))
+        .on("POST", `${R}/git/trees`, json({ sha: "new-tree-sha" }, 201))
+        .on("POST", `${R}/git/commits`, json({ sha: HEAD_SHA }, 201))
+        .on("PATCH", /\/git\/refs\/heads\//, json({ object: { sha: HEAD_SHA } }))
+        .on("POST", `${R}/pulls`, json({ number: 106, html_url: "pr106", head: { sha: HEAD_SHA } }, 201))
+        .on("PUT", `${R}/pulls/106/merge`, json({ merged: true, sha: "squash-sha" }))
+        .on("DELETE", /\/git\/refs\/heads\/task/, noContent())
+    );
+
+  it.each([
+    {
+      id: "implementer-diff-is-committed-on-the-task-branch-with-its-executable-bit",
+      outcomes: [changed("scripts/run.sh", "100755")],
+      jobStartedAtMs: undefined,
+      expectedRoles: ["implementer"],
+      expectedEscalation: undefined,
+      expectsStage1: true
+    },
+    {
+      id: "implementer-leaving-no-change-escalates-agent_no_changes-before-stage1",
+      outcomes: [unchanged()],
+      jobStartedAtMs: undefined,
+      expectedRoles: ["implementer"],
+      expectedEscalation: "agent_no_changes",
+      expectsStage1: false
+    },
+    {
+      id: "implementer-session-timeout-escalates-agent_timeout",
+      outcomes: [new AgentEngineError("AGENT_TIMEOUT", "Agent session exceeded 1800000 ms.")],
+      jobStartedAtMs: undefined,
+      expectedRoles: ["implementer"],
+      expectedEscalation: "agent_timeout",
+      expectsStage1: false
+    },
+    {
+      id: "implementer-without-kernel-confinement-escalates-sandbox_isolation_unavailable",
+      outcomes: [new AgentEngineError("AGENT_ISOLATION_UNAVAILABLE", "landrun is missing.")],
+      jobStartedAtMs: undefined,
+      expectedRoles: ["implementer"],
+      expectedEscalation: "sandbox_isolation_unavailable",
+      expectsStage1: false
+    },
+    {
+      id: "implementer-protocol-failure-escalates-agent_engine_failed",
+      outcomes: [new AgentEngineError("AGENT_PROTOCOL_ERROR", "Pi exited before agent_end.")],
+      jobStartedAtMs: undefined,
+      expectedRoles: ["implementer"],
+      expectedEscalation: "agent_engine_failed",
+      expectsStage1: false
+    },
+    {
+      id: "implementer-past-its-request-cap-escalates-agent_request_cap_reached",
+      outcomes: [new AgentEngineError("AGENT_REQUEST_CAP_REACHED", "200 LLM requests.")],
+      jobStartedAtMs: undefined,
+      expectedRoles: ["implementer"],
+      expectedEscalation: "agent_request_cap_reached",
+      expectsStage1: false
+    },
+    {
+      id: "implementer-diff-carrying-a-secret-escalates-agent_secret_leak_blocked",
+      outcomes: [new AgentEngineError("AGENT_SECRET_IN_DIFF", "src/a.ts holds a runner secret.")],
+      jobStartedAtMs: undefined,
+      expectedRoles: ["implementer"],
+      expectedEscalation: "agent_secret_leak_blocked",
+      expectsStage1: false
+    },
+    {
+      id: "too-little-job-budget-left-escalates-job_budget_exhausted-without-a-session",
+      outcomes: [changed("src/a.ts")],
+      jobStartedAtMs: Date.now() - 55 * 60_000,
+      expectedRoles: [],
+      expectedEscalation: "job_budget_exhausted",
+      expectsStage1: false
+    },
+    {
+      id: "implementer-touching-a-workflow-is-reverted-and-retried-as-a-failed-attempt",
+      outcomes: [unchanged([{ path: ".github/workflows/ci.yml", reason: "protected" }]), changed("src/a.ts")],
+      jobStartedAtMs: undefined,
+      expectedRoles: ["implementer", "fixer"],
+      expectedEscalation: undefined,
+      expectsStage1: true
+    }
+  ] as const)("$id", async ({ outcomes, jobStartedAtMs, expectedRoles, expectedEscalation, expectsStage1 }) => {
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const store = await seedState(FEATURE_INTEGRATION_PENDING_STATE);
+    const router = declareFreshTicketFlow();
+    const { engine, requests } = scriptedEngine(outcomes);
+    const sandboxRunner = vi.fn(PASSING_SANDBOX);
+
+    try {
+      await orchestrateIssueCommand({
+        repository: REPO,
+        commandArgs: "",
+        fallbackGithubToken: "ghs_test",
+        llmApiKey: "key_test",
+        model: "openai/gpt-test",
+        stateStore: store,
+        fetchImpl: router.fetch,
+        sandboxRunner,
+        agentEngine: engine,
+        jobStartedAtMs,
+        command: "approve",
+        actor: "maintainer",
+        issueNumber: ISSUE,
+        commentId: 900
+      });
+    } finally {
+      vi.restoreAllMocks();
+    }
+    const after = await readState(store);
+
+    expect(router.unmatched).toEqual([]);
+    expect(requests.map((r) => [r.role, r.toolPolicy])).toEqual(expectedRoles.map((role) => [role, "write"]));
+    expect(implementationCalls(router)).toBe(0);
+    expect(sandboxRunner.mock.calls.length > 0).toBe(expectsStage1);
+    if (expectedEscalation) {
+      expect(after).toMatchObject({ status: "suspended", last_escalation: { reason: expectedEscalation, ticket_number: ISSUE } });
+      expect(router.calls("POST", `${R}/git/commits`)).toBe(0);
+    } else {
+      expect(after.last_escalation).toBeUndefined();
+      expect(summaryCalls(router)).toBe(expectedRoles.length);
+      const committedTree = router.requests.find((r) => r.method === "POST" && r.path === `${R}/git/trees`)?.body as { tree: Array<{ path: string; mode: string }> };
+      const [committedPath, committedMode] = outcomes.at(-1) instanceof Error ? [] : [(outcomes.at(-1) as AgentSessionResult).diff.files[0]!.path, (outcomes.at(-1) as AgentSessionResult).diff.files[0]!.mode];
+      expect(committedTree.tree).toEqual(expect.arrayContaining([expect.objectContaining({ path: committedPath, mode: committedMode })]));
+      expect(router.requests.find((r) => r.method === "PATCH" && r.path.includes("/git/refs/heads/task"))).toBeDefined();
+    }
+    if (expectedRoles.includes("fixer" as never)) {
+      expect(requests[1]?.prompt).toContain(".github/workflows/ci.yml");
+    }
+  });
+
+  it.each([
+    {
+      id: "failed-summary-call-falls-back-to-a-deterministic-commit-message",
+      summary: () => json({ error: { message: "upstream exploded" } }, 400),
+      expectedCommitMessage: "feat(ticket-77): Async CI Feature",
+      expectedPrTitle: "feat(ticket-77): Async CI Feature"
+    },
+    {
+      id: "multi-line-commit-message-gives-the-pr-its-first-line-as-title",
+      summary: () => json({ choices: [{ message: { content: JSON.stringify({ commit_message: "feat: a\n\nLonger body.", test_summary: "green" }) } }] }),
+      expectedCommitMessage: "feat: a\n\nLonger body.",
+      expectedPrTitle: "feat: a"
+    }
+  ])("$id", async ({ summary, expectedCommitMessage, expectedPrTitle }) => {
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const store = await seedState(FEATURE_INTEGRATION_PENDING_STATE);
+    const router = declareFreshTicketFlow().onHost("api.openai.com", "POST", "/v1/chat/completions", (req) =>
+      schemaName(req.body) === "ticket_session_summary"
+        ? summary()
+        : json({ choices: [{ message: { content: JSON.stringify(schemaName(req.body) === "squash_commit_payload" ? { title: "feat: ship it", body: "", pr_title: "feat: ship it", commit_title: "feat: ship it", commit_body: "", bullets: ["- ship it"] } : { summary: "ok", findings: [] }) } }] })
+    );
+    const { engine } = scriptedEngine([changed("src/a.ts")]);
+
+    try {
+      await orchestrateIssueCommand({
+        repository: REPO,
+        commandArgs: "",
+        fallbackGithubToken: "ghs_test",
+        llmApiKey: "key_test",
+        model: "openai/gpt-test",
+        stateStore: store,
+        fetchImpl: router.fetch,
+        sandboxRunner: PASSING_SANDBOX,
+        agentEngine: engine,
+        command: "approve",
+        actor: "maintainer",
+        issueNumber: ISSUE,
+        commentId: 900
+      });
+    } finally {
+      vi.restoreAllMocks();
+    }
+
+    expect(router.unmatched).toEqual([]);
+    expect((router.requests.find((r) => r.method === "POST" && r.path === `${R}/git/commits`)?.body as { message: string }).message).toBe(expectedCommitMessage);
+    expect((router.requests.find((r) => r.method === "POST" && r.path === `${R}/pulls`)?.body as { title: string }).title).toBe(expectedPrTitle);
+  });
+
+  it.each([
+    { id: "no-known-job-deadline-uses-the-30-minute-session-cap", deadlineInMin: undefined, expectedMin: 30 },
+    { id: "plenty-of-job-budget-keeps-the-session-cap", deadlineInMin: 120, expectedMin: 30 },
+    { id: "session-ends-10-minutes-before-the-job-deadline", deadlineInMin: 25, expectedMin: 15 },
+    { id: "under-2-minutes-of-session-left-starts-no-session", deadlineInMin: 11, expectedMin: undefined }
+  ])("session timeout: $id", ({ deadlineInMin, expectedMin }) => {
+    const now = 1_000_000;
+    const deadline = deadlineInMin === undefined ? undefined : now + deadlineInMin * 60_000;
+
+    expect(agentSessionTimeoutMs(deadline, now)).toBe(expectedMin === undefined ? undefined : expectedMin * 60_000);
+  });
+
+  it("fixer-session-leaving-no-change-counts-as-a-failed-attempt-without-running-stage1", async () => {
+    const store = await seedState({ status: "active", subphase: "waiting_ticket_ci", active_ticket_number: ISSUE, active_task_branch: TASK_BRANCH, active_pr_number: 106 });
+    const router = answeringSessionSummaries(declareFailingFixFlow());
+    const { engine, requests } = scriptedEngine([unchanged()]);
+    const sandboxRunner = vi.fn(FAILING_SANDBOX);
+
+    await orchestrateIssueCommand({
+      repository: REPO,
+      commandArgs: "",
+      fallbackGithubToken: "ghs_test",
+      llmApiKey: "key_test",
+      model: "openai/gpt-test",
+      stateStore: store,
+      fetchImpl: router.fetch,
+      sandboxRunner,
+      agentEngine: engine,
+      command: "continue",
+      actor: "github-actions[bot]",
+      ...TRIGGERS.workflowRun
+    });
+
+    expect(router.unmatched).toEqual([]);
+    expect(requests.map((r) => r.role)).toEqual(["fixer", "fixer", "fixer"]);
+    expect(requests[1]?.prompt).toContain("no changes left in worktree");
+    expect(sandboxRunner).not.toHaveBeenCalled();
+    expect(await readState(store)).toMatchObject({ status: "suspended", last_escalation: { reason: "remediation_exhausted" } });
   });
 });
 

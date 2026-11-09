@@ -1,4 +1,12 @@
-import type { AgentEngine, AgentRole } from "../../agent/engine.js";
+import {
+  AgentEngineError,
+  type AgentEngine,
+  type AgentRole,
+  type AgentThinkingLevel,
+  type FileMode,
+  type SkippedPathReason
+} from "../../agent/engine.js";
+import { listTrackedPaths } from "../../agent/worktree-snapshot.js";
 import { redactSecrets } from "../../auth/issue-command-gate.js";
 import {
   discoverVerificationProfile,
@@ -7,6 +15,7 @@ import {
 import type { parseAgentsYaml } from "../../bootstrap/setup-repo.js";
 import {
   discoverExpectedExternalWorkflows,
+  resolveAgentEngineEscalationReason,
   resolveLlmEscalationReason,
   waitForExternalCiChecks,
   type NeedsHumanEscalationReason,
@@ -15,7 +24,9 @@ import {
 import { reconcileProvenTicketDependencies } from "../../execution/proven-dependency-unblocker.js";
 import { evaluateReviewFeedbackTrigger } from "../../execution/review-loop-guard.js";
 import {
+  AuthenticationError,
   LLMError,
+  QuotaExhaustedError,
   StructuredOutputValidationError
 } from "../../llm/errors.js";
 import { runMultiAgentPrReviewPass } from "../../review/multi-agent-pr-review.js";
@@ -30,6 +41,7 @@ import type {
 } from "../../sandbox/llm-sandbox.js";
 import {
   formatVerificationToolingGuideMarkdown,
+  isSensitiveTaskBranchPath,
   prepareRepositorySandboxWorkspace,
   syncWorkspaceFiles,
   validateWorkspaceFileOperations
@@ -49,7 +61,7 @@ import {
 } from "../../state/git-ref-state.js";
 import { currentTokenUsage, withUsageAttribution } from "../../usage/token-usage.js";
 import { formatTicketUsageSuffix } from "../../usage/usage-report.js";
-import { appendEpureCommandsSpoiler } from "../formatting/comments.js";
+import { appendEpureCommandsSpoiler, fencedCodeBlock } from "../formatting/comments.js";
 import { callLlmJson } from "../llm-helper.js";
 import {
   syncBranchWithBase,
@@ -135,6 +147,8 @@ export interface RunTicketExecutionLoopParams {
   readonly stopIfFeaturePrMerged: () => Promise<OrchestrateIssueResult | null>;
   // Implementation, Stage 1 fixes and review/CI remediation run as sessions of this engine when set.
   readonly agentEngine?: AgentEngine | undefined;
+  // Epoch ms at which the job's timeout kills the run; agent sessions end before it.
+  readonly jobDeadlineMs?: number | undefined;
 }
 
 export interface RunTicketExecutionLoopOutcome {
@@ -269,14 +283,57 @@ interface GenerateTicketImplementationWithFallbackParams {
   readonly agentSession?: TicketAgentSession | undefined;
 }
 
+// Shared by a ticket's sessions.
+interface TicketAgentSessionState {
+  // Carried to the commits: the text pipeline does not keep the executable bit.
+  readonly fileModes: Map<string, FileMode>;
+  // Reverted changes of the last session, told to the next one.
+  pendingFeedback: string[];
+  // Set when the last session counts as a failed attempt without running Stage 1.
+  failedAttempt: string | undefined;
+  lastSessionEmpty: boolean;
+}
+
 interface TicketAgentSession {
   readonly engine: AgentEngine;
   readonly role: AgentRole;
   // The Stage 1 checkout; it is brought to the ticket's current files before the session.
   readonly worktree: string;
+  readonly trackedPaths: readonly string[];
+  readonly jobDeadlineMs: number | undefined;
+  readonly maxLlmRequests: number;
+  readonly state: TicketAgentSessionState;
 }
 
 const TICKET_AGENT_SESSION_TIMEOUT_MS = 30 * 60 * 1000;
+// Kept after a session for Stage 1, the commit and an escalation before the job's timeout kills the run.
+const AGENT_SESSION_RESERVE_MS = 10 * 60 * 1000;
+const MIN_AGENT_SESSION_MS = 2 * 60 * 1000;
+export const DEFAULT_AGENT_MAX_LLM_REQUESTS = 200;
+
+export class JobBudgetExhaustedError extends Error {
+  constructor(remainingMs: number) {
+    super(
+      `${Math.max(0, Math.floor(remainingMs / 1000))} s of the job's time budget remain: an agent session needs ${(AGENT_SESSION_RESERVE_MS + MIN_AGENT_SESSION_MS) / 1000} s with Stage 1 and the commit.`
+    );
+    this.name = "JobBudgetExhaustedError";
+  }
+}
+
+// min(session cap, what the job leaves after the reserve); undefined when that is too short to start.
+export function agentSessionTimeoutMs(jobDeadlineMs: number | undefined, nowMs: number): number | undefined {
+  const available =
+    jobDeadlineMs === undefined ? TICKET_AGENT_SESSION_TIMEOUT_MS : jobDeadlineMs - nowMs - AGENT_SESSION_RESERVE_MS;
+  return available < MIN_AGENT_SESSION_MS ? undefined : Math.min(TICKET_AGENT_SESSION_TIMEOUT_MS, available);
+}
+
+const SKIPPED_PATH_LABELS: Record<SkippedPathReason, string> = {
+  symlink: "lien symbolique",
+  submodule: "sous-module",
+  binary: "binaire ou texte non UTF-8",
+  ignored: "nouveau fichier ignoré par .gitignore",
+  protected: "chemin protégé"
+};
 
 const TICKET_AGENT_ROLE_HEADLINES: Record<AgentRole, string> = {
   implementer: "Tu es un ingénieur TDD EPURE implémentant un ticket approuvé.",
@@ -302,23 +359,79 @@ async function runTicketAgentSession(
   params: GenerateTicketImplementationWithFallbackParams,
   session: TicketAgentSession
 ): Promise<GeneratedTicketImplementation> {
+  const nowMs = Date.now();
+  const timeoutMs = agentSessionTimeoutMs(session.jobDeadlineMs, nowMs);
+  if (timeoutMs === undefined) {
+    throw new JobBudgetExhaustedError((session.jobDeadlineMs ?? nowMs) - nowMs);
+  }
   syncWorkspaceFiles(session.worktree, params.accumulatedFiles, params.deletedFilesSet);
+  const { state } = session;
+  const feedback = state.pendingFeedback;
+  state.pendingFeedback = [];
   const { finalMessage, diff } = await session.engine.run({
     role: session.role,
     toolPolicy: "write",
     instructions: ticketAgentInstructions(session.role, params.reviewersDir),
-    prompt: params.prompt,
+    prompt: feedback.length > 0 ? [params.prompt, "", ...feedback].join("\n") : params.prompt,
     worktree: session.worktree,
-    timeoutMs: TICKET_AGENT_SESSION_TIMEOUT_MS,
+    timeoutMs,
     model: params.phaseModels.implementationModel,
-    providers: params.phaseModels.providers
+    providers: params.phaseModels.providers,
+    thinking: params.thinkingLevel ? THINKING_LEVELS[params.thinkingLevel] : undefined,
+    trackedPaths: session.trackedPaths,
+    isProtectedPath: (path) => isSensitiveTaskBranchPath(path, params.reviewersDir),
+    maxLlmRequests: session.maxLlmRequests
   });
+
+  for (const f of diff.files) {
+    state.fileModes.set(f.path, f.mode);
+  }
+  const reverted = diff.skipped.map((s) => `- ${s.path} (${SKIPPED_PATH_LABELS[s.reason]})`);
+  if (reverted.length > 0) {
+    state.pendingFeedback = [
+      "Changements de la session précédente annulés (non committables) ; le dépôt est revenu à leur état antérieur :",
+      ...reverted
+    ];
+  }
+  const protectedPaths = diff.skipped.filter((s) => s.reason === "protected").map((s) => s.path);
+  state.lastSessionEmpty = diff.files.length === 0 && diff.deleted_files.length === 0;
+  state.failedAttempt =
+    protectedPaths.length > 0
+      ? `Modification interdite de chemin(s) protégé(s), annulée : ${protectedPaths.join(", ")}. Ne modifie jamais ${params.reviewersDir}/**, .github/workflows/**, .github/agents.yml ni .env*.`
+      : session.role === "fixer" && state.lastSessionEmpty
+        ? "no changes left in worktree: la session de correction n'a laissé aucun changement dans le dépôt."
+        : undefined;
 
   const changedPaths = [
     ...diff.files.map((f) => `- ${f.path}`),
     ...diff.deleted_files.map((p) => `- ${p} (supprimé)`)
   ];
-  const summary = await callLlmJson<TicketSessionSummary>({
+  const summary = await summarizeAgentSession(params, changedPaths, finalMessage);
+
+  return {
+    commit_message: summary.commit_message,
+    test_summary: summary.test_summary,
+    files: diff.files.map(({ path, content }) => ({ path, content })),
+    patches: [],
+    deleted_files: [...diff.deleted_files]
+  };
+}
+
+const THINKING_LEVELS = {
+  MINIMAL: "minimal",
+  LOW: "low",
+  MEDIUM: "medium",
+  HIGH: "high"
+} as const satisfies Record<NonNullable<GenerateTicketImplementationWithFallbackParams["thinkingLevel"]>, AgentThinkingLevel>;
+
+// A failed summary call (other than auth or quota) falls back to a deterministic message instead of losing the session.
+async function summarizeAgentSession(
+  params: GenerateTicketImplementationWithFallbackParams,
+  changedPaths: readonly string[],
+  finalMessage: string
+): Promise<TicketSessionSummary> {
+  try {
+    return await callLlmJson<TicketSessionSummary>({
     apiKey: params.llmApiKey,
     model: params.phaseModels.implementationModel,
     providers: params.phaseModels.providers,
@@ -344,15 +457,16 @@ async function runTicketAgentSession(
     temperature: 0.1,
     responseSchema: TICKET_SESSION_SUMMARY_SCHEMA,
     fetchImpl: params.fetchImpl
-  });
-
-  return {
-    commit_message: summary.commit_message,
-    test_summary: summary.test_summary,
-    files: [...diff.files],
-    patches: [],
-    deleted_files: [...diff.deleted_files]
-  };
+    });
+  } catch (err) {
+    if (err instanceof AuthenticationError || err instanceof QuotaExhaustedError) {
+      throw err;
+    }
+    return {
+      commit_message: `feat(ticket-${params.ticket.ticketIssueNumber}): ${params.ticket.title}`,
+      test_summary: "Résumé indisponible : l'appel de synthèse de la session a échoué."
+    };
+  }
 }
 
 async function generateTicketImplementationWithFallback(
@@ -879,10 +993,28 @@ export async function runTicketExecutionLoop(
         formatVerificationToolingGuideMarkdown(verificationProfile);
     }
     const bootstrappedTargets = new Set<string>();
+    const agentState: TicketAgentSessionState = {
+      fileModes: new Map(),
+      pendingFeedback: [],
+      failedAttempt: undefined,
+      lastSessionEmpty: false
+    };
+    let agentTrackedPaths: readonly string[] = [];
     const agentSessionFor = (role: AgentRole): TicketAgentSession | undefined =>
       params.agentEngine
-        ? { engine: params.agentEngine, role, worktree: sandboxWorkspace.workDir }
+        ? {
+            engine: params.agentEngine,
+            role,
+            worktree: sandboxWorkspace.workDir,
+            trackedPaths: agentTrackedPaths,
+            jobDeadlineMs: params.jobDeadlineMs,
+            maxLlmRequests:
+              params.parsedDevAgentsConfig?.agent_max_llm_requests ?? DEFAULT_AGENT_MAX_LLM_REQUESTS,
+            state: agentState
+          }
         : undefined;
+    const withFileModes = <T extends { path: string }>(files: readonly T[]) =>
+      files.map((f) => ({ ...f, mode: agentState.fileModes.get(f.path) }));
 
     let taskPr: { number: number; html_url: string; head_sha: string } | undefined;
     const initialTicketFixAttempts =
@@ -906,6 +1038,9 @@ export async function runTicketExecutionLoop(
     };
 
     try {
+      if (params.agentEngine) {
+        agentTrackedPaths = await listTrackedPaths(sandboxWorkspace.workDir);
+      }
       const ticketChangedFilesMap = new Map<string, string>();
       const ticketDeletedFilesSet = new Set<string>();
       let impl: {
@@ -957,6 +1092,7 @@ export async function runTicketExecutionLoop(
         }
       };
 
+      let lastStage1Output = "";
       const evaluateIntegrityAndStage1Suite = async (label: string) => {
         const integrityCheck = validateTicketIntegrityGuard({
           baseFiles: baseBranchFilesSnapshot,
@@ -965,6 +1101,17 @@ export async function runTicketExecutionLoop(
           ticketFilesToTouch: ticket.filesToTouch,
           ticketDescription: `${ticket.title}\n${ticket.description}\n${ticket.acceptanceCriteria.join("\n")}`
         });
+        const agentFailure = agentState.failedAttempt;
+        agentState.failedAttempt = undefined;
+        if (agentFailure !== undefined) {
+          return {
+            integrityCheck,
+            testCheck: {
+              passed: false,
+              output: [agentFailure, lastStage1Output].filter(Boolean).join("\n\n")
+            }
+          };
+        }
         const testCheck = !integrityCheck.passed
           ? {
               passed: false,
@@ -988,6 +1135,7 @@ export async function runTicketExecutionLoop(
               llmApiKey: params.llmApiKey,
               label
             });
+        lastStage1Output = testCheck.output;
         return { integrityCheck, testCheck };
       };
 
@@ -1185,6 +1333,20 @@ export async function runTicketExecutionLoop(
           fetchImpl: params.fetchImpl,
           agentSession: agentSessionFor("implementer")
         }));
+        if (params.agentEngine && agentState.lastSessionEmpty && agentState.failedAttempt === undefined) {
+          const escalated = await params.escalateToNeedsHuman({
+            reason: "agent_no_changes",
+            ticketNumber: ticket.ticketIssueNumber,
+            branch: taskBranch,
+            diagnosticExcerpt: agentState.pendingFeedback.join("\n") || undefined
+          });
+          return {
+            halted: true,
+            result: escalated,
+            verificationProfile,
+            verificationGuideMarkdown
+          };
+        }
 
         const preStage1Check = validateWorkspaceFileOperations({
           workDir: sandboxWorkspace.workDir,
@@ -1405,7 +1567,7 @@ export async function runTicketExecutionLoop(
           branch: taskBranch,
           fromBranch: params.featureBranch,
           commitMessage: impl.commit_message,
-          files: impl.files,
+          files: withFileModes(impl.files),
           deletedFiles: Array.from(ticketDeletedFilesSet)
         });
 
@@ -1419,7 +1581,9 @@ export async function runTicketExecutionLoop(
             "",
             "## TDD & Sandbox Verification",
             `- **Sandbox Test Execution**: \`passed\``,
-            `- **Summary**: ${impl.test_summary}`
+            "- **Summary**:",
+            "",
+            fencedCodeBlock(impl.test_summary)
           ].join("\n"),
           {
             phase: "implementation",
@@ -1431,7 +1595,7 @@ export async function runTicketExecutionLoop(
         taskPr = await params.gh.openPullRequest({
           head: taskBranch,
           base: params.featureBranch,
-          title: impl.commit_message,
+          title: impl.commit_message.split("\n", 1)[0]?.trim() || `feat(ticket-${ticket.ticketIssueNumber}): ${ticket.title}`,
           body: prBody
         });
 
@@ -1462,8 +1626,42 @@ export async function runTicketExecutionLoop(
             diagnosticExcerpt: resync.diagnosticExcerpt
           });
         }
+        const previousHeadSha = currentPrHeadSha;
         currentPrHeadSha = resync.headSha || currentPrHeadSha;
+        if (params.agentEngine && currentPrHeadSha !== previousHeadSha) {
+          await refreshTicketFilesAfterResync(previousHeadSha, currentPrHeadSha);
+        }
         return undefined;
+      };
+
+      // Without it the next session's worktree and the next commit would revert what the merge brought.
+      const refreshTicketFilesAfterResync = async (fromSha: string, toSha: string): Promise<void> => {
+        const { changedFiles } = await params.gh.compareCommits(fromSha, toSha);
+        const removed = new Set<string>();
+        for (const path of changedFiles) {
+          const content = await params.gh.readSingleBranchFile(toSha, path);
+          if (content === null) {
+            params.accumulatedFiles.delete(path);
+            ticketChangedFilesMap.delete(path);
+            removed.add(path);
+            continue;
+          }
+          // Binary files are left alone: they cannot be held as text.
+          if (content.includes("\u0000") || content.includes("\uFFFD")) {
+            continue;
+          }
+          params.accumulatedFiles.set(path, content);
+          if (ticketChangedFilesMap.has(path)) {
+            ticketChangedFilesMap.set(path, content);
+          } else {
+            baseBranchFilesSnapshot.set(path, content);
+          }
+        }
+        syncWorkspaceFiles(sandboxWorkspace.workDir, new Map(), removed);
+        impl = {
+          ...impl,
+          files: Array.from(ticketChangedFilesMap, ([path, content]) => ({ path, content }))
+        };
       };
 
       const runStage2AndStage3ForTaskPr = async (passParams: {
@@ -2014,7 +2212,7 @@ export async function runTicketExecutionLoop(
               branch: taskBranch,
               fromBranch: params.featureBranch,
               commitMessage: `chore(wip): checkpoint review-fix attempt ${reviewFixAttempt} on #${ticket.ticketIssueNumber}`,
-              files: impl.files,
+              files: withFileModes(impl.files),
               deletedFiles: Array.from(ticketDeletedFilesSet)
             });
           }
@@ -2040,7 +2238,7 @@ export async function runTicketExecutionLoop(
           branch: taskBranch,
           fromBranch: params.featureBranch,
           commitMessage: `fix(review): address reviewer findings on #${ticket.ticketIssueNumber}`,
-          files: impl.files,
+          files: withFileModes(impl.files),
           deletedFiles: Array.from(ticketDeletedFilesSet)
         });
 
@@ -2319,9 +2517,14 @@ export async function runTicketExecutionLoop(
           formatTicketUsageSuffix(currentTokenUsage(), ticket.ticketIssueNumber, params.parsedDevAgentsConfig?.pricing)
       );
     } catch (err) {
-      if (err instanceof LLMError) {
+      if (err instanceof LLMError || err instanceof AgentEngineError || err instanceof JobBudgetExhaustedError) {
         const escalated = await params.escalateToNeedsHuman({
-          reason: resolveLlmEscalationReason(err),
+          reason:
+            err instanceof LLMError
+              ? resolveLlmEscalationReason(err)
+              : err instanceof AgentEngineError
+                ? resolveAgentEngineEscalationReason(err)
+                : "job_budget_exhausted",
           ticketNumber: ticket.ticketIssueNumber,
           branch: taskBranch,
           phase: "implementation",

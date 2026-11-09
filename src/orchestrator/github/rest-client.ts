@@ -915,7 +915,7 @@ export function createGitHubRestHelper(params: {
         seenTreePaths.add(cleanPath);
         treeEntries.push({
           path: cleanPath,
-          mode: "100644",
+          mode: file.mode ?? "100644",
           type: "blob",
           sha: blobRes.data!.sha
         });
