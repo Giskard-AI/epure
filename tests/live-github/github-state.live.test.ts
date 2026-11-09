@@ -754,6 +754,22 @@ describeLive(
           expect.objectContaining({ path: textPath, mode: "100644" })
         ])
       );
+
+      const resumedSha = await gh.commitFilesToBranch({
+        branch,
+        commitMessage: `test(${NS}): rewrite without a mode`,
+        files: [{ path: scriptPath, content: "#!/bin/sh\necho again\n" }]
+      });
+      const resumedTree = await api<{ tree: Array<{ path: string; mode: string }> }>("GET", `${R}/git/trees/${resumedSha}?recursive=1`);
+
+      expect(resumedTree.data.tree).toEqual(expect.arrayContaining([expect.objectContaining({ path: scriptPath, mode: "100755" })]));
+      await expect(
+        gh.commitFilesToBranch({
+          branch,
+          commitMessage: `test(${NS}): file over a directory`,
+          files: [{ path: `${NS}/modes`, content: "swap\n" }]
+        })
+      ).rejects.toThrow(/Refusing to commit/);
     });
 
     describe("3-way conflict resolution makes a conflicting PR mergeable (#105)", () => {
