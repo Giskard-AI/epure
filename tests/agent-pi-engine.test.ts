@@ -180,6 +180,18 @@ describe("snapshotWorktree", () => {
       }
     },
     {
+      id: "utf8-byte-order-mark-is-kept",
+      before: {},
+      change: (dir: string) => {
+        writeFileSync(join(dir, "bom.cs"), "\uFEFFclass A {}\n");
+      },
+      expected: {
+        files: [{ path: "bom.cs", content: "\uFEFFclass A {}\n", mode: "100644" }],
+        deleted_files: [],
+        skipped: []
+      }
+    },
+    {
       id: "new-gitignored-file-is-reported-and-removed",
       before: { ".gitignore": "*.log\n" },
       change: (dir: string) => {
@@ -188,7 +200,7 @@ describe("snapshotWorktree", () => {
       expected: { files: [], deleted_files: [], skipped: [{ path: "run.log", reason: "ignored" }] }
     },
     {
-      id: "dependency-and-build-output-without-a-gitignore-is-neither-committed-nor-reported",
+      id: "new-dependency-and-build-output-without-a-gitignore-is-reported-and-removed",
       before: {},
       change: (dir: string) => {
         for (const path of ["node_modules/.vite/x.js", "dist/index.js", "coverage/lcov.info", "tsconfig.tsbuildinfo"]) {
@@ -196,7 +208,29 @@ describe("snapshotWorktree", () => {
           writeFileSync(join(dir, path), "x");
         }
       },
-      expected: { files: [], deleted_files: [], skipped: [] }
+      expected: {
+        files: [],
+        deleted_files: [],
+        skipped: [
+          { path: "coverage", reason: "ignored" },
+          { path: "dist", reason: "ignored" },
+          { path: "node_modules", reason: "ignored" },
+          { path: "tsconfig.tsbuildinfo", reason: "ignored" }
+        ]
+      }
+    },
+    {
+      id: "nested-build-directory-is-source-and-committed",
+      before: {},
+      change: (dir: string) => {
+        mkdirSync(join(dir, "src/build"), { recursive: true });
+        writeFileSync(join(dir, "src/build/plan.ts"), "export const p = 1;\n");
+      },
+      expected: {
+        files: [{ path: "src/build/plan.ts", content: "export const p = 1;\n", mode: "100644" }],
+        deleted_files: [],
+        skipped: []
+      }
     },
     {
       id: "symlink-binary-and-non-utf8-files-are-reported-and-removed",
@@ -241,6 +275,7 @@ describe("snapshotWorktree", () => {
       expect(treeOf(dir)).toEqual(expect.objectContaining(publishedTree(before, diff)));
       for (const s of diff.skipped) {
         expect(treeOf(dir)[s.path]).toBe(before[s.path as keyof typeof before]);
+        expect(existsSync(join(dir, s.path))).toBe(s.path in before);
       }
     } finally {
       snapshot.dispose();
@@ -296,6 +331,45 @@ describe("snapshotWorktree", () => {
         ]
       },
       expectedTree: { ".github/workflows/ci.yml": "on: push\n", "src/a.ts": "b\n" }
+    },
+    {
+      id: "new-file-in-a-tracked-dist-directory-is-committed",
+      before: { "dist/index.js": "v1\n" },
+      trackedPaths: ["dist/index.js"],
+      isProtectedPath: undefined,
+      change: (dir: string) => writeFileSync(join(dir, "dist/extra.js"), "e\n"),
+      expected: { files: [{ path: "dist/extra.js", content: "e\n", mode: "100644" }], deleted_files: [], skipped: [] },
+      expectedTree: { "dist/extra.js": "e\n", "dist/index.js": "v1\n" }
+    },
+    {
+      id: "ignored-files-in-a-directory-ignored-before-are-kept-and-not-reported",
+      before: { ".gitignore": "*.log\n", "logs/old.log": "old\n" },
+      trackedPaths: undefined,
+      isProtectedPath: undefined,
+      change: (dir: string) => writeFileSync(join(dir, "logs/new.log"), "new\n"),
+      expected: { files: [], deleted_files: [], skipped: [] },
+      expectedTree: { ".gitignore": "*.log\n", "logs/new.log": "new\n", "logs/old.log": "old\n" }
+    },
+    {
+      id: "directory-folded-into-one-ignored-entry-keeps-its-pre-existing-ignored-file",
+      before: { ".gitignore": "*.log\n", "tmp/a.log": "old\n", "tmp/keep.ts": "k\n" },
+      trackedPaths: undefined,
+      isProtectedPath: undefined,
+      change: (dir: string) => rmSync(join(dir, "tmp/keep.ts")),
+      expected: { files: [], deleted_files: ["tmp/keep.ts"], skipped: [] },
+      expectedTree: { ".gitignore": "*.log\n", "tmp/a.log": "old\n" }
+    },
+    {
+      id: "new-ignored-directory-next-to-a-pre-existing-one-is-reported-and-removed",
+      before: { ".gitignore": "*.log\n", "logs/old.log": "old\n" },
+      trackedPaths: undefined,
+      isProtectedPath: undefined,
+      change: (dir: string) => {
+        mkdirSync(join(dir, "logs2"));
+        writeFileSync(join(dir, "logs2/new.log"), "new\n");
+      },
+      expected: { files: [], deleted_files: [], skipped: [{ path: "logs2", reason: "ignored" }] },
+      expectedTree: { ".gitignore": "*.log\n", "logs/old.log": "old\n" }
     }
   ])("$id", async ({ before, trackedPaths, isProtectedPath, change, expected, expectedTree }) => {
     const dir = tempWorktree(before);

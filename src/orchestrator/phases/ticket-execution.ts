@@ -333,7 +333,7 @@ const SKIPPED_PATH_LABELS: Record<SkippedPathReason, string> = {
   symlink: "lien symbolique",
   submodule: "sous-module",
   binary: "binaire ou texte non UTF-8",
-  ignored: "nouveau fichier ignoré par .gitignore",
+  ignored: "nouveau fichier ignoré (.gitignore, dépendances ou sortie de build)",
   protected: "chemin protégé"
 };
 

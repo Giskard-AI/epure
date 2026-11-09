@@ -21,18 +21,30 @@ export const DEFAULT_WORKTREE_DIFF_LIMITS: WorktreeDiffLimits = {
   maxTotalBytes: 10 * 1024 * 1024
 };
 
-// Untracked dependency and build output is never committed, even without a .gitignore; it stays in the worktree as a cache.
+// Untracked dependency and build output is never committed, even without a .gitignore. Build output is anchored
+// at the root (src/build/ is source); a directory holding a tracked path is never excluded.
 export const DEFAULT_UNTRACKED_EXCLUDES: readonly string[] = [
   "node_modules/",
-  "dist/",
-  "build/",
-  "coverage/",
   ".venv/",
   "__pycache__/",
-  "target/",
-  "*.tsbuildinfo"
+  "*.tsbuildinfo",
+  "/dist/",
+  "/build/",
+  "/coverage/",
+  "/target/"
 ];
-const CACHE_DIR_NAMES = new Set(DEFAULT_UNTRACKED_EXCLUDES.filter((p) => p.endsWith("/")).map((p) => p.slice(0, -1)));
+
+function untrackedExcludes(trackedPaths: readonly string[]): string[] {
+  return DEFAULT_UNTRACKED_EXCLUDES.filter((pattern) => {
+    if (!pattern.endsWith("/")) {
+      return true;
+    }
+    const name = pattern.replace(/^\/|\/$/g, "");
+    return !trackedPaths.some((p) =>
+      pattern.startsWith("/") ? p.startsWith(`${name}/`) : p.split("/").slice(0, -1).includes(name)
+    );
+  });
+}
 
 export interface SnapshotWorktreeOptions {
   // Paths the checkout's repository tracks: kept in the diff even when a .gitignore matches them.
@@ -43,7 +55,7 @@ export interface SnapshotWorktreeOptions {
 
 export interface WorktreeSnapshot {
   // Changes since the snapshot. Skipped paths are put back to their snapshot state and new ignored files
-  // outside the default excludes are removed, so the worktree then holds the snapshot plus the diff.
+  // (default excludes included) are removed, so the worktree then holds the snapshot plus the diff.
   collect(): Promise<WorktreeDiff>;
   dispose(): void;
 }
@@ -153,7 +165,7 @@ export async function snapshotWorktree(
   try {
     await git(["init", "--quiet"]);
     mkdirSync(join(gitDir, "info"), { recursive: true });
-    writeFileSync(join(gitDir, "info", "exclude"), `${DEFAULT_UNTRACKED_EXCLUDES.join("\n")}\n`);
+    writeFileSync(join(gitDir, "info", "exclude"), `${untrackedExcludes(options.trackedPaths ?? []).join("\n")}\n`);
     await git(["add", "--all"]);
     const tracked = (options.trackedPaths ?? []).filter((p) => isFileOrSymlink(join(worktree, p)));
     if (tracked.length > 0) {
@@ -240,9 +252,16 @@ export async function snapshotWorktree(
         }
       }
 
-      for (const path of await listIgnored()) {
-        if (!ignoredBefore.has(path) && !isDefaultExcluded(path)) {
-          skipped.push({ path: path.replace(/\/$/, ""), reason: "ignored", existedBefore: false });
+      // `--directory` folds a wholly ignored directory into one entry, so the two listings are compared by prefix:
+      // a path related to one ignored before may hold files that predate the session, and is left alone.
+      const earlier = [...ignoredBefore].map((p) => p.replace(/\/$/, ""));
+      const related = (a: string, b: string): boolean => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+      const newlyIgnored: string[] = [];
+      for (const listed of [...(await listIgnored())].sort()) {
+        const path = listed.replace(/\/$/, "");
+        if (!earlier.some((b) => related(path, b)) && !newlyIgnored.some((n) => related(path, n))) {
+          newlyIgnored.push(path);
+          skipped.push({ path, reason: "ignored", existedBefore: false });
         }
       }
 
@@ -313,7 +332,7 @@ function decodeText(blob: Buffer): string | undefined {
     return undefined;
   }
   try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(blob);
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(blob);
   } catch {
     return undefined;
   }
@@ -330,13 +349,6 @@ function isFileOrSymlink(path: string): boolean {
   } catch {
     return false;
   }
-}
-
-function isDefaultExcluded(path: string): boolean {
-  const isDir = path.endsWith("/");
-  const segments = path.replace(/\/$/, "").split("/");
-  const dirs = isDir ? segments : segments.slice(0, -1);
-  return dirs.some((s) => CACHE_DIR_NAMES.has(s)) || (!isDir && path.endsWith(".tsbuildinfo"));
 }
 
 // Never follows a symlinked parent out of the worktree.
