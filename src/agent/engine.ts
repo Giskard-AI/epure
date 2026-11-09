@@ -2,7 +2,7 @@ import { containsPrivateKeyMaterial } from "../auth/github-apps.js";
 import { redactSecrets } from "../auth/issue-command-gate.js";
 import type { ProviderConfig } from "../llm/types.js";
 
-export type AgentRole = "implementer" | "fixer";
+export type AgentRole = "implementer" | "fixer" | "conflict_resolver" | "reviewer";
 
 // "write" may edit files and run commands in the worktree; "read_only" may only read and search it.
 export type AgentToolPolicy = "write" | "read_only";

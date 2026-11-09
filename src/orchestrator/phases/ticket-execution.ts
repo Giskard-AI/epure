@@ -364,7 +364,10 @@ const SKIPPED_PATH_LABELS: Record<SkippedPathReason, string> = {
 const TICKET_AGENT_ROLE_HEADLINES: Record<AgentRole, string> = {
   implementer: "Tu es un ingénieur TDD EPURE implémentant un ticket approuvé.",
   fixer:
-    "Tu es un ingénieur TDD EPURE corrigeant les échecs décrits dans le message (vérification Stage 1, constats 'must_fix' de revue, CI externe) en gardant 100% des cibles Stage 1 au vert."
+    "Tu es un ingénieur TDD EPURE corrigeant les échecs décrits dans le message (vérification Stage 1, constats 'must_fix' de revue, CI externe) en gardant 100% des cibles Stage 1 au vert.",
+  conflict_resolver:
+    "Tu es un ingénieur expert chargé de résoudre un conflit de fusion Git à 3 voies (3-way merge) directement dans le répertoire de travail.",
+  reviewer: "Tu es un ingénieur EPURE en revue de code (lecture seule)."
 };
 
 function ticketAgentInstructions(role: AgentRole, reviewersDir: string): string {
@@ -942,7 +945,10 @@ export async function runTicketExecutionLoop(
           params.phaseModels.transientRetryBackoffSeconds,
         requestTimeoutMs: params.phaseModels.requestTimeoutMs,
         sandboxRunner: params.sandboxRunner,
-        reviewersDir
+        reviewersDir,
+        agentEngine: params.agentEngine,
+        maxLlmRequests:
+          params.parsedDevAgentsConfig?.agent_max_llm_requests ?? DEFAULT_AGENT_MAX_LLM_REQUESTS
       }));
       if (featureSync.status === "escalated") {
         const escalated = await params.escalateToNeedsHuman({
@@ -977,7 +983,10 @@ export async function runTicketExecutionLoop(
           params.phaseModels.transientRetryBackoffSeconds,
         requestTimeoutMs: params.phaseModels.requestTimeoutMs,
         sandboxRunner: params.sandboxRunner,
-        reviewersDir
+        reviewersDir,
+        agentEngine: params.agentEngine,
+        maxLlmRequests:
+          params.parsedDevAgentsConfig?.agent_max_llm_requests ?? DEFAULT_AGENT_MAX_LLM_REQUESTS
       }));
 
     if (syncWithBase) {

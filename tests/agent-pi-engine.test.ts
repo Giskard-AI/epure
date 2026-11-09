@@ -609,7 +609,7 @@ describe("createPiAgentEngine", () => {
   it.each([
     {
       id: "read-only-policy-mounts-cwd-read-only-and-logs-sandbox-backend",
-      role: "reviewer",
+      role: "reviewer" as const,
       toolPolicy: "read_only" as const,
       capabilities: { landrunAvailable: true, bubblewrapAvailable: true },
       expectedReadOnlyCwd: true,
@@ -618,7 +618,7 @@ describe("createPiAgentEngine", () => {
     },
     {
       id: "write-policy-mounts-cwd-writable-and-logs-sandbox-backend",
-      role: "implementer",
+      role: "implementer" as const,
       toolPolicy: "write" as const,
       capabilities: { landrunAvailable: true, bubblewrapAvailable: false },
       expectedReadOnlyCwd: false,

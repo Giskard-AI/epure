@@ -1,11 +1,35 @@
+import { spawn } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import {
+  assertNoSecretMaterial,
+  type AgentEngine
+} from "../../agent/engine.js";
+import { snapshotWorktree } from "../../agent/worktree-snapshot.js";
 import type { LLMClient } from "../../llm/client.js";
 import type { LLMCallOptions } from "../../llm/types.js";
-import type {
-  SandboxExecutionInput,
-  SandboxExecutionResult
+import { DEFAULT_REVIEWERS_DIR } from "../../review/reviewer-roster.js";
+import {
+  collectRunnerSecretValues,
+  type SandboxExecutionInput,
+  type SandboxExecutionResult
 } from "../../sandbox/llm-sandbox.js";
-import { validateWorkspaceFileOperations } from "../../sandbox/polyglot-workspace-runner.js";
-import { wrapUntrustedContent } from "../../security/prompt-injection-guard.js";
+import {
+  isSensitiveTaskBranchPath,
+  validateWorkspaceFileOperations
+} from "../../sandbox/polyglot-workspace-runner.js";
+import {
+  PROMPT_INJECTION_IMMUNITY_CLAUSE,
+  wrapUntrustedContent
+} from "../../security/prompt-injection-guard.js";
 import {
   buildIssueStateRefName,
   updateIssueStateWithCas,
@@ -1018,6 +1042,9 @@ export interface SyncBranchWithBaseInput extends LlmRequestTuning {
   readonly escalateToNeedsHuman?: EscalateToNeedsHumanFn | undefined;
   readonly maxConflictingFiles?: number | undefined;
   readonly reviewersDir?: string | undefined;
+  readonly agentEngine?: AgentEngine | undefined;
+  readonly worktreeDir?: string | undefined;
+  readonly maxLlmRequests?: number | undefined;
 }
 
 export interface SyncBranchWithBaseResult {
@@ -1038,6 +1065,188 @@ const GIT_CONFLICT_MARKER_LINE_REGEX = /^(?:<{7}|>{7}|\|{7})(?: |$)/m;
 
 function containsGitConflictMarkers(content: string): boolean {
   return GIT_CONFLICT_MARKER_LINE_REGEX.test(content.replace(/\r\n/g, "\n"));
+}
+
+interface ThreeWayFileVersions {
+  readonly path: string;
+  readonly baseContent: string | null;
+  readonly oursContent: string | null;
+  readonly theirsContent: string | null;
+}
+
+interface LocalGitMergeResult {
+  readonly autoMergedFiles: Array<{ path: string; content: string }>;
+  readonly autoDeletedPaths: string[];
+  readonly conflictingFiles: ThreeWayFileVersions[];
+}
+
+const LOCAL_GIT_MERGE_TIMEOUT_MS = 60_000;
+
+async function runIsolatedGitThreeWayMerge(params: {
+  readonly worktreeDir: string;
+  readonly targetBranch: string;
+  readonly baseBranch: string;
+  readonly files: readonly ThreeWayFileVersions[];
+}): Promise<LocalGitMergeResult> {
+  if (params.files.length === 0) {
+    return { autoMergedFiles: [], autoDeletedPaths: [], conflictingFiles: [] };
+  }
+  const gitDir = mkdtempSync(join(tmpdir(), "epure-merge-git-"));
+  const runGit = (
+    args: readonly string[],
+    options: { readonly input?: string; readonly allowExitCodes?: readonly number[] } = {}
+  ): Promise<{ readonly code: number; readonly stdout: Buffer; readonly stderr: string }> =>
+    new Promise((resolvePromise, reject) => {
+      const allowCodes = options.allowExitCodes ?? [0];
+      const child = spawn(
+        "git",
+        [
+          "-c", "core.hooksPath=/dev/null",
+          "-c", "core.fsmonitor=false",
+          "-c", "protocol.file.allow=never",
+          "-c", "core.autocrlf=false",
+          "-c", "core.symlinks=true",
+          "-c", "user.name=EPURE",
+          "-c", "user.email=epure@local",
+          `--git-dir=${gitDir}`,
+          `--work-tree=${params.worktreeDir}`,
+          ...args
+        ],
+        {
+          cwd: params.worktreeDir,
+          env: {
+            PATH: process.env.PATH ?? "/usr/bin:/bin",
+            HOME: gitDir,
+            GIT_CONFIG_NOSYSTEM: "1",
+            GIT_CONFIG_GLOBAL: "/dev/null",
+            GIT_ATTR_NOSYSTEM: "1",
+            GIT_LITERAL_PATHSPECS: "1"
+          },
+          stdio: ["pipe", "pipe", "pipe"]
+        }
+      );
+      const out: Buffer[] = [];
+      let stderr = "";
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        reject(new Error(`Local 3-way git ${args[0] ?? ""} timed out after ${LOCAL_GIT_MERGE_TIMEOUT_MS} ms`));
+      }, LOCAL_GIT_MERGE_TIMEOUT_MS);
+      child.stdout.on("data", (chunk: Buffer) => out.push(chunk));
+      child.stderr.on("data", (chunk: Buffer) => {
+        stderr = (stderr + chunk.toString("utf8")).slice(-2000);
+      });
+      child.stdin.on("error", () => {});
+      child.on("error", (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        const exitCode = code ?? 1;
+        if (allowCodes.includes(exitCode)) {
+          resolvePromise({ code: exitCode, stdout: Buffer.concat(out), stderr });
+        } else {
+          reject(new Error(`Local 3-way git ${args[0] ?? ""} exited with code ${exitCode}: ${stderr.trim()}`));
+        }
+      });
+      child.stdin.end(options.input ?? "");
+    });
+
+  const applySide = async (pick: (f: ThreeWayFileVersions) => string | null): Promise<void> => {
+    const presentPaths: string[] = [];
+    const absentPaths: string[] = [];
+    for (const f of params.files) {
+      const content = pick(f);
+      const abs = join(params.worktreeDir, f.path);
+      if (content !== null) {
+        mkdirSync(dirname(abs), { recursive: true });
+        writeFileSync(abs, content, "utf8");
+        presentPaths.push(f.path);
+      } else {
+        rmSync(abs, { force: true });
+        absentPaths.push(f.path);
+      }
+    }
+    if (presentPaths.length > 0) {
+      await runGit(["add", "--force", "--pathspec-from-file=-", "--pathspec-file-nul"], {
+        input: presentPaths.join("\0")
+      });
+    }
+    if (absentPaths.length > 0) {
+      await runGit(
+        ["rm", "--force", "--ignore-unmatch", "--quiet", "--pathspec-from-file=-", "--pathspec-file-nul"],
+        { input: absentPaths.join("\0") }
+      );
+    }
+  };
+
+  try {
+    await runGit(["init", "--quiet"]);
+    mkdirSync(join(gitDir, "info"), { recursive: true });
+    writeFileSync(join(gitDir, "info", "attributes"), "* -filter -diff\n", "utf8");
+
+    await applySide((f) => f.baseContent);
+    await runGit(["commit", "--quiet", "--allow-empty", "-m", "base"]);
+    const baseCommitSha = (await runGit(["rev-parse", "HEAD"])).stdout.toString("utf8").trim();
+
+    await runGit(["checkout", "--quiet", "-b", "theirs"]);
+    await applySide((f) => f.theirsContent);
+    await runGit(["commit", "--quiet", "--allow-empty", "-m", "theirs"]);
+
+    await runGit(["checkout", "--quiet", "-B", "ours", baseCommitSha]);
+    await applySide((f) => f.oursContent);
+    await runGit(["commit", "--quiet", "--allow-empty", "-m", "ours"]);
+
+    await runGit(["merge", "--no-commit", "--no-ff", "theirs"], { allowExitCodes: [0, 1] });
+
+    const unmergedRaw = (await runGit(["ls-files", "-z", "--unmerged"])).stdout.toString("utf8");
+    const unmergedPaths = new Set<string>();
+    for (const record of unmergedRaw.split("\0")) {
+      if (!record) continue;
+      const tabIdx = record.indexOf("\t");
+      if (tabIdx !== -1) {
+        unmergedPaths.add(record.slice(tabIdx + 1));
+      }
+    }
+
+    const autoMergedFiles: Array<{ path: string; content: string }> = [];
+    const autoDeletedPaths: string[] = [];
+    const conflictingFiles: ThreeWayFileVersions[] = [];
+
+    for (const f of params.files) {
+      const abs = join(params.worktreeDir, f.path);
+      if (unmergedPaths.has(f.path)) {
+        conflictingFiles.push(f);
+        const currentDisk = existsSync(abs) ? readFileSync(abs, "utf8") : "";
+        if (!containsGitConflictMarkers(currentDisk)) {
+          mkdirSync(dirname(abs), { recursive: true });
+          writeFileSync(
+            abs,
+            [
+              `<<<<<<< ${params.targetBranch}`,
+              (f.oursContent ?? "").replace(/\n$/, ""),
+              "=======",
+              (f.theirsContent ?? "").replace(/\n$/, ""),
+              `>>>>>>> ${params.baseBranch}`,
+              ""
+            ].join("\n"),
+            "utf8"
+          );
+        }
+      } else if (existsSync(abs)) {
+        autoMergedFiles.push({
+          path: f.path,
+          content: readFileSync(abs, "utf8")
+        });
+      } else {
+        autoDeletedPaths.push(f.path);
+      }
+    }
+
+    return { autoMergedFiles, autoDeletedPaths, conflictingFiles };
+  } finally {
+    rmSync(gitDir, { recursive: true, force: true });
+  }
 }
 
 export interface BaseSyncGuard {
@@ -1319,20 +1528,13 @@ export async function syncBranchWithBase(
     );
   }
 
-  const codeConflictPaths = candidateFiles.filter((p) => p !== "GLOSSARY.md");
-  const hasLlmResolver = Boolean(input.llmClient || input.llmApiKey);
-  if (
-    codeConflictPaths.length > maxConflicts ||
-    (codeConflictPaths.length > 0 && !hasLlmResolver)
-  ) {
-    return await escalateConflict(
-      codeConflictPaths.length > maxConflicts
-        ? `3-way merge conflict involves ${codeConflictPaths.length} files (exceeds automated limit of ${maxConflicts}).`
-        : `3-way merge conflict on ${codeConflictPaths.join(", ")} requires LLM client for resolution.`
-    );
-  }
+  const bothSidesCodeFiles = candidateFiles.filter((p) => p !== "GLOSSARY.md");
+  const hasLlmResolver = Boolean(
+    input.agentEngine || input.llmClient || input.llmApiKey
+  );
 
   const resolvedFiles: Array<{ path: string; content: string }> = [];
+  const autoMergedFiles: Array<{ path: string; content: string }> = [];
   const baseOnlyBlobs: Array<{ path: string } & GitBlobRef> = [];
   const baseDeletedFiles: string[] = [];
 
@@ -1356,118 +1558,325 @@ export async function syncBranchWithBase(
     });
   }
 
-  if (codeConflictPaths.length > 0 && hasLlmResolver) {
-    const fileTriplets: string[] = [];
-    for (const filePath of codeConflictPaths) {
+  if (bothSidesCodeFiles.length > 0) {
+    const readOptionalVersion = async (
+      blobs: ReadonlyMap<string, GitBlobRef>,
+      sha: string,
+      path: string
+    ): Promise<string | null> =>
+      blobs.has(path) ? await readPinnedFile(sha, path) : null;
+
+    const threeWayFiles: ThreeWayFileVersions[] = [];
+    for (const filePath of bothSidesCodeFiles) {
       const [baseContent, oursContent, theirsContent] = await Promise.all([
-        readVersion(ancestorBlobs, mergeBaseSha, filePath),
-        readVersion(targetBlobs, targetHeadSha, filePath),
-        readVersion(baseBlobs, baseHeadSha, filePath)
+        readOptionalVersion(ancestorBlobs, mergeBaseSha, filePath),
+        readOptionalVersion(targetBlobs, targetHeadSha, filePath),
+        readOptionalVersion(baseBlobs, baseHeadSha, filePath)
       ]);
-      fileTriplets.push(
-        [
-          `### File: \`${filePath}\` (untruncated 3-way versions)`,
-          "#### `<base_version>` (common ancestor):",
-          wrapUntrustedContent("untrusted_workspace_files", baseContent),
-          `#### \`<ours_target_branch>\` (\`${input.targetBranch}\`):`,
-          wrapUntrustedContent("untrusted_workspace_files", oursContent),
-          `#### \`<theirs_base_branch>\` (\`${input.baseBranch}\`):`,
-          wrapUntrustedContent("untrusted_workspace_files", theirsContent)
-        ].join("\n")
-      );
-    }
-
-    const systemInstruction = [
-      "Tu es un ingénieur expert chargé de résoudre un conflit de fusion Git à 3 voies (3-way merge).",
-      "Produis pour chaque fichier en conflit une version fusionnée propre, sans aucun marqueur de conflit (`<<<<<<<`, `=======`, `>>>>>>>`), préservant à la fois les évolutions de `<theirs_base_branch>` et celles de `<ours_target_branch>`.",
-      EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
-    ].join("\n\n");
-    const userPrompt = [
-      `Résous les conflits 3-way suivants lors de la synchronisation de \`${input.baseBranch}\` vers \`${input.targetBranch}\` :`,
-      "",
-      fileTriplets.join("\n\n")
-    ].join("\n");
-
-    let resolutionData: ConflictResolutionPayload;
-    if (input.llmClient) {
-      resolutionData = await input.llmClient.completeStructured({
-        model: input.model,
-        ...pickLlmRequestTuning(input),
-        systemInstruction,
-        userPrompt,
-        responseSchema: CONFLICT_RESOLUTION_SCHEMA,
-        temperature: 0.1
-      });
-    } else {
-      resolutionData = await callLlmJson<ConflictResolutionPayload>({
-        apiKey: input.llmApiKey ?? "",
-        model: input.model,
-        ...pickLlmRequestTuning(input),
-        systemInstruction,
-        prompt: userPrompt,
-        temperature: 0.1,
-        responseSchema: CONFLICT_RESOLUTION_SCHEMA,
-        fetchImpl: input.fetchImpl
+      threeWayFiles.push({
+        path: filePath,
+        baseContent,
+        oursContent,
+        theirsContent
       });
     }
 
-    const expectedPathsSet = new Set(
-      codeConflictPaths.map((p) => p.trim().replace(/^\/+/, ""))
-    );
-    const returnedNormalizedPaths = resolutionData.resolved_files.map((rf) =>
-      rf.path.trim().replace(/^\/+/, "")
-    );
-    const returnedPathsSet = new Set(returnedNormalizedPaths);
-    const hasExact1To1Coverage =
-      returnedNormalizedPaths.length === expectedPathsSet.size &&
-      returnedPathsSet.size === expectedPathsSet.size &&
-      Array.from(expectedPathsSet).every((p) => returnedPathsSet.has(p));
+    const tempWorktreeDir = input.worktreeDir
+      ? undefined
+      : mkdtempSync(join(tmpdir(), "epure-merge-worktree-"));
+    const worktreeDir = input.worktreeDir ?? tempWorktreeDir!;
 
-    if (!hasExact1To1Coverage) {
-      return await escalateConflict(
-        `LLM conflict resolution path mismatch: expected [${Array.from(expectedPathsSet).join(", ")}], received [${returnedNormalizedPaths.join(", ")}].`
-      );
-    }
+    try {
+      const localMerge = await runIsolatedGitThreeWayMerge({
+        worktreeDir,
+        targetBranch: input.targetBranch,
+        baseBranch: input.baseBranch,
+        files: threeWayFiles
+      });
 
-    const resolvedPathGuard = validateWorkspaceFileOperations({
-      workDir: process.cwd(),
-      files: returnedNormalizedPaths.map((path) => ({ path })),
-      targets: [],
-      isTaskBranch: true,
-      reviewersDir: input.reviewersDir
-    });
-    if (!resolvedPathGuard.allowed) {
-      return await escalateConflict(
-        `LLM conflict resolution returned forbidden paths: ${[...resolvedPathGuard.sensitivePaths, ...resolvedPathGuard.traversalPaths].join(", ")}`,
-        {
-          sensitivePaths: resolvedPathGuard.sensitivePaths,
-          traversalPaths: resolvedPathGuard.traversalPaths
+      for (const merged of localMerge.autoMergedFiles) {
+        autoMergedFiles.push(merged);
+      }
+      for (const deleted of localMerge.autoDeletedPaths) {
+        if (!baseDeletedFiles.includes(deleted)) {
+          baseDeletedFiles.push(deleted);
         }
-      );
-    }
+      }
 
-    for (const rf of resolutionData.resolved_files) {
-      if (containsGitConflictMarkers(rf.content)) {
+      const conflictingFiles = localMerge.conflictingFiles;
+      const codeConflictPaths = conflictingFiles.map((f) => f.path);
+
+      if (
+        codeConflictPaths.length > maxConflicts ||
+        (codeConflictPaths.length > 0 && !hasLlmResolver)
+      ) {
         return await escalateConflict(
-          `LLM conflict resolution for '${rf.path}' still contained Git conflict markers.`
+          codeConflictPaths.length > maxConflicts
+            ? `3-way merge conflict involves ${codeConflictPaths.length} files (exceeds automated limit of ${maxConflicts}).`
+            : `3-way merge conflict on ${codeConflictPaths.join(", ")} requires LLM client for resolution.`
         );
       }
-      resolvedFiles.push({
-        path: rf.path.trim().replace(/^\/+/, ""),
-        content: rf.content
-      });
+
+      if (codeConflictPaths.length > 0 && input.agentEngine) {
+        const expectedPathsSet = new Set(
+          codeConflictPaths.map((p) => p.trim().replace(/^\/+/, ""))
+        );
+        const outerSnapshot = await snapshotWorktree(worktreeDir, {
+          trackedPaths: bothSidesCodeFiles,
+          isProtectedPath: (path) =>
+            isSensitiveTaskBranchPath(path, input.reviewersDir)
+        });
+        let sessionResult: Awaited<ReturnType<AgentEngine["run"]>>;
+        let outerDiff: Awaited<ReturnType<typeof outerSnapshot.collect>>;
+        try {
+          sessionResult = await input.agentEngine.run({
+            role: "conflict_resolver",
+            toolPolicy: "write",
+            instructions: [
+              "Tu es un ingénieur expert chargé de résoudre un conflit de fusion Git à 3 voies (3-way merge) directement dans le répertoire de travail.",
+              PROMPT_INJECTION_IMMUNITY_CLAUSE,
+              "Les fichiers en conflit contiennent des marqueurs Git (`<<<<<<<`, `=======`, `>>>>>>>`). Édite chaque fichier en conflit sur place pour produire une version fusionnée propre, sans aucun marqueur de conflit, préservant les évolutions des deux branches.",
+              `Ne modifie JAMAIS ${(input.reviewersDir ?? DEFAULT_REVIEWERS_DIR).replace(/\/+$/, "")}/**, .github/workflows/**, .github/agents.yml, .env* ni .git/.`,
+              EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
+            ].join("\n\n"),
+            prompt: [
+              `Résous les conflits de fusion 3-way lors de la synchronisation de \`${input.baseBranch}\` vers \`${input.targetBranch}\`.`,
+              `Fichiers contenant des hunks en conflit : ${codeConflictPaths.map((p) => `\`${p}\``).join(", ")}.`
+            ].join("\n"),
+            worktree: worktreeDir,
+            timeoutMs: input.requestTimeoutMs ?? 30 * 60 * 1000,
+            model: input.model,
+            providers: input.providers,
+            trackedPaths: bothSidesCodeFiles,
+            isProtectedPath: (path) =>
+              isSensitiveTaskBranchPath(path, input.reviewersDir),
+            maxLlmRequests: input.maxLlmRequests,
+            secrets: [
+              input.llmApiKey ?? "",
+              ...collectRunnerSecretValues(process.env)
+            ].filter(Boolean)
+          });
+          outerDiff = await outerSnapshot.collect();
+        } finally {
+          outerSnapshot.dispose();
+        }
+
+        const protectedSkipped = [
+          ...sessionResult.diff.skipped,
+          ...outerDiff.skipped
+        ]
+          .filter((s) => s.reason === "protected")
+          .map((s) => s.path.trim().replace(/^\/+/, ""));
+        if (protectedSkipped.length > 0) {
+          const uniqueProtected = Array.from(new Set(protectedSkipped));
+          return await escalateConflict(
+            `LLM conflict resolution returned forbidden paths: ${uniqueProtected.join(", ")}`,
+            {
+              sensitivePaths: uniqueProtected,
+              traversalPaths: []
+            }
+          );
+        }
+
+        const effectiveDiffFileMap = new Map<string, string>();
+        for (const f of outerDiff.files) {
+          effectiveDiffFileMap.set(f.path.trim().replace(/^\/+/, ""), f.content);
+        }
+        for (const f of sessionResult.diff.files) {
+          effectiveDiffFileMap.set(f.path.trim().replace(/^\/+/, ""), f.content);
+        }
+        const effectiveDeletedPaths = Array.from(
+          new Set([
+            ...outerDiff.deleted_files.map((p) => p.trim().replace(/^\/+/, "")),
+            ...sessionResult.diff.deleted_files.map((p) =>
+              p.trim().replace(/^\/+/, "")
+            )
+          ])
+        );
+        const allTouchedPaths = Array.from(
+          new Set([...effectiveDiffFileMap.keys(), ...effectiveDeletedPaths])
+        );
+
+        if (allTouchedPaths.length > 0) {
+          const resolvedPathGuard = validateWorkspaceFileOperations({
+            workDir: process.cwd(),
+            files: allTouchedPaths.map((path) => ({ path })),
+            targets: [],
+            isTaskBranch: true,
+            reviewersDir: input.reviewersDir
+          });
+          if (!resolvedPathGuard.allowed) {
+            return await escalateConflict(
+              `LLM conflict resolution returned forbidden paths: ${[...resolvedPathGuard.sensitivePaths, ...resolvedPathGuard.traversalPaths].join(", ")}`,
+              {
+                sensitivePaths: resolvedPathGuard.sensitivePaths,
+                traversalPaths: resolvedPathGuard.traversalPaths
+              }
+            );
+          }
+          const outOfScope = allTouchedPaths.filter(
+            (p) => !expectedPathsSet.has(p)
+          );
+          if (outOfScope.length > 0) {
+            return await escalateConflict(
+              `LLM conflict resolution path mismatch: expected [${Array.from(expectedPathsSet).join(", ")}], received [${allTouchedPaths.join(", ")}].`
+            );
+          }
+        }
+
+        for (const conflictPath of codeConflictPaths) {
+          const normalizedPath = conflictPath.trim().replace(/^\/+/, "");
+          const diskPath = join(worktreeDir, normalizedPath);
+          const resolvedContent =
+            effectiveDiffFileMap.get(normalizedPath) ??
+            (existsSync(diskPath) ? readFileSync(diskPath, "utf8") : null);
+          if (resolvedContent === null) {
+            return await escalateConflict(
+              `LLM conflict resolution path mismatch: expected [${Array.from(expectedPathsSet).join(", ")}], received [${allTouchedPaths.join(", ")}].`
+            );
+          }
+          if (containsGitConflictMarkers(resolvedContent)) {
+            return await escalateConflict(
+              `LLM conflict resolution for '${normalizedPath}' still contained Git conflict markers.`
+            );
+          }
+          resolvedFiles.push({
+            path: normalizedPath,
+            content: resolvedContent
+          });
+        }
+
+        assertNoSecretMaterial(
+          resolvedFiles.map((f) => ({ label: f.path, text: f.content })),
+          [
+            input.llmApiKey ?? "",
+            ...collectRunnerSecretValues(process.env)
+          ].filter(Boolean)
+        );
+      } else if (codeConflictPaths.length > 0 && hasLlmResolver) {
+        const fileTriplets: string[] = [];
+        for (const f of conflictingFiles) {
+          fileTriplets.push(
+            [
+              `### File: \`${f.path}\` (untruncated 3-way versions)`,
+              "#### `<base_version>` (common ancestor):",
+              wrapUntrustedContent(
+                "untrusted_workspace_files",
+                f.baseContent ?? ""
+              ),
+              `#### \`<ours_target_branch>\` (\`${input.targetBranch}\`):`,
+              wrapUntrustedContent(
+                "untrusted_workspace_files",
+                f.oursContent ?? ""
+              ),
+              `#### \`<theirs_base_branch>\` (\`${input.baseBranch}\`):`,
+              wrapUntrustedContent(
+                "untrusted_workspace_files",
+                f.theirsContent ?? ""
+              )
+            ].join("\n")
+          );
+        }
+
+        const systemInstruction = [
+          "Tu es un ingénieur expert chargé de résoudre un conflit de fusion Git à 3 voies (3-way merge).",
+          "Produis pour chaque fichier en conflit une version fusionnée propre, sans aucun marqueur de conflit (`<<<<<<<`, `=======`, `>>>>>>>`), préservant à la fois les évolutions de `<theirs_base_branch>` et celles de `<ours_target_branch>`.",
+          EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
+        ].join("\n\n");
+        const userPrompt = [
+          `Résous les conflits 3-way suivants lors de la synchronisation de \`${input.baseBranch}\` vers \`${input.targetBranch}\` :`,
+          "",
+          fileTriplets.join("\n\n")
+        ].join("\n");
+
+        let resolutionData: ConflictResolutionPayload;
+        if (input.llmClient) {
+          resolutionData = await input.llmClient.completeStructured({
+            model: input.model,
+            ...pickLlmRequestTuning(input),
+            systemInstruction,
+            userPrompt,
+            responseSchema: CONFLICT_RESOLUTION_SCHEMA,
+            temperature: 0.1
+          });
+        } else {
+          resolutionData = await callLlmJson<ConflictResolutionPayload>({
+            apiKey: input.llmApiKey ?? "",
+            model: input.model,
+            ...pickLlmRequestTuning(input),
+            systemInstruction,
+            prompt: userPrompt,
+            temperature: 0.1,
+            responseSchema: CONFLICT_RESOLUTION_SCHEMA,
+            fetchImpl: input.fetchImpl
+          });
+        }
+
+        const expectedPathsSet = new Set(
+          codeConflictPaths.map((p) => p.trim().replace(/^\/+/, ""))
+        );
+        const returnedNormalizedPaths = resolutionData.resolved_files.map(
+          (rf) => rf.path.trim().replace(/^\/+/, "")
+        );
+        const returnedPathsSet = new Set(returnedNormalizedPaths);
+        const hasExact1To1Coverage =
+          returnedNormalizedPaths.length === expectedPathsSet.size &&
+          returnedPathsSet.size === expectedPathsSet.size &&
+          Array.from(expectedPathsSet).every((p) => returnedPathsSet.has(p));
+
+        if (!hasExact1To1Coverage) {
+          return await escalateConflict(
+            `LLM conflict resolution path mismatch: expected [${Array.from(expectedPathsSet).join(", ")}], received [${returnedNormalizedPaths.join(", ")}].`
+          );
+        }
+
+        const resolvedPathGuard = validateWorkspaceFileOperations({
+          workDir: process.cwd(),
+          files: returnedNormalizedPaths.map((path) => ({ path })),
+          targets: [],
+          isTaskBranch: true,
+          reviewersDir: input.reviewersDir
+        });
+        if (!resolvedPathGuard.allowed) {
+          return await escalateConflict(
+            `LLM conflict resolution returned forbidden paths: ${[...resolvedPathGuard.sensitivePaths, ...resolvedPathGuard.traversalPaths].join(", ")}`,
+            {
+              sensitivePaths: resolvedPathGuard.sensitivePaths,
+              traversalPaths: resolvedPathGuard.traversalPaths
+            }
+          );
+        }
+
+        for (const rf of resolutionData.resolved_files) {
+          if (containsGitConflictMarkers(rf.content)) {
+            return await escalateConflict(
+              `LLM conflict resolution for '${rf.path}' still contained Git conflict markers.`
+            );
+          }
+          resolvedFiles.push({
+            path: rf.path.trim().replace(/^\/+/, ""),
+            content: rf.content
+          });
+        }
+      }
+    } finally {
+      if (tempWorktreeDir) {
+        rmSync(tempWorktreeDir, { recursive: true, force: true });
+      }
     }
   }
 
+  const filesToCommit = [...autoMergedFiles, ...resolvedFiles];
+
   // Stage 1 Sandbox verification before committing resolved conflicts
-  if (input.sandboxRunner && resolvedFiles.length + baseOnlyBlobs.length > 0) {
+  if (input.sandboxRunner && filesToCommit.length + baseOnlyBlobs.length > 0) {
     const baseOnlyFiles = await Promise.all(
       baseOnlyBlobs.map(async (b) => ({
         path: b.path,
         content: await readPinnedFile(baseHeadSha, b.path)
       }))
     );
-    const allFilesToCommit = [...baseOnlyFiles, ...resolvedFiles];
+    const allFilesToCommit = [...baseOnlyFiles, ...filesToCommit];
     const workspaceFiles = await input.gh.readBranchWorkspaceFiles(
       input.targetBranch,
       allFilesToCommit.map((f) => f.path).join(" "),
@@ -1515,8 +1924,11 @@ export async function syncBranchWithBase(
 
   const headSha = await input.gh.commitFilesToBranch({
     branch: input.targetBranch,
-    commitMessage: `chore(sync): resolve merge conflicts from ${input.baseBranch} into ${input.targetBranch}`,
-    files: resolvedFiles,
+    commitMessage:
+      resolvedFiles.length > 0
+        ? `chore(sync): resolve merge conflicts from ${input.baseBranch} into ${input.targetBranch}`
+        : `chore(sync): merge ${input.baseBranch} into ${input.targetBranch}`,
+    files: filesToCommit,
     blobs: baseOnlyBlobs,
     ...(baseDeletedFiles.length > 0 ? { deletedFiles: baseDeletedFiles } : {}),
     // Without the base as second parent the merge base never moves: the PR stays `dirty` and GitHub runs no `pull_request` CI.
@@ -1524,7 +1936,7 @@ export async function syncBranchWithBase(
   });
 
   return {
-    status: "resolved",
+    status: resolvedFiles.length > 0 ? "resolved" : "merged",
     headSha,
     conflictsResolved: resolvedFiles.map((f) => f.path)
   };

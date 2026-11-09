@@ -1,3 +1,4 @@
+import type { AgentEngine } from "../../agent/engine.js";
 import { redactSecrets } from "../../auth/issue-command-gate.js";
 import {
   discoverVerificationProfile,
@@ -120,6 +121,7 @@ export interface RunFeatureIntegrationPhaseParams {
   readonly baseSyncGuard: BaseSyncGuard;
   readonly resumeContextMarkdown?: string | undefined;
   readonly stopIfFeaturePrMerged: () => Promise<OrchestrateIssueResult | null>;
+  readonly agentEngine?: AgentEngine | undefined;
 }
 
 /** Rewrites the `## LLM Usage` section of the feature PR body with the epic total so far; the rest is untouched. */
@@ -195,7 +197,8 @@ export async function runFeatureIntegrationPhase(
         params.phaseModels.transientRetryBackoffSeconds,
       requestTimeoutMs: params.phaseModels.requestTimeoutMs,
       sandboxRunner: params.sandboxRunner,
-      reviewersDir
+      reviewersDir,
+      agentEngine: params.agentEngine
     });
     if (featureSync.status === "escalated") {
       return await escalate({
@@ -344,7 +347,8 @@ export async function runFeatureIntegrationPhase(
         params.phaseModels.transientRetryBackoffSeconds,
       requestTimeoutMs: params.phaseModels.requestTimeoutMs,
       sandboxRunner: params.sandboxRunner,
-      reviewersDir
+      reviewersDir,
+      agentEngine: params.agentEngine
     });
     if (resync.status === "escalated") {
       return await escalate({
