@@ -367,7 +367,17 @@ const TICKET_AGENT_ROLE_HEADLINES: Record<AgentRole, string> = {
     "Tu es un ingénieur TDD EPURE corrigeant les échecs décrits dans le message (vérification Stage 1, constats 'must_fix' de revue, CI externe) en gardant 100% des cibles Stage 1 au vert.",
   conflict_resolver:
     "Tu es un ingénieur expert chargé de résoudre un conflit de fusion Git à 3 voies (3-way merge) directement dans le répertoire de travail.",
-  reviewer: "Tu es un ingénieur EPURE en revue de code (lecture seule)."
+  reviewer: "Tu es un ingénieur EPURE en revue de code (lecture seule).",
+  convergence_auditor:
+    "Tu es un auditeur de convergence EPURE évaluant l'alignement global du dépôt (lecture seule).",
+  adr_reconciler:
+    "Tu es un architecte EPURE réconciliant GLOSSARY.md et docs/adr/ après un audit de convergence.",
+  griller:
+    "Tu es un ingénieur EPURE menant un entretien de cadrage (grilling) sur une demande.",
+  spec_writer:
+    "Tu es un ingénieur EPURE rédigeant une spécification technique à partir d'un entretien validé.",
+  ticket_splitter:
+    "Tu es un ingénieur EPURE découpant une spécification approuvée en tickets atomiques."
 };
 
 function ticketAgentInstructions(role: AgentRole, reviewersDir: string): string {

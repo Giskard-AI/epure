@@ -179,6 +179,26 @@ export interface SandboxExecutionResult {
 const SECRET_ENV_NAME_PATTERN =
   /^(?:.*API_KEY|.*_TOKEN|.*_SECRET|.*PRIVATE_KEY|LLM_API_KEY|GITHUB_TOKEN|GH_TOKEN|GITHUB_PAT|EPURE_.*(?:KEY|TOKEN|SECRET)|AWS_.*|AZURE_.*|GCP_.*|NPM_TOKEN|NODE_AUTH_TOKEN|ACTIONS_RUNTIME_TOKEN|ACTIONS_ID_TOKEN_REQUEST_TOKEN)$/i;
 
+const SANDBOX_STRIPPED_GIT_ENV_NAMES = new Set<string>([
+  "GIT_AUTHOR_NAME",
+  "GIT_AUTHOR_EMAIL",
+  "GIT_AUTHOR_DATE",
+  "GIT_COMMITTER_NAME",
+  "GIT_COMMITTER_EMAIL",
+  "GIT_COMMITTER_DATE",
+  "GIT_CONFIG_GLOBAL",
+  "GIT_CONFIG_SYSTEM",
+  "GIT_DIR",
+  "GIT_WORK_TREE"
+]);
+
+const SANDBOX_DEFAULT_GIT_IDENTITY_ENV = {
+  GIT_AUTHOR_NAME: "EPURE Agent",
+  GIT_AUTHOR_EMAIL: "epure-agent@localhost",
+  GIT_COMMITTER_NAME: "EPURE Agent",
+  GIT_COMMITTER_EMAIL: "epure-agent@localhost"
+} as const;
+
 const NONCE_HEADER = "x-epure-proxy-nonce";
 // The sandbox presents the nonce where its SDK would put a key; the proxy swaps it for the real one.
 const CREDENTIAL_HEADERS = [
@@ -225,12 +245,16 @@ export function buildSanitizedSandboxEnv(
     if (SECRET_ENV_NAME_PATTERN.test(key)) {
       continue;
     }
+    if (SANDBOX_STRIPPED_GIT_ENV_NAMES.has(key)) {
+      continue;
+    }
     if (containsPrivateKeyMaterial(value)) {
       continue;
     }
     sanitized[key] = value;
   }
 
+  Object.assign(sanitized, SANDBOX_DEFAULT_GIT_IDENTITY_ENV);
   sanitized.EPURE_SANDBOX_ACTIVE = "true";
   if (proxy) {
     sanitized.EPURE_LLM_PROXY_URL = proxy.proxyUrl;
@@ -261,9 +285,17 @@ export function buildAgentSessionEnv(
       env[name] = value;
     }
   }
+  const customSessionEnv = sessionEnv?.(home);
+  if (customSessionEnv) {
+    for (const [key, value] of Object.entries(customSessionEnv)) {
+      if (!SANDBOX_STRIPPED_GIT_ENV_NAMES.has(key)) {
+        env[key] = value;
+      }
+    }
+  }
   return {
     ...env,
-    ...sessionEnv?.(home),
+    ...SANDBOX_DEFAULT_GIT_IDENTITY_ENV,
     HOME: home,
     TMPDIR: home,
     EPURE_SANDBOX_ACTIVE: "true",

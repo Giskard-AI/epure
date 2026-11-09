@@ -1731,4 +1731,86 @@ describe("Kernel confinement of sandboxed runs (#98)", () => {
     expect(JSON.parse(result.stdout)).toEqual({ viaProxy: 200, direct: "blocked" });
     expect(upstream.requests).toHaveLength(1);
   });
+
+  it.each([
+    {
+      id: "replaces-git-author-name-with-safe-default",
+      key: "GIT_AUTHOR_NAME",
+      hostValue: "Host Developer",
+      expected: "EPURE Agent"
+    },
+    {
+      id: "replaces-git-author-email-with-safe-default",
+      key: "GIT_AUTHOR_EMAIL",
+      hostValue: "host@corp.example",
+      expected: "epure-agent@localhost"
+    },
+    {
+      id: "strips-git-author-date",
+      key: "GIT_AUTHOR_DATE",
+      hostValue: "2020-01-01T00:00:00Z",
+      expected: undefined
+    },
+    {
+      id: "replaces-git-committer-name-with-safe-default",
+      key: "GIT_COMMITTER_NAME",
+      hostValue: "Host Committer",
+      expected: "EPURE Agent"
+    },
+    {
+      id: "replaces-git-committer-email-with-safe-default",
+      key: "GIT_COMMITTER_EMAIL",
+      hostValue: "committer@corp.example",
+      expected: "epure-agent@localhost"
+    },
+    {
+      id: "strips-git-committer-date",
+      key: "GIT_COMMITTER_DATE",
+      hostValue: "2020-01-01T00:00:00Z",
+      expected: undefined
+    },
+    {
+      id: "strips-git-config-global",
+      key: "GIT_CONFIG_GLOBAL",
+      hostValue: "/home/host/.gitconfig",
+      expected: undefined
+    },
+    {
+      id: "strips-git-config-system",
+      key: "GIT_CONFIG_SYSTEM",
+      hostValue: "/etc/gitconfig",
+      expected: undefined
+    },
+    {
+      id: "strips-git-dir",
+      key: "GIT_DIR",
+      hostValue: "/home/host/repo/.git",
+      expected: undefined
+    },
+    {
+      id: "strips-git-work-tree",
+      key: "GIT_WORK_TREE",
+      hostValue: "/home/host/repo",
+      expected: undefined
+    }
+  ])(
+    "sanitize GIT_* environment variables in sandboxed sessions (#150) [$id]",
+    ({ key, hostValue, expected }) => {
+      const runnerEnv = {
+        PATH: "/usr/bin",
+        [key]: hostValue
+      };
+
+      const sanitized = buildSanitizedSandboxEnv(runnerEnv);
+      expect(sanitized[key]).toBe(expected);
+
+      const sessionEnv = buildAgentSessionEnv(
+        runnerEnv,
+        "/tmp/epure-agent-150",
+        undefined,
+        () => ({ [key]: hostValue })
+      );
+      expect(sessionEnv[key]).toBe(expected);
+    }
+  );
 });
