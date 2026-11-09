@@ -51,3 +51,14 @@ EPURE écrit directement sur `feature/*` (intégration du plan, synchronisation 
 Un bypass `always` couvrirait aussi la suppression et le force-push d'une branche `feature/*`. Ces deux règles passent dans un quatrième Ruleset, `epure-feature-integrity` (`deletion`, `non_fast_forward`), sans aucun Bypass Actor : ni l'`Agent App` ni un humain ne peut réécrire ou supprimer une branche de fonctionnalité. `epure-feature-governance` garde la PR, les checks et le motif de commit.
 
 Conséquence opérationnelle, à reporter dans les notes de migration v3.0.0 : les branches `feature/*` fusionnées dans `dev` ne sont plus supprimées. `delete_branch_on_merge` ne les supprime pas et un administrateur reçoit lui aussi un refus. Le Ruleset n'est pas affaibli pour autant : pour élaguer, un administrateur désactive temporairement `epure-feature-integrity`, supprime les branches fusionnées, puis le réactive.
+
+## Amendement (v3.0.0, #97) — Rulesets de release
+
+La décision 1.3 plaçait `main` et `refs/tags/v*` dans un seul Ruleset. GitHub n'accepte qu'une cible par Ruleset (`branch` ou `tag`) et refuse ce Ruleset avec un `422`. La release est donc portée par deux Rulesets, avec la seule `Release App` en `bypass_actors` (`always`) :
+
+1. `epure-release-tags` (cible `tag`, `refs/tags/v*`) : règles `creation`, `update` et `deletion`. Personne d'autre ne crée, ne déplace ni ne supprime un tag `v*`.
+2. `epure-release-immutability` (cible `branch`, `refs/heads/main`) : règles `update`, `deletion`, `non_fast_forward` et `pull_request`. La règle `update` refuse aussi le merge d'une PR vers `main` : sans elle, tout acteur ayant l'accès en écriture, `Agent App` comprise, pouvait faire avancer `main` en fusionnant une PR. Seul l'unique `git push --atomic` de `release-promote.yml` (fast-forward de `main` et tag annoté) fait avancer `main`.
+
+`setup-repo` applique `epure-release-tags` avant `epure-release-immutability` : une application interrompue ne laisse jamais les tags `v*` sans protection. `--apply-github-settings` et son dry-run s'arrêtent avant tout appel GitHub si l'ID d'une App déclarée en Bypass Actor manque (`--release-app-id`, `--agent-app-id`) : le Ruleset serait sinon installé sans Bypass Actor, ou perdrait celui déjà installé, et bloquerait l'App.
+
+Conséquence opérationnelle : le hotfix manuel sur `main` prévu par l'[ADR-0005](0005-release-fast-forward-et-synchronisation-des-adr.md) exige qu'un administrateur désactive temporairement `epure-release-immutability`, puis le réactive.

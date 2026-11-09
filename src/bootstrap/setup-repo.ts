@@ -188,8 +188,12 @@ export interface RulesetBypassActorSpec {
 
 export interface RepositoryRulesetSpec {
   readonly name: string;
+  // GitHub accepts one target per ruleset: branch rulesets match refs/heads/*, tag rulesets refs/tags/*.
+  readonly target: "branch" | "tag";
   readonly enforcement: "active";
   readonly targetRefs: readonly string[];
+  readonly blockCreations?: boolean | undefined;
+  readonly blockUpdates?: boolean | undefined;
   readonly blockDirectPushes: boolean;
   readonly blockForcePushes: boolean;
   readonly blockDeletions: boolean;
@@ -248,9 +252,9 @@ export interface SetupRepoResult {
   readonly expected_secrets: readonly ExpectedSecretSpec[];
   readonly repository_merge_settings: RepositoryMergeSettingsSpec;
   readonly branch_protections: readonly BranchProtectionSpec[];
-  readonly ruleset_spec: RepositoryRulesetSpec;
+  readonly release_rulesets: readonly RepositoryRulesetSpec[];
   readonly governance_rulesets: readonly RepositoryRulesetSpec[];
-  readonly ruleset_action: ResourcePlanAction;
+  readonly release_rulesets_action: ResourcePlanAction;
   readonly apps_action: ResourcePlanAction;
   readonly release_environment: ReleaseEnvironmentSpec;
   readonly task_auto_merge_enabled: boolean;
@@ -1797,6 +1801,7 @@ export function buildGovernanceRulesets(params: {
   readonly featureGovernance: RepositoryRulesetSpec;
   readonly devGovernance: RepositoryRulesetSpec;
   readonly releaseImmutability: RepositoryRulesetSpec;
+  readonly releaseTags: RepositoryRulesetSpec;
   readonly all: readonly RepositoryRulesetSpec[];
 } {
   const requiredChecks = [
@@ -1810,6 +1815,7 @@ export function buildGovernanceRulesets(params: {
   // Nobody, the agent App included, deletes or force-pushes a feature/* branch.
   const featureIntegrity: RepositoryRulesetSpec = {
     name: "epure-feature-integrity",
+    target: "branch",
     enforcement: "active",
     targetRefs: ["refs/heads/feature/*"],
     blockDirectPushes: false,
@@ -1822,6 +1828,7 @@ export function buildGovernanceRulesets(params: {
   // resolutions), so the agent App bypasses the PR and commit rules there and linear history stays off.
   const featureGovernance: RepositoryRulesetSpec = {
     name: "epure-feature-governance",
+    target: "branch",
     enforcement: "active",
     targetRefs: ["refs/heads/feature/*"],
     blockDirectPushes: true,
@@ -1842,6 +1849,7 @@ export function buildGovernanceRulesets(params: {
 
   const devGovernance: RepositoryRulesetSpec = {
     name: "epure-dev-governance",
+    target: "branch",
     enforcement: "active",
     targetRefs: ["refs/heads/dev"],
     blockDirectPushes: true,
@@ -1855,12 +1863,34 @@ export function buildGovernanceRulesets(params: {
     bypassActors: []
   };
 
+  // `update` also refuses PR merges: only the Release App bypass moves main.
   const releaseImmutability: RepositoryRulesetSpec = {
     name: "epure-release-immutability",
+    target: "branch",
     enforcement: "active",
-    targetRefs: ["refs/heads/main", "refs/tags/v*"],
+    targetRefs: ["refs/heads/main"],
+    blockUpdates: true,
     blockDirectPushes: true,
     blockForcePushes: true,
+    blockDeletions: true,
+    bypassActors: [
+      {
+        appRole: "release",
+        appName: params.releaseAppName,
+        mode: "always"
+      }
+    ]
+  };
+
+  const releaseTags: RepositoryRulesetSpec = {
+    name: "epure-release-tags",
+    target: "tag",
+    enforcement: "active",
+    targetRefs: ["refs/tags/v*"],
+    blockCreations: true,
+    blockUpdates: true,
+    blockDirectPushes: false,
+    blockForcePushes: false,
     blockDeletions: true,
     bypassActors: [
       {
@@ -1876,7 +1906,9 @@ export function buildGovernanceRulesets(params: {
     featureGovernance,
     devGovernance,
     releaseImmutability,
-    all: [featureIntegrity, featureGovernance, devGovernance, releaseImmutability]
+    releaseTags,
+    // Tags before main: an apply that fails midway never leaves v* unprotected.
+    all: [featureIntegrity, featureGovernance, devGovernance, releaseTags, releaseImmutability]
   };
 }
 
@@ -1894,8 +1926,8 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
     releaseAppName: manifests.releaseApp.name,
     requirePrApprovalsOnDev: input.requirePrApprovalsOnDev
   });
-  const rulesetSpec = rulesetBundle.releaseImmutability;
   const governanceRulesets = rulesetBundle.all;
+  const releaseRulesets = governanceRulesets.filter((r) => r.bypassActors.some((a) => a.appRole === "release"));
 
   const releaseEnvironment: ReleaseEnvironmentSpec = {
     name: "release",
@@ -1968,9 +2000,9 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
       expected_secrets: expectedSecrets,
       repository_merge_settings: DEFAULT_REPOSITORY_MERGE_SETTINGS,
       branch_protections: branchProtections,
-      ruleset_spec: rulesetSpec,
+      release_rulesets: releaseRulesets,
       governance_rulesets: governanceRulesets,
-      ruleset_action: "noop",
+      release_rulesets_action: "noop",
       apps_action: "noop",
       release_environment: releaseEnvironment,
       task_auto_merge_enabled: false,
@@ -1995,9 +2027,9 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
       expected_secrets: expectedSecrets,
       repository_merge_settings: DEFAULT_REPOSITORY_MERGE_SETTINGS,
       branch_protections: branchProtections,
-      ruleset_spec: rulesetSpec,
+      release_rulesets: releaseRulesets,
       governance_rulesets: governanceRulesets,
-      ruleset_action: "noop",
+      release_rulesets_action: "noop",
       apps_action: "noop",
       release_environment: releaseEnvironment,
       task_auto_merge_enabled: false,
@@ -2235,9 +2267,7 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
   const existingRulesets = new Set(
     input.existingState?.existingRulesetNames ?? []
   );
-  const rulesetAction: ResourcePlanAction = existingRulesets.has(
-    rulesetSpec.name
-  )
+  const releaseRulesetsAction: ResourcePlanAction = releaseRulesets.every((r) => existingRulesets.has(r.name))
     ? "noop"
     : "create";
 
@@ -2293,8 +2323,8 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
     },
     {
       id: "apply_branch_protections_and_release_ruleset",
-      title: "Confirm 4 Repository Rulesets (feature/* integrity and governance, dev, main+v*) and squash-only merge settings",
-      details: `Run 'setup-repo --apply --apply-github-settings' to enforce squash-only merges and provision 'epure-feature-integrity', 'epure-feature-governance', 'epure-dev-governance', and '${rulesetSpec.name}'.`
+      title: `Confirm ${governanceRulesets.length} Repository Rulesets and squash-only merge settings`,
+      details: `Run 'setup-repo --apply --apply-github-settings' to enforce squash-only merges and provision ${governanceRulesets.map((r) => `'${r.name}'`).join(", ")}.`
     }
   ];
 
@@ -2345,9 +2375,9 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
     expected_secrets: expectedSecrets,
     repository_merge_settings: DEFAULT_REPOSITORY_MERGE_SETTINGS,
     branch_protections: branchProtections,
-    ruleset_spec: rulesetSpec,
+    release_rulesets: releaseRulesets,
     governance_rulesets: governanceRulesets,
-    ruleset_action: rulesetAction,
+    release_rulesets_action: releaseRulesetsAction,
     apps_action: appsAction,
     release_environment: releaseEnvironment,
     task_auto_merge_enabled: taskAutoMergeEnabled,
@@ -2381,6 +2411,12 @@ export function buildGitHubRulesetApiPayload(
   }
 
   const rules: Array<Record<string, unknown>> = [];
+  if (spec.blockCreations) {
+    rules.push({ type: "creation" });
+  }
+  if (spec.blockUpdates) {
+    rules.push({ type: "update" });
+  }
   if (spec.blockDeletions) {
     rules.push({ type: "deletion" });
   }
@@ -2417,7 +2453,7 @@ export function buildGitHubRulesetApiPayload(
 
   return {
     name: spec.name,
-    target: "branch",
+    target: spec.target,
     enforcement: spec.enforcement,
     bypass_actors: bypassActors,
     conditions: {
@@ -2431,6 +2467,7 @@ export function buildGitHubRulesetApiPayload(
 }
 
 interface GitHubRulesetShape {
+  readonly target?: string;
   readonly conditions?: { readonly ref_name?: { readonly include?: readonly string[] } };
   readonly rules?: ReadonlyArray<{ readonly type: string }>;
   readonly bypass_actors?: ReadonlyArray<{
@@ -2443,6 +2480,7 @@ interface GitHubRulesetShape {
 // Rule parameters are not compared: GitHub fills in defaults the payload never sends.
 function rulesetFingerprint(ruleset: GitHubRulesetShape): string {
   return JSON.stringify({
+    target: ruleset.target,
     include: [...(ruleset.conditions?.ref_name?.include ?? [])].sort(),
     rules: (ruleset.rules ?? []).map((r) => r.type).sort(),
     bypass: (ruleset.bypass_actors ?? [])
@@ -2451,10 +2489,30 @@ function rulesetFingerprint(ruleset: GitHubRulesetShape): string {
   });
 }
 
+// buildGitHubRulesetApiPayload drops a bypass actor without an App ID: GitHub would then create the
+// ruleset with nobody able to bypass it, or strip the bypass from an installed one.
+function assertBypassAppIds(input: ApplyGitHubRepositoryGovernanceInput): void {
+  const missing: string[] = [];
+  for (const spec of input.governanceRulesets) {
+    for (const actor of spec.bypassActors) {
+      const id = actor.appRole === "agent" ? input.agentAppIntegrationId : input.releaseAppIntegrationId;
+      if (!(Number.isInteger(id) && (id ?? 0) > 0)) {
+        missing.push(`'${spec.name}' needs the ${actor.appRole} App ID (--${actor.appRole}-app-id)`);
+      }
+    }
+  }
+  if (missing.length > 0) {
+    throw new Error(
+      `Refusing to apply GitHub settings on ${input.repository}: ${missing.join("; ")}. Without it GitHub installs the ruleset with no bypass actor (or removes the bypass from the installed one) and the App is locked out.`
+    );
+  }
+}
+
 /** Read-only counterpart of `applyGitHubRepositoryGovernance` for `--dry-run`. */
 export async function planGitHubRulesetChanges(
   input: ApplyGitHubRepositoryGovernanceInput
 ): Promise<ReadonlyArray<{ readonly name: string; readonly action: ResourcePlanAction }>> {
+  assertBypassAppIds(input);
   const fetchFn = input.fetchImpl ?? fetch;
   const baseUrl = `https://api.github.com/repos/${input.repository.trim()}`;
   const headers = {
@@ -2498,6 +2556,7 @@ export async function applyGitHubRepositoryGovernance(
   if (!owner || !repo) {
     throw new Error(`Invalid repository slug '${input.repository}'.`);
   }
+  assertBypassAppIds(input);
 
   const fetchFn = input.fetchImpl ?? fetch;
   const baseUrl = "https://api.github.com";

@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   applyGitHubRepositoryGovernance,
+  buildGitHubRulesetApiPayload,
   buildGovernanceRulesets,
   CONVENTIONAL_COMMIT_PATTERN_REGEX,
-  planGitHubRulesetChanges
+  planGitHubRulesetChanges,
+  type RepositoryRulesetSpec,
+  type ResourcePlanAction
 } from "../src/bootstrap/setup-repo.js";
 import { verifyPublisherMergeBoundary } from "../src/orchestrator/issue-orchestrator.js";
 import { validateAgentProposal } from "../src/publisher/isolated-publisher.js";
@@ -42,7 +45,7 @@ describe("EPURE v1.2.0 — Repository Rulesets, Multi-Agent Review Roster & Sema
         requirePrApprovalsOnDev
       });
 
-      expect(bundle.all).toHaveLength(4);
+      expect(bundle.all).toHaveLength(5);
       expect(bundle.featureIntegrity.targetRefs).toEqual(["refs/heads/feature/*"]);
       expect(bundle.featureIntegrity.bypassActors).toEqual([]);
       expect(bundle.featureGovernance.targetRefs).toEqual([
@@ -60,20 +63,37 @@ describe("EPURE v1.2.0 — Repository Rulesets, Multi-Agent Review Roster & Sema
       expect(bundle.devGovernance.requiredApprovingReviewCount).toBe(
         expectedDevApprovals
       );
-      expect(bundle.releaseImmutability.targetRefs).toEqual([
-        "refs/heads/main",
-        "refs/tags/v*"
-      ]);
-      expect(bundle.releaseImmutability.bypassActors).toEqual([
-        {
-          appRole: "release",
-          appName: "hartorn-inc-epure-release",
-          mode: "always"
-        }
-      ]);
+      expect(bundle.releaseImmutability.targetRefs).toEqual(["refs/heads/main"]);
+      expect(bundle.releaseTags.targetRefs).toEqual(["refs/tags/v*"]);
+      for (const spec of [bundle.releaseImmutability, bundle.releaseTags]) {
+        expect(spec.bypassActors).toEqual([
+          {
+            appRole: "release",
+            appName: "hartorn-inc-epure-release",
+            mode: "always"
+          }
+        ]);
+      }
     });
 
-    it("applies squash-only repository settings and creates/updates the 4 rulesets idempotently via GitHub REST API", async () => {
+    it.each(
+      buildGovernanceRulesets({ agentAppName: "a", releaseAppName: "r" }).all.map((spec) => ({
+        id: `${spec.name}-matches-only-${spec.target === "tag" ? "refs/tags" : "refs/heads"}-patterns`,
+        spec,
+        prefix: spec.target === "tag" ? "refs/tags/" : "refs/heads/"
+      }))
+    )("$id", ({ spec, prefix }) => {
+      const payload = buildGitHubRulesetApiPayload(spec, { agentAppIntegrationId: 1, releaseAppIntegrationId: 2 }) as {
+        target: string;
+        conditions: { ref_name: { include: string[] } };
+      };
+
+      expect(payload.target).toBe(spec.target);
+      expect(payload.conditions.ref_name.include.length).toBeGreaterThan(0);
+      expect(payload.conditions.ref_name.include.every((ref) => ref.startsWith(prefix))).toBe(true);
+    });
+
+    it("applies squash-only repository settings and creates/updates the 5 rulesets idempotently via GitHub REST API", async () => {
       const calls: Array<{ method: string; url: string; body?: unknown }> = [];
       const mockFetch: typeof fetch = async (input, init) => {
         const url = String(input);
@@ -119,6 +139,7 @@ describe("EPURE v1.2.0 — Repository Rulesets, Multi-Agent Review Roster & Sema
         { name: "epure-feature-integrity", action: "created", id: 99 },
         { name: "epure-feature-governance", action: "created", id: 99 },
         { name: "epure-dev-governance", action: "updated", id: 42 },
+        { name: "epure-release-tags", action: "created", id: 99 },
         { name: "epure-release-immutability", action: "created", id: 99 }
       ]);
 
@@ -137,23 +158,44 @@ describe("EPURE v1.2.0 — Repository Rulesets, Multi-Agent Review Roster & Sema
       {
         id: "feature-integrity-ruleset-blocks-deletion-and-force-push-for-everyone-including-the-agent-app",
         ruleset: "epure-feature-integrity",
+        expectedTarget: "branch",
         expectedRules: ["deletion", "non_fast_forward"],
         expectedBypass: []
       },
       {
         id: "feature-governance-ruleset-lets-the-agent-app-push-directly-and-allows-merge-commits",
         ruleset: "epure-feature-governance",
+        expectedTarget: "branch",
         expectedRules: ["pull_request", "commit_message_pattern"],
         expectedBypass: [{ actor_id: 2888446, actor_type: "Integration", bypass_mode: "always" }]
       },
       {
         id: "dev-ruleset-keeps-linear-history-and-no-bypass",
         ruleset: "epure-dev-governance",
+        expectedTarget: "branch",
         expectedRules: ["deletion", "non_fast_forward", "required_linear_history", "pull_request", "commit_message_pattern"],
         expectedBypass: []
+      },
+      {
+        id: "main-ruleset-blocks-updates-pr-merges-direct-push-force-push-and-deletion-except-for-the-release-app",
+        ruleset: "epure-release-immutability",
+        expectedTarget: "branch",
+        expectedRules: ["update", "deletion", "non_fast_forward", "pull_request"],
+        expectedBypass: [{ actor_id: 2888449, actor_type: "Integration", bypass_mode: "always" }]
+      },
+      {
+        id: "tag-ruleset-blocks-creating-moving-and-deleting-v-tags-except-for-the-release-app",
+        ruleset: "epure-release-tags",
+        expectedTarget: "tag",
+        expectedRules: ["creation", "update", "deletion"],
+        expectedBypass: [{ actor_id: 2888449, actor_type: "Integration", bypass_mode: "always" }]
       }
-    ])("$id", async ({ ruleset, expectedRules, expectedBypass }) => {
-      const sent: Array<{ method: string; url: string; body?: { name?: string; rules?: Array<{ type: string }>; bypass_actors?: unknown } }> = [];
+    ])("$id", async ({ ruleset, expectedTarget, expectedRules, expectedBypass }) => {
+      const sent: Array<{
+        method: string;
+        url: string;
+        body?: { name?: string; target?: string; rules?: Array<{ type: string }>; bypass_actors?: unknown };
+      }> = [];
       const mockFetch: typeof fetch = async (input, init) => {
         const method = init?.method ?? "GET";
         sent.push({ method, url: String(input), body: init?.body ? JSON.parse(String(init.body)) : undefined });
@@ -170,6 +212,7 @@ describe("EPURE v1.2.0 — Repository Rulesets, Multi-Agent Review Roster & Sema
       });
 
       const payload = sent.find((c) => c.method === "POST" && c.body?.name === ruleset)?.body;
+      expect(payload?.target).toBe(expectedTarget);
       expect(payload?.rules?.map((r) => r.type)).toEqual(expectedRules);
       expect(payload?.bypass_actors).toEqual(expectedBypass);
     });
@@ -181,7 +224,13 @@ describe("EPURE v1.2.0 — Repository Rulesets, Multi-Agent Review Roster & Sema
           rules: ["deletion", "non_fast_forward", "required_linear_history", "pull_request", "commit_message_pattern"],
           bypassMode: "pull_request"
         },
-        expected: { "epure-feature-integrity": "create", "epure-feature-governance": "update", "epure-dev-governance": "noop", "epure-release-immutability": "create" }
+        expected: {
+          "epure-feature-integrity": "create",
+          "epure-feature-governance": "update",
+          "epure-dev-governance": "noop",
+          "epure-release-immutability": "create",
+          "epure-release-tags": "create"
+        }
       },
       {
         id: "previous-single-feature-ruleset-letting-the-agent-app-delete-and-force-push-is-reported-as-update",
@@ -189,7 +238,13 @@ describe("EPURE v1.2.0 — Repository Rulesets, Multi-Agent Review Roster & Sema
           rules: ["commit_message_pattern", "deletion", "non_fast_forward", "pull_request"],
           bypassMode: "always"
         },
-        expected: { "epure-feature-integrity": "create", "epure-feature-governance": "update", "epure-dev-governance": "noop", "epure-release-immutability": "create" }
+        expected: {
+          "epure-feature-integrity": "create",
+          "epure-feature-governance": "update",
+          "epure-dev-governance": "noop",
+          "epure-release-immutability": "create",
+          "epure-release-tags": "create"
+        }
       },
       {
         id: "feature-governance-ruleset-already-generated-by-this-version-is-noop",
@@ -197,7 +252,13 @@ describe("EPURE v1.2.0 — Repository Rulesets, Multi-Agent Review Roster & Sema
           rules: ["commit_message_pattern", "pull_request"],
           bypassMode: "always"
         },
-        expected: { "epure-feature-integrity": "create", "epure-feature-governance": "noop", "epure-dev-governance": "noop", "epure-release-immutability": "create" }
+        expected: {
+          "epure-feature-integrity": "create",
+          "epure-feature-governance": "noop",
+          "epure-dev-governance": "noop",
+          "epure-release-immutability": "create",
+          "epure-release-tags": "create"
+        }
       }
     ])("$id", async ({ existingFeature, expected }) => {
       const rulesets = buildGovernanceRulesets({ agentAppName: "a", releaseAppName: "r" });
@@ -208,11 +269,13 @@ describe("EPURE v1.2.0 — Repository Rulesets, Multi-Agent Review Roster & Sema
           { id: 2, name: "epure-dev-governance" }
         ],
         "/rulesets/1": {
+          target: "branch",
           conditions: { ref_name: { include: ["refs/heads/feature/*"], exclude: [] } },
           rules: existingFeature.rules.map((type) => ({ type, parameters: { extra_github_default: true } })),
           bypass_actors: [{ actor_id: 2888446, actor_type: "Integration", bypass_mode: existingFeature.bypassMode }]
         },
         "/rulesets/2": {
+          target: "branch",
           conditions: { ref_name: { include: ["refs/heads/dev"], exclude: [] } },
           rules: devRules.map((type) => ({ type })),
           bypass_actors: []
@@ -236,6 +299,82 @@ describe("EPURE v1.2.0 — Repository Rulesets, Multi-Agent Review Roster & Sema
 
       expect(Object.fromEntries(plan.map((p) => [p.name, p.action]))).toEqual(expected);
       expect(new Set(methods)).toEqual(new Set(["GET"]));
+    });
+
+    it.each<{
+      id: string;
+      remote: Record<string, Partial<Pick<RepositoryRulesetSpec, "target" | "targetRefs" | "blockUpdates">>>;
+      expected: Record<string, ResourcePlanAction>;
+    }>([
+      {
+        id: "release-rulesets-generated-by-this-version-are-noop",
+        remote: { "epure-release-immutability": {}, "epure-release-tags": {} },
+        expected: { "epure-release-immutability": "noop", "epure-release-tags": "noop" }
+      },
+      {
+        id: "previous-main-and-tags-release-ruleset-is-updated-to-main-only-and-the-tag-ruleset-is-created",
+        remote: { "epure-release-immutability": { targetRefs: ["refs/heads/main", "refs/tags/v*"], blockUpdates: false } },
+        expected: { "epure-release-immutability": "update", "epure-release-tags": "create" }
+      },
+      {
+        id: "main-ruleset-without-the-update-rule-letting-any-writer-merge-into-main-is-reported-as-update",
+        remote: { "epure-release-immutability": { blockUpdates: false }, "epure-release-tags": {} },
+        expected: { "epure-release-immutability": "update", "epure-release-tags": "noop" }
+      },
+      {
+        id: "tag-ruleset-stored-with-a-branch-target-is-reported-as-update",
+        remote: { "epure-release-immutability": {}, "epure-release-tags": { target: "branch" } },
+        expected: { "epure-release-immutability": "noop", "epure-release-tags": "update" }
+      }
+    ])("$id", async ({ remote, expected }) => {
+      const bundle = buildGovernanceRulesets({ agentAppName: "a", releaseAppName: "r" });
+      const specs = [bundle.releaseImmutability, bundle.releaseTags];
+      const listed: Array<{ id: number; name: string }> = [];
+      const responses: Record<string, unknown> = { "/rulesets": listed };
+      specs.forEach((spec, i) => {
+        const override = remote[spec.name];
+        if (override) {
+          listed.push({ id: i + 1, name: spec.name });
+          responses[`/rulesets/${i + 1}`] = buildGitHubRulesetApiPayload({ ...spec, ...override }, { releaseAppIntegrationId: 2888449 });
+        }
+      });
+      const mockFetch: typeof fetch = async (input) => {
+        const path = new URL(String(input)).pathname.replace("/repos/Hartorn-Inc/trame", "");
+        return new Response(JSON.stringify(responses[path]), { status: 200 });
+      };
+
+      const plan = await planGitHubRulesetChanges({
+        repository: "Hartorn-Inc/trame",
+        githubToken: "ghs_testToken",
+        governanceRulesets: specs,
+        releaseAppIntegrationId: 2888449,
+        fetchImpl: mockFetch
+      });
+
+      expect(Object.fromEntries(plan.map((p) => [p.name, p.action]))).toEqual(expected);
+    });
+
+    it.each([
+      { id: "apply-without-release-app-id-is-refused", dryRun: false, agentAppIntegrationId: 11, releaseAppIntegrationId: undefined, missing: /epure-release-tags.*epure-release-immutability.*--release-app-id/ },
+      { id: "apply-without-agent-app-id-is-refused", dryRun: false, agentAppIntegrationId: undefined, releaseAppIntegrationId: 22, missing: /epure-feature-governance.*--agent-app-id/ },
+      { id: "apply-with-an-unparsable-release-app-id-is-refused", dryRun: false, agentAppIntegrationId: 11, releaseAppIntegrationId: Number.NaN, missing: /--release-app-id/ },
+      { id: "dry-run-without-release-app-id-reports-the-same-refusal", dryRun: true, agentAppIntegrationId: 11, releaseAppIntegrationId: undefined, missing: /epure-release-tags.*--release-app-id/ }
+    ])("$id before any GitHub call", async ({ dryRun, agentAppIntegrationId, releaseAppIntegrationId, missing }) => {
+      const calls: string[] = [];
+      const input = {
+        repository: "Hartorn-Inc/trame",
+        githubToken: "ghs_testToken",
+        governanceRulesets: buildGovernanceRulesets({ agentAppName: "a", releaseAppName: "r" }).all,
+        agentAppIntegrationId,
+        releaseAppIntegrationId,
+        fetchImpl: (async (url: string | URL | Request) => {
+          calls.push(String(url));
+          return new Response("[]", { status: 200 });
+        }) as typeof fetch
+      };
+
+      await expect(dryRun ? planGitHubRulesetChanges(input) : applyGitHubRepositoryGovernance(input)).rejects.toThrow(missing);
+      expect(calls).toEqual([]);
     });
 
     it.each([

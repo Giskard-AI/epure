@@ -149,7 +149,7 @@ Before writing any file, the agent inspects the target repository (`package.json
 To enforce strict privilege separation (Q82, Q91) and Zizmor-compliant zero secret exposure to unprivileged PR workflows, EPURE never uses a single all-powerful Personal Access Token or global repository secrets. Instead, every repository uses **two distinct GitHub Apps** and **two isolated GitHub Environments** (`<llm-env>` and `release`):
 
 1. **Agent App (`<owner>-epure-agent`)**: Used by the orchestrator for day-to-day automation (`plan/*`, `task/*`, `feature/*`, Issues, PRs, and Check Runs). It is **never** a Bypass Actor on `dev` or `main`.
-2. **Release App (`<owner>-epure-release`)**: Used exclusively by the release workflow (your `.github/workflows/release.yml`, which calls EPURE's reusable `release-promote.yml`) when a human dispatches a fast-forward release from `dev` to `main` with `semver_tag` and `expected_dev_sha`. It is the **sole Bypass Actor** on `epure-release-immutability` (`main` and `v*` tags). See [Promote a Release](./guides/how-to-release.md) for the one-time environment protection (required reviewer, `dev`-only deployment branch policy).
+2. **Release App (`<owner>-epure-release`)**: Used exclusively by the release workflow (your `.github/workflows/release.yml`, which calls EPURE's reusable `release-promote.yml`) when a human dispatches a fast-forward release from `dev` to `main` with `semver_tag` and `expected_dev_sha`. It is the **sole Bypass Actor** on `epure-release-immutability` (`main`) and `epure-release-tags` (`v*` tags). See [Promote a Release](./guides/how-to-release.md) for the one-time environment protection (required reviewer, `dev`-only deployment branch policy).
 
 Launch the interactive wizard, which supports **Approach 2** (1-click local GitHub App Manifest Flow) with automatic **Fallback Approach 1** (manual step-by-step guided registration) and injects secrets into their dedicated GitHub Environments via `gh secret set --env` without ever exposing PEM private keys to the LLM:
 
@@ -228,13 +228,14 @@ git push origin dev
      - **Always-On Core (Cross-Cutting & Persona)**: `architecture-reviewer`, `security-reviewer`, `spec-parity-reviewer`, `standards-reviewer` (adapted to the detected language: TypeScript, Python, Rust, or Go), and `user-advocate`.
      - **Agent-Designed Stack, Domain & UI Specialists**: `domain-backend-reviewer`, `infra-reviewer`, any custom domain specialists designed by the agent for your subsystems (e.g. `realtime-reviewer.md`, `combat-engine-reviewer.md`, `sql-migration-reviewer.md` with YAML frontmatter `paths:` routing), and — only when the project includes a UI — the frontend/Impeccable trio (`frontend-reviewer`, `accessibility-reviewer`, `design-reviewer`).
      - *Illustrative example on `craft-calculator` (TypeScript + React web app)*: the agent composes a 10-reviewer roster combining the always-on core, `domain-backend-reviewer`, `infra-reviewer`, and the 3 UI/Impeccable reviewers.
-5. **Squash-Only Merge Governance & 4 Repository Rulesets**:
+5. **Squash-Only Merge Governance & 5 Repository Rulesets**:
    - Configures the repository to allow **Squash merge only** (`allow_squash_merge: true`, `allow_merge_commit: false`, `allow_rebase_merge: false`, `delete_branch_on_merge: true`).
-   - Installs the 4 GitHub Repository Rulesets:
+   - Installs the 5 GitHub Repository Rulesets:
      - `epure-feature-integrity` (`refs/heads/feature/*`): blocks deletion and force-push with no bypass actor, so not even the `Agent App` can rewrite or delete a feature branch. Consequence: merged `feature/*` branches stay on GitHub. `delete_branch_on_merge` cannot remove them and neither can an admin; to prune them, temporarily disable this ruleset (Settings → Rules → Rulesets), delete the merged branches, then re-enable it.
      - `epure-feature-governance` (`refs/heads/feature/*`): `Agent App` in `always` bypass for autonomous `task/* -> feature/*` squash-merges once checks pass and for EPURE's direct writes (plan integration, `dev` merge syncs, conflict resolutions); humans still go through PRs.
      - `epure-dev-governance` (`refs/heads/dev`): No `Agent App` bypass (`required_approving_review_count: 0` by default for solo-maintainer compatibility; configurable via `--require-pr-approvals <N>`).
-     - `epure-release-immutability` (`refs/heads/main`, `refs/tags/v*`): `Release App` as sole Bypass Actor.
+     - `epure-release-immutability` (`refs/heads/main`): no update (PR merges included), direct push, force-push or deletion; `Release App` as sole Bypass Actor, so only a release moves `main`. An urgent manual hotfix on `main` requires an admin to disable this ruleset temporarily.
+     - `epure-release-tags` (`refs/tags/v*`, a tag ruleset): no creation, move or deletion of `v*` tags; `Release App` as sole Bypass Actor.
 
 ## Fail-Closed Trade-Offs
 
@@ -487,7 +488,7 @@ The **`.agents/skills/setup-repo/SKILL.md`** skill is the **preferred way** to o
 1. **Project Discovery**: Inspects the repository stack (`package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, `Makefile`), `src/` module layout, and whether a user interface is present.
 2. **Dry-Run Simulation (`--dry-run`)**: Runs `dist/cli/setup-repo.mjs --dry-run` and presents the full plan to the human maintainer before writing anything.
 3. **Dynamic Reviewer Roster Design (`reviewers_dir`, default `.agents/reviewers/*.md`)**: Creates, designs, and tailors specialist reviewers according to the project's actual elements (always-on core `architecture-reviewer`, `security-reviewer`, `spec-parity-reviewer`, `standards-reviewer`, `user-advocate` + tailored domain/UI specialists with `paths:` routing).
-4. **Idempotent Application (`--apply --apply-github-settings`)**: Writes `.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`, SHA-pinned caller workflows, configures squash-only merges, and provisions the 4 Repository Rulesets.
+4. **Idempotent Application (`--apply --apply-github-settings`)**: Writes `.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`, SHA-pinned caller workflows, configures squash-only merges, and provisions the 5 Repository Rulesets.
 
 ---
 
@@ -523,7 +524,7 @@ node dist/cli/setup-repo.mjs \
 | `--pinned-sha <sha>` | Latest EPURE SHA | Immutable 40-character Git commit SHA of `Giskard-AI/epure` used to pin generated caller workflows. |
 | `--dry-run` | `true` (if `--apply` omitted) | Prints the complete bootstrap plan without modifying local files or calling write APIs. With `--apply-github-settings`, reads the existing rulesets and reports `create`, `update` or `noop` for each. |
 | `--apply` | `false` | Writes configuration files (`.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`), caller workflows, and base reviewer prompts (`<reviewers_dir>/*.md`, default `.agents/reviewers/*.md`). |
-| `--apply-github-settings` | `false` | Applies squash-only repository settings and the 4 Repository Rulesets (`epure-feature-integrity`, `epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`) via the GitHub REST API. |
+| `--apply-github-settings` | `false` | Applies squash-only repository settings and the 5 Repository Rulesets (`epure-feature-integrity`, `epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`, `epure-release-tags`) via the GitHub REST API. |
 | `--no-frontend-reviewers` | `false` | Omits `frontend-reviewer`, `accessibility-reviewer`, and `design-reviewer` for headless repositories. |
 | `--domain-reviewers <csv>` | None | Scaffolds additional `<reviewers_dir>/<slug>-reviewer.md` specialist files for domain subsystems. |
 | `--reviewers-dir <path>` | `.agents/reviewers` | Reviewer roster directory written to `.github/agents.yml` (`reviewers_dir`) and read by the orchestrator from `dev` (e.g. `--reviewers-dir .cursor/agents` for a team that wants Cursor to load the reviewers as subagents). Absolute paths, `.`/`..` segments, and paths under `src/` fail closed with `SECURITY_INVARIANT_VIOLATION`. |
@@ -532,8 +533,8 @@ node dist/cli/setup-repo.mjs \
 | `--planning-model <provider/model>` | `anthropic/claude-sonnet-4-20250514` | Sets `models.planning`. |
 | `--implementation-model <provider/model>` | `anthropic/claude-sonnet-4-20250514` | Sets `models.implementation`. |
 | `--review-model <provider/model>` | `openai/gpt-4.1` | Sets `models.review`. |
-| `--agent-app-id <id>` | Optional | Numeric GitHub App ID of `<owner>-epure-agent` added as Bypass Actor (`always`) on `epure-feature-governance` (`feature/*`), so EPURE can push plan integrations, `dev` syncs and conflict resolutions directly. `epure-feature-integrity` has no bypass actor: nobody, the App included, can force-push or delete a `feature/*` branch. |
-| `--release-app-id <id>` | Optional | Numeric GitHub App ID of `<owner>-epure-release` added as sole Bypass Actor on `epure-release-immutability` (`main` and `v*`). |
+| `--agent-app-id <id>` | Required with `--apply-github-settings` | Numeric GitHub App ID of `<owner>-epure-agent` added as Bypass Actor (`always`) on `epure-feature-governance` (`feature/*`), so EPURE can push plan integrations, `dev` syncs and conflict resolutions directly. `epure-feature-integrity` has no bypass actor: nobody, the App included, can force-push or delete a `feature/*` branch. |
+| `--release-app-id <id>` | Required with `--apply-github-settings` | Numeric GitHub App ID of `<owner>-epure-release` added as sole Bypass Actor on `epure-release-immutability` (`main`) and `epure-release-tags` (`v*`). Without one of the two IDs, `--apply-github-settings` (and its dry-run) stops with an error before any GitHub call: the ruleset would otherwise lock the App out. |
 | `--require-pr-approvals <N>` | `0` | Number of human PR review approvals required on `dev` (`0` for solo-maintainer compatibility; `>=1` for teams). |
 | `--json` | `false` | Emits the full structured `SetupRepoResult` JSON payload to stdout instead of the Markdown summary. |
 
@@ -744,7 +745,7 @@ EPURE is built from the ground up around **Defense-in-Depth**, **Least Privilege
 
 1. **Dual GitHub App Separation & Environment-Scoped Secrets (`<owner>-epure-agent` vs. `<owner>-epure-release`, Q82 & Q91)**:
    - The **Agent App** mints short-lived RS256 installation tokens scoped to day-to-day orchestration (`plan/*`, `task/*`, `feature/*`). Its credentials (`EPURE_AGENT_APP_ID`, `EPURE_AGENT_APP_PRIVATE_KEY`) and `LLM_API_KEY` are scoped to the dedicated agent GitHub Environment (`<llm-env>`) and never exposed to `authorize-command` or public PR workflows. It is a Bypass Actor **only** on `epure-feature-governance` (`refs/heads/feature/*`), allowing autonomous integration of verified atomic tasks while physically blocking it from merging application code into `dev` or pushing to `main`.
-   - The **Release App** is invoked exclusively by `release-promote.yml` / `release.yml` under human `workflow_dispatch` inside the protected `release` GitHub Environment (`EPURE_RELEASE_APP_ID`, `EPURE_RELEASE_APP_PRIVATE_KEY`). It is the sole Bypass Actor on `epure-release-immutability` (`refs/heads/main` and `refs/tags/v*`).
+   - The **Release App** is invoked exclusively by `release-promote.yml` / `release.yml` under human `workflow_dispatch` inside the protected `release` GitHub Environment (`EPURE_RELEASE_APP_ID`, `EPURE_RELEASE_APP_PRIVATE_KEY`). It is the sole Bypass Actor on `epure-release-immutability` (`refs/heads/main`) and `epure-release-tags` (`refs/tags/v*`).
 2. **Secretless Sandbox Execution (Q74)**:
    - When EPURE runs `npm test`, `npm run build`, or `pytest` on a `task/*` branch, the child process environment is scrubbed of `LLM_API_KEY`, `EPURE_AGENT_APP_PRIVATE_KEY`, and `EPURE_RELEASE_APP_PRIVATE_KEY`.
    - A malicious or compromised test script cannot exfiltrate credentials. If sandbox isolation fails, EPURE aborts **fail-closed**.
@@ -837,7 +838,7 @@ URL: https://giskard-ai.github.io/epure/guides/how-to-onboard-repo
 
 # How-To: Onboard a Repository with the `/setup-repo` Skill
 
-This guide shows how to take a brand-new or existing GitHub repository (such as `my-org/craft-calculator`) and onboard it by invoking **the `/setup-repo` agent skill** (`.agents/skills/setup-repo/SKILL.md`)—the preferred way to configure EPURE's 2 GitHub Apps, environment-scoped secrets (`<llm-env>` and `release`), `.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`, dynamic reviewer roster (`reviewers_dir`, default `.agents/reviewers/*.md`), and 4 Repository Rulesets.
+This guide shows how to take a brand-new or existing GitHub repository (such as `my-org/craft-calculator`) and onboard it by invoking **the `/setup-repo` agent skill** (`.agents/skills/setup-repo/SKILL.md`)—the preferred way to configure EPURE's 2 GitHub Apps, environment-scoped secrets (`<llm-env>` and `release`), `.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`, dynamic reviewer roster (`reviewers_dir`, default `.agents/reviewers/*.md`), and 5 Repository Rulesets.
 
 ---
 
@@ -904,7 +905,7 @@ Check that the dry-run report presented by the agent lists:
 - Creation of `.github/agents.yml` (flat canonical schema with auto-discovered `verification.targets`), `.github/zizmor.yml`, and `renovate.json`.
 - Creation of `.github/workflows/epure-issue-command.yml`, `epure-check.yml`, `pr-title.yml`, `ci.yml`, and `release.yml` pinned to the 40-character SHA of `Giskard-AI/epure`.
 - Dynamic initialization of the reviewer roster in `.agents/reviewers/*.md` (or the `--reviewers-dir` you chose) designed by the agent for your stack and sub-domains (always-on core `architecture-reviewer`, `security-reviewer`, `spec-parity-reviewer`, `standards-reviewer`, `user-advocate` + tailored domain/UI specialists, yielding 10 agents for the `craft-calculator` web app example).
-- Creation of the 4 Repository Rulesets (`epure-feature-integrity`, `epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`).
+- Creation of the 5 Repository Rulesets (`epure-feature-integrity`, `epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`, `epure-release-tags`).
 
 ---
 
@@ -1079,7 +1080,7 @@ Both entry points run the same implementation, the reusable workflow `Giskard-AI
 
 | Repository | Workflow to dispatch | Rulesets that must list the Release App as bypass actor |
 | --- | --- | --- |
-| Consumer repository bootstrapped by `/setup-repo` | `.github/workflows/release.yml` (**EPURE Controlled Release (dev -> main)**), a thin caller pinned to an EPURE commit SHA | `epure-release-immutability` |
+| Consumer repository bootstrapped by `/setup-repo` | `.github/workflows/release.yml` (**EPURE Controlled Release (dev -> main)**), a thin caller pinned to an EPURE commit SHA | `epure-release-immutability`, `epure-release-tags` |
 | `Giskard-AI/epure` itself | `.github/workflows/release-promote.yml` (**Promote Dev to Main (Fast-Forward Release)**) | `Main basic protection`, `epure-branch-governance`, `epure-tag-immutability` |
 
 Inputs: `semver_tag` (`vMAJOR.MINOR.PATCH`), `expected_dev_sha` (the full 40-character SHA of the `dev` head you reviewed) and, on `release-promote.yml`, the optional `ci_workflow` (default `ci.yml`, the workflow file whose run on `dev` must have succeeded).
@@ -1089,7 +1090,7 @@ Inputs: `semver_tag` (`vMAJOR.MINOR.PATCH`), `expected_dev_sha` (the full 40-cha
 ## 1. One-Time Setup
 
 1. **Create and install the Release App.** Stage 3 of `scripts/wizards/setup-github-apps-wizard.sh --repo <owner>/<repo>` creates `<owner>-epure-release` (repository permissions `Contents: Read and write`, `Metadata: Read-only`, no webhook), installs it on that repository only, and stores two **secrets** in the `release` environment: `EPURE_RELEASE_APP_ID` (numeric App ID) and `EPURE_RELEASE_APP_PRIVATE_KEY` (PEM). The wizard always runs all stages, including the Agent App; if you only need the Release App, follow the same steps by hand and set the secrets with `gh secret set <NAME> -R <owner>/<repo> --env release`.
-2. **Add the Release App as bypass actor** (`actor_type: Integration`, `actor_id: <App ID>`, `bypass_mode: always`) on every ruleset that covers `main` and `v*` tags (see the table above). In consumer repositories, `node dist/cli/setup-repo.mjs --repo <owner>/<repo> --release-app-id <App ID> --apply --apply-github-settings` does it for `epure-release-immutability`. Elsewhere, add the actor with `gh api` while keeping the existing actors:
+2. **Add the Release App as bypass actor** (`actor_type: Integration`, `actor_id: <App ID>`, `bypass_mode: always`) on every ruleset that covers `main` and `v*` tags (see the table above). In consumer repositories, `node dist/cli/setup-repo.mjs --repo <owner>/<repo> --release-app-id <App ID> --apply --apply-github-settings` does it for `epure-release-immutability` and `epure-release-tags`. Elsewhere, add the actor with `gh api` while keeping the existing actors:
 
    ```bash
    gh api repos/<owner>/<repo>/rulesets/<ruleset-id> \
@@ -1212,7 +1213,7 @@ This page provides the aligned **English <-> French** ubiquitous language refere
 | English Term | French Canonical Term (`GLOSSARY.md`) | Definition & Invariant |
 | --- | --- | --- |
 | **Secretless Sandbox & LLM Proxy** | *Proxy LLM de sandbox* | Isolation boundary stripping `LLM_API_KEY` and GitHub App private keys from consumer test/build subprocesses; fails closed if isolation is unavailable. |
-| **Governance Rulesets (`epure-feature-integrity`, `epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`)** | *Séparation des Rulesets de gouvernance* | GitHub Repository Rulesets over three scopes: on `feature/*`, `epure-feature-integrity` blocks deletion and force-push with no bypass actor (the `Agent App` included), while `Agent App` bypasses `epure-feature-governance` (`always`), where EPURE pushes plan integrations, `dev` merge syncs and conflict resolutions directly (no linear-history rule there); `dev` requires human merge (`0` review approvals by default for solo maintainer compatibility); `main` and `v*` allow only `Release App`. |
+| **Governance Rulesets (`epure-feature-integrity`, `epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`, `epure-release-tags`)** | *Séparation des Rulesets de gouvernance* | GitHub Repository Rulesets over three scopes: on `feature/*`, `epure-feature-integrity` blocks deletion and force-push with no bypass actor (the `Agent App` included), while `Agent App` bypasses `epure-feature-governance` (`always`), where EPURE pushes plan integrations, `dev` merge syncs and conflict resolutions directly (no linear-history rule there); `dev` requires human merge (`0` review approvals by default for solo maintainer compatibility); `main` (`epure-release-immutability`) and `v*` tags (`epure-release-tags`, a tag ruleset) allow only `Release App`. |
 | **Trusted `dev` Reviewer Roster (`reviewers_dir`)** | *Roster de reviewers spécialisés et transverses* | Read-only reviewer definitions (`<name>.md`) initialized by `setup-repo` in the configurable reviewer roster directory (`reviewers_dir`, default `.agents/reviewers/`), always loaded at runtime from `dev` (never from `task/*`), capped at 4 specialists per diff + `spec-parity-reviewer`. |
 | **Persona UX Gate (`user-advocate`)** | *Porte UX orientée personas (`user-advocate`)* | Specialist evaluating end-user journeys in `design-gate` mode (enriching ticket acceptance criteria before `/epure approve`) and `implementation-review` mode (blocking PR check on UI changes). |
 | **Blocking Design Violation (`impeccable-gate`)** | *Violation de design bloquante* | Objective new UI regression (WCAG 2.1 AA contrast, layout overflow, missing `DESIGN.md` tokens, or missing `loading`/`ready`/`error` interaction states) that blocks PR merge. |
@@ -1374,7 +1375,7 @@ Avant d'écrire le moindre fichier, l'agent inspecte le dépôt cible (`package.
 Pour garantir une séparation stricte des privilèges (Q82, Q91) et zéro exposition de secrets aux workflows publics de Pull Request (conformité Zizmor), EPURE n'utilise jamais de jeton personnel (PAT) omnipotent ni de secrets globaux du dépôt. Chaque dépôt utilise **deux GitHub Apps distinctes** et **deux environnements GitHub isolés** (`<llm-env>` et `release`) :
 
 1. **Agent App (`<owner>-epure-agent`)** : utilisée par l'orchestrateur pour l'automatisation quotidienne (`plan/*`, `task/*`, `feature/*`, Issues, PRs et Check Runs). Elle ne figure **jamais** parmi les Bypass Actors de `dev` ou `main`.
-2. **Release App (`<owner>-epure-release`)** : utilisée exclusivement par le workflow de release (votre `.github/workflows/release.yml`, qui appelle le workflow réutilisable `release-promote.yml` d'EPURE) lorsqu'un humain déclenche une promotion fast-forward de `dev` vers `main` avec `semver_tag` et `expected_dev_sha`. C'est le **seul Bypass Actor** sur `epure-release-immutability` (`main` et les tags `v*`). Voir [Promouvoir une Release](./guides/how-to-release.md) pour la protection initiale de l'environnement (relecteur obligatoire, politique de déploiement limitée à `dev`).
+2. **Release App (`<owner>-epure-release`)** : utilisée exclusivement par le workflow de release (votre `.github/workflows/release.yml`, qui appelle le workflow réutilisable `release-promote.yml` d'EPURE) lorsqu'un humain déclenche une promotion fast-forward de `dev` vers `main` avec `semver_tag` et `expected_dev_sha`. C'est le **seul Bypass Actor** sur `epure-release-immutability` (`main`) et `epure-release-tags` (tags `v*`). Voir [Promouvoir une Release](./guides/how-to-release.md) pour la protection initiale de l'environnement (relecteur obligatoire, politique de déploiement limitée à `dev`).
 
 Lancez l'assistant interactif, qui propose l'**Approche 2** (flux local GitHub App Manifest en 1 clic) avec repli automatique sur l'**Approche 1** (enregistrement manuel guidé étape par étape) et injecte les secrets dans leurs environnements GitHub dédiés via `gh secret set --env` sans jamais exposer vos clés privées PEM au modèle LLM :
 
@@ -1453,13 +1454,14 @@ git push origin dev
      - **Socle transverse permanent** : `architecture-reviewer`, `security-reviewer`, `spec-parity-reviewer`, `standards-reviewer` (adapté au langage détecté : TypeScript, Python, Rust ou Go) et `user-advocate`.
      - **Spécialistes conçus sur mesure selon les éléments du projet** : `domain-backend-reviewer`, `infra-reviewer`, tout reviewer métier créé par l'agent pour vos sous-systèmes (ex. `realtime-reviewer.md`, `combat-engine-reviewer.md`, `sql-migration-reviewer.md` avec routage par `paths:` dans le frontmatter YAML), et — uniquement si le projet comporte une UI — les reviewers frontend/Impeccable (`frontend-reviewer`, `accessibility-reviewer`, `design-reviewer`).
      - *Exemple illustratif sur `craft-calculator` (application web TypeScript + React)* : l'agent assemble un roster de 10 reviewers combinant le socle transverse, `domain-backend-reviewer`, `infra-reviewer` et les 3 reviewers UI/Impeccable.
-5. **Politique Squash-Only & 4 Repository Rulesets** :
+5. **Politique Squash-Only & 5 Repository Rulesets** :
    - Configure le dépôt en **Squash merge exclusif** (`allow_squash_merge: true`, `allow_merge_commit: false`, `allow_rebase_merge: false`, `delete_branch_on_merge: true`).
-   - Installe les 4 Rulesets GitHub :
+   - Installe les 5 Rulesets GitHub :
      - `epure-feature-integrity` (`refs/heads/feature/*`) : interdit suppression et force-push sans aucun Bypass Actor, si bien que même l'`Agent App` ne peut ni réécrire ni supprimer une branche de fonctionnalité. Conséquence : les branches `feature/*` fusionnées restent sur GitHub. `delete_branch_on_merge` ne peut pas les supprimer, un administrateur non plus ; pour les élaguer, désactivez temporairement ce Ruleset (Settings → Rules → Rulesets), supprimez les branches fusionnées, puis réactivez-le.
      - `epure-feature-governance` (`refs/heads/feature/*`) : `Agent App` en bypass `always` pour le squash-merge autonome des PRs `task/* -> feature/*` et les écritures directes d'EPURE (intégration du plan, synchronisations depuis `dev` en commits de merge, résolutions de conflits) ; les humains passent toujours par une PR.
      - `epure-dev-governance` (`refs/heads/dev`) : aucun bypass pour l'`Agent App` (`required_approving_review_count: 0` par défaut pour permettre à un mainteneur solo de merger ses PRs ; configurable via `--require-pr-approvals <N>`).
-     - `epure-release-immutability` (`refs/heads/main`, `refs/tags/v*`) : `Release App` comme unique Bypass Actor.
+     - `epure-release-immutability` (`refs/heads/main`) : ni mise à jour (merges de PR compris), ni push direct, ni force-push, ni suppression ; `Release App` comme unique Bypass Actor, seule une release fait avancer `main`. Un hotfix manuel urgent sur `main` exige qu'un admin désactive temporairement ce ruleset.
+     - `epure-release-tags` (`refs/tags/v*`, ruleset de tags) : ni création, ni déplacement, ni suppression de tags `v*` ; `Release App` comme unique Bypass Actor.
 
 ## Compromis Fail-Closed
 
@@ -1712,7 +1714,7 @@ Le skill **`.agents/skills/setup-repo/SKILL.md`** est la **façon privilégiée*
 1. **Analyse du projet** : inspecte la stack (`package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, `Makefile`), la structure des modules `src/` et la présence ou non d'une interface utilisateur.
 2. **Simulation (`--dry-run`)** : exécute `dist/cli/setup-repo.mjs --dry-run` et présente le plan complet au mainteneur avant toute écriture.
 3. **Conception dynamique du roster de reviewers (`reviewers_dir`, par défaut `.agents/reviewers/*.md`)** : crée, conçoit et adapte les reviewers spécialisés en fonction des composants réels du projet (socle transverse `architecture-reviewer`, `security-reviewer`, `spec-parity-reviewer`, `standards-reviewer`, `user-advocate` + spécialistes métier/UI sur mesure avec routage `paths:`).
-4. **Application idempotente (`--apply --apply-github-settings`)** : écrit `.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`, les workflows appelants épinglés par SHA, configure le dépôt en squash-only et installe les 4 Repository Rulesets.
+4. **Application idempotente (`--apply --apply-github-settings`)** : écrit `.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`, les workflows appelants épinglés par SHA, configure le dépôt en squash-only et installe les 5 Repository Rulesets.
 
 ---
 
@@ -1748,7 +1750,7 @@ node dist/cli/setup-repo.mjs \
 | `--pinned-sha <sha>` | Dernier SHA EPURE | SHA Git immuable de 40 caractères de `Giskard-AI/epure` utilisé pour épingler les workflows appelants générés. |
 | `--dry-run` | `true` (si `--apply` omis) | Affiche le plan complet de bootstrap sans modifier aucun fichier ni appeler d'API d'écriture. Avec `--apply-github-settings`, lit les Rulesets existants et indique pour chacun `create`, `update` ou `noop`. |
 | `--apply` | `false` | Écrit les fichiers de configuration (`.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`), les workflows appelants et le socle des prompts de reviewers (`<reviewers_dir>/*.md`, par défaut `.agents/reviewers/*.md`). |
-| `--apply-github-settings` | `false` | Applique le mode squash-only et les 4 Repository Rulesets (`epure-feature-integrity`, `epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`) via l'API REST GitHub. |
+| `--apply-github-settings` | `false` | Applique le mode squash-only et les 5 Repository Rulesets (`epure-feature-integrity`, `epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`, `epure-release-tags`) via l'API REST GitHub. |
 | `--no-frontend-reviewers` | `false` | Omet `frontend-reviewer`, `accessibility-reviewer` et `design-reviewer` pour les dépôts sans UI. |
 | `--domain-reviewers <csv>` | Aucun | Génère des fichiers `<reviewers_dir>/<slug>-reviewer.md` supplémentaires pour les sous-domaines métier. |
 | `--reviewers-dir <chemin>` | `.agents/reviewers` | Répertoire du roster de reviewers écrit dans `.github/agents.yml` (`reviewers_dir`) et lu par l'orchestrateur depuis `dev` (p. ex. `--reviewers-dir .cursor/agents` pour une équipe souhaitant que Cursor charge les reviewers comme sous-agents). Les chemins absolus, les segments `.`/`..` et les chemins sous `src/` sont rejetés en *fail-closed* avec `SECURITY_INVARIANT_VIOLATION`. |
@@ -1757,8 +1759,8 @@ node dist/cli/setup-repo.mjs \
 | `--planning-model <fournisseur/modèle>` | `anthropic/claude-sonnet-4-20250514` | Définit `models.planning`. |
 | `--implementation-model <fournisseur/modèle>` | `anthropic/claude-sonnet-4-20250514` | Définit `models.implementation`. |
 | `--review-model <fournisseur/modèle>` | `openai/gpt-4.1` | Définit `models.review`. |
-| `--agent-app-id <id>` | Optionnel | ID numérique de `<owner>-epure-agent` ajouté en Bypass Actor (`always`) sur `epure-feature-governance` (`feature/*`), pour qu'EPURE pousse directement les intégrations de plan, synchronisations depuis `dev` et résolutions de conflits. `epure-feature-integrity` n'a aucun Bypass Actor : personne, l'App comprise, ne peut forcer un push ni supprimer une branche `feature/*`. |
-| `--release-app-id <id>` | Optionnel | ID numérique de `<owner>-epure-release` ajouté comme unique Bypass Actor sur `epure-release-immutability` (`main` et `v*`). |
+| `--agent-app-id <id>` | Obligatoire avec `--apply-github-settings` | ID numérique de `<owner>-epure-agent` ajouté en Bypass Actor (`always`) sur `epure-feature-governance` (`feature/*`), pour qu'EPURE pousse directement les intégrations de plan, synchronisations depuis `dev` et résolutions de conflits. `epure-feature-integrity` n'a aucun Bypass Actor : personne, l'App comprise, ne peut forcer un push ni supprimer une branche `feature/*`. |
+| `--release-app-id <id>` | Obligatoire avec `--apply-github-settings` | ID numérique de `<owner>-epure-release` ajouté comme unique Bypass Actor sur `epure-release-immutability` (`main`) et `epure-release-tags` (`v*`). Sans l'un des deux ID, `--apply-github-settings` (et son dry-run) s'arrête en erreur avant tout appel GitHub : le ruleset bloquerait sinon l'App. |
 | `--require-pr-approvals <N>` | `0` | Nombre d'approbations humaines requises sur `dev` (`0` pour compatibilité mainteneur solo ; `>=1` en équipe). |
 | `--json` | `false` | Affiche le résultat structuré complet `SetupRepoResult` au format JSON sur la sortie standard au lieu du résumé Markdown. |
 
@@ -1969,7 +1971,7 @@ EPURE a été conçu dès l'origine autour de trois principes d'ingénierie : **
 
 1. **Séparation à Deux GitHub Apps & Secrets Cloisonnés par Environnement (`<owner>-epure-agent` vs `<owner>-epure-release`, Q82 & Q91)** :
    - L'**Agent App** émet des jetons d'installation RS256 éphémères dédiés à l'orchestration quotidienne (`plan/*`, `task/*`, `feature/*`). Ses identifiants (`EPURE_AGENT_APP_ID`, `EPURE_AGENT_APP_PRIVATE_KEY`) et `LLM_API_KEY` sont isolés dans l'environnement GitHub d'agent (`<llm-env>`) et ne sont jamais exposés à `authorize-command` ni aux workflows publics de Pull Request. Elle n'est Bypass Actor **que** sur le ruleset `epure-feature-governance` (`refs/heads/feature/*`), ce qui lui permet de fusionner en autonomie les tâches atomiques validées tout en lui interdisant matériellement de fusionner du code applicatif dans `dev` ou de pousser sur `main`.
-   - La **Release App** est invoquée exclusivement par `release-promote.yml` / `release.yml` sur déclenchement humain (`workflow_dispatch`) au sein de l'environnement GitHub protégé `release` (`EPURE_RELEASE_APP_ID`, `EPURE_RELEASE_APP_PRIVATE_KEY`). C'est le seul Bypass Actor autorisé sur `epure-release-immutability` (`refs/heads/main` et `refs/tags/v*`).
+   - La **Release App** est invoquée exclusivement par `release-promote.yml` / `release.yml` sur déclenchement humain (`workflow_dispatch`) au sein de l'environnement GitHub protégé `release` (`EPURE_RELEASE_APP_ID`, `EPURE_RELEASE_APP_PRIVATE_KEY`). C'est le seul Bypass Actor autorisé sur `epure-release-immutability` (`refs/heads/main`) et `epure-release-tags` (`refs/tags/v*`).
 2. **Exécution en Sandbox Sans Secret (Q74)** :
    - Lorsqu'EPURE exécute `npm test`, `npm run build` ou `pytest` sur une branche `task/*`, l'environnement des sous-processus est intégralement purgé de `LLM_API_KEY`, `EPURE_AGENT_APP_PRIVATE_KEY` et `EPURE_RELEASE_APP_PRIVATE_KEY`.
    - Un test ou une dépendance compromise ne peut exfiltrer aucun secret. Si l'isolation de la sandbox ne peut être garantie, EPURE s'arrête immédiatement en mode **fail-closed**.
@@ -2062,7 +2064,7 @@ URL: https://giskard-ai.github.io/epure/fr/guides/how-to-onboard-repo
 
 # Guide : Onboarder un Dépôt avec le Skill `/setup-repo`
 
-Ce guide explique comment configurer un dépôt GitHub neuf ou existant (tel que `my-org/craft-calculator`) en invoquant **le skill d'agent `/setup-repo`** (`.agents/skills/setup-repo/SKILL.md`), qui est la façon privilégiée d'installer EPURE, ses 2 GitHub Apps, ses secrets cloisonnés par environnement (`<llm-env>` et `release`), `.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`, son roster dynamique de reviewers (`reviewers_dir`, par défaut `.agents/reviewers/*.md`) et ses 4 Repository Rulesets.
+Ce guide explique comment configurer un dépôt GitHub neuf ou existant (tel que `my-org/craft-calculator`) en invoquant **le skill d'agent `/setup-repo`** (`.agents/skills/setup-repo/SKILL.md`), qui est la façon privilégiée d'installer EPURE, ses 2 GitHub Apps, ses secrets cloisonnés par environnement (`<llm-env>` et `release`), `.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`, son roster dynamique de reviewers (`reviewers_dir`, par défaut `.agents/reviewers/*.md`) et ses 5 Repository Rulesets.
 
 ---
 
@@ -2129,7 +2131,7 @@ Vérifiez que le rapport de simulation présenté par l'agent mentionne :
 - La création de `.github/agents.yml` (schéma canonique plat avec découverte automatique de `verification.targets`), `.github/zizmor.yml` et `renovate.json`.
 - La création de `.github/workflows/epure-issue-command.yml`, `epure-check.yml`, `pr-title.yml`, `ci.yml` et `release.yml` épinglés sur le SHA de 40 caractères de `Giskard-AI/epure`.
 - L'initialisation dynamique du roster de reviewers dans `.agents/reviewers/*.md` (ou le `--reviewers-dir` choisi) conçu par l'agent selon la stack et les sous-domaines du projet (socle transverse `architecture-reviewer`, `security-reviewer`, `spec-parity-reviewer`, `standards-reviewer`, `user-advocate` + spécialistes métier/UI sur mesure, soit 10 agents dans l'exemple `craft-calculator`).
-- La configuration des 4 Repository Rulesets (`epure-feature-integrity`, `epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`).
+- La configuration des 5 Repository Rulesets (`epure-feature-integrity`, `epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`, `epure-release-tags`).
 
 ---
 
@@ -2304,7 +2306,7 @@ Les deux points d'entrée exécutent la même implémentation, le workflow réut
 
 | Dépôt | Workflow à déclencher | Rulesets où la Release App doit être Bypass Actor |
 | --- | --- | --- |
-| Dépôt consommateur initialisé par `/setup-repo` | `.github/workflows/release.yml` (**EPURE Controlled Release (dev -> main)**), un appelant minimal épinglé sur un SHA d'EPURE | `epure-release-immutability` |
+| Dépôt consommateur initialisé par `/setup-repo` | `.github/workflows/release.yml` (**EPURE Controlled Release (dev -> main)**), un appelant minimal épinglé sur un SHA d'EPURE | `epure-release-immutability`, `epure-release-tags` |
 | `Giskard-AI/epure` lui-même | `.github/workflows/release-promote.yml` (**Promote Dev to Main (Fast-Forward Release)**) | `Main basic protection`, `epure-branch-governance`, `epure-tag-immutability` |
 
 Entrées : `semver_tag` (`vMAJOR.MINOR.PATCH`), `expected_dev_sha` (le SHA complet de 40 caractères de la tête de `dev` que vous avez relue) et, sur `release-promote.yml`, l'entrée optionnelle `ci_workflow` (par défaut `ci.yml`, le fichier du workflow dont l'exécution sur `dev` doit avoir réussi).
@@ -2314,7 +2316,7 @@ Entrées : `semver_tag` (`vMAJOR.MINOR.PATCH`), `expected_dev_sha` (le SHA compl
 ## 1. Configuration Initiale (une seule fois)
 
 1. **Créer et installer la Release App.** L'étape 3 de `scripts/wizards/setup-github-apps-wizard.sh --repo <owner>/<repo>` crée `<owner>-epure-release` (permissions de dépôt `Contents: Read and write`, `Metadata: Read-only`, sans webhook), l'installe sur ce seul dépôt et enregistre deux **secrets** dans l'environnement `release` : `EPURE_RELEASE_APP_ID` (identifiant numérique de l'App) et `EPURE_RELEASE_APP_PRIVATE_KEY` (PEM). L'assistant enchaîne toujours toutes les étapes, y compris l'Agent App ; si seule la Release App vous intéresse, suivez les mêmes étapes à la main puis enregistrez les secrets avec `gh secret set <NAME> -R <owner>/<repo> --env release`.
-2. **Déclarer la Release App comme Bypass Actor** (`actor_type: Integration`, `actor_id: <App ID>`, `bypass_mode: always`) sur chaque ruleset couvrant `main` et les tags `v*` (voir le tableau ci-dessus). Dans un dépôt consommateur, `node dist/cli/setup-repo.mjs --repo <owner>/<repo> --release-app-id <App ID> --apply --apply-github-settings` le fait pour `epure-release-immutability`. Ailleurs, ajoutez l'acteur avec `gh api` en conservant les acteurs existants :
+2. **Déclarer la Release App comme Bypass Actor** (`actor_type: Integration`, `actor_id: <App ID>`, `bypass_mode: always`) sur chaque ruleset couvrant `main` et les tags `v*` (voir le tableau ci-dessus). Dans un dépôt consommateur, `node dist/cli/setup-repo.mjs --repo <owner>/<repo> --release-app-id <App ID> --apply --apply-github-settings` le fait pour `epure-release-immutability` et `epure-release-tags`. Ailleurs, ajoutez l'acteur avec `gh api` en conservant les acteurs existants :
 
    ```bash
    gh api repos/<owner>/<repo>/rulesets/<ruleset-id> \

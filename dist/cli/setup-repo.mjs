@@ -597,17 +597,14 @@ function buildSandboxToolingSetupSteps(rtkVersion = PINNED_RTK_VERSION) {
     "          # renovate: datasource=github-releases depName=rtk-ai/rtk",
     `          RTK_VERSION="${safeRtkVersion}"`,
     '          RTK_ARCHIVE="rtk-x86_64-unknown-linux-musl.tar.gz"',
-    '          curl -fsSL "https://github.com/rtk-ai/rtk/releases/download/${RTK_VERSION}/${RTK_ARCHIVE}" -o "/tmp/${RTK_ARCHIVE}"',
-    '          curl -fsSL "https://github.com/rtk-ai/rtk/releases/download/${RTK_VERSION}/checksums.txt" -o "/tmp/rtk-checksums.txt"',
+    '          curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "https://github.com/rtk-ai/rtk/releases/download/${RTK_VERSION}/${RTK_ARCHIVE}" -o "/tmp/${RTK_ARCHIVE}"',
+    '          curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "https://github.com/rtk-ai/rtk/releases/download/${RTK_VERSION}/checksums.txt" -o "/tmp/rtk-checksums.txt"',
     "          (cd /tmp && sha256sum --check --ignore-missing rtk-checksums.txt)",
-    '          mkdir -p "$RUNNER_TEMP/bin"',
-    '          tar -xzf "/tmp/${RTK_ARCHIVE}" -C "$RUNNER_TEMP/bin" rtk',
-    '          chmod 0755 "$RUNNER_TEMP/bin/rtk"',
-    '          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"',
-    '          echo "RTK_TELEMETRY_DISABLED=1" >> "$GITHUB_ENV"',
-    '          echo "RTK_RECALL=0" >> "$GITHUB_ENV"',
-    '          echo "RTK_TEE=0" >> "$GITHUB_ENV"',
-    '          echo "NO_COLOR=1" >> "$GITHUB_ENV"'
+    '          tar -xzf "/tmp/${RTK_ARCHIVE}" -C /tmp rtk',
+    // /usr/local/bin is already on PATH and executable inside landrun; writing GITHUB_PATH or
+    // GITHUB_ENV under issue_comment/workflow_run fails zizmor's github-env audit. The stateless
+    // RTK variables come from buildSanitizedSandboxEnv.
+    "          sudo install -m 0755 /tmp/rtk /usr/local/bin/rtk"
   ];
 }
 function parseMakefileTargets(makefileContent) {
@@ -2866,6 +2863,7 @@ function buildGovernanceRulesets(params) {
   ];
   const featureIntegrity = {
     name: "epure-feature-integrity",
+    target: "branch",
     enforcement: "active",
     targetRefs: ["refs/heads/feature/*"],
     blockDirectPushes: false,
@@ -2875,6 +2873,7 @@ function buildGovernanceRulesets(params) {
   };
   const featureGovernance = {
     name: "epure-feature-governance",
+    target: "branch",
     enforcement: "active",
     targetRefs: ["refs/heads/feature/*"],
     blockDirectPushes: true,
@@ -2894,6 +2893,7 @@ function buildGovernanceRulesets(params) {
   };
   const devGovernance = {
     name: "epure-dev-governance",
+    target: "branch",
     enforcement: "active",
     targetRefs: ["refs/heads/dev"],
     blockDirectPushes: true,
@@ -2908,10 +2908,30 @@ function buildGovernanceRulesets(params) {
   };
   const releaseImmutability = {
     name: "epure-release-immutability",
+    target: "branch",
     enforcement: "active",
-    targetRefs: ["refs/heads/main", "refs/tags/v*"],
+    targetRefs: ["refs/heads/main"],
+    blockUpdates: true,
     blockDirectPushes: true,
     blockForcePushes: true,
+    blockDeletions: true,
+    bypassActors: [
+      {
+        appRole: "release",
+        appName: params.releaseAppName,
+        mode: "always"
+      }
+    ]
+  };
+  const releaseTags = {
+    name: "epure-release-tags",
+    target: "tag",
+    enforcement: "active",
+    targetRefs: ["refs/tags/v*"],
+    blockCreations: true,
+    blockUpdates: true,
+    blockDirectPushes: false,
+    blockForcePushes: false,
     blockDeletions: true,
     bypassActors: [
       {
@@ -2926,7 +2946,9 @@ function buildGovernanceRulesets(params) {
     featureGovernance,
     devGovernance,
     releaseImmutability,
-    all: [featureIntegrity, featureGovernance, devGovernance, releaseImmutability]
+    releaseTags,
+    // Tags before main: an apply that fails midway never leaves v* unprotected.
+    all: [featureIntegrity, featureGovernance, devGovernance, releaseTags, releaseImmutability]
   };
 }
 function planAndApplyRepoSetup(input) {
@@ -2941,8 +2963,8 @@ function planAndApplyRepoSetup(input) {
     releaseAppName: manifests.releaseApp.name,
     requirePrApprovalsOnDev: input.requirePrApprovalsOnDev
   });
-  const rulesetSpec = rulesetBundle.releaseImmutability;
   const governanceRulesets = rulesetBundle.all;
+  const releaseRulesets = governanceRulesets.filter((r) => r.bypassActors.some((a) => a.appRole === "release"));
   const releaseEnvironment = {
     name: "release",
     requiredReviewers: true,
@@ -3011,9 +3033,9 @@ function planAndApplyRepoSetup(input) {
       expected_secrets: expectedSecrets,
       repository_merge_settings: DEFAULT_REPOSITORY_MERGE_SETTINGS,
       branch_protections: branchProtections,
-      ruleset_spec: rulesetSpec,
+      release_rulesets: releaseRulesets,
       governance_rulesets: governanceRulesets,
-      ruleset_action: "noop",
+      release_rulesets_action: "noop",
       apps_action: "noop",
       release_environment: releaseEnvironment,
       task_auto_merge_enabled: false,
@@ -3037,9 +3059,9 @@ function planAndApplyRepoSetup(input) {
       expected_secrets: expectedSecrets,
       repository_merge_settings: DEFAULT_REPOSITORY_MERGE_SETTINGS,
       branch_protections: branchProtections,
-      ruleset_spec: rulesetSpec,
+      release_rulesets: releaseRulesets,
       governance_rulesets: governanceRulesets,
-      ruleset_action: "noop",
+      release_rulesets_action: "noop",
       apps_action: "noop",
       release_environment: releaseEnvironment,
       task_auto_merge_enabled: false,
@@ -3212,9 +3234,7 @@ function planAndApplyRepoSetup(input) {
   const existingRulesets = new Set(
     input.existingState?.existingRulesetNames ?? []
   );
-  const rulesetAction = existingRulesets.has(
-    rulesetSpec.name
-  ) ? "noop" : "create";
+  const releaseRulesetsAction = releaseRulesets.every((r) => existingRulesets.has(r.name)) ? "noop" : "create";
   const mutatedFiles = [];
   if (!dryRun && input.repoRootDir) {
     if (agentsConfigAction !== "noop") {
@@ -3265,8 +3285,8 @@ function planAndApplyRepoSetup(input) {
     },
     {
       id: "apply_branch_protections_and_release_ruleset",
-      title: "Confirm 4 Repository Rulesets (feature/* integrity and governance, dev, main+v*) and squash-only merge settings",
-      details: `Run 'setup-repo --apply --apply-github-settings' to enforce squash-only merges and provision 'epure-feature-integrity', 'epure-feature-governance', 'epure-dev-governance', and '${rulesetSpec.name}'.`
+      title: `Confirm ${governanceRulesets.length} Repository Rulesets and squash-only merge settings`,
+      details: `Run 'setup-repo --apply --apply-github-settings' to enforce squash-only merges and provision ${governanceRulesets.map((r) => `'${r.name}'`).join(", ")}.`
     }
   ];
   const deferredWorkflowsList = effectiveVerification.deferred_external_workflows ?? [];
@@ -3311,9 +3331,9 @@ function planAndApplyRepoSetup(input) {
     expected_secrets: expectedSecrets,
     repository_merge_settings: DEFAULT_REPOSITORY_MERGE_SETTINGS,
     branch_protections: branchProtections,
-    ruleset_spec: rulesetSpec,
+    release_rulesets: releaseRulesets,
     governance_rulesets: governanceRulesets,
-    ruleset_action: rulesetAction,
+    release_rulesets_action: releaseRulesetsAction,
     apps_action: appsAction,
     release_environment: releaseEnvironment,
     task_auto_merge_enabled: taskAutoMergeEnabled,
@@ -3336,6 +3356,12 @@ function buildGitHubRulesetApiPayload(spec, appIntegrationIds) {
     }
   }
   const rules = [];
+  if (spec.blockCreations) {
+    rules.push({ type: "creation" });
+  }
+  if (spec.blockUpdates) {
+    rules.push({ type: "update" });
+  }
   if (spec.blockDeletions) {
     rules.push({ type: "deletion" });
   }
@@ -3371,7 +3397,7 @@ function buildGitHubRulesetApiPayload(spec, appIntegrationIds) {
   }
   return {
     name: spec.name,
-    target: "branch",
+    target: spec.target,
     enforcement: spec.enforcement,
     bypass_actors: bypassActors,
     conditions: {
@@ -3385,12 +3411,30 @@ function buildGitHubRulesetApiPayload(spec, appIntegrationIds) {
 }
 function rulesetFingerprint(ruleset) {
   return JSON.stringify({
+    target: ruleset.target,
     include: [...ruleset.conditions?.ref_name?.include ?? []].sort(),
     rules: (ruleset.rules ?? []).map((r) => r.type).sort(),
     bypass: (ruleset.bypass_actors ?? []).map((a) => `${a.actor_type}:${a.actor_id}:${a.bypass_mode}`).sort()
   });
 }
+function assertBypassAppIds(input) {
+  const missing = [];
+  for (const spec of input.governanceRulesets) {
+    for (const actor of spec.bypassActors) {
+      const id = actor.appRole === "agent" ? input.agentAppIntegrationId : input.releaseAppIntegrationId;
+      if (!(Number.isInteger(id) && (id ?? 0) > 0)) {
+        missing.push(`'${spec.name}' needs the ${actor.appRole} App ID (--${actor.appRole}-app-id)`);
+      }
+    }
+  }
+  if (missing.length > 0) {
+    throw new Error(
+      `Refusing to apply GitHub settings on ${input.repository}: ${missing.join("; ")}. Without it GitHub installs the ruleset with no bypass actor (or removes the bypass from the installed one) and the App is locked out.`
+    );
+  }
+}
 async function planGitHubRulesetChanges(input) {
+  assertBypassAppIds(input);
   const fetchFn = input.fetchImpl ?? fetch;
   const baseUrl = `https://api.github.com/repos/${input.repository.trim()}`;
   const headers = {
@@ -3429,6 +3473,7 @@ async function applyGitHubRepositoryGovernance(input) {
   if (!owner || !repo) {
     throw new Error(`Invalid repository slug '${input.repository}'.`);
   }
+  assertBypassAppIds(input);
   const fetchFn = input.fetchImpl ?? fetch;
   const baseUrl = "https://api.github.com";
   const headers = {
@@ -3709,4 +3754,8 @@ ${githubRulesetsPlan.map((p) => `- \`${p.name}\`: \`${p.action}\``).join("\n")}
     process.exitCode = 1;
   }
 }
-void main();
+main().catch((error) => {
+  process.stderr.write(`setup-repo: ${error instanceof Error ? error.message : String(error)}
+`);
+  process.exitCode = 1;
+});

@@ -8,7 +8,7 @@ Both entry points run the same implementation, the reusable workflow `Giskard-AI
 
 | Repository | Workflow to dispatch | Rulesets that must list the Release App as bypass actor |
 | --- | --- | --- |
-| Consumer repository bootstrapped by `/setup-repo` | `.github/workflows/release.yml` (**EPURE Controlled Release (dev -> main)**), a thin caller pinned to an EPURE commit SHA | `epure-release-immutability` |
+| Consumer repository bootstrapped by `/setup-repo` | `.github/workflows/release.yml` (**EPURE Controlled Release (dev -> main)**), a thin caller pinned to an EPURE commit SHA | `epure-release-immutability`, `epure-release-tags` |
 | `Giskard-AI/epure` itself | `.github/workflows/release-promote.yml` (**Promote Dev to Main (Fast-Forward Release)**) | `Main basic protection`, `epure-branch-governance`, `epure-tag-immutability` |
 
 Inputs: `semver_tag` (`vMAJOR.MINOR.PATCH`), `expected_dev_sha` (the full 40-character SHA of the `dev` head you reviewed) and, on `release-promote.yml`, the optional `ci_workflow` (default `ci.yml`, the workflow file whose run on `dev` must have succeeded).
@@ -18,7 +18,7 @@ Inputs: `semver_tag` (`vMAJOR.MINOR.PATCH`), `expected_dev_sha` (the full 40-cha
 ## 1. One-Time Setup
 
 1. **Create and install the Release App.** Stage 3 of `scripts/wizards/setup-github-apps-wizard.sh --repo <owner>/<repo>` creates `<owner>-epure-release` (repository permissions `Contents: Read and write`, `Metadata: Read-only`, no webhook), installs it on that repository only, and stores two **secrets** in the `release` environment: `EPURE_RELEASE_APP_ID` (numeric App ID) and `EPURE_RELEASE_APP_PRIVATE_KEY` (PEM). The wizard always runs all stages, including the Agent App; if you only need the Release App, follow the same steps by hand and set the secrets with `gh secret set <NAME> -R <owner>/<repo> --env release`.
-2. **Add the Release App as bypass actor** (`actor_type: Integration`, `actor_id: <App ID>`, `bypass_mode: always`) on every ruleset that covers `main` and `v*` tags (see the table above). In consumer repositories, `node dist/cli/setup-repo.mjs --repo <owner>/<repo> --release-app-id <App ID> --apply --apply-github-settings` does it for `epure-release-immutability`. Elsewhere, add the actor with `gh api` while keeping the existing actors:
+2. **Add the Release App as bypass actor** (`actor_type: Integration`, `actor_id: <App ID>`, `bypass_mode: always`) on every ruleset that covers `main` and `v*` tags (see the table above). In consumer repositories, `node dist/cli/setup-repo.mjs --repo <owner>/<repo> --release-app-id <App ID> --apply --apply-github-settings` does it for `epure-release-immutability` and `epure-release-tags`. Elsewhere, add the actor with `gh api` while keeping the existing actors:
 
    ```bash
    gh api repos/<owner>/<repo>/rulesets/<ruleset-id> \

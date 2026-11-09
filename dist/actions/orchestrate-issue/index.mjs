@@ -2769,7 +2769,71 @@ Output ONLY a corrected, complete JSON object strictly matching the required sch
   );
 }
 
+// src/llm/usage.ts
+var LLM_USAGE_LOG_PREFIX = "epure-llm-usage";
+function count(source, key) {
+  const value = source?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+function asCounts(value) {
+  return value && typeof value === "object" ? value : void 0;
+}
+function extractLLMTokenUsage(provider, model, body) {
+  const root = asCounts(body);
+  if (provider === "google") {
+    const u2 = asCounts(root?.usageMetadata);
+    if (!u2) {
+      return null;
+    }
+    const thinking = count(u2, "thoughtsTokenCount");
+    return {
+      provider,
+      model,
+      input_tokens: count(u2, "promptTokenCount") + count(u2, "toolUsePromptTokenCount"),
+      cached_input_tokens: count(u2, "cachedContentTokenCount"),
+      output_tokens: count(u2, "candidatesTokenCount") + thinking,
+      thinking_tokens: thinking
+    };
+  }
+  const u = asCounts(root?.usage);
+  if (!u) {
+    return null;
+  }
+  if (provider === "anthropic") {
+    const cacheRead = count(u, "cache_read_input_tokens");
+    return {
+      provider,
+      model,
+      input_tokens: count(u, "input_tokens") + cacheRead + count(u, "cache_creation_input_tokens"),
+      cached_input_tokens: cacheRead,
+      output_tokens: count(u, "output_tokens"),
+      thinking_tokens: 0
+    };
+  }
+  return {
+    provider,
+    model,
+    input_tokens: count(u, "prompt_tokens"),
+    cached_input_tokens: count(asCounts(u.prompt_tokens_details), "cached_tokens"),
+    output_tokens: count(u, "completion_tokens"),
+    thinking_tokens: count(asCounts(u.completion_tokens_details), "reasoning_tokens")
+  };
+}
+function formatLLMUsageLogLine(usage) {
+  return `${LLM_USAGE_LOG_PREFIX} ${JSON.stringify(usage)}`;
+}
+
 // src/llm/client.ts
+async function logTokenUsage(res, provider, model) {
+  try {
+    const usage = extractLLMTokenUsage(provider, model, await res.clone().json());
+    if (usage) {
+      process.stdout.write(`${formatLLMUsageLogLine(usage)}
+`);
+    }
+  } catch {
+  }
+}
 function resolveConfigValue(val, env = process.env) {
   if (val === void 0) {
     return void 0;
@@ -2981,6 +3045,7 @@ var LLMClient = class {
           const effectiveInit = reqInit.signal || options.fetchImpl && options.requestTimeoutMs === void 0 ? reqInit : { ...reqInit, signal: AbortSignal.timeout(requestTimeoutMs) };
           const res = await fetchFn(reqUrl, effectiveInit);
           if (res.ok) {
+            await logTokenUsage(res, provider, model);
             return res;
           }
           const errText = await res.text();

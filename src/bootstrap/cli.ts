@@ -225,4 +225,7 @@ async function main(): Promise<void> {
   }
 }
 
-void main();
+main().catch((error: unknown) => {
+  process.stderr.write(`setup-repo: ${error instanceof Error ? error.message : String(error)}\n`);
+  process.exitCode = 1;
+});

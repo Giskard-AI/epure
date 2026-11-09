@@ -24,7 +24,7 @@ const EN_PAGES = [
     url: `${SITE_URL}/installation`,
     file: "installation.md",
     summary:
-      "Primary onboarding via the /setup-repo agent skill, Dual GitHub Apps wizard with environment-scoped secrets (--llm-env and release), 4 Repository Rulesets, and dynamic reviewer roster design (reviewers_dir, default .agents/reviewers/)."
+      "Primary onboarding via the /setup-repo agent skill, Dual GitHub Apps wizard with environment-scoped secrets (--llm-env and release), 5 Repository Rulesets, and dynamic reviewer roster design (reviewers_dir, default .agents/reviewers/)."
   },
   {
     title: "Basic Usage (Case Study: craft-calculator)",
@@ -104,7 +104,7 @@ const FR_PAGES = [
     url: `${SITE_URL}/fr/installation`,
     file: "fr/installation.md",
     summary:
-      "Onboarding recommandé via le skill /setup-repo, wizard des 2 GitHub Apps avec secrets cloisonnés par environnement (--llm-env et release), 4 Rulesets et composition dynamique du roster de reviewers (reviewers_dir, .agents/reviewers/ par défaut)."
+      "Onboarding recommandé via le skill /setup-repo, wizard des 2 GitHub Apps avec secrets cloisonnés par environnement (--llm-env et release), 5 Rulesets et composition dynamique du roster de reviewers (reviewers_dir, .agents/reviewers/ par défaut)."
   },
   {
     title: "Usage de Base (Étude de Cas : craft-calculator)",
@@ -178,7 +178,7 @@ function buildLlmsIndex() {
     "",
     "## Core Summary for AI Agents",
     "",
-    "- **Preferred Onboarding (`/setup-repo`)**: Invoke `/setup-repo <owner>/<repo>` in any Skills-compatible coding agent (`.agents/skills/setup-repo/SKILL.md`). The agent inspects the repository stack and domains, runs `scripts/wizards/setup-github-apps-wizard.sh --repo <owner>/<repo> --llm-env <env-name>` (default `epure-agent`), executes `node dist/cli/setup-repo.mjs --dry-run` then `--apply --apply-github-settings`, configures 4 Repository Rulesets (`epure-feature-integrity`, `epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`), generates `.github/zizmor.yml` and a hardened `renovate.json` (with 3-to-14-day quarantine cooldowns), and dynamically composes specialist reviewers in `reviewers_dir` (default `.agents/reviewers/*.md`).",
+    "- **Preferred Onboarding (`/setup-repo`)**: Invoke `/setup-repo <owner>/<repo>` in any Skills-compatible coding agent (`.agents/skills/setup-repo/SKILL.md`). The agent inspects the repository stack and domains, runs `scripts/wizards/setup-github-apps-wizard.sh --repo <owner>/<repo> --llm-env <env-name>` (default `epure-agent`), executes `node dist/cli/setup-repo.mjs --dry-run` then `--apply --apply-github-settings`, configures 5 Repository Rulesets (`epure-feature-integrity`, `epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`, `epure-release-tags`), generates `.github/zizmor.yml` and a hardened `renovate.json` (with 3-to-14-day quarantine cooldowns), and dynamically composes specialist reviewers in `reviewers_dir` (default `.agents/reviewers/*.md`).",
     "- **Four Mandatory Human Gates**:",
     "  1. Initiating `/epure plan` and answering the architectural Grill on the GitHub Issue.",
     "  2. Approving the locked specification mandate via `/epure approve` (integrating `plan/*` directly into `feature/*` and locking `spec_sha`).",

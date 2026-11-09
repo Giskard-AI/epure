@@ -41,7 +41,7 @@ Avant d'écrire le moindre fichier, l'agent inspecte le dépôt cible (`package.
 Pour garantir une séparation stricte des privilèges (Q82, Q91) et zéro exposition de secrets aux workflows publics de Pull Request (conformité Zizmor), EPURE n'utilise jamais de jeton personnel (PAT) omnipotent ni de secrets globaux du dépôt. Chaque dépôt utilise **deux GitHub Apps distinctes** et **deux environnements GitHub isolés** (`<llm-env>` et `release`) :
 
 1. **Agent App (`<owner>-epure-agent`)** : utilisée par l'orchestrateur pour l'automatisation quotidienne (`plan/*`, `task/*`, `feature/*`, Issues, PRs et Check Runs). Elle ne figure **jamais** parmi les Bypass Actors de `dev` ou `main`.
-2. **Release App (`<owner>-epure-release`)** : utilisée exclusivement par le workflow de release (votre `.github/workflows/release.yml`, qui appelle le workflow réutilisable `release-promote.yml` d'EPURE) lorsqu'un humain déclenche une promotion fast-forward de `dev` vers `main` avec `semver_tag` et `expected_dev_sha`. C'est le **seul Bypass Actor** sur `epure-release-immutability` (`main` et les tags `v*`). Voir [Promouvoir une Release](./guides/how-to-release.md) pour la protection initiale de l'environnement (relecteur obligatoire, politique de déploiement limitée à `dev`).
+2. **Release App (`<owner>-epure-release`)** : utilisée exclusivement par le workflow de release (votre `.github/workflows/release.yml`, qui appelle le workflow réutilisable `release-promote.yml` d'EPURE) lorsqu'un humain déclenche une promotion fast-forward de `dev` vers `main` avec `semver_tag` et `expected_dev_sha`. C'est le **seul Bypass Actor** sur `epure-release-immutability` (`main`) et `epure-release-tags` (tags `v*`). Voir [Promouvoir une Release](./guides/how-to-release.md) pour la protection initiale de l'environnement (relecteur obligatoire, politique de déploiement limitée à `dev`).
 
 Lancez l'assistant interactif, qui propose l'**Approche 2** (flux local GitHub App Manifest en 1 clic) avec repli automatique sur l'**Approche 1** (enregistrement manuel guidé étape par étape) et injecte les secrets dans leurs environnements GitHub dédiés via `gh secret set --env` sans jamais exposer vos clés privées PEM au modèle LLM :
 
@@ -120,13 +120,14 @@ git push origin dev
      - **Socle transverse permanent** : `architecture-reviewer`, `security-reviewer`, `spec-parity-reviewer`, `standards-reviewer` (adapté au langage détecté : TypeScript, Python, Rust ou Go) et `user-advocate`.
      - **Spécialistes conçus sur mesure selon les éléments du projet** : `domain-backend-reviewer`, `infra-reviewer`, tout reviewer métier créé par l'agent pour vos sous-systèmes (ex. `realtime-reviewer.md`, `combat-engine-reviewer.md`, `sql-migration-reviewer.md` avec routage par `paths:` dans le frontmatter YAML), et — uniquement si le projet comporte une UI — les reviewers frontend/Impeccable (`frontend-reviewer`, `accessibility-reviewer`, `design-reviewer`).
      - *Exemple illustratif sur `craft-calculator` (application web TypeScript + React)* : l'agent assemble un roster de 10 reviewers combinant le socle transverse, `domain-backend-reviewer`, `infra-reviewer` et les 3 reviewers UI/Impeccable.
-5. **Politique Squash-Only & 4 Repository Rulesets** :
+5. **Politique Squash-Only & 5 Repository Rulesets** :
    - Configure le dépôt en **Squash merge exclusif** (`allow_squash_merge: true`, `allow_merge_commit: false`, `allow_rebase_merge: false`, `delete_branch_on_merge: true`).
-   - Installe les 4 Rulesets GitHub :
+   - Installe les 5 Rulesets GitHub :
      - `epure-feature-integrity` (`refs/heads/feature/*`) : interdit suppression et force-push sans aucun Bypass Actor, si bien que même l'`Agent App` ne peut ni réécrire ni supprimer une branche de fonctionnalité. Conséquence : les branches `feature/*` fusionnées restent sur GitHub. `delete_branch_on_merge` ne peut pas les supprimer, un administrateur non plus ; pour les élaguer, désactivez temporairement ce Ruleset (Settings → Rules → Rulesets), supprimez les branches fusionnées, puis réactivez-le.
      - `epure-feature-governance` (`refs/heads/feature/*`) : `Agent App` en bypass `always` pour le squash-merge autonome des PRs `task/* -> feature/*` et les écritures directes d'EPURE (intégration du plan, synchronisations depuis `dev` en commits de merge, résolutions de conflits) ; les humains passent toujours par une PR.
      - `epure-dev-governance` (`refs/heads/dev`) : aucun bypass pour l'`Agent App` (`required_approving_review_count: 0` par défaut pour permettre à un mainteneur solo de merger ses PRs ; configurable via `--require-pr-approvals <N>`).
-     - `epure-release-immutability` (`refs/heads/main`, `refs/tags/v*`) : `Release App` comme unique Bypass Actor.
+     - `epure-release-immutability` (`refs/heads/main`) : ni mise à jour (merges de PR compris), ni push direct, ni force-push, ni suppression ; `Release App` comme unique Bypass Actor, seule une release fait avancer `main`. Un hotfix manuel urgent sur `main` exige qu'un admin désactive temporairement ce ruleset.
+     - `epure-release-tags` (`refs/tags/v*`, ruleset de tags) : ni création, ni déplacement, ni suppression de tags `v*` ; `Release App` comme unique Bypass Actor.
 
 ## Compromis Fail-Closed
 

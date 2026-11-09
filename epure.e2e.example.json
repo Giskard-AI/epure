@@ -1,0 +1,17 @@
+{
+  "repository": "Giskard-AI/epure-e2e-sandbox",
+  "epureRef": "dev",
+  "model": "google/gemini-3.8-flash",
+  "llmEnvironment": "epure-agent",
+  "agentAppId": 0,
+  "releaseAppId": 0,
+  "pricing": {
+    "google/gemini-3.8-flash": { "inputPerMTok": 0.75, "outputPerMTok": 3.75, "cachedInputPerMTok": 0.075 }
+  },
+  "pricingSource": "https://aistudio.google.com/docs/pricing (paid tier, introductory rates through 2026-12-31; $1.50/$7.50/$0.15 from 2027-01-01), read 2026-11-08",
+  "outputDir": ".scratch/e2e",
+  "maxGrillReplies": 3,
+  "planningStepTimeoutMinutes": 30,
+  "implementationTimeoutMinutes": 240,
+  "installCiTimeoutMinutes": 20
+}

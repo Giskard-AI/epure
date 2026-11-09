@@ -69,7 +69,7 @@ The **`.agents/skills/setup-repo/SKILL.md`** skill is the **preferred way** to o
 1. **Project Discovery**: Inspects the repository stack (`package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, `Makefile`), `src/` module layout, and whether a user interface is present.
 2. **Dry-Run Simulation (`--dry-run`)**: Runs `dist/cli/setup-repo.mjs --dry-run` and presents the full plan to the human maintainer before writing anything.
 3. **Dynamic Reviewer Roster Design (`reviewers_dir`, default `.agents/reviewers/*.md`)**: Creates, designs, and tailors specialist reviewers according to the project's actual elements (always-on core `architecture-reviewer`, `security-reviewer`, `spec-parity-reviewer`, `standards-reviewer`, `user-advocate` + tailored domain/UI specialists with `paths:` routing).
-4. **Idempotent Application (`--apply --apply-github-settings`)**: Writes `.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`, SHA-pinned caller workflows, configures squash-only merges, and provisions the 4 Repository Rulesets.
+4. **Idempotent Application (`--apply --apply-github-settings`)**: Writes `.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`, SHA-pinned caller workflows, configures squash-only merges, and provisions the 5 Repository Rulesets.
 
 ---
 
@@ -105,7 +105,7 @@ node dist/cli/setup-repo.mjs \
 | `--pinned-sha <sha>` | Latest EPURE SHA | Immutable 40-character Git commit SHA of `Giskard-AI/epure` used to pin generated caller workflows. |
 | `--dry-run` | `true` (if `--apply` omitted) | Prints the complete bootstrap plan without modifying local files or calling write APIs. With `--apply-github-settings`, reads the existing rulesets and reports `create`, `update` or `noop` for each. |
 | `--apply` | `false` | Writes configuration files (`.github/agents.yml`, `.github/zizmor.yml`, `renovate.json`), caller workflows, and base reviewer prompts (`<reviewers_dir>/*.md`, default `.agents/reviewers/*.md`). |
-| `--apply-github-settings` | `false` | Applies squash-only repository settings and the 4 Repository Rulesets (`epure-feature-integrity`, `epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`) via the GitHub REST API. |
+| `--apply-github-settings` | `false` | Applies squash-only repository settings and the 5 Repository Rulesets (`epure-feature-integrity`, `epure-feature-governance`, `epure-dev-governance`, `epure-release-immutability`, `epure-release-tags`) via the GitHub REST API. |
 | `--no-frontend-reviewers` | `false` | Omits `frontend-reviewer`, `accessibility-reviewer`, and `design-reviewer` for headless repositories. |
 | `--domain-reviewers <csv>` | None | Scaffolds additional `<reviewers_dir>/<slug>-reviewer.md` specialist files for domain subsystems. |
 | `--reviewers-dir <path>` | `.agents/reviewers` | Reviewer roster directory written to `.github/agents.yml` (`reviewers_dir`) and read by the orchestrator from `dev` (e.g. `--reviewers-dir .cursor/agents` for a team that wants Cursor to load the reviewers as subagents). Absolute paths, `.`/`..` segments, and paths under `src/` fail closed with `SECURITY_INVARIANT_VIOLATION`. |
@@ -114,8 +114,8 @@ node dist/cli/setup-repo.mjs \
 | `--planning-model <provider/model>` | `anthropic/claude-sonnet-4-20250514` | Sets `models.planning`. |
 | `--implementation-model <provider/model>` | `anthropic/claude-sonnet-4-20250514` | Sets `models.implementation`. |
 | `--review-model <provider/model>` | `openai/gpt-4.1` | Sets `models.review`. |
-| `--agent-app-id <id>` | Optional | Numeric GitHub App ID of `<owner>-epure-agent` added as Bypass Actor (`always`) on `epure-feature-governance` (`feature/*`), so EPURE can push plan integrations, `dev` syncs and conflict resolutions directly. `epure-feature-integrity` has no bypass actor: nobody, the App included, can force-push or delete a `feature/*` branch. |
-| `--release-app-id <id>` | Optional | Numeric GitHub App ID of `<owner>-epure-release` added as sole Bypass Actor on `epure-release-immutability` (`main` and `v*`). |
+| `--agent-app-id <id>` | Required with `--apply-github-settings` | Numeric GitHub App ID of `<owner>-epure-agent` added as Bypass Actor (`always`) on `epure-feature-governance` (`feature/*`), so EPURE can push plan integrations, `dev` syncs and conflict resolutions directly. `epure-feature-integrity` has no bypass actor: nobody, the App included, can force-push or delete a `feature/*` branch. |
+| `--release-app-id <id>` | Required with `--apply-github-settings` | Numeric GitHub App ID of `<owner>-epure-release` added as sole Bypass Actor on `epure-release-immutability` (`main`) and `epure-release-tags` (`v*`). Without one of the two IDs, `--apply-github-settings` (and its dry-run) stops with an error before any GitHub call: the ruleset would otherwise lock the App out. |
 | `--require-pr-approvals <N>` | `0` | Number of human PR review approvals required on `dev` (`0` for solo-maintainer compatibility; `>=1` for teams). |
 | `--json` | `false` | Emits the full structured `SetupRepoResult` JSON payload to stdout instead of the Markdown summary. |
 

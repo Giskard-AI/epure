@@ -538,6 +538,9 @@ describe("Bilingual VitePress Documentation, Archify Showcase Diagrams & Impecca
         "--repo <owner>/<repo>",
         "--llm-env <env-name>",
         "--manual",
+        "--app-name-prefix <prefix>",
+        "--llm-api-key-file <path>",
+        "--e2e-config <path>",
         "EPURE_AGENT_APP_ID",
         "EPURE_RELEASE_APP_ID",
         "--env release"

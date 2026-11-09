@@ -88,17 +88,14 @@ export function buildSandboxToolingSetupSteps(
     "          # renovate: datasource=github-releases depName=rtk-ai/rtk",
     `          RTK_VERSION="${safeRtkVersion}"`,
     '          RTK_ARCHIVE="rtk-x86_64-unknown-linux-musl.tar.gz"',
-    '          curl -fsSL "https://github.com/rtk-ai/rtk/releases/download/${RTK_VERSION}/${RTK_ARCHIVE}" -o "/tmp/${RTK_ARCHIVE}"',
-    '          curl -fsSL "https://github.com/rtk-ai/rtk/releases/download/${RTK_VERSION}/checksums.txt" -o "/tmp/rtk-checksums.txt"',
+    '          curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "https://github.com/rtk-ai/rtk/releases/download/${RTK_VERSION}/${RTK_ARCHIVE}" -o "/tmp/${RTK_ARCHIVE}"',
+    '          curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "https://github.com/rtk-ai/rtk/releases/download/${RTK_VERSION}/checksums.txt" -o "/tmp/rtk-checksums.txt"',
     "          (cd /tmp && sha256sum --check --ignore-missing rtk-checksums.txt)",
-    '          mkdir -p "$RUNNER_TEMP/bin"',
-    '          tar -xzf "/tmp/${RTK_ARCHIVE}" -C "$RUNNER_TEMP/bin" rtk',
-    '          chmod 0755 "$RUNNER_TEMP/bin/rtk"',
-    '          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"',
-    '          echo "RTK_TELEMETRY_DISABLED=1" >> "$GITHUB_ENV"',
-    '          echo "RTK_RECALL=0" >> "$GITHUB_ENV"',
-    '          echo "RTK_TEE=0" >> "$GITHUB_ENV"',
-    '          echo "NO_COLOR=1" >> "$GITHUB_ENV"'
+    '          tar -xzf "/tmp/${RTK_ARCHIVE}" -C /tmp rtk',
+    // /usr/local/bin is already on PATH and executable inside landrun; writing GITHUB_PATH or
+    // GITHUB_ENV under issue_comment/workflow_run fails zizmor's github-env audit. The stateless
+    // RTK variables come from buildSanitizedSandboxEnv.
+    "          sudo install -m 0755 /tmp/rtk /usr/local/bin/rtk"
   ];
 }
 

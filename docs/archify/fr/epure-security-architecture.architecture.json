@@ -155,7 +155,7 @@
       "items": [
         "Job 1 authorize-command tourne avec 0 secret ; Job 2 s'exécute dans l'environnement isolé <llm-env>",
         "L'Agent App n'écrit que sur plan/*, task/* et feature/* (auto-merge sur dev et push sur main interdits)",
-        "La Release App tourne exclusivement dans environment: release comme seul Bypass Actor sur main et v*"
+        "La Release App tourne exclusivement dans environment: release comme seul Bypass Actor de epure-release-immutability (main, sans merge de PR) et epure-release-tags (v*)"
       ]
     },
     {
