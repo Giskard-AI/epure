@@ -1,4 +1,8 @@
 import { appendFileSync } from "node:fs";
+import {
+  createGitHubRestHelper,
+  loadTrustedAgentsProviders
+} from "../../src/orchestrator/github/rest-client.js";
 import { runInUntrustedCodeSandbox } from "../../src/sandbox/llm-sandbox.js";
 
 function writeActionOutputs(outputs: Record<string, string>): void {
@@ -36,15 +40,24 @@ async function main(): Promise<void> {
     args = [];
   }
 
+  const model = process.env.INPUT_MODEL?.trim() ?? "";
+  const repository = (process.env.INPUT_REPOSITORY ?? process.env.GITHUB_REPOSITORY ?? "").trim();
+  const githubToken = (process.env.INPUT_GITHUB_TOKEN ?? "").trim();
+  const providers =
+    model && githubToken && repository
+      ? await loadTrustedAgentsProviders(createGitHubRestHelper({ repository, token: githubToken }))
+      : undefined;
   const result = await runInUntrustedCodeSandbox({
     isolationAvailable,
     runnerEnv: process.env,
     command,
-    args
+    args,
+    ...(model ? { llm: { model, providers } } : {})
   });
 
   writeActionOutputs({
     isolated: String(result.isolated),
+    confined: String(result.confined === true),
     error_code: result.error_code,
     exit_code: String(result.exit_code),
     stdout: result.stdout,

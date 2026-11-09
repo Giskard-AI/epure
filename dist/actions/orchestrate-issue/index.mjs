@@ -2142,23 +2142,138 @@ Output ONLY a corrected, complete JSON object strictly matching the required sch
   );
 }
 
+// src/llm/upstream.ts
+var MODEL = String.raw`[\w.@-]+`;
+var GENERATE = String.raw`:(?:generateContent|streamGenerateContent)`;
+var OPENAI_PATHS = [/^\/chat\/completions$/, /^\/responses$/];
+function trimBase(raw) {
+  return raw.trim().replace(/\/+$/, "");
+}
+function openAiCompatibleRoot(base) {
+  const trimmed = trimBase(base);
+  if (trimmed.endsWith("/chat/completions")) {
+    return trimmed.slice(0, -"/chat/completions".length);
+  }
+  return /\/v1$/.test(trimmed) ? trimmed : `${trimmed}/v1`;
+}
+function azureAiRoot(endpoint) {
+  const root = trimBase(endpoint).replace(/\/models$/i, "");
+  if (root.endsWith("/chat/completions")) {
+    return root.slice(0, -"/chat/completions".length);
+  }
+  return /\/v1$/.test(root) ? root : `${root}/openai/v1`;
+}
+function googleApiRoot(base, provider) {
+  const trimmed = trimBase(base).replace(/(?:\/publishers\/google)?\/models$/, "");
+  const versioned = /^(.*)\/(v1beta1?|v1)$/i.exec(trimmed);
+  if (versioned?.[1] !== void 0 && versioned[2] !== void 0) {
+    return { root: versioned[1], version: versioned[2] };
+  }
+  return { root: trimmed, version: provider === "vertex" ? "v1" : "v1beta" };
+}
+function requireEndpoint(provider, value, hint) {
+  if (!value?.trim()) {
+    throw new BadRequestError(`Provider '${provider}' requires base_url (or ${hint}).`, {
+      provider,
+      status: 400
+    });
+  }
+  return trimBase(value);
+}
+function resolveProviderUpstream(provider, providerConfig, env = process.env) {
+  const configured = providerConfig?.baseUrl ?? providerConfig?.base_url;
+  const defaultHeaders = {
+    ...providerConfig?.defaultHeaders ?? providerConfig?.default_headers ?? {}
+  };
+  switch (provider) {
+    case "openai":
+    case "openrouter":
+      return {
+        provider,
+        baseUrl: openAiCompatibleRoot(
+          configured ?? (provider === "openrouter" ? "https://openrouter.ai/api/v1" : env.OPENAI_BASE_URL ?? "https://api.openai.com/v1")
+        ),
+        authHeader: "authorization",
+        allowedPaths: OPENAI_PATHS,
+        defaultHeaders
+      };
+    case "azure":
+      return {
+        provider,
+        baseUrl: requireEndpoint(
+          provider,
+          configured ?? env.AZURE_OPENAI_ENDPOINT ?? env.AZURE_API_BASE,
+          "AZURE_OPENAI_ENDPOINT / AZURE_API_BASE"
+        ),
+        authHeader: "api-key",
+        allowedPaths: [
+          new RegExp(`^/openai/deployments/${MODEL}/chat/completions$`),
+          /^\/openai\/v1\/(?:chat\/completions|responses)$/
+        ],
+        defaultHeaders
+      };
+    case "azure_ai":
+      return {
+        provider,
+        baseUrl: azureAiRoot(
+          requireEndpoint(
+            provider,
+            configured ?? env.AZURE_AI_ENDPOINT ?? env.AZURE_AI_BASE_URL,
+            "AZURE_AI_ENDPOINT / AZURE_AI_BASE_URL"
+          )
+        ),
+        authHeader: "api-key",
+        allowedPaths: OPENAI_PATHS,
+        defaultHeaders
+      };
+    case "anthropic":
+      return {
+        provider,
+        baseUrl: trimBase(configured ?? "https://api.anthropic.com").replace(
+          /(?:\/v1)?(?:\/messages)?$/,
+          ""
+        ),
+        authHeader: "x-api-key",
+        allowedPaths: [/^\/v1\/messages$/],
+        defaultHeaders
+      };
+    case "google":
+      return {
+        provider,
+        baseUrl: googleApiRoot(configured ?? "https://generativelanguage.googleapis.com", provider).root,
+        authHeader: "x-goog-api-key",
+        allowedPaths: [new RegExp(`^/v1(?:beta)?/models/${MODEL}${GENERATE}$`)],
+        defaultHeaders
+      };
+    case "vertex":
+      return {
+        provider,
+        baseUrl: googleApiRoot(configured ?? "https://aiplatform.googleapis.com", provider).root,
+        defaultHeaders,
+        authHeader: "x-goog-api-key",
+        allowedPaths: [
+          new RegExp(
+            `^/v1(?:beta1)?/(?:projects/[\\w-]+/locations/[\\w-]+/)?publishers/google/models/${MODEL}${GENERATE}$`
+          )
+        ]
+      };
+  }
+}
+
 // src/llm/providers/google.ts
 var GEMINI_SKIP_THOUGHT_SIGNATURE_SENTINEL = "c2tpcF90aG91Z2h0X3NpZ25hdHVyZV92YWxpZGF0b3I=";
 function buildGoogleGenerateContentUrl(params) {
   const modelEncoded = encodeURIComponent(params.model.trim());
   const keyEncoded = encodeURIComponent(params.apiKey.trim());
-  const rawBase = (params.baseUrl ?? "https://generativelanguage.googleapis.com/v1beta").trim().replace(/\/+$/, "");
+  const isVertex = params.provider === "vertex";
+  const rawBase = (params.baseUrl ?? (isVertex ? "https://aiplatform.googleapis.com/v1" : "https://generativelanguage.googleapis.com/v1beta")).trim().replace(/\/+$/, "");
   if (rawBase.includes(":generateContent")) {
     const sep2 = rawBase.includes("?") ? "&" : "?";
     return rawBase.includes("key=") ? rawBase : `${rawBase}${sep2}key=${keyEncoded}`;
   }
-  if (rawBase.endsWith("/models")) {
-    return `${rawBase}/${modelEncoded}:generateContent?key=${keyEncoded}`;
-  }
-  if (/\/v1(?:beta)?$/i.test(rawBase)) {
-    return `${rawBase}/models/${modelEncoded}:generateContent?key=${keyEncoded}`;
-  }
-  return `${rawBase}/v1beta/models/${modelEncoded}:generateContent?key=${keyEncoded}`;
+  const { root, version } = googleApiRoot(rawBase, isVertex ? "vertex" : "google");
+  const models = isVertex ? "publishers/google/models" : "models";
+  return `${root}/${version}/${models}/${modelEncoded}:generateContent?key=${keyEncoded}`;
 }
 function extractTextFromParts(parts) {
   const nonThoughtText = parts.filter((p) => !p.thought).map((p) => p.text ?? "").join("");
@@ -2182,7 +2297,8 @@ async function executeGoogleProvider(input) {
   const url = buildGoogleGenerateContentUrl({
     model,
     apiKey,
-    baseUrl
+    baseUrl,
+    provider: input.provider
   });
   const headers = {
     "Content-Type": "application/json",
@@ -2510,6 +2626,16 @@ Output ONLY a corrected, complete JSON object strictly matching the required sch
 }
 
 // src/llm/providers/openai.ts
+var STRUCTURED_OUTPUT_REJECTION_PATTERN = /response_format|json_schema|structured output|can handle the requested parameters/i;
+function explainStructuredOutputRejection(err, provider, model, url) {
+  if (err instanceof LLMError && (err.status === 400 || err.status === 404 || err.status === 422) && STRUCTURED_OUTPUT_REJECTION_PATTERN.test(err.message)) {
+    return new BadRequestError(
+      `The OpenAI-compatible endpoint ${new URL(url).host} rejected structured output (response_format json_schema) for '${provider}/${model}'. EPURE needs JSON-schema structured outputs for this call: pick a model or base_url that supports them. ${err.message}`,
+      { provider, status: err.status }
+    );
+  }
+  return err;
+}
 function buildOpenAICompatibleEndpointAndHeaders(params) {
   const env = params.env ?? process.env;
   const cfg = params.providerConfig;
@@ -2526,9 +2652,9 @@ function buildOpenAICompatibleEndpointAndHeaders(params) {
       );
     }
     const apiVersion = (rawApiVersion ?? env.AZURE_API_VERSION ?? "2024-10-21").trim();
-    const url2 = `${base}/openai/deployments/${encodeURIComponent(params.model.trim())}/chat/completions?api-version=${encodeURIComponent(apiVersion)}`;
+    const url = `${base}/openai/deployments/${encodeURIComponent(params.model.trim())}/chat/completions?api-version=${encodeURIComponent(apiVersion)}`;
     return {
-      url: url2,
+      url,
       headers: {
         "Content-Type": "application/json",
         "api-key": apiKey,
@@ -2544,17 +2670,8 @@ function buildOpenAICompatibleEndpointAndHeaders(params) {
         { provider: "azure_ai", status: 400 }
       );
     }
-    const normalizedBase = rawEndpoint.replace(/\/+$/, "").replace(/\/models$/i, "");
-    let url2;
-    if (normalizedBase.endsWith("/chat/completions")) {
-      url2 = normalizedBase;
-    } else if (normalizedBase.endsWith("/v1")) {
-      url2 = `${normalizedBase}/chat/completions`;
-    } else {
-      url2 = `${normalizedBase}/openai/v1/chat/completions`;
-    }
     return {
-      url: url2,
+      url: `${azureAiRoot(rawEndpoint)}/chat/completions`,
       headers: {
         "Content-Type": "application/json",
         "api-key": apiKey,
@@ -2563,17 +2680,9 @@ function buildOpenAICompatibleEndpointAndHeaders(params) {
       }
     };
   }
-  const openAiBase = (rawBaseUrl ?? env.OPENAI_BASE_URL ?? "https://api.openai.com/v1").trim().replace(/\/+$/, "");
-  let url;
-  if (openAiBase.endsWith("/chat/completions")) {
-    url = openAiBase;
-  } else if (openAiBase.endsWith("/v1")) {
-    url = `${openAiBase}/chat/completions`;
-  } else {
-    url = `${openAiBase}/v1/chat/completions`;
-  }
+  const openAiBase = rawBaseUrl ?? (params.provider === "openrouter" ? "https://openrouter.ai/api/v1" : env.OPENAI_BASE_URL ?? "https://api.openai.com/v1");
   return {
-    url,
+    url: `${openAiCompatibleRoot(openAiBase)}/chat/completions`,
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,
@@ -2592,6 +2701,17 @@ async function executeOpenAIProvider(input) {
   const effectiveSystemInstruction = buildProtectedSystemInstruction(
     options.systemInstruction
   );
+  const send = async (body) => {
+    try {
+      return await executeRequest(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body)
+      });
+    } catch (err) {
+      throw options.responseSchema ? explainStructuredOutputRejection(err, provider, model, url) : err;
+    }
+  };
   const messages = [
     {
       role: "system",
@@ -2639,16 +2759,15 @@ async function executeOpenAIProvider(input) {
           schema: closeObjectSchemasForOpenAI(options.responseSchema.schema)
         }
       };
+      if (provider === "openrouter") {
+        body.provider = { require_parameters: true };
+      }
     } else if (options.responseMimeType === "application/json") {
       body.response_format = {
         type: "json_object"
       };
     }
-    const response = await executeRequest(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body)
-    });
+    const response = await send(body);
     if (!response.ok) {
       const errText = await response.text();
       throw classifyHttpError({
@@ -2739,11 +2858,7 @@ Output ONLY a corrected, complete JSON object strictly matching the required sch
               messages,
               ...openAiTools ? { tools: openAiTools, tool_choice: "none" } : {}
             };
-            const retryResponse = await executeRequest(url, {
-              method: "POST",
-              headers,
-              body: JSON.stringify(retryBody)
-            });
+            const retryResponse = await send(retryBody);
             if (!retryResponse.ok) {
               const errText = await retryResponse.text();
               throw classifyHttpError({
@@ -2781,7 +2896,7 @@ function asCounts(value) {
 }
 function extractLLMTokenUsage(provider, model, body) {
   const root = asCounts(body);
-  if (provider === "google") {
+  if (provider === "google" || provider === "vertex") {
     const u2 = asCounts(root?.usageMetadata);
     if (!u2) {
       return null;
@@ -2869,6 +2984,12 @@ function mapKnownProviderPrefix(prefix) {
   }
   if (lower === "anthropic" || lower === "claude") {
     return "anthropic";
+  }
+  if (lower === "openrouter") {
+    return "openrouter";
+  }
+  if (lower === "vertex" || lower === "vertex_ai") {
+    return "vertex";
   }
   return void 0;
 }
@@ -2962,6 +3083,10 @@ function resolveProviderApiKey(params) {
     providerEnvKey = env.AZURE_AI_API_KEY?.trim() || env.AZURE_AI_KEY?.trim();
   } else if (params.provider === "anthropic") {
     providerEnvKey = env.ANTHROPIC_API_KEY?.trim();
+  } else if (params.provider === "openrouter") {
+    providerEnvKey = env.OPENROUTER_API_KEY?.trim();
+  } else if (params.provider === "vertex") {
+    providerEnvKey = env.GOOGLE_API_KEY?.trim();
   }
   if (providerEnvKey) {
     return providerEnvKey;
@@ -3102,8 +3227,9 @@ var LLMClient = class {
       await sleepMs(backoffSec * 1e3);
     } : void 0;
     const invokeProvider = async () => {
-      if (provider === "google") {
+      if (provider === "google" || provider === "vertex") {
         return await executeGoogleProvider({
+          provider,
           model,
           apiKey,
           providerConfig,
@@ -7294,10 +7420,10 @@ import {
   existsSync as existsSync2,
   lstatSync,
   mkdirSync as mkdirSync2,
-  mkdtempSync,
+  mkdtempSync as mkdtempSync2,
   readFileSync as readFileSync2,
   realpathSync,
-  rmSync,
+  rmSync as rmSync2,
   unlinkSync,
   writeFileSync
 } from "node:fs";
@@ -7305,20 +7431,46 @@ import { tmpdir } from "node:os";
 import { dirname as dirname2, join as join2, resolve as resolve2, sep } from "node:path";
 
 // src/sandbox/llm-sandbox.ts
-import { randomBytes } from "node:crypto";
-import { mkdirSync } from "node:fs";
-import { createServer } from "node:http";
+import { randomBytes, timingSafeEqual } from "node:crypto";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import {
+  Agent as HttpAgent,
+  createServer,
+  request as httpRequest
+} from "node:http";
+import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 import { spawn, spawnSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
-var SECRET_ENV_NAME_PATTERN = /^(?:OPENAI_API_KEY|ANTHROPIC_API_KEY|GOOGLE_API_KEY|GEMINI_API_KEY|LLM_API_KEY|GITHUB_TOKEN|GH_TOKEN|GITHUB_PAT|EPURE_.*(?:KEY|TOKEN|SECRET)|AWS_.*|AZURE_.*|GCP_.*|NPM_TOKEN|NODE_AUTH_TOKEN|ACTIONS_RUNTIME_TOKEN|ACTIONS_ID_TOKEN_REQUEST_TOKEN)$/i;
-var ALLOWED_PROXY_PATHS = /* @__PURE__ */ new Set([
-  "/v1/chat/completions",
-  "/v1/responses",
-  "/v1/messages",
-  "/chat/completions",
-  "/responses",
-  "/messages"
+import { pipeline, Transform } from "node:stream";
+import { brotliDecompressSync, gunzipSync, inflateSync } from "node:zlib";
+var SECRET_ENV_NAME_PATTERN = /^(?:.*API_KEY|.*_TOKEN|.*_SECRET|.*PRIVATE_KEY|LLM_API_KEY|GITHUB_TOKEN|GH_TOKEN|GITHUB_PAT|EPURE_.*(?:KEY|TOKEN|SECRET)|AWS_.*|AZURE_.*|GCP_.*|NPM_TOKEN|NODE_AUTH_TOKEN|ACTIONS_RUNTIME_TOKEN|ACTIONS_ID_TOKEN_REQUEST_TOKEN)$/i;
+var NONCE_HEADER = "x-epure-proxy-nonce";
+var CREDENTIAL_HEADERS = [
+  NONCE_HEADER,
+  "authorization",
+  "x-api-key",
+  "api-key",
+  "x-goog-api-key"
+];
+var HOP_BY_HOP_HEADERS = [
+  "connection",
+  "keep-alive",
+  "proxy-authorization",
+  "proxy-connection",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade"
+];
+var DROPPED_REQUEST_HEADERS = /* @__PURE__ */ new Set([
+  ...CREDENTIAL_HEADERS,
+  ...HOP_BY_HOP_HEADERS,
+  "host",
+  "expect",
+  "accept-encoding"
 ]);
+var DROPPED_RESPONSE_HEADERS = new Set(HOP_BY_HOP_HEADERS);
+var MAX_PROXY_REQUEST_BYTES = 20 * 1024 * 1024;
 function buildSanitizedSandboxEnv(runnerEnv, proxy) {
   const sanitized = {};
   for (const [key, value] of Object.entries(runnerEnv)) {
@@ -7334,8 +7486,10 @@ function buildSanitizedSandboxEnv(runnerEnv, proxy) {
     sanitized[key] = value;
   }
   sanitized.EPURE_SANDBOX_ACTIVE = "true";
-  sanitized.EPURE_LLM_PROXY_URL = proxy.proxyUrl;
-  sanitized.EPURE_LLM_PROXY_NONCE = proxy.proxyNonce;
+  if (proxy) {
+    sanitized.EPURE_LLM_PROXY_URL = proxy.proxyUrl;
+    sanitized.EPURE_LLM_PROXY_NONCE = proxy.proxyNonce;
+  }
   sanitized.GITHUB_TOKEN_PERMISSIONS = "none";
   sanitized.RTK_TELEMETRY_DISABLED = "1";
   sanitized.RTK_RECALL = "0";
@@ -7359,7 +7513,13 @@ function buildLandrunInvocation(params) {
   if (params.command.startsWith("/")) {
     roxPaths.add(sanitizeLandrunPath(dirname(resolve(params.command))));
   }
-  const rwxPaths = /* @__PURE__ */ new Set([resolvedCwd, "/tmp"]);
+  for (const p of params.readOnlyPaths ?? []) {
+    roxPaths.add(sanitizeLandrunPath(resolve(p)));
+  }
+  const rwxPaths = /* @__PURE__ */ new Set([
+    resolvedCwd,
+    params.agentDir ? sanitizeLandrunPath(resolve(params.agentDir)) : "/tmp"
+  ]);
   if (params.networkPolicy === "https_only") {
     const home = sanitizeLandrunPath(params.sanitizedEnv.HOME?.trim() ?? "");
     if (home) {
@@ -7391,12 +7551,16 @@ function buildLandrunInvocation(params) {
 }
 function buildBubblewrapInvocation(params) {
   const resolvedCwd = resolve(params.cwd);
+  const extraBinds = [
+    ...(params.readOnlyPaths ?? []).flatMap((p) => ["--ro-bind", resolve(p), resolve(p)]),
+    ...params.agentDir ? ["--bind", resolve(params.agentDir), resolve(params.agentDir)] : []
+  ];
   return [
-    "--unshare-net",
+    ...params.underLandrun ? [] : ["--unshare-net"],
     "--unshare-pid",
     "--unshare-ipc",
     "--die-with-parent",
-    "--ro-bind",
+    params.underLandrun ? "--bind" : "--ro-bind",
     "/",
     "/",
     "--dev",
@@ -7405,6 +7569,12 @@ function buildBubblewrapInvocation(params) {
     "/proc",
     "--tmpfs",
     "/tmp",
+    "--tmpfs",
+    "/run",
+    "--ro-bind-try",
+    "/run/systemd/resolve",
+    "/run/systemd/resolve",
+    ...extraBinds,
     "--bind",
     resolvedCwd,
     resolvedCwd,
@@ -7415,58 +7585,48 @@ function buildBubblewrapInvocation(params) {
     ...params.args
   ];
 }
+function selectKernelBackend(networkPolicy, capabilities) {
+  if (networkPolicy === "offline" && capabilities.bubblewrapAvailable) {
+    return "bubblewrap";
+  }
+  if (capabilities.landrunAvailable) {
+    return capabilities.bubblewrapAvailable ? "bubblewrap+landrun" : "landrun";
+  }
+  return "none";
+}
+function hidesHostSockets(backend) {
+  return backend === "bubblewrap" || backend === "bubblewrap+landrun";
+}
 function buildKernelSandboxedCommand(input) {
-  if (input.networkPolicy === "offline") {
-    if (input.capabilities.bubblewrapAvailable) {
-      return {
-        backend: "bubblewrap",
-        command: "bwrap",
-        args: buildBubblewrapInvocation({
-          command: input.command,
-          args: input.args,
-          cwd: input.cwd
-        })
-      };
-    }
-    if (input.capabilities.landrunAvailable) {
-      return {
-        backend: "landrun",
-        command: "landrun",
-        args: buildLandrunInvocation({
-          command: input.command,
-          args: input.args,
-          cwd: input.cwd,
-          sanitizedEnv: input.sanitizedEnv,
-          networkPolicy: "offline",
-          proxyPort: input.proxyPort
-        })
-      };
-    }
-    return {
-      backend: "none",
-      command: input.command,
-      args: input.args
-    };
-  }
-  if (input.capabilities.landrunAvailable) {
-    return {
-      backend: "landrun",
-      command: "landrun",
-      args: buildLandrunInvocation({
-        command: input.command,
-        args: input.args,
-        cwd: input.cwd,
-        sanitizedEnv: input.sanitizedEnv,
-        networkPolicy: input.networkPolicy,
-        proxyPort: input.proxyPort
-      })
-    };
-  }
-  return {
-    backend: "none",
+  const backend = selectKernelBackend(input.networkPolicy, input.capabilities);
+  const landrun = () => buildLandrunInvocation({
     command: input.command,
-    args: input.args
-  };
+    args: input.args,
+    cwd: input.cwd,
+    sanitizedEnv: input.sanitizedEnv,
+    networkPolicy: input.networkPolicy,
+    proxyPort: input.proxyPort,
+    readOnlyPaths: input.readOnlyPaths,
+    agentDir: input.agentDir
+  });
+  const bubblewrap = (command, args) => buildBubblewrapInvocation({
+    command,
+    args,
+    cwd: input.cwd,
+    readOnlyPaths: input.readOnlyPaths,
+    agentDir: input.agentDir,
+    underLandrun: backend === "bubblewrap+landrun"
+  });
+  switch (backend) {
+    case "bubblewrap":
+      return { backend, command: "bwrap", args: bubblewrap(input.command, input.args) };
+    case "bubblewrap+landrun":
+      return { backend, command: "bwrap", args: bubblewrap("landrun", landrun()) };
+    case "landrun":
+      return { backend, command: "landrun", args: landrun() };
+    case "none":
+      return { backend, command: input.command, args: input.args };
+  }
 }
 var cachedDefaultCapabilities = null;
 var cachedDefaultCapabilitiesPath = "";
@@ -7498,11 +7658,11 @@ function probeKernelSandboxCapabilities(runnerEnv = process.env) {
   }
   let bubblewrapAvailable = false;
   try {
-    const res = spawnSync("bwrap", ["--version"], {
-      env: probeEnv,
-      stdio: "ignore",
-      timeout: 3e3
-    });
+    const res = spawnSync(
+      "bwrap",
+      buildBubblewrapInvocation({ command: "/bin/true", args: [], cwd: "/", underLandrun: true }),
+      { env: probeEnv, stdio: "ignore", timeout: 3e3 }
+    );
     bubblewrapAvailable = res.status === 0;
   } catch {
     bubblewrapAvailable = false;
@@ -7512,68 +7672,263 @@ function probeKernelSandboxCapabilities(runnerEnv = process.env) {
   cachedDefaultCapabilitiesPath = pathVal;
   return result;
 }
-function readRequestBody(req) {
-  return new Promise((resolve3, reject) => {
-    const chunks = [];
-    req.on("data", (chunk) => chunks.push(chunk));
-    req.on("end", () => resolve3(Buffer.concat(chunks).toString("utf8")));
-    req.on("error", reject);
-  });
+function forwardedHeaders(source, dropped) {
+  const namedByConnection = new Set(
+    String(source.connection ?? "").split(",").map((token) => token.trim().toLowerCase()).filter(Boolean)
+  );
+  const out = {};
+  for (const [name, value] of Object.entries(source)) {
+    if (value !== void 0 && !dropped.has(name) && !namedByConnection.has(name)) {
+      out[name] = value;
+    }
+  }
+  return out;
+}
+function guardObserver(open) {
+  let observer;
+  try {
+    observer = open();
+  } catch {
+    observer = void 0;
+  }
+  let ended = false;
+  return {
+    chunk(chunk) {
+      try {
+        observer?.onChunk(chunk);
+      } catch {
+      }
+    },
+    end() {
+      if (ended) {
+        return;
+      }
+      ended = true;
+      try {
+        observer?.onEnd();
+      } catch {
+      }
+    }
+  };
+}
+function decodeBody(body, contentEncoding) {
+  switch (String(contentEncoding ?? "").trim().toLowerCase()) {
+    case "gzip":
+    case "x-gzip":
+      return gunzipSync(body);
+    case "deflate":
+      return inflateSync(body);
+    case "br":
+      return brotliDecompressSync(body);
+    default:
+      return body;
+  }
+}
+var ProxyRequestTooLargeError = class extends Error {
+};
+function sendProxyError(res, status, errorCode, errorMessage) {
+  res.statusCode = status;
+  res.setHeader("content-type", "application/json");
+  res.end(JSON.stringify({ error_code: errorCode, error_message: errorMessage }));
+}
+function presentedCredentials(req, url) {
+  const values = [];
+  for (const name of CREDENTIAL_HEADERS) {
+    const value = req.headers[name];
+    if (typeof value === "string") {
+      values.push(name === "authorization" ? value.replace(/^Bearer\s+/i, "") : value);
+    }
+  }
+  const queryKey = url.searchParams.get("key");
+  if (queryKey) {
+    values.push(queryKey);
+  }
+  return values;
+}
+function isNonce(candidate, nonce) {
+  const value = Buffer.from(candidate.trim());
+  return value.length === nonce.length && timingSafeEqual(value, nonce);
 }
 async function createLlmSandboxProxy(options) {
-  const realKey = options.llmApiKey.trim();
+  const { upstream } = options;
+  const apiKey = options.apiKey.trim();
+  const target = new URL(upstream.baseUrl);
+  const upstreamHost = target.host;
+  const basePath = target.pathname.replace(/\/+$/, "");
+  const send = target.protocol === "https:" ? httpsRequest : httpRequest;
+  const agent = target.protocol === "https:" ? new HttpsAgent({ keepAlive: true }) : new HttpAgent({ keepAlive: true });
   const proxyNonce = randomBytes(24).toString("hex");
-  const defaultUpstream = async (req) => ({
-    status: 200,
-    body: JSON.stringify({
-      id: "chatcmpl-epure-proxy",
-      object: "chat.completion",
-      path: req.path,
-      choices: [{ index: 0, message: { role: "assistant", content: "ok" } }]
-    })
-  });
-  const handler = options.upstreamHandler ?? defaultUpstream;
-  const server = createServer(
-    async (req, res) => {
-      const providedNonce = req.headers["x-epure-proxy-nonce"];
-      if (providedNonce !== proxyNonce) {
-        res.statusCode = 401;
-        res.setHeader("content-type", "application/json");
-        res.end(
-          JSON.stringify({
-            error_code: "PROXY_UNAUTHORIZED_NONCE",
-            error_message: "Missing or invalid x-epure-proxy-nonce header for local sandbox LLM proxy."
-          })
-        );
-        return;
-      }
-      const rawUrl = req.url ?? "/";
-      const normalizedPath = rawUrl.split("?")[0] ?? "/";
-      if (!ALLOWED_PROXY_PATHS.has(normalizedPath)) {
-        res.statusCode = 403;
-        res.setHeader("content-type", "application/json");
-        res.end(
-          JSON.stringify({
-            error_code: "PROXY_FORBIDDEN_ENDPOINT",
-            error_message: `Sandbox LLM proxy forbids access to '${normalizedPath}'.`
-          })
-        );
-        return;
-      }
-      const body = await readRequestBody(req);
-      const upstreamResp = await handler(
-        {
-          method: req.method ?? "POST",
-          path: normalizedPath,
-          body
-        },
-        realKey
+  const nonceBytes = Buffer.from(proxyNonce);
+  const relay = (req, res) => {
+    const rawUrl = req.url ?? "/";
+    if (!rawUrl.startsWith("/")) {
+      sendProxyError(
+        res,
+        403,
+        "PROXY_FORBIDDEN_ENDPOINT",
+        `Sandbox LLM proxy only forwards to ${upstreamHost}.`
       );
-      res.statusCode = upstreamResp.status;
-      res.setHeader("content-type", "application/json");
-      res.end(redactSecrets(upstreamResp.body, [realKey]));
+      return;
     }
-  );
+    const url = new URL(rawUrl, "http://127.0.0.1");
+    if (!presentedCredentials(req, url).some((value) => isNonce(value, nonceBytes))) {
+      sendProxyError(
+        res,
+        401,
+        "PROXY_UNAUTHORIZED_NONCE",
+        `Missing or invalid sandbox nonce: send EPURE_LLM_PROXY_NONCE as the API key or in ${NONCE_HEADER}.`
+      );
+      return;
+    }
+    if (req.method !== "POST" || !upstream.allowedPaths.some((p) => p.test(url.pathname))) {
+      sendProxyError(
+        res,
+        403,
+        "PROXY_FORBIDDEN_ENDPOINT",
+        `Sandbox LLM proxy forbids ${req.method ?? "?"} '${url.pathname}' on ${upstreamHost}.`
+      );
+      return;
+    }
+    if (Number(req.headers["content-length"] ?? 0) > MAX_PROXY_REQUEST_BYTES) {
+      res.setHeader("connection", "close");
+      sendProxyError(
+        res,
+        413,
+        "PROXY_REQUEST_TOO_LARGE",
+        `Sandbox LLM proxy accepts request bodies up to ${MAX_PROXY_REQUEST_BYTES} bytes.`
+      );
+      return;
+    }
+    const rawQuery = rawUrl.includes("?") ? rawUrl.slice(rawUrl.indexOf("?")) : "";
+    let query = rawQuery;
+    if (url.searchParams.has("key")) {
+      url.searchParams.delete("key");
+      query = url.search;
+    }
+    const headers = forwardedHeaders(req.headers, DROPPED_REQUEST_HEADERS);
+    for (const [name, value] of Object.entries(upstream.defaultHeaders)) {
+      headers[name.toLowerCase()] = value;
+    }
+    headers[upstream.authHeader] = upstream.authHeader === "authorization" ? `Bearer ${apiKey}` : apiKey;
+    let responded = false;
+    let failed = false;
+    const fail = (status, code, message) => {
+      if (failed) {
+        return;
+      }
+      failed = true;
+      upstreamReq.destroy();
+      if (res.headersSent) {
+        res.destroy();
+      } else {
+        res.setHeader("connection", "close");
+        sendProxyError(res, status, code, message);
+      }
+    };
+    const upstreamReq = send({
+      agent,
+      hostname: target.hostname.replace(/^\[|\]$/g, ""),
+      port: target.port || void 0,
+      method: "POST",
+      path: `${basePath}${url.pathname}${query}`,
+      headers,
+      timeout: DEFAULT_LLM_REQUEST_TIMEOUT_MS
+    });
+    upstreamReq.on("timeout", () => upstreamReq.destroy(new Error("upstream idle timeout")));
+    upstreamReq.on(
+      "error",
+      () => fail(502, "PROXY_UPSTREAM_UNREACHABLE", `Sandbox LLM proxy could not reach ${upstreamHost}.`)
+    );
+    res.on("close", () => {
+      if (!res.writableFinished) {
+        upstreamReq.destroy();
+      }
+    });
+    let received = 0;
+    const limit = new Transform({
+      transform(chunk, _encoding, callback) {
+        received += chunk.length;
+        callback(received > MAX_PROXY_REQUEST_BYTES ? new ProxyRequestTooLargeError() : null, chunk);
+      }
+    });
+    pipeline(req, limit, upstreamReq, (err) => {
+      if (!err || responded) {
+        return;
+      }
+      if (err instanceof ProxyRequestTooLargeError) {
+        fail(
+          413,
+          "PROXY_REQUEST_TOO_LARGE",
+          `Sandbox LLM proxy accepts request bodies up to ${MAX_PROXY_REQUEST_BYTES} bytes.`
+        );
+      } else {
+        fail(502, "PROXY_UPSTREAM_UNREACHABLE", `Sandbox LLM proxy could not reach ${upstreamHost}.`);
+      }
+    });
+    upstreamReq.on("response", (upstreamRes) => {
+      responded = true;
+      const status = upstreamRes.statusCode ?? 502;
+      const responseHeaders = forwardedHeaders(upstreamRes.headers, DROPPED_RESPONSE_HEADERS);
+      const observer = guardObserver(
+        () => options.observeResponse?.({
+          method: "POST",
+          path: url.pathname,
+          status,
+          contentType: String(upstreamRes.headers["content-type"] ?? "")
+        })
+      );
+      if (status >= 400) {
+        const chunks = [];
+        upstreamRes.on("data", (chunk) => chunks.push(chunk));
+        upstreamRes.on("error", () => {
+          observer.end();
+          fail(502, "PROXY_UPSTREAM_UNREACHABLE", `Sandbox LLM proxy lost the response from ${upstreamHost}.`);
+        });
+        upstreamRes.on("end", () => {
+          let body;
+          try {
+            body = decodeBody(Buffer.concat(chunks), upstreamRes.headers["content-encoding"]);
+          } catch {
+            observer.end();
+            fail(502, "PROXY_UPSTREAM_UNREACHABLE", `Sandbox LLM proxy could not decode the error from ${upstreamHost}.`);
+            return;
+          }
+          const redacted = Buffer.from(redactSecrets(body.toString("utf8"), [apiKey]));
+          delete responseHeaders["content-encoding"];
+          responseHeaders["content-length"] = String(redacted.length);
+          observer.chunk(redacted);
+          observer.end();
+          res.writeHead(status, responseHeaders).end(redacted);
+        });
+        return;
+      }
+      res.writeHead(status, responseHeaders);
+      res.flushHeaders();
+      const tap = new Transform({
+        transform(chunk, _encoding, callback) {
+          observer.chunk(chunk);
+          callback(null, chunk);
+        }
+      });
+      pipeline(upstreamRes, tap, res, () => observer.end());
+    });
+  };
+  const server = createServer((req, res) => {
+    try {
+      relay(req, res);
+    } catch {
+      if (res.headersSent) {
+        res.destroy();
+      } else {
+        sendProxyError(
+          res,
+          502,
+          "PROXY_UPSTREAM_UNREACHABLE",
+          `Sandbox LLM proxy could not build the request to ${upstreamHost}.`
+        );
+      }
+    }
+  });
   await new Promise((resolve3, reject) => {
     server.once("error", reject);
     server.listen(0, "127.0.0.1", () => resolve3());
@@ -7584,9 +7939,55 @@ async function createLlmSandboxProxy(options) {
     proxyUrl,
     proxyNonce,
     close: () => new Promise((resolve3) => {
+      agent.destroy();
+      server.closeAllConnections();
       server.close(() => resolve3());
     })
   };
+}
+var LOOPBACK_HOSTS = /* @__PURE__ */ new Set(["127.0.0.1", "localhost", "[::1]"]);
+function resolveLlmProxyTarget(llm, runnerEnv) {
+  const model = llm.model.trim();
+  if (!model) {
+    return {
+      error_code: "LLM_MODEL_MISSING",
+      message: "Fail-closed: the sandbox LLM route has no model; set the 'model' input to '<provider>/<model>'."
+    };
+  }
+  const slash = model.indexOf("/");
+  const prefix = slash > 0 ? model.slice(0, slash).trim() : "";
+  const isKnownProvider = prefix !== "" && mapKnownProviderPrefix(prefix) !== void 0;
+  const isAlias = prefix !== "" && !isKnownProvider && llm.providers?.[prefix] !== void 0;
+  if (!isKnownProvider && !isAlias) {
+    return {
+      error_code: "LLM_ROUTE_INVALID",
+      message: `Fail-closed: model '${model}' must start with a provider (openai/, anthropic/, google/, azure/, azure_ai/, openrouter/, vertex/) or a provider alias declared in .github/agents.yml; the sandbox proxy does not infer providers.`
+    };
+  }
+  const { provider, providerConfig } = parseModelIdentifier(model, llm.providers, runnerEnv);
+  const apiKey = isAlias ? providerConfig?.apiKey?.trim() : resolveProviderApiKey({ provider, providerConfig, env: runnerEnv });
+  if (!apiKey) {
+    return {
+      error_code: "LLM_API_KEY_MISSING",
+      message: isAlias ? `Fail-closed: provider alias '${prefix}' must declare its own api_key in .github/agents.yml (e.g. os.environ/${prefix.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY) and the runner must have it.` : `Fail-closed: runner has no API key for LLM provider '${provider}' (model '${model}') to hold in the sandbox proxy.`
+    };
+  }
+  try {
+    const upstream = resolveProviderUpstream(provider, providerConfig, runnerEnv);
+    const base = new URL(upstream.baseUrl);
+    if (base.protocol !== "https:" && !(base.protocol === "http:" && LOOPBACK_HOSTS.has(base.hostname))) {
+      return {
+        error_code: "LLM_ROUTE_INVALID",
+        message: `Fail-closed: the sandbox proxy only sends keys over https, not to '${base.origin}' (model '${model}').`
+      };
+    }
+    return { upstream, apiKey };
+  } catch (err) {
+    return {
+      error_code: "LLM_ROUTE_INVALID",
+      message: `Fail-closed: ${err instanceof Error ? err.message : String(err)}`
+    };
+  }
 }
 function collectRunnerSecretValues(runnerEnv) {
   const values = [];
@@ -7609,7 +8010,7 @@ function parsePortFromProxyUrl(proxyUrl) {
 }
 async function runInUntrustedCodeSandbox(input) {
   const startMs = Date.now();
-  const networkPolicy = input.networkPolicy ?? "proxy_only";
+  const networkPolicy = input.networkPolicy ?? (input.llm ? "proxy_only" : "offline");
   if (!input.isolationAvailable) {
     return {
       isolated: false,
@@ -7624,12 +8025,12 @@ async function runInUntrustedCodeSandbox(input) {
       network_policy: networkPolicy
     };
   }
-  const llmApiKey = (input.runnerEnv.OPENAI_API_KEY ?? input.runnerEnv.ANTHROPIC_API_KEY ?? input.runnerEnv.GOOGLE_API_KEY ?? input.runnerEnv.GEMINI_API_KEY ?? input.runnerEnv.LLM_API_KEY ?? "").trim();
-  if (!llmApiKey) {
+  const llmTarget = input.llm ? resolveLlmProxyTarget(input.llm, input.runnerEnv) : void 0;
+  if (llmTarget && "error_code" in llmTarget) {
     return {
       isolated: false,
-      error_code: "LLM_API_KEY_MISSING",
-      error_message: "Fail-closed: runner is missing LLM API key (OPENAI_API_KEY, ANTHROPIC_API_KEY, or LLM_API_KEY) for the local proxy sidecar.",
+      error_code: llmTarget.error_code,
+      error_message: llmTarget.message,
       exit_code: 1,
       stdout: "",
       stderr: "",
@@ -7639,24 +8040,38 @@ async function runInUntrustedCodeSandbox(input) {
       network_policy: networkPolicy
     };
   }
-  const enforceKernelSandbox = input.enforceKernelSandbox === true || input.runnerEnv.EPURE_ENFORCE_KERNEL_SANDBOX === "true";
-  const secretValues = collectRunnerSecretValues(input.runnerEnv);
-  const proxy = await createLlmSandboxProxy({
-    llmApiKey,
-    upstreamHandler: input.upstreamHandler
-  });
-  try {
-    const sanitizedEnv = buildSanitizedSandboxEnv(input.runnerEnv, {
-      proxyUrl: proxy.proxyUrl,
-      proxyNonce: proxy.proxyNonce
-    });
-    const args = input.args ? [...input.args] : [];
-    const cwd = input.cwd ?? process.cwd();
-    const timeoutMs = input.timeoutMs ?? 60 * 60 * 1e3;
-    const proxyPort = parsePortFromProxyUrl(proxy.proxyUrl);
-    const capabilities = input.kernelCapabilities ?? probeKernelSandboxCapabilities(input.runnerEnv);
-    if (networkPolicy === "https_only") {
-      const home = sanitizedEnv.HOME?.trim() ?? "";
+  const enforceKernelSandbox = input.enforceKernelSandbox === true || input.runnerEnv.EPURE_ENFORCE_KERNEL_SANDBOX === "true" || isCiRunner(input.runnerEnv);
+  const capabilities = input.kernelCapabilities ?? probeKernelSandboxCapabilities(input.runnerEnv);
+  const installCommands = input.agentSession?.installCommands ?? [];
+  const policies = [
+    ...installCommands.length > 0 ? ["https_only"] : [],
+    networkPolicy
+  ];
+  if (enforceKernelSandbox && policies.some((policy) => !hidesHostSockets(selectKernelBackend(policy, capabilities)))) {
+    return {
+      isolated: false,
+      error_code: "SANDBOX_ISOLATION_UNAVAILABLE",
+      error_message: "Fail-closed: kernel confinement is mandatory in CI or with EPURE_ENFORCE_KERNEL_SANDBOX=true, and this runner lacks a working bubblewrap (plus landrun for networked phases) (ADR-0034).",
+      exit_code: 1,
+      stdout: "",
+      stderr: "",
+      duration_ms: Date.now() - startMs,
+      proxy_url: "",
+      kernel_backend: "none",
+      network_policy: networkPolicy
+    };
+  }
+  const secretValues = [
+    ...collectRunnerSecretValues(input.runnerEnv),
+    ...llmTarget ? [llmTarget.apiKey] : []
+  ];
+  const cwd = input.cwd ?? process.cwd();
+  const timeoutMs = input.timeoutMs ?? 60 * 60 * 1e3;
+  const agentDir = input.agentSession ? mkdtempSync("/tmp/epure-agent-") : void 0;
+  const agentEnv = agentDir ? { HOME: agentDir, TMPDIR: agentDir } : {};
+  const runConfined = (command, policy, env, proxyPort) => {
+    if (policy === "https_only") {
+      const home = env.HOME?.trim() ?? "";
       if (home) {
         for (const sub of [".npm", ".cache", ".cargo"]) {
           try {
@@ -7667,79 +8082,112 @@ async function runInUntrustedCodeSandbox(input) {
       }
     }
     const wrapped = buildKernelSandboxedCommand({
-      command: input.command,
-      args,
+      command: command.command,
+      args: command.args ?? [],
       cwd,
-      sanitizedEnv,
-      networkPolicy,
+      sanitizedEnv: env,
+      networkPolicy: policy,
       proxyPort,
-      capabilities
+      capabilities,
+      readOnlyPaths: input.readOnlyPaths,
+      agentDir
     });
-    const kernelBackend = wrapped.backend;
-    if (wrapped.backend === "none" && enforceKernelSandbox) {
-      return {
-        isolated: false,
-        error_code: "SANDBOX_ISOLATION_UNAVAILABLE",
-        error_message: "Fail-closed: kernel sandbox backend (landrun/bubblewrap) is unavailable while EPURE_ENFORCE_KERNEL_SANDBOX=true (ADR-0030).",
-        exit_code: 1,
-        stdout: "",
-        stderr: "",
-        duration_ms: Date.now() - startMs,
-        proxy_url: "",
-        kernel_backend: "none",
-        network_policy: networkPolicy
-      };
+    return spawnCaptured(wrapped.command, wrapped.args, cwd, env, timeoutMs);
+  };
+  let proxy;
+  try {
+    const installEnv = { ...buildSanitizedSandboxEnv(input.runnerEnv), ...agentEnv };
+    for (const install of installCommands) {
+      const installed = await runConfined(install, "https_only", installEnv);
+      if (installed.exitCode !== 0) {
+        return {
+          isolated: true,
+          error_code: "SANDBOX_COMMAND_FAILED",
+          error_message: `Dependency install '${[install.command, ...install.args ?? []].join(" ")}' exited with code ${installed.exitCode} before the agent session.`,
+          exit_code: installed.exitCode,
+          stdout: redactSecrets(installed.stdout, secretValues),
+          stderr: redactSecrets(installed.stderr, secretValues),
+          duration_ms: Date.now() - startMs,
+          proxy_url: "",
+          kernel_backend: selectKernelBackend("https_only", capabilities),
+          confined: selectKernelBackend("https_only", capabilities) !== "none",
+          network_policy: "https_only"
+        };
+      }
     }
-    const spawnCommand = wrapped.command;
-    const spawnArgs = wrapped.args;
-    const childResult = await new Promise((resolvePromise) => {
-      const child = spawn(spawnCommand, [...spawnArgs], {
-        cwd,
-        env: sanitizedEnv,
-        stdio: ["ignore", "pipe", "pipe"]
-      });
-      const stdoutChunks = [];
-      const stderrChunks = [];
-      const timer = setTimeout(() => {
-        child.kill("SIGKILL");
-      }, timeoutMs);
-      child.stdout.on("data", (chunk) => stdoutChunks.push(chunk));
-      child.stderr.on("data", (chunk) => stderrChunks.push(chunk));
-      child.on("error", (err) => {
-        clearTimeout(timer);
-        resolvePromise({
-          exitCode: 1,
-          stdout: Buffer.concat(stdoutChunks).toString("utf8"),
-          stderr: err.message
-        });
-      });
-      child.on("close", (code) => {
-        clearTimeout(timer);
-        resolvePromise({
-          exitCode: code ?? 1,
-          stdout: Buffer.concat(stdoutChunks).toString("utf8"),
-          stderr: Buffer.concat(stderrChunks).toString("utf8")
-        });
-      });
-    });
-    const cleanStdout = redactSecrets(childResult.stdout, secretValues);
-    const cleanStderr = redactSecrets(childResult.stderr, secretValues);
+    proxy = llmTarget ? await createLlmSandboxProxy({ upstream: llmTarget.upstream, apiKey: llmTarget.apiKey }) : void 0;
+    const childResult = await runConfined(
+      { command: input.command, args: input.args },
+      networkPolicy,
+      { ...buildSanitizedSandboxEnv(input.runnerEnv, proxy), ...agentEnv },
+      proxy ? parsePortFromProxyUrl(proxy.proxyUrl) : void 0
+    );
     const ok = childResult.exitCode === 0;
     return {
       isolated: true,
       error_code: ok ? "NONE" : "SANDBOX_COMMAND_FAILED",
       error_message: ok ? "" : `Sandboxed command exited with code ${childResult.exitCode}.`,
       exit_code: childResult.exitCode,
-      stdout: cleanStdout,
-      stderr: cleanStderr,
+      stdout: redactSecrets(childResult.stdout, secretValues),
+      stderr: redactSecrets(childResult.stderr, secretValues),
       duration_ms: Date.now() - startMs,
-      proxy_url: proxy.proxyUrl,
-      kernel_backend: kernelBackend,
+      proxy_url: proxy?.proxyUrl ?? "",
+      kernel_backend: selectKernelBackend(networkPolicy, capabilities),
+      confined: selectKernelBackend(networkPolicy, capabilities) !== "none",
       network_policy: networkPolicy
     };
   } finally {
-    await proxy.close();
+    await proxy?.close();
+    if (agentDir) {
+      rmSync(agentDir, { recursive: true, force: true });
+    }
   }
+}
+function isCiRunner(runnerEnv) {
+  const flagged = (value) => value !== void 0 && ["true", "1"].includes(value.trim().toLowerCase());
+  return [process.env, runnerEnv].some(
+    (env) => flagged(env.GITHUB_ACTIONS) || flagged(env.CI)
+  );
+}
+function spawnCaptured(command, args, cwd, env, timeoutMs) {
+  return new Promise((resolvePromise) => {
+    const child = spawn(command, [...args], {
+      cwd,
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: true
+    });
+    const killGroup = () => {
+      if (child.pid !== void 0) {
+        try {
+          process.kill(-child.pid, "SIGKILL");
+        } catch {
+        }
+      }
+    };
+    const stdoutChunks = [];
+    const stderrChunks = [];
+    const timer = setTimeout(killGroup, timeoutMs);
+    child.on("exit", killGroup);
+    child.stdout.on("data", (chunk) => stdoutChunks.push(chunk));
+    child.stderr.on("data", (chunk) => stderrChunks.push(chunk));
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      resolvePromise({
+        exitCode: 1,
+        stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+        stderr: err.message
+      });
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolvePromise({
+        exitCode: code ?? 1,
+        stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+        stderr: Buffer.concat(stderrChunks).toString("utf8")
+      });
+    });
+  });
 }
 
 // src/sandbox/polyglot-workspace-runner.ts
@@ -8031,7 +8479,7 @@ function materializeSeedFilesIntoWorkspace(workDir, seedFiles) {
   }
 }
 function prepareRepositorySandboxWorkspace(input) {
-  const workDir = input.workDir ?? mkdtempSync(join2(tmpdir(), "epure-polyglot-sandbox-"));
+  const workDir = input.workDir ?? mkdtempSync2(join2(tmpdir(), "epure-polyglot-sandbox-"));
   mkdirSync2(workDir, { recursive: true });
   const repoSlug = (input.repository ?? "").trim();
   const [owner, repo] = repoSlug.split("/");
@@ -8090,7 +8538,7 @@ function prepareRepositorySandboxWorkspace(input) {
     clonedFromRemote,
     sanitizedGitConfigUrl: cleanRemoteUrl,
     cleanup: () => {
-      rmSync(workDir, { recursive: true, force: true });
+      rmSync2(workDir, { recursive: true, force: true });
     }
   };
 }
@@ -8339,7 +8787,7 @@ function shouldSkipDefaultNodeStepInOfflineTempDir(params) {
 }
 async function runPolyglotStage1Verification(input) {
   const ownsTempWorkDir = !input.workDir;
-  const workDir = input.workDir ?? mkdtempSync(join2(tmpdir(), "epure-stage1-sandbox-"));
+  const workDir = input.workDir ?? mkdtempSync2(join2(tmpdir(), "epure-stage1-sandbox-"));
   mkdirSync2(workDir, { recursive: true });
   const hasCustomSandboxRunner = Boolean(input.sandboxRunner);
   const sandboxRunner = input.sandboxRunner ?? runInUntrustedCodeSandbox;
@@ -8627,7 +9075,7 @@ ${formattedOutput}`;
     };
   } finally {
     if (ownsTempWorkDir) {
-      rmSync(workDir, { recursive: true, force: true });
+      rmSync2(workDir, { recursive: true, force: true });
     }
   }
 }
@@ -10677,6 +11125,7 @@ async function runTestsInIsolatedWorkspace(params) {
       isTaskBranch: params.isTaskBranch,
       reviewersDir: params.reviewersDir,
       llmApiKey: params.llmApiKey,
+      runnerEnv: process.env,
       bootstrappedTargets: params.bootstrappedTargets,
       sandboxRunner: params.sandboxRunner,
       label: params.label

@@ -93,6 +93,10 @@ var PROVIDER_EFFORTS = [
   "max"
 ];
 
+// src/llm/upstream.ts
+var MODEL = String.raw`[\w.@-]+`;
+var GENERATE = String.raw`:(?:generateContent|streamGenerateContent)`;
+
 // src/orchestrator/github/rate-limit.ts
 var GITHUB_RATE_LIMIT_MAX_WAIT_MS = 5 * 60 * 1e3;
 var SECONDARY_RATE_LIMIT_DEFAULT_WAIT_MS = 60 * 1e3;

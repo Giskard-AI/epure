@@ -561,6 +561,7 @@ export async function runTestsInIsolatedWorkspace(params: {
       isTaskBranch: params.isTaskBranch,
       reviewersDir: params.reviewersDir,
       llmApiKey: params.llmApiKey,
+      runnerEnv: process.env,
       bootstrappedTargets: params.bootstrappedTargets,
       sandboxRunner: params.sandboxRunner,
       label: params.label

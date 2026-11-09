@@ -9,6 +9,18 @@ inputs:
     description: "JSON array of command arguments"
     required: false
     default: "[]"
+  model:
+    description: "Model the command may call through the sandbox LLM proxy ('<provider>/<model>' or an alias from .github/agents.yml); empty starts no proxy and runs offline"
+    required: false
+    default: ""
+  repository:
+    description: "Repository whose .github/agents.yml (dev, else main) declares provider aliases; defaults to the workflow repository"
+    required: false
+    default: ""
+  github_token:
+    description: "Token that reads .github/agents.yml for provider aliases; never exposed to the sandbox"
+    required: false
+    default: "${{ github.token }}"
   isolation_available:
     description: "Whether container/process sandbox isolation is available on the runner"
     required: false
@@ -16,6 +28,8 @@ inputs:
 outputs:
   isolated:
     description: "true when sandbox isolation and secret stripping succeeded"
+  confined:
+    description: "true when a kernel backend (bubblewrap, landrun) confined the command; false for the unconfined local fallback"
   error_code:
     description: "NONE or structured error code (e.g., SANDBOX_ISOLATION_UNAVAILABLE)"
   exit_code:

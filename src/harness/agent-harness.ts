@@ -1,3 +1,4 @@
+import type { ProviderConfig } from "../llm/types.js";
 import {
   publishAgentProposal,
   type IsolatedPublisherClient,
@@ -5,6 +6,7 @@ import {
 } from "../publisher/isolated-publisher.js";
 import {
   runInUntrustedCodeSandbox,
+  type SandboxCommand,
   type SandboxErrorCode
 } from "../sandbox/llm-sandbox.js";
 
@@ -142,6 +144,9 @@ export function resolveHarnessFromAgentsConfig(
 
 export interface TicketExecutionInput {
   readonly harness: string;
+  readonly model: string;
+  // The providers block of .github/agents.yml read from the protected branch (aliases such as corp-gateway/).
+  readonly providers?: Readonly<Record<string, ProviderConfig>> | undefined;
   readonly repository: string;
   readonly repositoryId: number;
   readonly planIssueNumber: number;
@@ -154,6 +159,8 @@ export interface TicketExecutionInput {
   readonly changedFiles: readonly string[];
   readonly isolationAvailable: boolean;
   readonly runnerEnv: Readonly<Record<string, string | undefined>>;
+  readonly installCommands?: readonly SandboxCommand[] | undefined;
+  readonly readOnlyPaths?: readonly string[] | undefined;
   readonly publisherClient?: IsolatedPublisherClient | undefined;
 }
 
@@ -230,7 +237,10 @@ export async function runTicketWithHarness(
     isolationAvailable: input.isolationAvailable,
     runnerEnv: input.runnerEnv,
     command: invocation.command,
-    args: invocation.args
+    args: invocation.args,
+    llm: { model: input.model, providers: input.providers },
+    readOnlyPaths: input.readOnlyPaths,
+    agentSession: { installCommands: input.installCommands }
   });
 
   if (!sandboxResult.isolated || sandboxResult.exit_code !== 0) {

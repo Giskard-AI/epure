@@ -62,3 +62,8 @@ export {
   type ToolParameterProperty,
   type ToolParameterType
 } from "./types.js";
+export {
+  type ProviderAuthHeader,
+  type ProviderUpstream,
+  resolveProviderUpstream
+} from "./upstream.js";

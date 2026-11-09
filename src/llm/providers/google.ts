@@ -9,6 +9,7 @@ import {
   type LLMCallOptions,
   type ProviderConfig
 } from "../types.js";
+import { googleApiRoot } from "../upstream.js";
 import { sanitizeSchemaForGemini } from "./schema-utils.js";
 
 export const GEMINI_SKIP_THOUGHT_SIGNATURE_SENTINEL =
@@ -38,6 +39,7 @@ interface GeminiContentTurn {
 }
 
 export interface GoogleProviderExecutionInput<T = unknown> {
+  readonly provider?: "google" | "vertex" | undefined;
   readonly model: string;
   readonly apiKey: string;
   readonly providerConfig?: ProviderConfig | undefined;
@@ -60,11 +62,16 @@ export function buildGoogleGenerateContentUrl(params: {
   readonly model: string;
   readonly apiKey: string;
   readonly baseUrl?: string | undefined;
+  readonly provider?: "google" | "vertex" | undefined;
 }): string {
   const modelEncoded = encodeURIComponent(params.model.trim());
   const keyEncoded = encodeURIComponent(params.apiKey.trim());
+  const isVertex = params.provider === "vertex";
   const rawBase = (
-    params.baseUrl ?? "https://generativelanguage.googleapis.com/v1beta"
+    params.baseUrl ??
+    (isVertex
+      ? "https://aiplatform.googleapis.com/v1"
+      : "https://generativelanguage.googleapis.com/v1beta")
   )
     .trim()
     .replace(/\/+$/, "");
@@ -76,15 +83,9 @@ export function buildGoogleGenerateContentUrl(params: {
       : `${rawBase}${sep}key=${keyEncoded}`;
   }
 
-  if (rawBase.endsWith("/models")) {
-    return `${rawBase}/${modelEncoded}:generateContent?key=${keyEncoded}`;
-  }
-
-  if (/\/v1(?:beta)?$/i.test(rawBase)) {
-    return `${rawBase}/models/${modelEncoded}:generateContent?key=${keyEncoded}`;
-  }
-
-  return `${rawBase}/v1beta/models/${modelEncoded}:generateContent?key=${keyEncoded}`;
+  const { root, version } = googleApiRoot(rawBase, isVertex ? "vertex" : "google");
+  const models = isVertex ? "publishers/google/models" : "models";
+  return `${root}/${version}/${models}/${modelEncoded}:generateContent?key=${keyEncoded}`;
 }
 
 function extractTextFromParts(parts: readonly GeminiContentPart[]): string {
@@ -122,7 +123,8 @@ export async function executeGoogleProvider<T = unknown>(
   const url = buildGoogleGenerateContentUrl({
     model,
     apiKey,
-    baseUrl
+    baseUrl,
+    provider: input.provider
   });
 
   const headers: Record<string, string> = {

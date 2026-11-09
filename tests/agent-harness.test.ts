@@ -18,6 +18,7 @@ describe("Ticket 07 (#8) — Pi agent harness execution & isolated PR publicatio
       id: "pi-implements-approved-ticket-and-opens-pr-on-feature-branch",
       input: {
         harness: "pi",
+        model: "openai/gpt-5.4",
         repository: "Giskard-AI/consumer-app",
         repositoryId: 7001,
         planIssueNumber: 1,
@@ -43,6 +44,7 @@ describe("Ticket 07 (#8) — Pi agent harness execution & isolated PR publicatio
       id: "pi-rejects-unapproved-ticket-before-running-llm",
       input: {
         harness: "pi",
+        model: "openai/gpt-5.4",
         repository: "Giskard-AI/consumer-app",
         repositoryId: 7001,
         planIssueNumber: 1,
@@ -65,6 +67,7 @@ describe("Ticket 07 (#8) — Pi agent harness execution & isolated PR publicatio
       id: "pi-rejects-direct-target-to-protected-dev-or-main",
       input: {
         harness: "pi",
+        model: "openai/gpt-5.4",
         repository: "Giskard-AI/consumer-app",
         repositoryId: 7001,
         planIssueNumber: 1,
@@ -87,6 +90,7 @@ describe("Ticket 07 (#8) — Pi agent harness execution & isolated PR publicatio
       id: "pi-fails-closed-when-sandbox-isolation-unavailable",
       input: {
         harness: "pi",
+        model: "openai/gpt-5.4",
         repository: "Giskard-AI/consumer-app",
         repositoryId: 7001,
         planIssueNumber: 1,
@@ -182,6 +186,7 @@ describe("Ticket 07 (#8) — Pi agent harness execution & isolated PR publicatio
 
       const baseTicket: TicketExecutionInput = {
         harness: resolvedHarness,
+        model: "openai/gpt-5.4",
         repository: "Giskard-AI/consumer-app",
         repositoryId: 7001,
         planIssueNumber: 1,
@@ -221,4 +226,53 @@ describe("Ticket 07 (#8) — Pi agent harness execution & isolated PR publicatio
       expect(result.publisher_token_revoked).toBe(true);
     }
   );
+
+  const CORP_GATEWAY = {
+    "corp-gateway": {
+      provider: "openai" as const,
+      base_url: "https://llm.corp.example/v1",
+      api_key: "os.environ/CORP_GATEWAY_API_KEY"
+    }
+  };
+  it.each([
+    {
+      id: "agents-yml-alias-reaches-the-sandbox-route",
+      model: "corp-gateway/qwen-coder",
+      providers: CORP_GATEWAY,
+      expectedErrorCode: "NONE"
+    },
+    {
+      id: "alias-absent-from-agents-yml-is-refused-not-inferred",
+      model: "corp-gateway/qwen-coder",
+      providers: undefined,
+      expectedErrorCode: "LLM_ROUTE_INVALID"
+    },
+    {
+      id: "empty-model-input-is-refused",
+      model: "",
+      providers: CORP_GATEWAY,
+      expectedErrorCode: "LLM_MODEL_MISSING"
+    }
+  ])("runTicketWithHarness [$id]: routes the agent through agents.yml providers", async ({ model, providers, expectedErrorCode }) => {
+    const result = await runTicketWithHarness({
+      harness: "pi",
+      model,
+      providers,
+      repository: "Giskard-AI/consumer-app",
+      repositoryId: 7001,
+      planIssueNumber: 1,
+      ticketIssueNumber: 8,
+      ticketSlug: "pi-agent-harness",
+      ticketTitle: "Alias route",
+      acceptanceCriteria: ["Passes unit tests"],
+      approvedByHuman: true,
+      targetFeatureBranch: "feature/1-v1",
+      changedFiles: ["src/health.ts"],
+      isolationAvailable: true,
+      runnerEnv: { ...BASE_RUNNER_ENV, CORP_GATEWAY_API_KEY: "corp-RealGatewaySecret1234567890" }
+    });
+
+    expect(result.error_code).toBe(expectedErrorCode);
+    expect(result.completed).toBe(expectedErrorCode === "NONE");
+  });
 });
