@@ -1273,7 +1273,8 @@ export function parseAgentsYaml(yamlContent: string): ParsedAgentsConfig {
       } else if (key === "review_timeout_minutes") {
         review_timeout_minutes = parseNum(val);
       } else if (key === "agent_max_llm_requests") {
-        agent_max_llm_requests = parseNum(val);
+        const parsed = parseNum(val);
+        agent_max_llm_requests = parsed === undefined ? undefined : Math.max(1, parsed);
       } else if (key === "max_concurrent_tasks_per_feature") {
         max_concurrent_tasks_per_feature = parseNum(val);
       } else if (key === "trace_retention_days") {
