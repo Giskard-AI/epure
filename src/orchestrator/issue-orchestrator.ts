@@ -1049,7 +1049,12 @@ async function runMeteredIssueCommand(
           onTransientRetriesUsed: (used) => {
             totalTransientRetriesUsed += used;
           },
-          fetchImpl: effectiveInput.fetchImpl
+          fetchImpl: effectiveInput.fetchImpl,
+          agentEngine:
+            effectiveInput.agentEngine?.name === "pi"
+              ? effectiveInput.agentEngine
+              : undefined,
+          activeToken
         }));
       } catch (err) {
         if (err instanceof LLMError) {

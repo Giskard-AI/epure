@@ -3172,6 +3172,24 @@ function meterResponse(provider, model, contentType, contentEncoding) {
 
 // src/sandbox/llm-sandbox.ts
 var SECRET_ENV_NAME_PATTERN = /^(?:.*API_KEY|.*_TOKEN|.*_SECRET|.*PRIVATE_KEY|LLM_API_KEY|GITHUB_TOKEN|GH_TOKEN|GITHUB_PAT|EPURE_.*(?:KEY|TOKEN|SECRET)|AWS_.*|AZURE_.*|GCP_.*|NPM_TOKEN|NODE_AUTH_TOKEN|ACTIONS_RUNTIME_TOKEN|ACTIONS_ID_TOKEN_REQUEST_TOKEN)$/i;
+var SANDBOX_STRIPPED_GIT_ENV_NAMES = /* @__PURE__ */ new Set([
+  "GIT_AUTHOR_NAME",
+  "GIT_AUTHOR_EMAIL",
+  "GIT_AUTHOR_DATE",
+  "GIT_COMMITTER_NAME",
+  "GIT_COMMITTER_EMAIL",
+  "GIT_COMMITTER_DATE",
+  "GIT_CONFIG_GLOBAL",
+  "GIT_CONFIG_SYSTEM",
+  "GIT_DIR",
+  "GIT_WORK_TREE"
+]);
+var SANDBOX_DEFAULT_GIT_IDENTITY_ENV = {
+  GIT_AUTHOR_NAME: "EPURE Agent",
+  GIT_AUTHOR_EMAIL: "epure-agent@localhost",
+  GIT_COMMITTER_NAME: "EPURE Agent",
+  GIT_COMMITTER_EMAIL: "epure-agent@localhost"
+};
 var NONCE_HEADER = "x-epure-proxy-nonce";
 var CREDENTIAL_HEADERS = [
   NONCE_HEADER,
@@ -3209,11 +3227,15 @@ function buildSanitizedSandboxEnv(runnerEnv, proxy) {
     if (SECRET_ENV_NAME_PATTERN.test(key)) {
       continue;
     }
+    if (SANDBOX_STRIPPED_GIT_ENV_NAMES.has(key)) {
+      continue;
+    }
     if (containsPrivateKeyMaterial(value)) {
       continue;
     }
     sanitized[key] = value;
   }
+  Object.assign(sanitized, SANDBOX_DEFAULT_GIT_IDENTITY_ENV);
   sanitized.EPURE_SANDBOX_ACTIVE = "true";
   if (proxy) {
     sanitized.EPURE_LLM_PROXY_URL = proxy.proxyUrl;
@@ -3236,9 +3258,17 @@ function buildAgentSessionEnv(runnerEnv, home, proxy, sessionEnv) {
       env[name] = value;
     }
   }
+  const customSessionEnv = sessionEnv?.(home);
+  if (customSessionEnv) {
+    for (const [key, value] of Object.entries(customSessionEnv)) {
+      if (!SANDBOX_STRIPPED_GIT_ENV_NAMES.has(key)) {
+        env[key] = value;
+      }
+    }
+  }
   return {
     ...env,
-    ...sessionEnv?.(home),
+    ...SANDBOX_DEFAULT_GIT_IDENTITY_ENV,
     HOME: home,
     TMPDIR: home,
     EPURE_SANDBOX_ACTIVE: "true",
@@ -3264,8 +3294,11 @@ function buildLandrunInvocation(params) {
   for (const p of params.readOnlyPaths ?? []) {
     roxPaths.add(sanitizeLandrunPath(resolve(p)));
   }
+  if (params.readOnlyCwd) {
+    roxPaths.add(resolvedCwd);
+  }
   const rwxPaths = /* @__PURE__ */ new Set([
-    resolvedCwd,
+    ...params.readOnlyCwd ? [] : [resolvedCwd],
     params.agentDir ? sanitizeLandrunPath(resolve(params.agentDir)) : "/tmp",
     ...packageCacheDirs(params.networkPolicy, params.sanitizedEnv).map(sanitizeLandrunPath)
   ]);
@@ -3322,7 +3355,7 @@ function buildBubblewrapInvocation(params) {
     "/run/systemd/resolve",
     "/run/systemd/resolve",
     ...extraBinds,
-    "--bind",
+    params.readOnlyCwd ? "--ro-bind" : "--bind",
     resolvedCwd,
     resolvedCwd,
     "--chdir",
@@ -3355,6 +3388,7 @@ function buildKernelSandboxedCommand(input) {
     proxyPort: input.proxyPort,
     readOnlyPaths: input.readOnlyPaths,
     agentDir: input.agentDir,
+    readOnlyCwd: input.readOnlyCwd,
     writableDevNull: backend === "bubblewrap+landrun"
   });
   const bubblewrap = (command, args) => buildBubblewrapInvocation({
@@ -3364,6 +3398,7 @@ function buildKernelSandboxedCommand(input) {
     readOnlyPaths: input.readOnlyPaths,
     agentDir: input.agentDir,
     writablePaths: packageCacheDirs(input.networkPolicy, input.sanitizedEnv),
+    readOnlyCwd: input.readOnlyCwd,
     underLandrun: backend === "bubblewrap+landrun"
   });
   switch (backend) {
@@ -3880,7 +3915,8 @@ async function runInUntrustedCodeSandbox(input) {
       proxyPort,
       capabilities,
       readOnlyPaths: input.readOnlyPaths,
-      agentDir
+      agentDir,
+      readOnlyCwd: input.readOnlyCwd ?? input.agentSession?.readOnlyCwd
     });
     return spawnCaptured(wrapped.command, wrapped.args, cwd, env, timeoutMs, interact, (kill) => {
       killChild = kill;

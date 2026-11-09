@@ -1,3 +1,8 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { snapshotWorktree } from "../../agent/worktree-snapshot.js";
+import type { AgentEngine } from "../../agent/engine.js";
 import {
   buildRenovateConfigJson,
   buildStackAwareCiWorkflowYaml,
@@ -5,6 +10,7 @@ import {
   detectRepositoryStack
 } from "../../bootstrap/ci-and-renovate.js";
 import { planImpeccableDesignSession } from "../../frontend/impeccable-planning.js";
+import type { ResponseSchemaSpec } from "../../llm/types.js";
 import {
   validatePlanningArtifactsAndGraph,
   type PlanningArtifactsBundle
@@ -14,6 +20,7 @@ import {
   DEFAULT_REVIEWERS_DIR,
   runUserAdvocateDesignGate
 } from "../../review/reviewer-roster.js";
+import { syncWorkspaceFiles } from "../../sandbox/polyglot-workspace-runner.js";
 import {
   PROMPT_INJECTION_IMMUNITY_CLAUSE,
   wrapUntrustedContent
@@ -319,6 +326,305 @@ const IMPLEMENTATION_STARTED_PHASES: ReadonlySet<string> = new Set([
   "completed"
 ]);
 
+function extractJsonCandidatesFromText(text: string): string[] {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return [];
+  }
+  const fenceMatch = /```(?:json)?\s*([\s\S]*?)```/i.exec(trimmed);
+  const candidates = [
+    ...(fenceMatch && fenceMatch[1] ? [fenceMatch[1].trim()] : []),
+    trimmed
+  ];
+  const firstBrace = trimmed.indexOf("{");
+  const lastBrace = trimmed.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    candidates.push(trimmed.slice(firstBrace, lastBrace + 1));
+  }
+  return candidates;
+}
+
+function parseJsonWithSchemaFromText<T>(
+  text: string,
+  schema: ResponseSchemaSpec<T>
+): T | null {
+  for (const candidate of extractJsonCandidatesFromText(text)) {
+    try {
+      const raw = JSON.parse(candidate);
+      return schema.validate(raw);
+    } catch {
+      // try next candidate
+    }
+  }
+  return null;
+}
+
+function extractSpecArtifactsFromAgentSession(params: {
+  readonly finalMessage: string;
+  readonly fileMap: ReadonlyMap<string, string>;
+  readonly planSlug: string;
+  readonly defaultSpecPath: string;
+  readonly existingGlossary?: string | undefined;
+  readonly existingSpec?: string | undefined;
+}): GeneratedSpecArtifacts | null {
+  const {
+    finalMessage,
+    fileMap,
+    planSlug,
+    defaultSpecPath,
+    existingGlossary,
+    existingSpec
+  } = params;
+
+  const specFileEntry = Array.from(fileMap.entries()).find(
+    ([path, content]) =>
+      path.startsWith("docs/specs/") &&
+      path.endsWith(".md") &&
+      content.trim().length > 0
+  );
+  const writtenGlossary = fileMap.get("GLOSSARY.md");
+  const writtenAdrs = Array.from(fileMap.entries())
+    .filter(
+      ([path, content]) =>
+        /^docs\/adr\/\d{4}-[a-z0-9-]+\.md$/.test(path) &&
+        content.trim().length > 0
+    )
+    .map(([path, content]) => {
+      const filename = path.split("/").pop() ?? path;
+      return {
+        path,
+        content,
+        filename,
+        title: filename,
+        markdown: content
+      };
+    });
+
+  const parsedFull = parseJsonWithSchemaFromText(
+    finalMessage,
+    GENERATED_SPEC_ARTIFACTS_SCHEMA
+  );
+  if (parsedFull) {
+    return {
+      ...parsedFull,
+      ...(writtenGlossary && writtenGlossary.trim().length > 0
+        ? { glossary_markdown: writtenGlossary }
+        : {}),
+      ...(writtenAdrs.length > 0 ? { adrs: writtenAdrs } : {}),
+      ...(specFileEntry
+        ? {
+            spec_path: specFileEntry[0],
+            spec_markdown: specFileEntry[1]
+          }
+        : {})
+    };
+  }
+
+  let rawObj: Record<string, unknown> | null = null;
+  for (const candidate of extractJsonCandidatesFromText(finalMessage)) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        rawObj = parsed as Record<string, unknown>;
+        break;
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  const trimmedMsg = finalMessage.trim();
+  const looksLikeMarkdownSpec =
+    !rawObj &&
+    trimmedMsg.startsWith("#") &&
+    (trimmedMsg.includes("\n## ") || trimmedMsg.length >= 80);
+
+  if (!specFileEntry && !rawObj && !looksLikeMarkdownSpec) {
+    return null;
+  }
+
+  const fallbackAdrContent =
+    "# ADR 0001\n\n## Context\nSpecification generated via agentEngine.\n\n## Decision\nAdopt the approved specification architecture.\n\n## Consequences\nDeterministic implementation.\n";
+
+  const candidateRaw: Record<string, unknown> = {
+    plan_slug:
+      typeof rawObj?.plan_slug === "string" && rawObj.plan_slug.trim().length > 0
+        ? rawObj.plan_slug
+        : planSlug,
+    glossary_markdown:
+      writtenGlossary && writtenGlossary.trim().length > 0
+        ? writtenGlossary
+        : typeof rawObj?.glossary_markdown === "string" &&
+            rawObj.glossary_markdown.trim().length > 0
+          ? rawObj.glossary_markdown
+          : existingGlossary && existingGlossary.trim().length > 0
+            ? existingGlossary
+            : "# Glossary\n\n- **Domain Term**: Canonical project definition.\n",
+    adrs:
+      writtenAdrs.length > 0
+        ? writtenAdrs
+        : Array.isArray(rawObj?.adrs) && rawObj.adrs.length > 0
+          ? rawObj.adrs
+          : [
+              {
+                path: "docs/adr/0001-plan-architecture.md",
+                content: fallbackAdrContent
+              }
+            ],
+    spec_path: specFileEntry
+      ? specFileEntry[0]
+      : typeof rawObj?.spec_path === "string" &&
+          rawObj.spec_path.trim().startsWith("docs/specs/")
+        ? rawObj.spec_path
+        : defaultSpecPath,
+    spec_markdown: specFileEntry
+      ? specFileEntry[1]
+      : typeof rawObj?.spec_markdown === "string" &&
+          rawObj.spec_markdown.trim().length > 0
+        ? rawObj.spec_markdown
+        : looksLikeMarkdownSpec
+          ? trimmedMsg
+          : existingSpec ?? "",
+    ...(Array.isArray(rawObj?.target_files_hint)
+      ? { target_files_hint: rawObj.target_files_hint }
+      : {}),
+    ...(rawObj?.epic_goal_contract &&
+    typeof rawObj.epic_goal_contract === "object"
+      ? { epic_goal_contract: rawObj.epic_goal_contract }
+      : {})
+  };
+
+  try {
+    return GENERATED_SPEC_ARTIFACTS_SCHEMA.validate(candidateRaw);
+  } catch {
+    return null;
+  }
+}
+
+async function runReadOnlyPlanningAgentSession(params: {
+  readonly agentEngine: AgentEngine;
+  readonly role: "griller" | "ticket_splitter";
+  readonly instructions: string;
+  readonly prompt: string;
+  readonly phaseModels: ResolvedPhaseModels;
+  readonly seedFiles: ReadonlyMap<string, string>;
+  readonly worktreeDir?: string | undefined;
+  readonly activeToken?: string | undefined;
+}): Promise<string> {
+  let tempWorktreeDir: string | undefined;
+  let effectiveWorktreeDir = params.worktreeDir;
+  if (!effectiveWorktreeDir) {
+    tempWorktreeDir = mkdtempSync(join(tmpdir(), `epure-${params.role}-wt-`));
+    effectiveWorktreeDir = tempWorktreeDir;
+    syncWorkspaceFiles(tempWorktreeDir, params.seedFiles, new Set());
+  }
+  try {
+    const session = await params.agentEngine.run({
+      role: params.role,
+      toolPolicy: "read_only",
+      instructions: params.instructions,
+      prompt: params.prompt,
+      worktree: effectiveWorktreeDir,
+      timeoutMs: params.phaseModels.requestTimeoutMs ?? 30 * 60 * 1000,
+      model: params.phaseModels.planningModel,
+      providers: params.phaseModels.providers,
+      ...(params.activeToken ? { secrets: [params.activeToken] } : {})
+    });
+    return session.finalMessage;
+  } finally {
+    if (tempWorktreeDir) {
+      try {
+        rmSync(tempWorktreeDir, { recursive: true, force: true });
+      } catch {
+        // ignore cleanup error
+      }
+    }
+  }
+}
+
+async function runSpecWriterAgentSession(params: {
+  readonly agentEngine: AgentEngine;
+  readonly instructions: string;
+  readonly prompt: string;
+  readonly phaseModels: ResolvedPhaseModels;
+  readonly planSlug: string;
+  readonly defaultSpecPath: string;
+  readonly existingGlossary?: string | undefined;
+  readonly existingSpec?: string | undefined;
+  readonly seedFiles: ReadonlyMap<string, string>;
+  readonly worktreeDir?: string | undefined;
+  readonly activeToken?: string | undefined;
+}): Promise<GeneratedSpecArtifacts | null> {
+  let tempWorktreeDir: string | undefined;
+  let effectiveWorktreeDir = params.worktreeDir;
+  const seedEntries = new Map<string, string>(params.seedFiles);
+  if (params.existingGlossary && params.existingGlossary.trim().length > 0) {
+    seedEntries.set("GLOSSARY.md", params.existingGlossary);
+  }
+  if (params.existingSpec && params.existingSpec.trim().length > 0) {
+    seedEntries.set(
+      params.defaultSpecPath.trim().replace(/^\/+/, ""),
+      params.existingSpec
+    );
+  }
+  if (!effectiveWorktreeDir) {
+    tempWorktreeDir = mkdtempSync(join(tmpdir(), "epure-spec-writer-wt-"));
+    effectiveWorktreeDir = tempWorktreeDir;
+    for (const [relPath, content] of seedEntries.entries()) {
+      const normalized = relPath.trim().replace(/^\/+/, "");
+      if (!normalized) continue;
+      const fullPath = join(tempWorktreeDir, normalized);
+      mkdirSync(dirname(fullPath), { recursive: true });
+      writeFileSync(fullPath, content, "utf8");
+    }
+  }
+  const trackedPaths = Array.from(seedEntries.keys()).map((p) =>
+    p.trim().replace(/^\/+/, "")
+  );
+  const outerSnapshot = await snapshotWorktree(effectiveWorktreeDir, {
+    trackedPaths
+  });
+  try {
+    const session = await params.agentEngine.run({
+      role: "spec_writer",
+      toolPolicy: "write",
+      instructions: params.instructions,
+      prompt: params.prompt,
+      worktree: effectiveWorktreeDir,
+      timeoutMs: params.phaseModels.requestTimeoutMs ?? 30 * 60 * 1000,
+      model: params.phaseModels.planningModel,
+      providers: params.phaseModels.providers,
+      trackedPaths,
+      ...(params.activeToken ? { secrets: [params.activeToken] } : {})
+    });
+    const outerDiff = await outerSnapshot.collect();
+    const fileMap = new Map<string, string>();
+    for (const f of outerDiff.files) {
+      fileMap.set(f.path.trim().replace(/^\/+/, ""), f.content);
+    }
+    for (const f of session.diff.files) {
+      fileMap.set(f.path.trim().replace(/^\/+/, ""), f.content);
+    }
+    return extractSpecArtifactsFromAgentSession({
+      finalMessage: session.finalMessage,
+      fileMap,
+      planSlug: params.planSlug,
+      defaultSpecPath: params.defaultSpecPath,
+      existingGlossary: params.existingGlossary,
+      existingSpec: params.existingSpec
+    });
+  } finally {
+    outerSnapshot.dispose();
+    if (tempWorktreeDir) {
+      try {
+        rmSync(tempWorktreeDir, { recursive: true, force: true });
+      } catch {
+        // ignore cleanup error
+      }
+    }
+  }
+}
+
 export async function runGrillAndPlanPhase(params: {
   readonly command: "plan" | "reply" | "to-spec" | "to-tickets";
   readonly currentPhase?: string | undefined;
@@ -341,6 +647,9 @@ export async function runGrillAndPlanPhase(params: {
   readonly reviewersDir?: string | undefined;
   readonly onTransientRetriesUsed?: ((retriesUsed: number) => void) | undefined;
   readonly fetchImpl?: typeof fetch | undefined;
+  readonly agentEngine?: AgentEngine | undefined;
+  readonly worktreeDir?: string | undefined;
+  readonly activeToken?: string | undefined;
 }): Promise<OrchestrateIssueResult> {
   const {
     command,
@@ -362,7 +671,10 @@ export async function runGrillAndPlanPhase(params: {
     phaseModels,
     reviewersDir = DEFAULT_REVIEWERS_DIR,
     onTransientRetriesUsed,
-    fetchImpl
+    fetchImpl,
+    agentEngine,
+    worktreeDir,
+    activeToken
   } = params;
 
   // Before implementation, `/epure to-tickets` regenerates the graph and closes the tickets it supersedes.
@@ -447,23 +759,50 @@ export async function runGrillAndPlanPhase(params: {
       )
     ].join("\n");
 
-    const grillQuestions = await callLlmText({
-      apiKey: llmApiKey,
-      model: phaseModels.planningModel,
-      providers: phaseModels.providers,
-      maxTransientRetries: phaseModels.maxTransientRetries,
-      transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
-      requestTimeoutMs: phaseModels.requestTimeoutMs,
-      onTransientRetriesUsed,
-      systemInstruction: grillSystemInstruction,
-      prompt: grillPrompt,
-      temperature: 0.2,
-      tools: grillRepoTools.tools,
-      toolHandlers: grillRepoTools.toolHandlers,
-      maxToolRounds: 8,
-      logLabel: `grill-round-1#${issueNumber}`,
-      fetchImpl
-    });
+    let grillQuestions: string | null = null;
+    if (agentEngine) {
+      const rawGrillMsg = await runReadOnlyPlanningAgentSession({
+        agentEngine,
+        role: "griller",
+        instructions: grillSystemInstruction,
+        prompt: grillPrompt,
+        phaseModels,
+        seedFiles: grillExplorationCache,
+        worktreeDir,
+        activeToken
+      });
+      const parsedGrillEval = parseJsonWithSchemaFromText(
+        rawGrillMsg,
+        GRILL_ROUND_EVALUATION_SCHEMA
+      );
+      if (
+        parsedGrillEval &&
+        parsedGrillEval.follow_up_questions_markdown.trim().length > 0
+      ) {
+        grillQuestions = parsedGrillEval.follow_up_questions_markdown.trim();
+      } else if (rawGrillMsg.trim().length > 0) {
+        grillQuestions = rawGrillMsg.trim();
+      }
+    }
+    if (!grillQuestions) {
+      grillQuestions = await callLlmText({
+        apiKey: llmApiKey,
+        model: phaseModels.planningModel,
+        providers: phaseModels.providers,
+        maxTransientRetries: phaseModels.maxTransientRetries,
+        transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+        requestTimeoutMs: phaseModels.requestTimeoutMs,
+        onTransientRetriesUsed,
+        systemInstruction: grillSystemInstruction,
+        prompt: grillPrompt,
+        temperature: 0.2,
+        tools: grillRepoTools.tools,
+        toolHandlers: grillRepoTools.toolHandlers,
+        maxToolRounds: 8,
+        logLabel: `grill-round-1#${issueNumber}`,
+        fetchImpl
+      });
+    }
 
     const commentBody = appendEpureCommandsSpoiler(
       [
@@ -544,24 +883,43 @@ export async function runGrillAndPlanPhase(params: {
       )
     ].join("\n");
 
-    const evalResult = await callLlmJson<GrillRoundEvaluation>({
-      apiKey: llmApiKey,
-      model: phaseModels.planningModel,
-      providers: phaseModels.providers,
-      maxTransientRetries: phaseModels.maxTransientRetries,
-      transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
-      requestTimeoutMs: phaseModels.requestTimeoutMs,
-      onTransientRetriesUsed,
-      systemInstruction: grillLoopEvalSystemInstruction,
-      prompt: grillLoopEvalPrompt,
-      temperature: 0.1,
-      tools: grillRepoTools.tools,
-      toolHandlers: grillRepoTools.toolHandlers,
-      maxToolRounds: 8,
-      logLabel: `grill-eval#${issueNumber}`,
-      responseSchema: GRILL_ROUND_EVALUATION_SCHEMA,
-      fetchImpl
-    });
+    let evalResult: GrillRoundEvaluation | null = null;
+    if (agentEngine) {
+      const rawEvalMsg = await runReadOnlyPlanningAgentSession({
+        agentEngine,
+        role: "griller",
+        instructions: grillLoopEvalSystemInstruction,
+        prompt: grillLoopEvalPrompt,
+        phaseModels,
+        seedFiles: grillExplorationCache,
+        worktreeDir,
+        activeToken
+      });
+      evalResult = parseJsonWithSchemaFromText(
+        rawEvalMsg,
+        GRILL_ROUND_EVALUATION_SCHEMA
+      );
+    }
+    if (!evalResult) {
+      evalResult = await callLlmJson<GrillRoundEvaluation>({
+        apiKey: llmApiKey,
+        model: phaseModels.planningModel,
+        providers: phaseModels.providers,
+        maxTransientRetries: phaseModels.maxTransientRetries,
+        transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+        requestTimeoutMs: phaseModels.requestTimeoutMs,
+        onTransientRetriesUsed,
+        systemInstruction: grillLoopEvalSystemInstruction,
+        prompt: grillLoopEvalPrompt,
+        temperature: 0.1,
+        tools: grillRepoTools.tools,
+        toolHandlers: grillRepoTools.toolHandlers,
+        maxToolRounds: 8,
+        logLabel: `grill-eval#${issueNumber}`,
+        responseSchema: GRILL_ROUND_EVALUATION_SCHEMA,
+        fetchImpl
+      });
+    }
 
     if (
       !evalResult.frontier_resolved &&
@@ -742,43 +1100,69 @@ export async function runGrillAndPlanPhase(params: {
       )
     ].join("\n");
 
-    let specArtifacts = await callLlmJson<GeneratedSpecArtifacts>({
-      apiKey: llmApiKey,
-      model: phaseModels.planningModel,
-      providers: phaseModels.providers,
-      maxTransientRetries: phaseModels.maxTransientRetries,
-      transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
-      requestTimeoutMs: phaseModels.requestTimeoutMs,
-      onTransientRetriesUsed,
-      systemInstruction: specOnlySystemInstruction,
-      prompt: specOnlyPrompt,
-      temperature: 0.1,
-      tools: grillRepoTools.tools,
-      toolHandlers: grillRepoTools.toolHandlers,
-      maxToolRounds: 10,
-      logLabel: isSpecRevision
-        ? `spec-revision#${issueNumber}`
-        : `spec-artifacts#${issueNumber}`,
-      responseSchema: GENERATED_SPEC_ARTIFACTS_SCHEMA,
-      fetchImpl
-    });
+    const existingGlossaryForSpec =
+      (await readRepoFileSafely("GLOSSARY.md", planBranch)) ??
+      (await readRepoFileSafely("GLOSSARY.md", "dev")) ??
+      undefined;
 
-    // Goldfish Zero-Context Spec Audit (Google EGM, ADR-0031)
-    let goldfishAudit: GoldfishSpecAuditPayload | null = null;
-    try {
-      goldfishAudit = await runGoldfishSpecAudit({
-        specArtifacts,
+    let specArtifactsFromAgent: GeneratedSpecArtifacts | null = null;
+    if (agentEngine) {
+      specArtifactsFromAgent = await runSpecWriterAgentSession({
+        agentEngine,
+        instructions: specOnlySystemInstruction,
+        prompt: specOnlyPrompt,
+        phaseModels,
+        planSlug,
+        defaultSpecPath: specManifest?.specPath ?? `docs/specs/${planSlug}.md`,
+        existingGlossary: existingGlossaryForSpec,
+        existingSpec: currentSpecOnBranch ?? undefined,
+        seedFiles: grillExplorationCache,
+        worktreeDir,
+        activeToken
+      });
+    }
+
+    let specArtifacts =
+      specArtifactsFromAgent ??
+      (await callLlmJson<GeneratedSpecArtifacts>({
         apiKey: llmApiKey,
-        model: phaseModels.reviewModel,
+        model: phaseModels.planningModel,
         providers: phaseModels.providers,
         maxTransientRetries: phaseModels.maxTransientRetries,
         transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
         requestTimeoutMs: phaseModels.requestTimeoutMs,
         onTransientRetriesUsed,
+        systemInstruction: specOnlySystemInstruction,
+        prompt: specOnlyPrompt,
+        temperature: 0.1,
+        tools: grillRepoTools.tools,
+        toolHandlers: grillRepoTools.toolHandlers,
+        maxToolRounds: 10,
+        logLabel: isSpecRevision
+          ? `spec-revision#${issueNumber}`
+          : `spec-artifacts#${issueNumber}`,
+        responseSchema: GENERATED_SPEC_ARTIFACTS_SCHEMA,
         fetchImpl
-      });
-    } catch {
-      goldfishAudit = null;
+      }));
+
+    // Goldfish Zero-Context Spec Audit (Google EGM, ADR-0031)
+    let goldfishAudit: GoldfishSpecAuditPayload | null = null;
+    if (!specArtifactsFromAgent) {
+      try {
+        goldfishAudit = await runGoldfishSpecAudit({
+          specArtifacts,
+          apiKey: llmApiKey,
+          model: phaseModels.reviewModel,
+          providers: phaseModels.providers,
+          maxTransientRetries: phaseModels.maxTransientRetries,
+          transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+          requestTimeoutMs: phaseModels.requestTimeoutMs,
+          onTransientRetriesUsed,
+          fetchImpl
+        });
+      } catch {
+        goldfishAudit = null;
+      }
     }
 
     if (goldfishAudit && !goldfishAudit.passed) {
@@ -915,22 +1299,23 @@ export async function runGrillAndPlanPhase(params: {
       candidateDesignTopics: ["theme", "layout", "accessibility"]
     });
 
-    const designGate = touchesFrontendUi
-      ? await runUserAdvocateDesignGate({
-          repository,
-          planTitle: issue.title,
-          glossaryMarkdown: specArtifacts.glossary_markdown,
-          specMarkdown: specArtifacts.spec_markdown,
-          llmApiKey,
-          model: phaseModels.reviewModel,
-          providers: phaseModels.providers,
-          maxTransientRetries: phaseModels.maxTransientRetries,
-          transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
-          requestTimeoutMs: phaseModels.requestTimeoutMs,
-          onTransientRetriesUsed,
-          fetchImpl
-        })
-      : null;
+    const designGate =
+      touchesFrontendUi && !specArtifactsFromAgent
+        ? await runUserAdvocateDesignGate({
+            repository,
+            planTitle: issue.title,
+            glossaryMarkdown: specArtifacts.glossary_markdown,
+            specMarkdown: specArtifacts.spec_markdown,
+            llmApiKey,
+            model: phaseModels.reviewModel,
+            providers: phaseModels.providers,
+            maxTransientRetries: phaseModels.maxTransientRetries,
+            transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+            requestTimeoutMs: phaseModels.requestTimeoutMs,
+            onTransientRetriesUsed,
+            fetchImpl
+          })
+        : null;
 
     const plannedStack = detectRepositoryStack({
       targetFilesHint
@@ -1133,24 +1518,50 @@ export async function runGrillAndPlanPhase(params: {
       )
     ].join("\n");
 
-    const ticketDag = await callLlmJson<GeneratedTicketDag>({
-      apiKey: llmApiKey,
-      model: phaseModels.planningModel,
-      providers: phaseModels.providers,
-      maxTransientRetries: phaseModels.maxTransientRetries,
-      transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
-      requestTimeoutMs: phaseModels.requestTimeoutMs,
-      onTransientRetriesUsed,
-      systemInstruction: ticketsOnlySystemInstruction,
-      prompt: ticketsOnlyPrompt,
-      temperature: 0.1,
-      tools: grillRepoTools.tools,
-      toolHandlers: grillRepoTools.toolHandlers,
-      maxToolRounds: 8,
-      logLabel: `ticket-dag#${issueNumber}`,
-      responseSchema: GENERATED_TICKET_DAG_SCHEMA,
-      fetchImpl
-    });
+    let ticketDagFromAgent: GeneratedTicketDag | null = null;
+    if (agentEngine) {
+      const ticketSeedFiles = new Map<string, string>(grillExplorationCache);
+      ticketSeedFiles.set("GLOSSARY.md", existingGlossary);
+      ticketSeedFiles.set(candidateSpecPath, existingSpecOnPlanBranch);
+      for (const adr of loadedAdrs) {
+        ticketSeedFiles.set(adr.path, adr.content);
+      }
+      const rawTicketDagMsg = await runReadOnlyPlanningAgentSession({
+        agentEngine,
+        role: "ticket_splitter",
+        instructions: ticketsOnlySystemInstruction,
+        prompt: ticketsOnlyPrompt,
+        phaseModels,
+        seedFiles: ticketSeedFiles,
+        worktreeDir,
+        activeToken
+      });
+      ticketDagFromAgent = parseJsonWithSchemaFromText(
+        rawTicketDagMsg,
+        GENERATED_TICKET_DAG_SCHEMA
+      );
+    }
+
+    const ticketDag =
+      ticketDagFromAgent ??
+      (await callLlmJson<GeneratedTicketDag>({
+        apiKey: llmApiKey,
+        model: phaseModels.planningModel,
+        providers: phaseModels.providers,
+        maxTransientRetries: phaseModels.maxTransientRetries,
+        transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+        requestTimeoutMs: phaseModels.requestTimeoutMs,
+        onTransientRetriesUsed,
+        systemInstruction: ticketsOnlySystemInstruction,
+        prompt: ticketsOnlyPrompt,
+        temperature: 0.1,
+        tools: grillRepoTools.tools,
+        toolHandlers: grillRepoTools.toolHandlers,
+        maxToolRounds: 8,
+        logLabel: `ticket-dag#${issueNumber}`,
+        responseSchema: GENERATED_TICKET_DAG_SCHEMA,
+        fetchImpl
+      }));
 
     const fallbackAdrContent =
       "# ADR 0001\n\n## Context\nApproved specification on plan branch.\n\n## Decision\nExecute atomic TDD ticket DAG.\n\n## Consequences\nDeterministic execution.\n";
@@ -1221,24 +1632,71 @@ export async function runGrillAndPlanPhase(params: {
       )
     ].join("\n");
 
-    bundle = await callLlmJson<GeneratedPlanningBundle>({
-      apiKey: llmApiKey,
-      model: phaseModels.planningModel,
-      providers: phaseModels.providers,
-      maxTransientRetries: phaseModels.maxTransientRetries,
-      transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
-      requestTimeoutMs: phaseModels.requestTimeoutMs,
-      onTransientRetriesUsed,
-      systemInstruction: specSystemInstruction,
-      prompt: specGenerationPrompt,
-      temperature: 0.1,
-      tools: grillRepoTools.tools,
-      toolHandlers: grillRepoTools.toolHandlers,
-      maxToolRounds: 10,
-      logLabel: `spec-bundle#${issueNumber}`,
-      responseSchema: GENERATED_PLANNING_BUNDLE_SCHEMA,
-      fetchImpl
-    });
+    let bundleFromAgent: GeneratedPlanningBundle | null = null;
+    if (agentEngine) {
+      const rawBundleMsg = await runReadOnlyPlanningAgentSession({
+        agentEngine,
+        role: "ticket_splitter",
+        instructions: specSystemInstruction,
+        prompt: specGenerationPrompt,
+        phaseModels,
+        seedFiles: grillExplorationCache,
+        worktreeDir,
+        activeToken
+      });
+      bundleFromAgent = parseJsonWithSchemaFromText(
+        rawBundleMsg,
+        GENERATED_PLANNING_BUNDLE_SCHEMA
+      );
+      if (!bundleFromAgent) {
+        const dagOnly = parseJsonWithSchemaFromText(
+          rawBundleMsg,
+          GENERATED_TICKET_DAG_SCHEMA
+        );
+        if (dagOnly) {
+          const fallbackAdr =
+            "# ADR 0001\n\n## Context\nApproved specification on plan branch.\n\n## Decision\nExecute atomic TDD ticket DAG.\n\n## Consequences\nDeterministic execution.\n";
+          bundleFromAgent = {
+            plan_slug: planSlug,
+            glossary_markdown:
+              "# Glossary\n\n- **Domain Term**: Canonical project definition.\n",
+            adrs: [
+              {
+                path: "docs/adr/0001-plan-architecture.md",
+                content: fallbackAdr,
+                filename: "0001-plan-architecture.md",
+                title: "ADR 0001",
+                markdown: fallbackAdr
+              }
+            ],
+            spec_path: candidateSpecPath,
+            spec_markdown: `# Specification (${planSlug})\n\n${issue.body}`,
+            tickets: dagOnly.tickets
+          };
+        }
+      }
+    }
+
+    bundle =
+      bundleFromAgent ??
+      (await callLlmJson<GeneratedPlanningBundle>({
+        apiKey: llmApiKey,
+        model: phaseModels.planningModel,
+        providers: phaseModels.providers,
+        maxTransientRetries: phaseModels.maxTransientRetries,
+        transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+        requestTimeoutMs: phaseModels.requestTimeoutMs,
+        onTransientRetriesUsed,
+        systemInstruction: specSystemInstruction,
+        prompt: specGenerationPrompt,
+        temperature: 0.1,
+        tools: grillRepoTools.tools,
+        toolHandlers: grillRepoTools.toolHandlers,
+        maxToolRounds: 10,
+        logLabel: `spec-bundle#${issueNumber}`,
+        responseSchema: GENERATED_PLANNING_BUNDLE_SCHEMA,
+        fetchImpl
+      }));
   }
 
   // Bucket A Guard: Validate planning artifacts and DAG acyclicity before creating sub-issues
@@ -1327,22 +1785,23 @@ export async function runGrillAndPlanPhase(params: {
     candidateDesignTopics: ["theme", "layout", "accessibility"]
   });
 
-  const designGate = touchesFrontendUi
-    ? await runUserAdvocateDesignGate({
-        repository,
-        planTitle: issue.title,
-        glossaryMarkdown: bundle.glossary_markdown,
-        specMarkdown: bundle.spec_markdown,
-        llmApiKey,
-        model: phaseModels.reviewModel,
-        providers: phaseModels.providers,
-        maxTransientRetries: phaseModels.maxTransientRetries,
-        transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
-        requestTimeoutMs: phaseModels.requestTimeoutMs,
-        onTransientRetriesUsed,
-        fetchImpl
-      })
-    : null;
+  const designGate =
+    touchesFrontendUi && !agentEngine
+      ? await runUserAdvocateDesignGate({
+          repository,
+          planTitle: issue.title,
+          glossaryMarkdown: bundle.glossary_markdown,
+          specMarkdown: bundle.spec_markdown,
+          llmApiKey,
+          model: phaseModels.reviewModel,
+          providers: phaseModels.providers,
+          maxTransientRetries: phaseModels.maxTransientRetries,
+          transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+          requestTimeoutMs: phaseModels.requestTimeoutMs,
+          onTransientRetriesUsed,
+          fetchImpl
+        })
+      : null;
 
   const plannedStack = detectRepositoryStack({
     targetFilesHint: allTargetFiles
