@@ -84,6 +84,9 @@ async function run(): Promise<void> {
         }
       : undefined;
 
+  // Written by the job's first step, so the budget counts setup time too.
+  const jobStartedAtMs = Number.parseInt(process.env.EPURE_JOB_STARTED_AT_MS ?? "", 10);
+
   const secrets = [agentAppPrivateKey, fallbackGithubToken, llmApiKey].filter(
     (s) => s.length >= 4
   );
@@ -105,6 +108,7 @@ async function run(): Promise<void> {
       ...(asyncCiContinuation ? { asyncCiContinuation } : {}),
       runId,
       workflowJob,
+      ...(Number.isFinite(jobStartedAtMs) ? { jobStartedAtMs } : {}),
       agentEngine: createPiAgentEngine({
         runnerEnv: { ...process.env, ...(llmApiKey ? { LLM_API_KEY: llmApiKey } : {}) }
       })

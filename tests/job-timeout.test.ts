@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -55,5 +55,17 @@ describe("The lease length is the timeout-minutes GitHub enforces on the orchest
     );
     expect(minutes).toBe(expected);
     expect(reads).toEqual([".github/workflows/epure-issue-command.yml@wf-sha"]);
+  });
+
+  it.each([
+    { id: "generated-caller-workflow", yaml: GENERATED },
+    { id: "reusable-issue-command-workflow", yaml: readFileSync(".github/workflows/issue-command.yml", "utf8") }
+  ])("[$id] the orchestrate-command job records its start in its first step and hands it to the orchestrator", ({ yaml }) => {
+    const job = yaml.slice(yaml.indexOf("  orchestrate-command:"));
+    const firstStep = job.slice(job.indexOf("    steps:")).split("\n")[1];
+
+    expect(firstStep).toBe("      - name: Record job start");
+    expect(job).toContain('run: echo "ms=$(date +%s%3N)" >> "$GITHUB_OUTPUT"');
+    expect(job).toContain("EPURE_JOB_STARTED_AT_MS: ${{ steps.job-start.outputs.ms }}");
   });
 });

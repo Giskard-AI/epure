@@ -5,7 +5,7 @@ import { AgentEngineError, type AgentEngine, type AgentSessionRequest, type Agen
 import { ClosureNotProcessedError, EscalationNotRecordedError, orchestrateIssueCommand } from "../src/orchestrator/issue-orchestrator.js";
 import { GitHubRateLimitError } from "../src/orchestrator/github/rate-limit.js";
 import { AmbiguousFeatureBranchError, findExistingFeatureBranch } from "../src/orchestrator/phases/epic-closure.js";
-import { agentSessionTimeoutMs } from "../src/orchestrator/phases/ticket-execution.js";
+import { agentSessionTimeoutMs, summaryRequestTimeoutMs } from "../src/orchestrator/phases/ticket-execution.js";
 import type { OrchestrateIssueInput } from "../src/orchestrator/types.js";
 import {
   claimForRun,
@@ -1534,6 +1534,52 @@ describe("Implementation, Stage 1 fixes and review/CI remediation run as agent e
     }
   });
 
+  it("session-leaving-too-little-job-budget-for-stage1-escalates-job_budget_exhausted-before-stage1", async () => {
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const store = await seedState(FEATURE_INTEGRATION_PENDING_STATE);
+    const router = declareFreshTicketFlow();
+    const sandboxRunner = vi.fn(PASSING_SANDBOX);
+    const engine: AgentEngine = {
+      name: "slow",
+      run: async (request) => {
+        // 15 min left, a 5 min session: running 5.5 min past it leaves 4.5 min, under the Stage 1 floor.
+        vi.setSystemTime(Date.now() + request.timeoutMs + 5.5 * 60_000);
+        return changed("src/a.ts") as AgentSessionResult;
+      }
+    };
+
+    try {
+      await orchestrateIssueCommand({
+        repository: REPO,
+        commandArgs: "",
+        fallbackGithubToken: "ghs_test",
+        llmApiKey: "key_test",
+        model: "openai/gpt-test",
+        stateStore: store,
+        fetchImpl: router.fetch,
+        sandboxRunner,
+        agentEngine: engine,
+        jobStartedAtMs: Date.now() - 45 * 60_000,
+        command: "approve",
+        actor: "maintainer",
+        issueNumber: ISSUE,
+        commentId: 900
+      });
+    } finally {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    }
+
+    expect(router.unmatched).toEqual([]);
+    expect(sandboxRunner).not.toHaveBeenCalled();
+    expect(router.calls("POST", `${R}/git/commits`)).toBe(0);
+    expect(await readState(store)).toMatchObject({
+      status: "suspended",
+      last_escalation: { reason: "job_budget_exhausted", ticket_number: ISSUE }
+    });
+  });
+
   it.each([
     {
       id: "failed-summary-call-falls-back-to-a-deterministic-commit-message",
@@ -1592,6 +1638,18 @@ describe("Implementation, Stage 1 fixes and review/CI remediation run as agent e
     const deadline = deadlineInMin === undefined ? undefined : now + deadlineInMin * 60_000;
 
     expect(agentSessionTimeoutMs(deadline, now)).toBe(expectedMin === undefined ? undefined : expectedMin * 60_000);
+  });
+
+  it.each([
+    { id: "no-known-job-deadline-keeps-the-configured-timeout", deadlineInMin: undefined, configuredMs: 60_000, expectedMs: 60_000 },
+    { id: "plenty-of-job-budget-keeps-the-default-timeout", deadlineInMin: 60, configuredMs: undefined, expectedMs: 900_000 },
+    { id: "summary-ends-5-minutes-before-the-job-deadline", deadlineInMin: 8, configuredMs: undefined, expectedMs: 3 * 60_000 },
+    { id: "past-the-stage1-floor-the-call-gets-1-second", deadlineInMin: 4, configuredMs: undefined, expectedMs: 1_000 }
+  ])("summary timeout: $id", ({ deadlineInMin, configuredMs, expectedMs }) => {
+    const now = 1_000_000;
+    const deadline = deadlineInMin === undefined ? undefined : now + deadlineInMin * 60_000;
+
+    expect(summaryRequestTimeoutMs(deadline, now, configuredMs)).toBe(expectedMs);
   });
 
   it("fixer-session-leaving-no-change-counts-as-a-failed-attempt-without-running-stage1", async () => {

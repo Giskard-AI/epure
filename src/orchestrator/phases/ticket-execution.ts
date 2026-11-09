@@ -23,6 +23,7 @@ import {
 } from "../../execution/external-ci-gate.js";
 import { reconcileProvenTicketDependencies } from "../../execution/proven-dependency-unblocker.js";
 import { evaluateReviewFeedbackTrigger } from "../../execution/review-loop-guard.js";
+import { DEFAULT_LLM_REQUEST_TIMEOUT_MS } from "../../llm/client.js";
 import {
   AuthenticationError,
   LLMError,
@@ -311,12 +312,18 @@ const TICKET_AGENT_SESSION_TIMEOUT_MS = 30 * 60 * 1000;
 // Kept after a session for Stage 1, the commit and an escalation before the job's timeout kills the run.
 const AGENT_SESSION_RESERVE_MS = 10 * 60 * 1000;
 const MIN_AGENT_SESSION_MS = 2 * 60 * 1000;
+// One Stage 1 install or test command at its timeout, then the commit or an escalation.
+const MIN_STAGE1_BUDGET_MS = 5 * 60 * 1000;
 export const DEFAULT_AGENT_MAX_LLM_REQUESTS = 200;
 
 export class JobBudgetExhaustedError extends Error {
-  constructor(remainingMs: number) {
+  constructor(
+    remainingMs: number,
+    step = "an agent session with Stage 1 and the commit",
+    neededMs = AGENT_SESSION_RESERVE_MS + MIN_AGENT_SESSION_MS
+  ) {
     super(
-      `${Math.max(0, Math.floor(remainingMs / 1000))} s of the job's time budget remain: an agent session needs ${(AGENT_SESSION_RESERVE_MS + MIN_AGENT_SESSION_MS) / 1000} s with Stage 1 and the commit.`
+      `${Math.max(0, Math.floor(remainingMs / 1000))} s of the job's time budget remain: ${step} needs ${neededMs / 1000} s.`
     );
     this.name = "JobBudgetExhaustedError";
   }
@@ -327,6 +334,21 @@ export function agentSessionTimeoutMs(jobDeadlineMs: number | undefined, nowMs: 
   const available =
     jobDeadlineMs === undefined ? TICKET_AGENT_SESSION_TIMEOUT_MS : jobDeadlineMs - nowMs - AGENT_SESSION_RESERVE_MS;
   return available < MIN_AGENT_SESSION_MS ? undefined : Math.min(TICKET_AGENT_SESSION_TIMEOUT_MS, available);
+}
+
+// The summary call leaves Stage 1 its floor; at least 1 s so the call can still fail over to the fallback message.
+export function summaryRequestTimeoutMs(
+  jobDeadlineMs: number | undefined,
+  nowMs: number,
+  requestTimeoutMs: number | undefined
+): number | undefined {
+  if (jobDeadlineMs === undefined) {
+    return requestTimeoutMs;
+  }
+  return Math.max(
+    1_000,
+    Math.min(requestTimeoutMs ?? DEFAULT_LLM_REQUEST_TIMEOUT_MS, jobDeadlineMs - nowMs - MIN_STAGE1_BUDGET_MS)
+  );
 }
 
 const SKIPPED_PATH_LABELS: Record<SkippedPathReason, string> = {
@@ -408,7 +430,7 @@ async function runTicketAgentSession(
     ...diff.files.map((f) => `- ${f.path}`),
     ...diff.deleted_files.map((p) => `- ${p} (supprimé)`)
   ];
-  const summary = await summarizeAgentSession(params, changedPaths, finalMessage);
+  const summary = await summarizeAgentSession(params, changedPaths, finalMessage, session.jobDeadlineMs);
 
   return {
     commit_message: summary.commit_message,
@@ -430,8 +452,10 @@ const THINKING_LEVELS = {
 async function summarizeAgentSession(
   params: GenerateTicketImplementationWithFallbackParams,
   changedPaths: readonly string[],
-  finalMessage: string
+  finalMessage: string,
+  jobDeadlineMs: number | undefined
 ): Promise<TicketSessionSummary> {
+  const requestTimeoutMs = summaryRequestTimeoutMs(jobDeadlineMs, Date.now(), params.phaseModels.requestTimeoutMs);
   try {
     return await callLlmJson<TicketSessionSummary>({
     apiKey: params.llmApiKey,
@@ -439,7 +463,7 @@ async function summarizeAgentSession(
     providers: params.phaseModels.providers,
     maxTransientRetries: params.phaseModels.maxTransientRetries,
     transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
-    requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+    requestTimeoutMs,
     onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
     logLabel: params.logLabel ? `${params.logLabel}/summary` : undefined,
     systemInstruction: [
@@ -1113,6 +1137,10 @@ export async function runTicketExecutionLoop(
               output: [agentFailure, lastStage1Output].filter(Boolean).join("\n\n")
             }
           };
+        }
+        const remainingMs = params.jobDeadlineMs === undefined ? undefined : params.jobDeadlineMs - Date.now();
+        if (integrityCheck.passed && remainingMs !== undefined && remainingMs < MIN_STAGE1_BUDGET_MS) {
+          throw new JobBudgetExhaustedError(remainingMs, "Stage 1 with the commit", MIN_STAGE1_BUDGET_MS);
         }
         const testCheck = !integrityCheck.passed
           ? {
