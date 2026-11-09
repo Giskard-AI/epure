@@ -2422,7 +2422,8 @@ function parseAgentsYaml(yamlContent) {
       } else if (key === "review_timeout_minutes") {
         review_timeout_minutes = parseNum(val);
       } else if (key === "agent_max_llm_requests") {
-        agent_max_llm_requests = parseNum(val);
+        const parsed = parseNum(val);
+        agent_max_llm_requests = parsed === void 0 ? void 0 : Math.max(1, parsed);
       } else if (key === "max_concurrent_tasks_per_feature") {
         max_concurrent_tasks_per_feature = parseNum(val);
       } else if (key === "trace_retention_days") {
@@ -2824,10 +2825,15 @@ function buildCallerWorkflows(pinnedSha, stack, jobTimeoutMinutes = DEFAULT_AGEN
         "      pull-requests: write # open, review, and squash-merge task PRs",
         "      checks: read # the GITHUB_TOKEN fallback reads CI check runs; the Agent App publishes EPURE's with its own permissions",
         "    steps:",
+        "      - name: Record job start",
+        "        id: job-start",
+        '        run: echo "ms=$(date +%s%3N)" >> "$GITHUB_OUTPUT"',
         ...buildSandboxToolingSetupSteps(),
         "      - name: Run pre-bundled EPURE issue orchestrator",
         "        id: orchestrate",
         `        uses: Giskard-AI/epure/actions/orchestrate-issue@${pinnedSha} # v1.1.0`,
+        "        env:",
+        "          EPURE_JOB_STARTED_AT_MS: ${{ steps.job-start.outputs.ms }}",
         "        with:",
         "          repository: ${{ github.repository }}",
         "          issue_number: ${{ github.event.issue.number || 0 }}",

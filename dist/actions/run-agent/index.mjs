@@ -936,7 +936,8 @@ function parseAgentsYaml(yamlContent) {
       } else if (key === "review_timeout_minutes") {
         review_timeout_minutes = parseNum(val);
       } else if (key === "agent_max_llm_requests") {
-        agent_max_llm_requests = parseNum(val);
+        const parsed = parseNum(val);
+        agent_max_llm_requests = parsed === void 0 ? void 0 : Math.max(1, parsed);
       } else if (key === "max_concurrent_tasks_per_feature") {
         max_concurrent_tasks_per_feature = parseNum(val);
       } else if (key === "trace_retention_days") {
@@ -1346,6 +1347,18 @@ var TruncatedGitTreeError = class extends Error {
   commitSha;
   name = "TruncatedGitTreeError";
 };
+function assertNoFileDirectorySwap(branch, written, parentFiles, deleted) {
+  const ancestorsOf = (path) => path.split("/").slice(0, -1).map((_, i, segments) => segments.slice(0, i + 1).join("/"));
+  const kept = [...parentFiles.keys()].filter((p) => !deleted.has(p));
+  const keptFiles = new Set(kept);
+  const keptDirs = new Set(kept.flatMap(ancestorsOf));
+  const swaps = written.map((e) => e.path).filter((p) => keptDirs.has(p) || ancestorsOf(p).some((a) => keptFiles.has(a)));
+  if (swaps.length > 0) {
+    throw new Error(
+      `Refusing to commit ${swaps.join(", ")} to '${branch}': each would replace a directory with a file, or a file with a directory, whose other entries the commit does not delete.`
+    );
+  }
+}
 function encodeGitHubContentsPath(filePath) {
   return filePath.split("/").filter((segment) => segment.length > 0).map((segment) => encodeURIComponent(segment)).join("/");
 }
@@ -1985,7 +1998,7 @@ function createGitHubRestHelper(params) {
         seenTreePaths.add(cleanPath);
         treeEntries.push({
           path: cleanPath,
-          mode: file.mode ?? "100644",
+          mode: file.mode,
           type: "blob",
           sha: blobRes.data.sha
         });
@@ -2033,9 +2046,20 @@ function createGitHubRestHelper(params) {
           `/repos/${owner}/${repo}/git/commits/${parentCommitSha}`
         );
         const baseTreeSha = parentCommit.data.tree.sha;
-        const attemptEntries = [...treeEntries];
+        const parentTree = treeEntries.length > 0 || pendingDeletedPaths.length > 0 ? await readCommitTree(parentCommitSha) : { entries: [], truncated: true };
+        const parentFiles = parentTree.truncated ? null : new Map(
+          parentTree.entries.flatMap(
+            (e) => e.type !== "tree" && e.path ? [[e.path, e.mode ?? "100644"]] : []
+          )
+        );
+        if (parentFiles) {
+          assertNoFileDirectorySwap(input.branch, treeEntries, parentFiles, new Set(pendingDeletedPaths));
+        }
+        const attemptEntries = treeEntries.map((e) => ({
+          ...e,
+          mode: e.mode ?? (parentFiles?.get(e.path) === "100755" ? "100755" : "100644")
+        }));
         if (pendingDeletedPaths.length > 0) {
-          const parentTree = await readCommitTree(parentCommitSha);
           const existingTreePaths = parentTree.truncated ? null : new Set(
             parentTree.entries.flatMap(
               (e) => e.type === "blob" && e.path ? [e.path] : []
@@ -2116,7 +2140,8 @@ function createGitHubRestHelper(params) {
           ).map((item) => ({
             filename: item.filename.trim().replace(/^\/+/, ""),
             status: item.status ?? "modified",
-            ...typeof item.patch === "string" ? { patch: item.patch } : {}
+            ...typeof item.patch === "string" ? { patch: item.patch } : {},
+            ...typeof item.previous_filename === "string" ? { previous_filename: item.previous_filename.trim().replace(/^\/+/, "") } : {}
           }));
         }
       } catch {
@@ -3250,7 +3275,8 @@ function buildLandrunInvocation(params) {
     "--ro",
     "/dev,/proc",
     "--rwx",
-    Array.from(rwxPaths).join(",")
+    Array.from(rwxPaths).join(","),
+    ...params.writableDevNull ? ["--rw", "/dev/null"] : []
   ];
   if (params.networkPolicy === "proxy_only") {
     if (typeof params.proxyPort === "number" && params.proxyPort > 0) {
@@ -3328,7 +3354,8 @@ function buildKernelSandboxedCommand(input) {
     networkPolicy: input.networkPolicy,
     proxyPort: input.proxyPort,
     readOnlyPaths: input.readOnlyPaths,
-    agentDir: input.agentDir
+    agentDir: input.agentDir,
+    writableDevNull: backend === "bubblewrap+landrun"
   });
   const bubblewrap = (command, args) => buildBubblewrapInvocation({
     command,
