@@ -732,6 +732,30 @@ describeLive(
       });
     });
 
+    it("commitFilesToBranch carries each file's mode to the tree (#99)", async () => {
+      const branch = await createBranch("file-modes", baseSha);
+      const scriptPath = `${NS}/modes/run.sh`;
+      const textPath = `${NS}/modes/notes.txt`;
+      const gh = createGitHubRestHelper({ repository: cfg.repository, token });
+
+      const headSha = await gh.commitFilesToBranch({
+        branch,
+        commitMessage: `test(${NS}): file modes`,
+        files: [
+          { path: scriptPath, content: "#!/bin/sh\necho ok\n", mode: "100755" },
+          { path: textPath, content: "notes\n" }
+        ]
+      });
+      const tree = await api<{ tree: Array<{ path: string; mode: string }> }>("GET", `${R}/git/trees/${headSha}?recursive=1`);
+
+      expect(tree.data.tree).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ path: scriptPath, mode: "100755" }),
+          expect.objectContaining({ path: textPath, mode: "100644" })
+        ])
+      );
+    });
+
     describe("3-way conflict resolution makes a conflicting PR mergeable (#105)", () => {
       const FILE = `${NS}/conflict.txt`;
       let base = "";
