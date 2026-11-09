@@ -1263,15 +1263,28 @@ describe("Sandbox LLM proxy & untrusted code credential isolation (#98)", () => 
       id: "dependency-install-under-landrun-also-binds-the-package-caches",
       networkPolicy: "https_only" as SandboxNetworkPolicy,
       capabilities: { landrunAvailable: true, bubblewrapAvailable: true },
+      readOnlyCwd: undefined,
       expectedSequences: [
         ["--die-with-parent", "--ro-bind", "/", "/"],
         ["--bind-try", "/tmp/epure-agent-x/.npm", "/tmp/epure-agent-x/.npm"],
         ["--bind-try", "/tmp/epure-agent-x/.cache", "/tmp/epure-agent-x/.cache"]
       ]
+    },
+    {
+      id: "read-only-cwd-mounts-worktree-ro-bind-in-bubblewrap-and-rox-in-landrun",
+      networkPolicy: "proxy_only" as SandboxNetworkPolicy,
+      capabilities: { landrunAvailable: true, bubblewrapAvailable: true },
+      readOnlyCwd: true,
+      expectedSequences: [
+        ["--bind", "/tmp/epure-agent-x", "/tmp/epure-agent-x"],
+        ["--ro-bind", "/tmp/epure-work", "/tmp/epure-work", "--chdir", "/tmp/epure-work"],
+        ["--rox", "/usr,/bin,/lib,/lib64,/etc,/opt,/run,/opt/epure/engine,/tmp/epure-work"],
+        ["--rwx", "/tmp/epure-agent-x"]
+      ]
     }
   ])(
     "buildKernelSandboxedCommand [$id]: confines an agent session",
-    ({ networkPolicy, capabilities, expectedSequences }) => {
+    ({ networkPolicy, capabilities, readOnlyCwd, expectedSequences }) => {
       const wrapped = buildKernelSandboxedCommand({
         command: "pi",
         args: [],
@@ -1281,7 +1294,8 @@ describe("Sandbox LLM proxy & untrusted code credential isolation (#98)", () => 
         proxyPort: 43120,
         capabilities,
         readOnlyPaths: ["/opt/epure/engine"],
-        agentDir: "/tmp/epure-agent-x"
+        agentDir: "/tmp/epure-agent-x",
+        readOnlyCwd
       });
 
       const joined = wrapped.args.join("\u0000");

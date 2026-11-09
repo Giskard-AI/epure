@@ -575,7 +575,9 @@ export function deriveEngine(issueCommandWorkflow: string, agentsYml: string): E
   const executed = actions.includes("run-agent")
     ? `agent harness (${harness ?? "default"})`
     : actions.includes("orchestrate-issue")
-      ? "epure-in-house-loop"
+      ? harness === null || harness === "pi"
+        ? "pi"
+        : "epure-in-house-loop"
       : "unknown";
   return { executed, workflow_actions: actions, agents_yml_harness: harness };
 }

@@ -605,6 +605,111 @@ describe("createPiAgentEngine", () => {
     await expect(engine.run(sessionRequest(tempWorktree({})))).rejects.toMatchObject({ code, message: expect.stringMatching(message) });
     expect(kill).toHaveBeenCalledTimes(killed ? 1 : 0);
   });
+
+  it.each([
+    {
+      id: "read-only-policy-mounts-cwd-read-only-and-logs-sandbox-backend",
+      role: "reviewer",
+      toolPolicy: "read_only" as const,
+      capabilities: { landrunAvailable: true, bubblewrapAvailable: true },
+      expectedReadOnlyCwd: true,
+      expectedTools: "read,grep,find,ls",
+      expectedLog: "[pi-engine] session starting (role=reviewer, policy=read_only, sandbox=bubblewrap+landrun)"
+    },
+    {
+      id: "write-policy-mounts-cwd-writable-and-logs-sandbox-backend",
+      role: "implementer",
+      toolPolicy: "write" as const,
+      capabilities: { landrunAvailable: true, bubblewrapAvailable: false },
+      expectedReadOnlyCwd: false,
+      expectedTools: "read,bash,edit,write,grep,find,ls",
+      expectedLog: "[pi-engine] session starting (role=implementer, policy=write, sandbox=landrun)"
+    }
+  ])("$id", async ({ role, toolPolicy, capabilities, expectedReadOnlyCwd, expectedTools, expectedLog }) => {
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      const sandboxRunner = vi.fn(async (input: SandboxExecutionInput): Promise<SandboxExecutionResult> => {
+        const stdout = new PassThrough();
+        const session = input.interact?.({ stdin: new PassThrough(), stdout, kill: () => stdout.end() });
+        stdout.write('{"type":"response","id":"prompt","success":true,"data":{"disposition":"handled"}}\n');
+        stdout.write('{"type":"response","id":"final","success":true,"data":{"text":"ok"}}\n');
+        stdout.end();
+        await session;
+        return { isolated: true, error_code: "NONE", error_message: "", proxy_url: "", exit_code: 0, stdout: "", stderr: "", duration_ms: 0 };
+      });
+      const engine = createPiAgentEngine({
+        runnerEnv: { ANTHROPIC_API_KEY: REAL_KEY },
+        piDir: "/opt/pi",
+        sandboxRunner,
+        kernelCapabilities: capabilities
+      });
+
+      const res = await engine.run(sessionRequest(tempWorktree({}), { role, toolPolicy }));
+
+      expect(res.finalMessage).toBe("ok");
+      expect(infoSpy).toHaveBeenCalledWith(expectedLog);
+      expect(sandboxRunner).toHaveBeenCalledWith(
+        expect.objectContaining({
+          readOnlyCwd: expectedReadOnlyCwd,
+          args: expect.arrayContaining(["--tools", expectedTools]),
+          agentSession: expect.objectContaining({ readOnlyCwd: expectedReadOnlyCwd })
+        })
+      );
+    } finally {
+      infoSpy.mockRestore();
+    }
+  });
+
+  it.each([
+    {
+      id: "symlinks-fd-to-fdfind-in-session-bin-and-prepends-to-path-when-fd-is-absent",
+      hasFd: false,
+      hasFdfind: true,
+      expectSymlink: true
+    },
+    {
+      id: "does-not-create-fd-symlink-when-fd-already-exists",
+      hasFd: true,
+      hasFdfind: true,
+      expectSymlink: false
+    }
+  ])("$id", async ({ hasFd, hasFdfind, expectSymlink }) => {
+    const fakeUsrBin = tempWorktree({
+      ...(hasFd ? { fd: "#!/bin/sh\n" } : {}),
+      ...(hasFdfind ? { fdfind: "#!/bin/sh\n" } : {})
+    });
+    let observedSessionDir = "";
+    let observedSymlinkExists = false;
+    let observedEnvPath = "";
+    const sandboxRunner = vi.fn(async (input: SandboxExecutionInput): Promise<SandboxExecutionResult> => {
+      observedSessionDir = input.readOnlyPaths?.[1] ?? "";
+      observedSymlinkExists = lstatSync(join(observedSessionDir, "bin", "fd"), { throwIfNoEntry: false })?.isSymbolicLink() ?? false;
+      observedEnvPath = input.agentSession?.env?.("/tmp/home").PATH ?? input.runnerEnv.PATH ?? "";
+      const stdout = new PassThrough();
+      const session = input.interact?.({ stdin: new PassThrough(), stdout, kill: () => stdout.end() });
+      stdout.write('{"type":"response","id":"prompt","success":true,"data":{"disposition":"handled"}}\n');
+      stdout.write('{"type":"response","id":"final","success":true,"data":{"text":"ok"}}\n');
+      stdout.end();
+      await session;
+      return { isolated: true, error_code: "NONE", error_message: "", proxy_url: "", exit_code: 0, stdout: "", stderr: "", duration_ms: 0 };
+    });
+    const engine = createPiAgentEngine({
+      runnerEnv: { PATH: "/usr/bin:/bin", ANTHROPIC_API_KEY: REAL_KEY },
+      piDir: "/opt/pi",
+      sandboxRunner,
+      fdPath: join(fakeUsrBin, "fd"),
+      fdfindPath: join(fakeUsrBin, "fdfind")
+    });
+
+    await engine.run(sessionRequest(tempWorktree({}), { toolPolicy: "read_only" }));
+
+    expect(observedSymlinkExists).toBe(expectSymlink);
+    if (expectSymlink) {
+      expect(observedEnvPath).toBe(`${join(observedSessionDir, "bin")}:/usr/bin:/bin`);
+    } else {
+      expect(observedEnvPath).toBe("/usr/bin:/bin");
+    }
+  });
 });
 
 describe("assertNoSecretMaterial", () => {

@@ -1227,10 +1227,16 @@ describe("deriveEngine", () => {
 
   it.each([
     {
-      id: "issue-command-runs-the-in-house-loop-whatever-agents-yml-says",
+      id: "issue-command-with-pi-harness-returns-pi",
       workflow: `      - uses: Giskard-AI/epure/actions/authorize-command@${sha}\n        uses: Giskard-AI/epure/actions/orchestrate-issue@${sha} # v1.1.0`,
       agents: "version: 1\nharness: pi\nmodel: google/gemini-3.8-flash\n",
-      expected: { executed: "epure-in-house-loop", workflow_actions: ["authorize-command", "orchestrate-issue"], agents_yml_harness: "pi" }
+      expected: { executed: "pi", workflow_actions: ["authorize-command", "orchestrate-issue"], agents_yml_harness: "pi" }
+    },
+    {
+      id: "issue-command-with-default-harness-returns-pi",
+      workflow: `      - uses: Giskard-AI/epure/actions/authorize-command@${sha}\n        uses: Giskard-AI/epure/actions/orchestrate-issue@${sha}`,
+      agents: "version: 1\nmodel: google/gemini-3.8-flash\n",
+      expected: { executed: "pi", workflow_actions: ["authorize-command", "orchestrate-issue"], agents_yml_harness: null }
     },
     {
       id: "run-agent-uses-the-configured-harness",

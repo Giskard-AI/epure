@@ -63,6 +63,7 @@ export interface BuildKernelSandboxedCommandInput {
   readonly capabilities: KernelSandboxCapabilities;
   readonly readOnlyPaths?: readonly string[] | undefined;
   readonly agentDir?: string | undefined;
+  readonly readOnlyCwd?: boolean | undefined;
 }
 
 export interface BuiltKernelSandboxedCommand {
@@ -127,6 +128,7 @@ export interface SandboxAgentSession {
     | ((proxy: SandboxProxyEndpoint | undefined) => Readonly<Record<string, string>>)
     | undefined;
   readonly env?: ((home: string) => Readonly<Record<string, string>>) | undefined;
+  readonly readOnlyCwd?: boolean | undefined;
 }
 
 export interface SandboxSessionIo {
@@ -142,6 +144,7 @@ export interface SandboxExecutionInput {
   readonly command: string;
   readonly args?: readonly string[] | undefined;
   readonly cwd?: string | undefined;
+  readonly readOnlyCwd?: boolean | undefined;
   readonly timeoutMs?: number | undefined;
   readonly networkPolicy?: SandboxNetworkPolicy | undefined;
   readonly enforceKernelSandbox?: boolean | undefined;
@@ -278,6 +281,7 @@ export function buildLandrunInvocation(params: {
   readonly proxyPort?: number | undefined;
   readonly readOnlyPaths?: readonly string[] | undefined;
   readonly agentDir?: string | undefined;
+  readonly readOnlyCwd?: boolean | undefined;
   // Only under bubblewrap, whose /dev is a private minimal devtmpfs.
   readonly writableDevNull?: boolean | undefined;
 }): readonly string[] {
@@ -298,9 +302,12 @@ export function buildLandrunInvocation(params: {
   for (const p of params.readOnlyPaths ?? []) {
     roxPaths.add(sanitizeLandrunPath(resolve(p)));
   }
+  if (params.readOnlyCwd) {
+    roxPaths.add(resolvedCwd);
+  }
 
   const rwxPaths = new Set<string>([
-    resolvedCwd,
+    ...(params.readOnlyCwd ? [] : [resolvedCwd]),
     params.agentDir ? sanitizeLandrunPath(resolve(params.agentDir)) : "/tmp",
     ...packageCacheDirs(params.networkPolicy, params.sanitizedEnv).map(sanitizeLandrunPath)
   ]);
@@ -354,6 +361,7 @@ export function buildBubblewrapInvocation(params: {
   readonly readOnlyPaths?: readonly string[] | undefined;
   readonly agentDir?: string | undefined;
   readonly writablePaths?: readonly string[] | undefined;
+  readonly readOnlyCwd?: boolean | undefined;
   // Host network kept: landrun inside enforces ports.
   readonly underLandrun?: boolean | undefined;
 }): readonly string[] {
@@ -386,7 +394,7 @@ export function buildBubblewrapInvocation(params: {
     "/run/systemd/resolve",
     "/run/systemd/resolve",
     ...extraBinds,
-    "--bind",
+    params.readOnlyCwd ? "--ro-bind" : "--bind",
     resolvedCwd,
     resolvedCwd,
     "--chdir",
@@ -430,6 +438,7 @@ export function buildKernelSandboxedCommand(
       proxyPort: input.proxyPort,
       readOnlyPaths: input.readOnlyPaths,
       agentDir: input.agentDir,
+      readOnlyCwd: input.readOnlyCwd,
       writableDevNull: backend === "bubblewrap+landrun"
     });
   const bubblewrap = (command: string, args: readonly string[]): readonly string[] =>
@@ -440,6 +449,7 @@ export function buildKernelSandboxedCommand(
       readOnlyPaths: input.readOnlyPaths,
       agentDir: input.agentDir,
       writablePaths: packageCacheDirs(input.networkPolicy, input.sanitizedEnv),
+      readOnlyCwd: input.readOnlyCwd,
       underLandrun: backend === "bubblewrap+landrun"
     });
 
@@ -1064,7 +1074,8 @@ export async function runInUntrustedCodeSandbox(
       proxyPort,
       capabilities,
       readOnlyPaths: input.readOnlyPaths,
-      agentDir
+      agentDir,
+      readOnlyCwd: input.readOnlyCwd ?? input.agentSession?.readOnlyCwd
     });
     return spawnCaptured(wrapped.command, wrapped.args, cwd, env, timeoutMs, interact, (kill) => {
       killChild = kill;
