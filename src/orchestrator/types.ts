@@ -273,6 +273,7 @@ export interface GitHubRestHelper {
       readonly filename: string;
       readonly status: string;
       readonly patch?: string | undefined;
+      readonly previous_filename?: string | undefined;
     }>
   >;
   findOpenPullRequestByHead(

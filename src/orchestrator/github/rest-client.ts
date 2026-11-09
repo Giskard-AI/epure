@@ -1106,6 +1106,7 @@ export function createGitHubRestHelper(params: {
         readonly filename: string;
         readonly status: string;
         readonly patch?: string | undefined;
+        readonly previous_filename?: string | undefined;
       }>
     > {
       try {
@@ -1114,6 +1115,7 @@ export function createGitHubRestHelper(params: {
             filename?: string;
             status?: string;
             patch?: string;
+            previous_filename?: string;
           }>
         >(
           "GET",
@@ -1130,6 +1132,7 @@ export function createGitHubRestHelper(params: {
                 filename: string;
                 status?: string;
                 patch?: string;
+                previous_filename?: string;
               } =>
                 typeof item?.filename === "string" &&
                 item.filename.trim().length > 0
@@ -1137,7 +1140,10 @@ export function createGitHubRestHelper(params: {
             .map((item) => ({
               filename: item.filename.trim().replace(/^\/+/, ""),
               status: item.status ?? "modified",
-              ...(typeof item.patch === "string" ? { patch: item.patch } : {})
+              ...(typeof item.patch === "string" ? { patch: item.patch } : {}),
+              ...(typeof item.previous_filename === "string"
+                ? { previous_filename: item.previous_filename.trim().replace(/^\/+/, "") }
+                : {})
             }));
         }
       } catch {

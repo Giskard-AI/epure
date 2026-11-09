@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import {
+  chmodSync,
   cpSync,
   existsSync,
   lstatSync,
@@ -542,10 +543,17 @@ function materializeSeedFilesIntoWorkspace(
 export function syncWorkspaceFiles(
   workDir: string,
   files: ReadonlyMap<string, string>,
-  deletedFiles: Iterable<string>
+  deletedFiles: Iterable<string>,
+  fileModes: ReadonlyMap<string, "100644" | "100755"> = new Map()
 ): void {
   materializeSeedFilesIntoWorkspace(workDir, files);
   const resolvedRoot = resolve(workDir);
+  for (const [rawPath, mode] of fileModes) {
+    const cleanRel = rawPath.replace(/^\/+/, "");
+    if (files.has(rawPath) && isContainedRelativePath(resolvedRoot, cleanRel, false)) {
+      chmodSync(resolve(resolvedRoot, cleanRel), mode === "100755" ? 0o755 : 0o644);
+    }
+  }
   for (const rawPath of deletedFiles) {
     const cleanRel = rawPath.replace(/^\/+/, "");
     if (isContainedRelativePath(resolvedRoot, cleanRel, false)) {

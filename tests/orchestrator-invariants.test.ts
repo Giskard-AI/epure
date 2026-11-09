@@ -1,3 +1,5 @@
+import { existsSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { AgentEngineError, type AgentEngine, type AgentSessionRequest, type AgentSessionResult } from "../src/agent/engine.js";
 import { ClosureNotProcessedError, EscalationNotRecordedError, orchestrateIssueCommand } from "../src/orchestrator/issue-orchestrator.js";
@@ -1294,6 +1296,75 @@ describe("Implementation, Stage 1 fixes and review/CI remediation run as agent e
     expect(implementationCalls(router)).toBe(0);
     expect(summaryCalls(router)).toBe(expectedRoles.length);
     expect(await readState(store)).toMatchObject({ status: expectedStatus });
+  });
+
+  it("resumed-run-keeps-an-untouched-100755-file-executable-in-stage1-and-in-its-commits-and-drops-a-renamed-file", async () => {
+    const store = await seedState({ status: "suspended", subphase: "idle", last_processed_comment_id: ESCALATED_AT_CURSOR });
+    const fileContent = (text: string) => json({ type: "file", encoding: "base64", content: Buffer.from(text, "utf8").toString("base64") });
+    const router = answeringSessionSummaries(
+      declareImplementationFlow(createGitHubMockRouter(), "failure", { taskPr: true, featurePr: true })
+        .on("POST", `${R}/issues/${TICKET}/labels`, json([]))
+        .on("GET", `${R}/issues/${ISSUE}/comments?per_page=100`, json([]))
+        .on("GET", /\/pulls\/106\/files$/, json([
+          { filename: "src/a.ts", status: "modified" },
+          { filename: "scripts/run.sh", status: "added" },
+          { filename: "src/new-name.ts", status: "renamed", previous_filename: "src/old-name.ts" }
+        ]))
+        .on("GET", new RegExp(`^${R_RX}/git/trees/[^?]+\\?recursive=1$`), json({
+          tree: [
+            { path: "scripts/run.sh", type: "blob", mode: "100755", sha: "s1" },
+            { path: "src/a.ts", type: "blob", mode: "100644", sha: "s2" },
+            { path: "src/new-name.ts", type: "blob", mode: "100644", sha: "s3" },
+            { path: "src/old-name.ts", type: "blob", mode: "100644", sha: "s4" }
+          ]
+        }))
+        .on("GET", new RegExp(`^${R_RX}/contents/`), fileContent("#!/bin/sh\necho ok\n"))
+        .on("GET", /\/git\/blobs\/s\d$/, fileContent("#!/bin/sh\necho ok\n"))
+        .on("GET", /\/git\/commits\/[^/]+$/, json({ sha: "branch-sha", tree: { sha: "tree-sha" } }))
+        .on("POST", `${R}/git/blobs`, json({ sha: "blob-sha" }, 201))
+        .on("POST", `${R}/git/trees`, json({ sha: "new-tree-sha" }, 201))
+        .on("POST", `${R}/git/commits`, json({ sha: "wip-sha" }, 201))
+        .on("PATCH", /\/git\/refs\/heads\//, json({ object: { sha: "wip-sha" } }))
+    );
+    const { engine } = recordingEngine();
+    const stage1Modes: Array<number | undefined> = [];
+    const stage1Sees: boolean[] = [];
+    const sandboxRunner: NonNullable<OrchestrateIssueInput["sandboxRunner"]> = async (input) => {
+      const script = join(input.cwd ?? "", "scripts/run.sh");
+      stage1Modes.push(existsSync(script) ? statSync(script).mode & 0o777 : undefined);
+      stage1Sees.push(existsSync(join(input.cwd ?? "", "src/old-name.ts")));
+      return FAILING_SANDBOX(input);
+    };
+
+    await orchestrateIssueCommand({
+      repository: REPO,
+      commandArgs: "",
+      fallbackGithubToken: "ghs_test",
+      llmApiKey: "key_test",
+      model: "openai/gpt-test",
+      stateStore: store,
+      fetchImpl: router.fetch,
+      sandboxRunner,
+      agentEngine: engine,
+      command: "continue",
+      actor: "maintainer",
+      issueNumber: ISSUE,
+      commentId: RESUME_COMMENT
+    });
+
+    const committed = router.requests
+      .filter((r) => r.method === "POST" && r.path === `${R}/git/trees`)
+      .flatMap((r) => (r.body as { tree: Array<{ path: string; mode: string; sha: string | null }> }).tree);
+    expect(router.unmatched).toEqual([]);
+    expect(stage1Modes.length).toBeGreaterThan(0);
+    expect(new Set(stage1Modes)).toEqual(new Set([0o755]));
+    expect(stage1Sees).not.toContain(true);
+    expect(committed.length).toBeGreaterThan(0);
+    expect(committed.filter((e) => e.path === "scripts/run.sh").map((e) => e.mode)).toEqual(
+      expect.arrayContaining(["100755"])
+    );
+    expect(committed.filter((e) => e.path === "scripts/run.sh" && e.mode !== "100755")).toEqual([]);
+    expect(committed).toEqual(expect.arrayContaining([expect.objectContaining({ path: "src/old-name.ts", sha: null })]));
   });
 
   type SessionOutcome = AgentSessionResult | Error;

@@ -72,7 +72,8 @@ import {
   isConflictRefusal,
   loadOrchestratorStateFromGitRef,
   PullRequestHeadMovedError,
-  PullRequestNotMergeableError
+  PullRequestNotMergeableError,
+  TruncatedGitTreeError
 } from "../github/rest-client.js";
 import { EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT } from "../prompts/code-discipline.js";
 import { formatResumeContextPromptLines } from "../prompts/resume-context.js";
@@ -84,6 +85,7 @@ import {
   createGeneratedTicketImplementationSchema,
   type EscalateToNeedsHumanFn,
   type GeneratedTicketImplementation,
+  type GitBlobRef,
   type GitHubRestHelper,
   type IssueMetadata,
   type OrchestrateIssueResult,
@@ -364,7 +366,7 @@ async function runTicketAgentSession(
   if (timeoutMs === undefined) {
     throw new JobBudgetExhaustedError((session.jobDeadlineMs ?? nowMs) - nowMs);
   }
-  syncWorkspaceFiles(session.worktree, params.accumulatedFiles, params.deletedFilesSet);
+  syncWorkspaceFiles(session.worktree, params.accumulatedFiles, params.deletedFilesSet, session.state.fileModes);
   const { state } = session;
   const feedback = state.pendingFeedback;
   state.pendingFeedback = [];
@@ -1149,14 +1151,20 @@ export async function runTicketExecutionLoop(
           existingTaskPr.number
         );
         if (taskPrFiles.length > 0) {
+          const markRemoved = (cleanPath: string): void => {
+            params.accumulatedFiles.delete(cleanPath);
+            params.featureChangedFilesMap.delete(cleanPath);
+            ticketChangedFilesMap.delete(cleanPath);
+            params.featureDeletedFilesSet.add(cleanPath);
+            ticketDeletedFilesSet.add(cleanPath);
+          };
           for (const prFile of taskPrFiles) {
             const cleanPath = prFile.filename.replace(/^\/+/, "");
+            if (prFile.status === "renamed" && prFile.previous_filename) {
+              markRemoved(prFile.previous_filename.replace(/^\/+/, ""));
+            }
             if (prFile.status === "removed") {
-              params.accumulatedFiles.delete(cleanPath);
-              params.featureChangedFilesMap.delete(cleanPath);
-              ticketChangedFilesMap.delete(cleanPath);
-              params.featureDeletedFilesSet.add(cleanPath);
-              ticketDeletedFilesSet.add(cleanPath);
+              markRemoved(cleanPath);
             } else {
               const content =
                 (await params.gh.readSingleBranchFile(taskBranch, cleanPath)) ??
@@ -1184,6 +1192,25 @@ export async function runTicketExecutionLoop(
             ticketChangedFilesMap.set(p, c);
           }
         }
+        // The reconcile commit and Stage 1 keep the task branch's executable bits.
+        const taskBranchBlobs = await params.gh.listBranchBlobs(taskBranch).catch((err: unknown) => {
+          if (err instanceof TruncatedGitTreeError) {
+            return new Map<string, GitBlobRef>();
+          }
+          throw err;
+        });
+        for (const path of ticketChangedFilesMap.keys()) {
+          const mode = taskBranchBlobs.get(path)?.mode;
+          if (mode === "100644" || mode === "100755") {
+            agentState.fileModes.set(path, mode);
+          }
+        }
+        syncWorkspaceFiles(
+          sandboxWorkspace.workDir,
+          params.accumulatedFiles,
+          params.featureDeletedFilesSet,
+          agentState.fileModes
+        );
 
         const existingPreCheck = validateWorkspaceFileOperations({
           workDir: sandboxWorkspace.workDir,
