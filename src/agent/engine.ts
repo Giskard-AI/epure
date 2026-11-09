@@ -1,10 +1,25 @@
 import type { ProviderConfig } from "../llm/types.js";
-import type { WorktreeDiff } from "./worktree-snapshot.js";
 
 export type AgentRole = "implementer" | "fixer";
 
 // "write" may edit files and run commands in the worktree; "read_only" may only read and search it.
 export type AgentToolPolicy = "write" | "read_only";
+
+export type AgentThinkingLevel = "minimal" | "low" | "medium" | "high";
+
+export type FileMode = "100644" | "100755";
+
+// symlink, submodule and binary (incl. non-UTF-8 text) cannot be committed as text; ignored is a new
+// file a .gitignore hides; protected is a path the request forbids.
+export type SkippedPathReason = "symlink" | "submodule" | "binary" | "ignored" | "protected";
+
+// What a write session left in the worktree, as committable text files.
+export interface WorktreeDiff {
+  readonly files: ReadonlyArray<{ readonly path: string; readonly content: string; readonly mode: FileMode }>;
+  readonly deleted_files: readonly string[];
+  // Already put back to their state before the session: the worktree holds that state plus files and deleted_files.
+  readonly skipped: ReadonlyArray<{ readonly path: string; readonly reason: SkippedPathReason }>;
+}
 
 export interface AgentSessionRequest {
   readonly role: AgentRole;
@@ -18,9 +33,18 @@ export interface AgentSessionRequest {
   // "<provider>/<model>", resolved like the direct LLM calls.
   readonly model: string;
   readonly providers?: Readonly<Record<string, ProviderConfig>> | undefined;
+  readonly thinking?: AgentThinkingLevel | undefined;
+  // Paths the checkout's repository tracks, read before any session wrote to it: kept even when a .gitignore matches.
+  readonly trackedPaths?: readonly string[] | undefined;
+  // Changes to these paths are reverted and reported as skipped "protected".
+  readonly isProtectedPath?: ((path: string) => boolean) | undefined;
+  // LLM requests the session may send before it is aborted with AGENT_REQUEST_CAP_REACHED.
+  readonly maxLlmRequests?: number | undefined;
 }
 
-// Token usage is not part of the result: it is reported once, by the sandbox LLM proxy (ADR-0035).
+// Token usage is never part of the result. The adapter reports it exactly once (ADR-0035): per response
+// through the sandbox LLM proxy or LLMClient, or per session through a usageReporter() bound at the
+// start of run(), or as usage_unavailable when the engine cannot tell.
 export interface AgentSessionResult {
   readonly finalMessage: string;
   readonly diff: WorktreeDiff;
@@ -33,9 +57,14 @@ export interface AgentEngine {
 
 export type AgentEngineErrorCode =
   | "AGENT_ENGINE_UNAVAILABLE"
+  | "AGENT_ISOLATION_UNAVAILABLE"
   | "AGENT_SANDBOX_FAILED"
   | "AGENT_TIMEOUT"
-  | "AGENT_PROTOCOL_ERROR";
+  | "AGENT_REQUEST_CAP_REACHED"
+  | "AGENT_PROTOCOL_ERROR"
+  | "AGENT_SNAPSHOT_FAILED"
+  | "AGENT_DIFF_TOO_LARGE"
+  | "AGENT_SECRET_IN_DIFF";
 
 // Provider failures inside a session surface as the LLMError subclasses instead, so escalation stays the same.
 export class AgentEngineError extends Error {

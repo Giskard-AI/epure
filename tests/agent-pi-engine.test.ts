@@ -1,14 +1,26 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import type { ServerResponse } from "node:http";
-import { afterEach, describe, expect, it } from "vitest";
-import { AgentEngineError, type AgentSessionRequest } from "../src/agent/engine.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { AgentEngineError, type AgentSessionRequest, type WorktreeDiff } from "../src/agent/engine.js";
 import { createPiAgentEngine, resolveVendoredPiDir } from "../src/agent/pi-engine.js";
 import { translateModelForPi } from "../src/agent/pi-models.js";
-import { snapshotWorktree } from "../src/agent/worktree-snapshot.js";
+import { listTrackedPaths, snapshotWorktree } from "../src/agent/worktree-snapshot.js";
 import { AuthenticationError, BadRequestError } from "../src/llm/errors.js";
+import type { SandboxExecutionResult } from "../src/sandbox/llm-sandbox.js";
 import { runWithTokenUsageLedger, TokenUsageLedger } from "../src/usage/token-usage.js";
 import { startFakeLlmUpstream, type FakeLlmUpstream } from "./fixtures/fake-llm-upstream.js";
 
@@ -100,6 +112,37 @@ describe("translateModelForPi", () => {
   });
 });
 
+// Every path under the worktree except .git, with its content (or "<symlink>"), sorted.
+function treeOf(dir: string, prefix = ""): Record<string, string> {
+  const entries: Record<string, string> = {};
+  for (const name of readdirSync(join(dir, prefix)).sort()) {
+    const rel = prefix ? `${prefix}/${name}` : name;
+    const stat = lstatSync(join(dir, rel));
+    if (rel === ".git") {
+      continue;
+    } else if (stat.isSymbolicLink()) {
+      entries[rel] = "<symlink>";
+    } else if (stat.isDirectory()) {
+      Object.assign(entries, treeOf(dir, rel));
+    } else {
+      entries[rel] = readFileSync(join(dir, rel)).toString("latin1");
+    }
+  }
+  return entries;
+}
+
+// The worktree a commit of `diff` on top of `before` would publish.
+function publishedTree(before: Readonly<Record<string, string>>, diff: WorktreeDiff): Record<string, string> {
+  const tree: Record<string, string> = { ...before };
+  for (const path of diff.deleted_files) {
+    delete tree[path];
+  }
+  for (const f of diff.files) {
+    tree[f.path] = Buffer.from(f.content, "utf8").toString("latin1");
+  }
+  return Object.fromEntries(Object.entries(tree).sort(([a], [b]) => a.localeCompare(b)));
+}
+
 describe("snapshotWorktree", () => {
   it.each([
     {
@@ -112,49 +155,201 @@ describe("snapshotWorktree", () => {
       },
       expected: {
         files: [
-          { path: "a.txt", content: "a2\n" },
-          { path: "src/new.ts", content: "n\n" }
+          { path: "a.txt", content: "a2\n", mode: "100644" },
+          { path: "src/new.ts", content: "n\n", mode: "100644" }
         ],
-        deleted_files: ["b.txt"]
+        deleted_files: ["b.txt"],
+        skipped: []
       }
     },
     {
-      id: "gitignored-output-is-left-out",
-      before: { ".gitignore": "node_modules/\n*.log\n" },
+      id: "executable-bit-is-carried-with-the-file",
+      before: { "run.sh": "#!/bin/sh\necho hi\n" },
       change: (dir: string) => {
-        mkdirSync(join(dir, "node_modules/x"), { recursive: true });
-        writeFileSync(join(dir, "node_modules/x/index.js"), "x");
-        writeFileSync(join(dir, "run.log"), "log");
+        chmodSync(join(dir, "run.sh"), 0o755);
+        writeFileSync(join(dir, "new.sh"), "#!/bin/sh\n", { mode: 0o755 });
       },
-      expected: { files: [], deleted_files: [] }
+      expected: {
+        files: [
+          { path: "new.sh", content: "#!/bin/sh\n", mode: "100755" },
+          { path: "run.sh", content: "#!/bin/sh\necho hi\n", mode: "100755" }
+        ],
+        deleted_files: [],
+        skipped: []
+      }
     },
     {
-      id: "symlinks-and-binary-files-are-left-out",
+      id: "new-gitignored-file-is-reported-and-removed",
+      before: { ".gitignore": "*.log\n" },
+      change: (dir: string) => {
+        writeFileSync(join(dir, "run.log"), "log");
+      },
+      expected: { files: [], deleted_files: [], skipped: [{ path: "run.log", reason: "ignored" }] }
+    },
+    {
+      id: "dependency-and-build-output-without-a-gitignore-is-neither-committed-nor-reported",
       before: {},
+      change: (dir: string) => {
+        for (const path of ["node_modules/.vite/x.js", "dist/index.js", "coverage/lcov.info", "tsconfig.tsbuildinfo"]) {
+          mkdirSync(join(dir, path, ".."), { recursive: true });
+          writeFileSync(join(dir, path), "x");
+        }
+      },
+      expected: { files: [], deleted_files: [], skipped: [] }
+    },
+    {
+      id: "symlink-binary-and-non-utf8-files-are-reported-and-removed",
+      before: { "keep.txt": "k\n" },
       change: (dir: string) => {
         symlinkSync("/etc/hostname", join(dir, "host-link"));
         writeFileSync(join(dir, "blob.bin"), Buffer.from([0, 1, 2, 3]));
+        writeFileSync(join(dir, "latin1.txt"), Buffer.from([0x63, 0x61, 0x66, 0xe9]));
       },
-      expected: { files: [], deleted_files: [] }
+      expected: {
+        files: [],
+        deleted_files: [],
+        skipped: [
+          { path: "host-link", reason: "symlink" },
+          { path: "blob.bin", reason: "binary" },
+          { path: "latin1.txt", reason: "binary" }
+        ]
+      }
+    },
+    {
+      id: "edited-binary-is-put-back-to-its-snapshot-content",
+      before: { "img.bin": "\u0000old" },
+      change: (dir: string) => {
+        writeFileSync(join(dir, "img.bin"), "\u0000new");
+      },
+      expected: { files: [], deleted_files: [], skipped: [{ path: "img.bin", reason: "binary" }] }
     },
     {
       id: "unchanged-worktree-has-an-empty-diff",
       before: { "a.txt": "a\n" },
       change: () => {},
-      expected: { files: [], deleted_files: [] }
+      expected: { files: [], deleted_files: [], skipped: [] }
     }
-  ])("$id", ({ before, change, expected }) => {
+  ] as const)("$id", async ({ before, change, expected }) => {
     const dir = tempWorktree(before);
-    const snapshot = snapshotWorktree(dir);
+    const snapshot = await snapshotWorktree(dir);
     try {
       change(dir);
-      expect(snapshot.diff()).toEqual(expected);
+      const diff = await snapshot.collect();
+
+      expect({ ...diff, files: [...diff.files].sort((a, b) => a.path.localeCompare(b.path)) }).toEqual(expected);
+      expect(treeOf(dir)).toEqual(expect.objectContaining(publishedTree(before, diff)));
+      for (const s of diff.skipped) {
+        expect(treeOf(dir)[s.path]).toBe(before[s.path as keyof typeof before]);
+      }
     } finally {
       snapshot.dispose();
     }
   });
 
-  it("never runs hooks or fsmonitor planted in the worktree's own .git", () => {
+  it("agent-adding-a-binary-a-test-needs-leaves-a-worktree-where-that-test-fails-as-it-would-on-the-published-tree", async () => {
+    const dir = tempWorktree({ "package.json": "{}\n" });
+    const snapshot = await snapshotWorktree(dir);
+    try {
+      writeFileSync(join(dir, "fixture.bin"), Buffer.from([0, 255, 1]));
+      writeFileSync(join(dir, "fixture.test.cjs"), "require('node:fs').readFileSync(__dirname + '/fixture.bin');\n");
+      const runTest = () => execFileSync(process.execPath, ["fixture.test.cjs"], { cwd: dir, stdio: "pipe" });
+      expect(runTest).not.toThrow();
+
+      const diff = await snapshot.collect();
+
+      expect(diff.files.map((f) => f.path)).toEqual(["fixture.test.cjs"]);
+      expect(diff.skipped).toEqual([{ path: "fixture.bin", reason: "binary" }]);
+      expect(treeOf(dir)).toEqual(publishedTree({ "package.json": "{}\n" }, diff));
+      expect(runTest).toThrow();
+    } finally {
+      snapshot.dispose();
+    }
+  });
+
+  it.each([
+    {
+      id: "edit-to-a-tracked-but-gitignored-file-is-kept",
+      before: { ".gitignore": "*.lock\n", "deps.lock": "v1\n" },
+      trackedPaths: ["deps.lock", ".gitignore"],
+      isProtectedPath: undefined,
+      change: (dir: string) => writeFileSync(join(dir, "deps.lock"), "v2\n"),
+      expected: { files: [{ path: "deps.lock", content: "v2\n", mode: "100644" }], deleted_files: [], skipped: [] },
+      expectedTree: { ".gitignore": "*.lock\n", "deps.lock": "v2\n" }
+    },
+    {
+      id: "protected-paths-are-put-back-and-reported",
+      before: { ".github/workflows/ci.yml": "on: push\n", "src/a.ts": "a\n" },
+      trackedPaths: undefined,
+      isProtectedPath: (path: string) => path.startsWith(".github/workflows/") || path.startsWith(".env"),
+      change: (dir: string) => {
+        writeFileSync(join(dir, ".github/workflows/ci.yml"), "on: pull_request_target\n");
+        writeFileSync(join(dir, ".env.local"), "TOKEN=x\n");
+        writeFileSync(join(dir, "src/a.ts"), "b\n");
+      },
+      expected: {
+        files: [{ path: "src/a.ts", content: "b\n", mode: "100644" }],
+        deleted_files: [],
+        skipped: [
+          { path: ".env.local", reason: "protected" },
+          { path: ".github/workflows/ci.yml", reason: "protected" }
+        ]
+      },
+      expectedTree: { ".github/workflows/ci.yml": "on: push\n", "src/a.ts": "b\n" }
+    }
+  ])("$id", async ({ before, trackedPaths, isProtectedPath, change, expected, expectedTree }) => {
+    const dir = tempWorktree(before);
+    const snapshot = await snapshotWorktree(dir, { trackedPaths, isProtectedPath });
+    try {
+      change(dir);
+
+      expect(await snapshot.collect()).toEqual(expected);
+      expect(treeOf(dir)).toEqual(expectedTree);
+    } finally {
+      snapshot.dispose();
+    }
+  });
+
+  it.each([
+    { id: "too-many-files", limits: { maxFiles: 1, maxFileBytes: 1024, maxTotalBytes: 4096 }, files: { "a.txt": "a", "b.txt": "b" } },
+    { id: "file-over-the-per-file-cap", limits: { maxFiles: 10, maxFileBytes: 4, maxTotalBytes: 4096 }, files: { "a.txt": "12345" } },
+    { id: "diff-over-the-total-cap", limits: { maxFiles: 10, maxFileBytes: 1024, maxTotalBytes: 6 }, files: { "a.txt": "1234", "b.txt": "1234" } }
+  ])("$id-fails-with-AGENT_DIFF_TOO_LARGE", async ({ limits, files }) => {
+    const dir = tempWorktree({});
+    const snapshot = await snapshotWorktree(dir, { limits });
+    try {
+      for (const [path, content] of Object.entries(files)) {
+        writeFileSync(join(dir, path), content);
+      }
+
+      await expect(snapshot.collect()).rejects.toMatchObject({ name: "AgentEngineError", code: "AGENT_DIFF_TOO_LARGE" });
+    } finally {
+      snapshot.dispose();
+    }
+  });
+
+  it("unreadable-file-fails-with-AGENT_SNAPSHOT_FAILED", async () => {
+    const dir = tempWorktree({});
+    const snapshot = await snapshotWorktree(dir);
+    try {
+      writeFileSync(join(dir, "secret.txt"), "x");
+      chmodSync(join(dir, "secret.txt"), 0o000);
+
+      await expect(snapshot.collect()).rejects.toMatchObject({ name: "AgentEngineError", code: "AGENT_SNAPSHOT_FAILED" });
+    } finally {
+      chmodSync(join(dir, "secret.txt"), 0o644);
+      snapshot.dispose();
+    }
+  });
+
+  it("listTrackedPaths-reads-the-checkout-index", async () => {
+    const dir = tempWorktree({ ".gitignore": "*.lock\n", "deps.lock": "v1\n", "a.txt": "a\n" });
+    execFileSync("git", ["init", "--quiet"], { cwd: dir });
+    execFileSync("git", ["add", "--force", "deps.lock", "a.txt"], { cwd: dir });
+
+    expect((await listTrackedPaths(dir)).sort()).toEqual(["a.txt", "deps.lock"]);
+  });
+
+  it("never runs hooks or fsmonitor planted in the worktree's own .git", async () => {
     const dir = tempWorktree({ "a.txt": "a\n" });
     execFileSync("git", ["init", "--quiet"], { cwd: dir });
     const marker = join(dir, "..", `${dir.split("/").pop()}-pwned`);
@@ -162,10 +357,10 @@ describe("snapshotWorktree", () => {
     writeFileSync(script, `#!/bin/sh\ntouch ${marker}\n`);
     chmodSync(script, 0o755);
     writeFileSync(join(dir, ".git", "config"), `[core]\n\tfsmonitor = ${script}\n\thooksPath = ${join(dir, ".git")}\n`);
-    const snapshot = snapshotWorktree(dir);
+    const snapshot = await snapshotWorktree(dir);
     try {
       writeFileSync(join(dir, "a.txt"), "b\n");
-      expect(snapshot.diff().files).toEqual([{ path: "a.txt", content: "b\n" }]);
+      expect((await snapshot.collect()).files).toEqual([{ path: "a.txt", content: "b\n", mode: "100644" }]);
       expect(existsSync(marker)).toBe(false);
     } finally {
       snapshot.dispose();
@@ -232,6 +427,28 @@ function sessionRequest(worktree: string, overrides: Partial<AgentSessionRequest
   };
 }
 
+describe("createPiAgentEngine", () => {
+  it.each([
+    { id: "kernel-confinement-is-required-by-default", option: undefined, expected: true },
+    { id: "a-test-may-opt-out-explicitly", option: false, expected: false }
+  ])("$id", async ({ option, expected }) => {
+    const sandboxRunner = vi.fn(async (): Promise<SandboxExecutionResult> => ({
+      isolated: false,
+      error_code: "SANDBOX_ISOLATION_UNAVAILABLE",
+      error_message: "landrun is missing.",
+      proxy_url: "",
+      exit_code: 1,
+      stdout: "",
+      stderr: "",
+      duration_ms: 0
+    }));
+    const engine = createPiAgentEngine({ runnerEnv: {}, piDir: "/opt/pi", sandboxRunner, enforceKernelSandbox: option });
+
+    await expect(engine.run(sessionRequest(tempWorktree({})))).rejects.toMatchObject({ code: "AGENT_ISOLATION_UNAVAILABLE" });
+    expect(sandboxRunner).toHaveBeenCalledWith(expect.objectContaining({ enforceKernelSandbox: expected }));
+  });
+});
+
 const PI_AVAILABLE = (() => {
   try {
     resolveVendoredPiDir();
@@ -251,7 +468,8 @@ describe.skipIf(!PI_AVAILABLE)("Pi agent engine in the sandbox, against a fake p
     upstreams.push(upstream);
     const worktree = tempWorktree({ "obsolete.txt": "old\n", "keep.txt": "keep\n" });
     const engine = createPiAgentEngine({
-      runnerEnv: { PATH: process.env.PATH, ANTHROPIC_API_KEY: REAL_KEY, ANTHROPIC_BASE_URL: upstream.url }
+      runnerEnv: { PATH: process.env.PATH, ANTHROPIC_API_KEY: REAL_KEY, ANTHROPIC_BASE_URL: upstream.url },
+      enforceKernelSandbox: false
     });
     const ledger = new TokenUsageLedger();
 
@@ -265,7 +483,7 @@ describe.skipIf(!PI_AVAILABLE)("Pi agent engine in the sandbox, against a fake p
 
     expect(result).toEqual({
       finalMessage: "Done: hello.txt created.",
-      diff: { files: [{ path: "hello.txt", content: "hello\n" }], deleted_files: ["obsolete.txt"] }
+      diff: { files: [{ path: "hello.txt", content: "hello\n", mode: "100644" }], deleted_files: ["obsolete.txt"], skipped: [] }
     });
     expect(upstream.requests).toHaveLength(3);
     for (const req of upstream.requests) {
@@ -301,7 +519,7 @@ describe.skipIf(!PI_AVAILABLE)("Pi agent engine in the sandbox, against a fake p
     });
     upstreams.push(upstream);
     const worktree = tempWorktree({ "a.txt": "a\n" });
-    const engine = createPiAgentEngine({ runnerEnv: { PATH: process.env.PATH } });
+    const engine = createPiAgentEngine({ runnerEnv: { PATH: process.env.PATH }, enforceKernelSandbox: false });
 
     const run = engine.run(
       sessionRequest(worktree, {
@@ -312,13 +530,97 @@ describe.skipIf(!PI_AVAILABLE)("Pi agent engine in the sandbox, against a fake p
     await expect(run).rejects.toBeInstanceOf(expected);
   }, 120_000);
 
+  it.each([
+    {
+      id: "runner-secret-written-into-the-worktree-fails-the-session-without-echoing-it",
+      turns: [
+        anthropicStream({ type: "tool_use", id: "toolu_1", name: "write", input: { path: "leak.txt", content: `key=${REAL_KEY}\n` } }, { input: 10, output: 5 }),
+        anthropicStream({ type: "text", text: "Done." }, { input: 10, output: 5 })
+      ],
+      maxLlmRequests: undefined,
+      expected: { name: "AgentEngineError", code: "AGENT_SECRET_IN_DIFF" }
+    },
+    {
+      id: "private-key-block-in-the-worktree-fails-the-session",
+      turns: [
+        anthropicStream(
+          { type: "tool_use", id: "toolu_1", name: "write", input: { path: "id.pem", content: "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----\n" } },
+          { input: 10, output: 5 }
+        ),
+        anthropicStream({ type: "text", text: "Done." }, { input: 10, output: 5 })
+      ],
+      maxLlmRequests: undefined,
+      expected: { name: "AgentEngineError", code: "AGENT_SECRET_IN_DIFF" }
+    },
+    {
+      id: "session-past-its-llm-request-cap-is-aborted",
+      turns: [
+        anthropicStream({ type: "tool_use", id: "toolu_1", name: "bash", input: { command: "true" } }, { input: 10, output: 5 })
+      ],
+      maxLlmRequests: 2,
+      expected: { name: "AgentEngineError", code: "AGENT_REQUEST_CAP_REACHED" }
+    }
+  ])("$id", async ({ turns, maxLlmRequests, expected }) => {
+    const upstream = await scriptedUpstream(turns);
+    upstreams.push(upstream);
+    const worktree = tempWorktree({ "a.txt": "a\n" });
+    const engine = createPiAgentEngine({ runnerEnv: { PATH: process.env.PATH, ANTHROPIC_API_KEY: REAL_KEY }, enforceKernelSandbox: false });
+
+    const run = engine.run(
+      sessionRequest(worktree, {
+        maxLlmRequests,
+        providers: { anthropic: { provider: "anthropic", base_url: upstream.url, api_key: REAL_KEY } }
+      })
+    );
+
+    await expect(run).rejects.toMatchObject(expected);
+    await expect(run).rejects.not.toHaveProperty("message", expect.stringContaining(REAL_KEY));
+    if (maxLlmRequests !== undefined) {
+      expect(upstream.requests).toHaveLength(maxLlmRequests);
+    }
+  }, 120_000);
+
+  it("runs Pi with an allowlisted environment and the requested thinking level", async () => {
+    const upstream = await scriptedUpstream([
+      anthropicStream({ type: "tool_use", id: "toolu_1", name: "bash", input: { command: "env | cut -d= -f1 | sort > env-names.txt" } }, { input: 10, output: 5 }),
+      anthropicStream({ type: "text", text: "Done." }, { input: 10, output: 5 })
+    ]);
+    upstreams.push(upstream);
+    const worktree = tempWorktree({ "a.txt": "a\n" });
+    const engine = createPiAgentEngine({
+      runnerEnv: {
+        PATH: process.env.PATH,
+        LANG: "C.UTF-8",
+        ANTHROPIC_API_KEY: REAL_KEY,
+        NODE_OPTIONS: "--max-old-space-size=4096",
+        PI_CODING_AGENT_DIR: "/home/runner/.pi-runner",
+        GITHUB_TOKEN: "ghs_runnerTokenValue1234567890"
+      },
+      enforceKernelSandbox: false
+    });
+
+    const { diff } = await engine.run(
+      sessionRequest(worktree, {
+        thinking: "high",
+        providers: { anthropic: { provider: "anthropic", base_url: upstream.url, api_key: REAL_KEY } }
+      })
+    );
+    const names = diff.files.find((f) => f.path === "env-names.txt")?.content.trim().split("\n") ?? [];
+
+    expect(names).toEqual(expect.arrayContaining(["HOME", "LANG", "PATH", "PI_CODING_AGENT_DIR", "TMPDIR"]));
+    expect(names).not.toEqual(expect.arrayContaining(["NODE_OPTIONS"]));
+    expect(names).not.toEqual(expect.arrayContaining(["GITHUB_TOKEN"]));
+    expect(names).not.toEqual(expect.arrayContaining(["ANTHROPIC_API_KEY"]));
+    expect((JSON.parse(upstream.requests[0]?.body ?? "{}") as { thinking?: unknown }).thinking).toMatchObject({ type: "enabled" });
+  }, 120_000);
+
   it("aborts a session that outlives its timeout", async () => {
     const upstream = await startFakeLlmUpstream(() => {
       // never answers
     });
     upstreams.push(upstream);
     const worktree = tempWorktree({ "a.txt": "a\n" });
-    const engine = createPiAgentEngine({ runnerEnv: { PATH: process.env.PATH } });
+    const engine = createPiAgentEngine({ runnerEnv: { PATH: process.env.PATH }, enforceKernelSandbox: false });
 
     const run = engine.run(
       sessionRequest(worktree, {

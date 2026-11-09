@@ -3,9 +3,12 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
+import { containsPrivateKeyMaterial } from "../auth/github-apps.js";
+import { redactSecrets } from "../auth/issue-command-gate.js";
 import { parseModelIdentifier } from "../llm/client.js";
 import { classifyHttpError, LLMError } from "../llm/errors.js";
 import {
+  collectRunnerSecretValues,
   runInUntrustedCodeSandbox,
   type LlmProxyExchange,
   type LlmProxyResponseObserver,
@@ -18,7 +21,8 @@ import {
   type AgentEngine,
   type AgentSessionRequest,
   type AgentSessionResult,
-  type AgentToolPolicy
+  type AgentToolPolicy,
+  type WorktreeDiff
 } from "./engine.js";
 import { translateModelForPi } from "./pi-models.js";
 import { snapshotWorktree } from "./worktree-snapshot.js";
@@ -38,6 +42,8 @@ const PI_SETTINGS = JSON.stringify({
 const SHUTDOWN_GRACE_MS = 30_000;
 const MAX_ERROR_BODY_CHARS = 16 * 1024;
 const STDERR_TAIL_CHARS = 2000;
+// One RPC record per line; a longer line kills the session.
+const MAX_RPC_LINE_BYTES = 8 * 1024 * 1024;
 
 export interface PiAgentEngineOptions {
   readonly runnerEnv: Readonly<Record<string, string | undefined>>;
@@ -45,6 +51,10 @@ export interface PiAgentEngineOptions {
   readonly sandboxRunner?:
     | ((input: SandboxExecutionInput) => Promise<SandboxExecutionResult>)
     | undefined;
+  // Default true: a session fails closed without bubblewrap and landrun. Only tests turn it off.
+  readonly enforceKernelSandbox?: boolean | undefined;
+  // Values a diff must not contain, besides the runner's secret variables, provider keys and the proxy nonce.
+  readonly extraSecrets?: readonly string[] | undefined;
 }
 
 // dist/vendor/pi, seen from the bundled actions (dist/actions/*), the CLI (dist/cli) or the sources (src/agent).
@@ -65,6 +75,7 @@ export function resolveVendoredPiDir(): string {
 interface RpcOutcome {
   settled: boolean;
   timedOut: boolean;
+  lineTooLong: boolean;
   finalMessage: string;
   lastStopReason?: string | undefined;
   lastErrorMessage?: string | undefined;
@@ -86,19 +97,20 @@ export function createPiAgentEngine(options: PiAgentEngineOptions): AgentEngine 
       const sessionDir = mkdtempSync(join(tmpdir(), "epure-pi-session-"));
       const instructionsPath = join(sessionDir, "instructions.md");
       writeFileSync(instructionsPath, request.instructions, "utf8");
-      const snapshot = snapshotWorktree(request.worktree);
-      const outcome: RpcOutcome = { settled: false, timedOut: false, finalMessage: "" };
+      const outcome: RpcOutcome = { settled: false, timedOut: false, lineTooLong: false, finalMessage: "" };
       let upstreamError: UpstreamError | undefined;
+      let proxyNonce = "";
+      let snapshot: Awaited<ReturnType<typeof snapshotWorktree>> | undefined;
 
       try {
+        snapshot = await snapshotWorktree(request.worktree, {
+          trackedPaths: request.trackedPaths,
+          isProtectedPath: request.isProtectedPath
+        });
         const result = await sandboxRunner({
           isolationAvailable: true,
-          runnerEnv: {
-            ...options.runnerEnv,
-            PI_OFFLINE: "1",
-            PI_TELEMETRY: "0",
-            PI_SKIP_VERSION_CHECK: "1"
-          },
+          runnerEnv: options.runnerEnv,
+          enforceKernelSandbox: options.enforceKernelSandbox ?? true,
           command: process.execPath,
           args: [
             join(piDir, "rpc-entry.js"),
@@ -115,6 +127,7 @@ export function createPiAgentEngine(options: PiAgentEngineOptions): AgentEngine 
             route.provider,
             "--model",
             route.modelId,
+            ...(request.thinking ? ["--thinking", request.thinking] : []),
             "--tools",
             PI_TOOLS[request.toolPolicy],
             "--append-system-prompt",
@@ -124,15 +137,24 @@ export function createPiAgentEngine(options: PiAgentEngineOptions): AgentEngine 
           networkPolicy: "proxy_only",
           timeoutMs: request.timeoutMs + SHUTDOWN_GRACE_MS,
           llm: { model: request.model, providers: request.providers },
+          maxLlmRequests: request.maxLlmRequests,
           readOnlyPaths: [piDir, sessionDir],
           agentSession: {
-            homeFiles: (proxy) =>
-              proxy
+            homeFiles: (proxy) => {
+              proxyNonce = proxy?.proxyNonce ?? "";
+              return proxy
                 ? {
                     ".pi/agent/models.json": route.modelsJson(proxy.proxyUrl),
                     ".pi/agent/settings.json": PI_SETTINGS
                   }
-                : {}
+                : {};
+            },
+            env: (home) => ({
+              PI_CODING_AGENT_DIR: `${home}/.pi/agent`,
+              PI_OFFLINE: "1",
+              PI_TELEMETRY: "0",
+              PI_SKIP_VERSION_CHECK: "1"
+            })
           },
           observeLlmResponse: (exchange) => {
             if (exchange.status < 400) {
@@ -146,13 +168,28 @@ export function createPiAgentEngine(options: PiAgentEngineOptions): AgentEngine 
           interact: (io) => driveRpcSession(io, request.prompt, request.timeoutMs, outcome)
         });
 
+        if (result.error_code === "SANDBOX_ISOLATION_UNAVAILABLE") {
+          throw new AgentEngineError("AGENT_ISOLATION_UNAVAILABLE", result.error_message);
+        }
         if (!result.isolated) {
           throw new AgentEngineError("AGENT_SANDBOX_FAILED", result.error_message);
+        }
+        if (result.error_code === "LLM_REQUEST_CAP_REACHED") {
+          throw new AgentEngineError(
+            "AGENT_REQUEST_CAP_REACHED",
+            `Agent session (${request.role}) was aborted after ${request.maxLlmRequests ?? 0} LLM requests.`
+          );
         }
         if (outcome.timedOut) {
           throw new AgentEngineError(
             "AGENT_TIMEOUT",
             `Agent session (${request.role}) exceeded ${request.timeoutMs} ms and was aborted.`
+          );
+        }
+        if (outcome.lineTooLong) {
+          throw new AgentEngineError(
+            "AGENT_PROTOCOL_ERROR",
+            `Pi wrote an RPC line over ${MAX_RPC_LINE_BYTES} bytes; the session was killed.`
           );
         }
         if (outcome.rejected !== undefined) {
@@ -167,13 +204,42 @@ export function createPiAgentEngine(options: PiAgentEngineOptions): AgentEngine 
         if (outcome.lastStopReason === "error" || outcome.lastStopReason === "aborted") {
           throw sessionProviderError(request, upstreamError, outcome.lastErrorMessage, options.runnerEnv);
         }
-        return { finalMessage: outcome.finalMessage, diff: snapshot.diff() };
+        const diff = await snapshot.collect();
+        assertNoSecrets(diff, [
+          ...collectRunnerSecretValues(options.runnerEnv),
+          ...providerKeys(request, options.runnerEnv),
+          ...(options.extraSecrets ?? []),
+          proxyNonce
+        ]);
+        return { finalMessage: outcome.finalMessage, diff };
       } finally {
-        snapshot.dispose();
+        snapshot?.dispose();
         rmSync(sessionDir, { recursive: true, force: true });
       }
     }
   };
+}
+
+function providerKeys(
+  request: AgentSessionRequest,
+  env: Readonly<Record<string, string | undefined>>
+): string[] {
+  const { providerConfig } = parseModelIdentifier(request.model, request.providers, env);
+  return providerConfig?.apiKey ? [providerConfig.apiKey] : [];
+}
+
+// The error names files only: the secret itself must not reach a log or comment.
+function assertNoSecrets(diff: WorktreeDiff, secrets: readonly string[]): void {
+  const values = secrets.map((s) => s.trim()).filter((s) => s.length >= 8);
+  const leaking = diff.files
+    .filter((f) => containsPrivateKeyMaterial(f.content) || values.some((v) => f.content.includes(v)))
+    .map((f) => redactSecrets(f.path, values));
+  if (leaking.length > 0) {
+    throw new AgentEngineError(
+      "AGENT_SECRET_IN_DIFF",
+      `The session left secret material (a runner secret, the proxy nonce or a private key) in ${leaking.join(", ")}; nothing was committed.`
+    );
+  }
 }
 
 function collectErrorBody(
@@ -220,6 +286,17 @@ async function driveRpcSession(
   const send = (command: Readonly<Record<string, unknown>>): void => {
     io.stdin.write(`${JSON.stringify(command)}\n`);
   };
+  // readline buffers a line whole, so its length is watched on the raw bytes.
+  let bytesSinceNewline = 0;
+  const watchLineLength = (chunk: Buffer): void => {
+    const lastNewline = chunk.lastIndexOf(10);
+    bytesSinceNewline = lastNewline >= 0 ? chunk.length - lastNewline - 1 : bytesSinceNewline + chunk.length;
+    if (bytesSinceNewline > MAX_RPC_LINE_BYTES && !outcome.lineTooLong) {
+      outcome.lineTooLong = true;
+      io.kill();
+    }
+  };
+  io.stdout.on("data", watchLineLength);
   const lines = createInterface({ input: io.stdout, crlfDelay: Infinity });
   const timer = setTimeout(() => {
     outcome.timedOut = true;
@@ -229,6 +306,9 @@ async function driveRpcSession(
   try {
     send({ id: "prompt", type: "prompt", message: prompt });
     for await (const line of lines) {
+      if (outcome.lineTooLong) {
+        return;
+      }
       const record = parseRecord(line);
       if (record?.type === "response" && record.id === "prompt") {
         if (record.success !== true) {
@@ -259,6 +339,7 @@ async function driveRpcSession(
     }
   } finally {
     clearTimeout(timer);
+    io.stdout.off("data", watchLineLength);
     lines.close();
     io.stdout.resume();
   }

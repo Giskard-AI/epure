@@ -6,6 +6,7 @@ import { createPiAgentEngine } from "../../src/agent/pi-engine.js";
 import { LLMClient, type ProviderConfig } from "../../src/llm/index.js";
 import { orchestrateIssueCommand } from "../../src/orchestrator/issue-orchestrator.js";
 import { GRILL_ROUND_EVALUATION_SCHEMA } from "../../src/orchestrator/prompts/schemas.js";
+import { probeKernelSandboxCapabilities } from "../../src/sandbox/llm-sandbox.js";
 import { createInMemoryGitRefStateStore } from "../../src/state/git-ref-state.js";
 import { runWithTokenUsageLedger, TokenUsageLedger } from "../../src/usage/token-usage.js";
 
@@ -577,7 +578,16 @@ describeLive(
         const worktree = mkdtempSync(join(tmpdir(), "epure-live-pi-"));
         writeFileSync(join(worktree, "sum.ts"), "export const sum = (a: number, b: number): number => a - b;\n");
         writeFileSync(join(worktree, "obsolete.txt"), "remove me\n");
-        const engine = createPiAgentEngine({ runnerEnv: { ...process.env, LLM_API_KEY: target.apiKey ?? "" } });
+        const capabilities = probeKernelSandboxCapabilities();
+        // Opts out only on a dev host without landrun/bubblewrap; the confined container run covers the real path.
+        const enforceKernelSandbox = capabilities.landrunAvailable || capabilities.bubblewrapAvailable;
+        if (!enforceKernelSandbox) {
+          console.log(`[${target.id}] Pi session runs unconfined: no landrun/bubblewrap on this host`);
+        }
+        const engine = createPiAgentEngine({
+          runnerEnv: { ...process.env, LLM_API_KEY: target.apiKey ?? "" },
+          enforceKernelSandbox
+        });
         const ledger = new TokenUsageLedger();
 
         try {
