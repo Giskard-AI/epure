@@ -15828,10 +15828,20 @@ function formatResumeContextPromptLines(resumeContextMarkdown) {
 }
 
 // src/orchestrator/phases/feature-integration.ts
+async function refreshFeaturePrUsage(gh, pr, pricing) {
+  if (!pr) {
+    return;
+  }
+  const body = replacePrUsageSection(pr.body, formatPrUsageSection(currentTokenUsage(), pricing));
+  if (body !== pr.body) {
+    await gh.updatePullRequest(pr.number, { body });
+  }
+}
 async function runFeatureIntegrationPhase(params) {
   const reviewersDir = params.parsedDevAgentsConfig?.reviewers_dir ?? DEFAULT_REVIEWERS_DIR;
   let verificationProfile = params.initialVerificationProfile;
   let verificationGuideMarkdown = params.initialVerificationGuideMarkdown;
+  const pricing = params.parsedDevAgentsConfig?.pricing;
   const escalate = (escalation) => params.escalateToNeedsHuman({ ...escalation, budgetScope: "feature" });
   const featurePrGate = prepareFeatureToDevPullRequest({
     repository: params.repository,
@@ -15933,7 +15943,7 @@ async function runFeatureIntegrationPhase(params) {
         `- **Summary**: ${params.epicConvergenceSummary}`
       ] : [],
       "",
-      formatPrUsageSection(currentTokenUsage(), params.parsedDevAgentsConfig?.pricing),
+      formatPrUsageSection(currentTokenUsage(), pricing),
       "",
       "## Governance",
       "- Requires human review and squash-merge into `dev` in the GitHub UI (ADR-0001, ADR-0027, Q45, Q91, Q95)."
@@ -15954,19 +15964,12 @@ async function runFeatureIntegrationPhase(params) {
     title: featureSquashPreview.pr_title,
     body: featurePrBody
   });
-  const refreshFeaturePrUsage = async (pr) => {
-    if (!pr) {
-      return;
-    }
-    const body = replacePrUsageSection(
-      pr.body,
-      formatPrUsageSection(currentTokenUsage(), params.parsedDevAgentsConfig?.pricing)
-    );
-    if (body !== pr.body) {
-      await params.gh.updatePullRequest(pr.number, { body });
-    }
-  };
-  await refreshFeaturePrUsage(existingFeaturePr);
+  const refreshOpenFeaturePrUsage = async () => refreshFeaturePrUsage(
+    params.gh,
+    await params.gh.findOpenPullRequestByHead(params.featureBranch, "dev"),
+    pricing
+  );
+  await refreshFeaturePrUsage(params.gh, existingFeaturePr, pricing);
   if (params.featureChangedFilesMap.size === 0) {
     const existingFeaturePrFiles = await params.gh.listPullRequestFiles(
       featurePr.number
@@ -16065,6 +16068,7 @@ async function runFeatureIntegrationPhase(params) {
       commitId: passParams.headSha,
       body: reviewRes.review_body_markdown
     });
+    await refreshOpenFeaturePrUsage();
     await params.gh.publishCheckRun({
       name: "PR title",
       headSha: passParams.headSha,
@@ -16617,9 +16621,7 @@ Refs #${params.issueNumber}`
       diagnosticExcerpt: finalFeatureCiGate.formattedDiagnostics
     });
   }
-  await refreshFeaturePrUsage(
-    await params.gh.findOpenPullRequestByHead(params.featureBranch, "dev")
-  );
+  await refreshOpenFeaturePrUsage();
   const updatedDone = await updateIssueStateWithCas({
     issueNumber: params.issueNumber,
     store: params.store,
@@ -19473,6 +19475,9 @@ async function runMeteredIssueCommand(input, ledger) {
                   code_fix_attempts_used: 0
                 })
               });
+              const pricing = parsedDevAgentsConfig?.pricing;
+              const tickets = updatedReviewReady.state.plan_manifest?.tickets ?? [];
+              await refreshFeaturePrUsage(gh, openFeaturePr, pricing);
               const readyMd = appendEpureCommandsSpoiler(
                 [
                   formatIssueStateMarker(updatedReviewReady.state),
@@ -19481,7 +19486,15 @@ async function runMeteredIssueCommand(input, ledger) {
                   `### \u2705 Feature Pull Request pr\xEAte pour validation humaine \u2014 PR #${featurePrNumber}`,
                   `- **Pull Request** : ${featurePrUrl || `#${featurePrNumber}`}`,
                   `- **CI externe & \`ai-review\`** : \`success\` sur \`${activeHeadSha}\``,
-                  "- **Prochaine \xE9tape** : Revue humaine et squash-merge vers `dev`."
+                  "- **Prochaine \xE9tape** : Revue humaine et squash-merge vers `dev`.",
+                  ...tickets.length > 0 ? [
+                    "",
+                    `Tickets int\xE9gr\xE9s \xE0 \`${featureBranch}\` :`,
+                    ...tickets.map(
+                      (ticket) => `- **#${ticket.ticketIssueNumber}** (${ticket.title})` + formatTicketUsageSuffix(currentTokenUsage(), ticket.ticketIssueNumber, pricing)
+                    )
+                  ] : [],
+                  ...formatEpicUsageSection(currentTokenUsage(), pricing)
                 ].join("\n"),
                 {
                   phase: "completed",

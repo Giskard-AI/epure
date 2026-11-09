@@ -52,7 +52,7 @@ export function formatEpicUsageSection(
 const PR_USAGE_START = "<!-- epure-llm-usage:start -->";
 const PR_USAGE_END = "<!-- epure-llm-usage:end -->";
 
-/** The feature PR body's section, between markers so each feature-integration pass rewrites it in place. */
+/** The feature PR body's section, between markers so EPURE rewrites it in place as the epic's usage grows. */
 export function formatPrUsageSection(
   record: TokenUsageRecord | undefined,
   pricing: PricingTable | undefined

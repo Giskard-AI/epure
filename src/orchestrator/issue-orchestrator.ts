@@ -63,7 +63,11 @@ import {
   withUsageAttribution,
   type UsagePhase
 } from "../usage/token-usage.js";
-import { formatStatusUsageLines, formatTicketUsageSuffix } from "../usage/usage-report.js";
+import {
+  formatEpicUsageSection,
+  formatStatusUsageLines,
+  formatTicketUsageSuffix
+} from "../usage/usage-report.js";
 import { appendEpureCommandsSpoiler } from "./formatting/comments.js";
 import {
   createBaseSyncGuard,
@@ -97,7 +101,7 @@ import {
   runEpicConvergenceAudit,
   spawnPhase2ConvergenceTickets
 } from "./phases/epic-convergence.js";
-import { runFeatureIntegrationPhase } from "./phases/feature-integration.js";
+import { refreshFeaturePrUsage, runFeatureIntegrationPhase } from "./phases/feature-integration.js";
 import {
   buildParentIssueTicketsTasklistBlock,
   runGoldfishSpecAudit,
@@ -1363,6 +1367,9 @@ async function runMeteredIssueCommand(
                   code_fix_attempts_used: 0
                 })
               });
+              const pricing = parsedDevAgentsConfig?.pricing;
+              const tickets = updatedReviewReady.state.plan_manifest?.tickets ?? [];
+              await refreshFeaturePrUsage(gh, openFeaturePr, pricing);
               const readyMd = appendEpureCommandsSpoiler(
                 [
                   formatIssueStateMarker(updatedReviewReady.state),
@@ -1371,7 +1378,19 @@ async function runMeteredIssueCommand(
                   `### ✅ Feature Pull Request prête pour validation humaine — PR #${featurePrNumber}`,
                   `- **Pull Request** : ${featurePrUrl || `#${featurePrNumber}`}`,
                   `- **CI externe & \`ai-review\`** : \`success\` sur \`${activeHeadSha}\``,
-                  "- **Prochaine étape** : Revue humaine et squash-merge vers `dev`."
+                  "- **Prochaine étape** : Revue humaine et squash-merge vers `dev`.",
+                  ...(tickets.length > 0
+                    ? [
+                        "",
+                        `Tickets intégrés à \`${featureBranch}\` :`,
+                        ...tickets.map(
+                          (ticket) =>
+                            `- **#${ticket.ticketIssueNumber}** (${ticket.title})` +
+                            formatTicketUsageSuffix(currentTokenUsage(), ticket.ticketIssueNumber, pricing)
+                        )
+                      ]
+                    : []),
+                  ...formatEpicUsageSection(currentTokenUsage(), pricing)
                 ].join("\n"),
                 {
                   phase: "completed",

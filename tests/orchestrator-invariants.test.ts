@@ -300,17 +300,21 @@ describe("feature PR integration — a conflicting feature PR is re-synced with 
   });
 });
 
-describe("a CI run that completes while EPURE holds the lease is not missed when the plan enters waiting_feature_ci", () => {
-  const CI_WORKFLOW = "name: CI\non:\n  pull_request:\n    branches: [dev]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n";
+const CI_WORKFLOW = "name: CI\non:\n  pull_request:\n    branches: [dev]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n";
 
+function declareDevCiWorkflow(router: GitHubMockRouter): GitHubMockRouter {
+  return router
+    .on("GET", `${R}/contents/.github/workflows?ref=dev`, json([{ type: "file", path: ".github/workflows/ci.yml", sha: "wf-ci" }]))
+    .on("GET", `${R}/git/blobs/wf-ci`, json({ encoding: "base64", content: Buffer.from(CI_WORKFLOW).toString("base64") }));
+}
+
+describe("a CI run that completes while EPURE holds the lease is not missed when the plan enters waiting_feature_ci", () => {
   it.each([
     { id: "feature-ci-already-green-moves-to-review-without-a-new-event", ci: "success", expected: { phase: "review", status: "awaiting_human_approval", subphase: "idle" } },
     { id: "feature-ci-still-running-stays-in-waiting_feature_ci", ci: "pending", expected: { phase: "review", status: "active", subphase: "waiting_feature_ci", active_head_sha: HEAD_SHA } }
   ] as const)("$id", async ({ ci, expected }) => {
     const store = await seedState(FEATURE_INTEGRATION_PENDING_STATE);
-    const router = declareImplementationFlow(createGitHubMockRouter(), ci, { taskPr: false, featurePr: true })
-      .on("GET", `${R}/contents/.github/workflows?ref=dev`, json([{ type: "file", path: ".github/workflows/ci.yml", sha: "wf-ci" }]))
-      .on("GET", `${R}/git/blobs/wf-ci`, json({ encoding: "base64", content: Buffer.from(CI_WORKFLOW).toString("base64") }))
+    const router = declareDevCiWorkflow(declareImplementationFlow(createGitHubMockRouter(), ci, { taskPr: false, featurePr: true }))
       .on("GET", new RegExp(`^${R_RX}/labels/[^/]+$`), json({}));
 
     const res = await orchestrateIssueCommand({
@@ -1004,19 +1008,33 @@ describe("Token usage is written with the run's existing state updates (#125)", 
     expect(requestsByScopeAndPhase).toEqual({ epic: { plan: 2, integration: 1, review: 2 }, [String(ISSUE)]: { implementation: 3 } });
   });
 
-  it("resumed-pass-rewrites-only-the-usage-section-of-the-existing-feature-pr-at-its-start-and-end", async () => {
+  const PR_BEFORE = "## Summary\nEdited by a human.\n\n";
+  const PR_AFTER = "\n\n## Governance\nUnchanged.";
+  const prSection = (total: string) => `<!-- epure-llm-usage:start -->\n## LLM Usage\n- **Epic total**: ${total}\n<!-- epure-llm-usage:end -->`;
+  // The open feature PR keeps the body EPURE last wrote, as GitHub does.
+  const declareOpenFeaturePr = (router: GitHubMockRouter, body: string): GitHubMockRouter => {
+    let current = body;
+    return router
+      .on("GET", new RegExp(`/pulls\\?state=open&head=${encodeURIComponent(`${OWNER}:${FEATURE_BRANCH}`)}`), () =>
+        json([{ number: 105, html_url: "pr105", title: "feat: y", body: current, head: { sha: HEAD_SHA } }])
+      )
+      .on("PATCH", `${R}/pulls/105`, (req) => {
+        current = (req.body as { body?: string }).body ?? current;
+        return json({ head: { sha: HEAD_SHA } });
+      });
+  };
+  const patchedFeaturePrBodies = (router: GitHubMockRouter): string[] =>
+    router.requests
+      .filter((r) => r.method === "PATCH" && r.path === `${R}/pulls/105` && (r.body as { body?: string }).body !== undefined)
+      .map((r) => (r.body as { body: string }).body);
+
+  it("resumed-pass-rewrites-only-the-usage-section-of-the-existing-feature-pr-at-its-start-and-after-the-review-pass", async () => {
     vi.spyOn(process.stdout, "write").mockImplementation(() => true);
-    const before = "## Summary\nEdited by a human.\n\n";
-    const after = "\n\n## Governance\nUnchanged.";
-    const section = (total: string) => `<!-- epure-llm-usage:start -->\n## LLM Usage\n- **Epic total**: ${total}\n<!-- epure-llm-usage:end -->`;
     const store = await seedState({ ...FEATURE_INTEGRATION_PENDING_STATE, token_usage: { epic: SEEDED_USAGE.epic, [String(ISSUE)]: SEEDED_USAGE["78"] } });
-    const router = declareImplementationFlow(createGitHubMockRouter(), "success", { taskPr: false, featurePr: true })
-      .on("GET", `${R}/contents/.github/agents.yml?ref=dev`, base64File(PRICING_YAML))
-      .on(
-        "GET",
-        new RegExp(`/pulls\\?state=open&head=${encodeURIComponent(`${OWNER}:${FEATURE_BRANCH}`)}`),
-        json([{ number: 105, html_url: "pr105", title: "feat: y", body: `${before}${section("stale")}${after}`, head: { sha: HEAD_SHA } }])
-      );
+    const router = declareOpenFeaturePr(
+      declareImplementationFlow(createGitHubMockRouter(), "success", { taskPr: false, featurePr: true }),
+      `${PR_BEFORE}${prSection("stale")}${PR_AFTER}`
+    ).on("GET", `${R}/contents/.github/agents.yml?ref=dev`, base64File(PRICING_YAML));
 
     try {
       await run(router, store, { command: "approve", actor: "maintainer", issueNumber: ISSUE, commentId: 900 });
@@ -1025,14 +1043,90 @@ describe("Token usage is written with the run's existing state updates (#125)", 
     }
 
     expect(router.unmatched).toEqual([]);
-    const patchedBodies = router.requests
-      .filter((r) => r.method === "PATCH" && r.path === `${R}/pulls/105` && (r.body as { body?: string }).body !== undefined)
-      .map((r) => (r.body as { body: string }).body);
     const finalTotal = /## LLM Usage\n- \*\*Epic total\*\*: (.*)\n/.exec(postedComments(router).at(-1) ?? "")?.[1];
-    expect(patchedBodies).toEqual([
-      `${before}${section("4,000,000 input tokens (1,200,000 cached) · 600,000 output (10,000 thinking) · 6 requests · 2 without usage data · ≥ $11.00")}${after}`,
-      `${before}${section(finalTotal!)}${after}`
+    expect(finalTotal).toBe("4,000,000 input tokens (1,200,000 cached) · 600,000 output (10,000 thinking) · 8 requests · 4 without usage data · ≥ $11.00");
+    expect(patchedFeaturePrBodies(router)).toEqual([
+      `${PR_BEFORE}${prSection("4,000,000 input tokens (1,200,000 cached) · 600,000 output (10,000 thinking) · 6 requests · 2 without usage data · ≥ $11.00")}${PR_AFTER}`,
+      `${PR_BEFORE}${prSection(finalTotal!)}${PR_AFTER}`
     ]);
+    expect(Object.values((await readState(store)).token_usage?.epic?.review ?? {}).map((t) => t.requests)).toEqual([2]);
+  });
+
+  it("feature-pr-body-released-for-async-feature-ci-already-holds-the-review-usage-and-the-state-total", async () => {
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const store = await seedState({ ...FEATURE_INTEGRATION_PENDING_STATE, token_usage: { epic: SEEDED_USAGE.epic, [String(ISSUE)]: SEEDED_USAGE["78"] } });
+    const router = declareOpenFeaturePr(
+      declareDevCiWorkflow(declareImplementationFlow(createGitHubMockRouter(), "pending", { taskPr: false, featurePr: true })),
+      `${PR_BEFORE}${prSection("stale")}${PR_AFTER}`
+    ).on("GET", `${R}/contents/.github/agents.yml?ref=dev`, base64File(PRICING_YAML));
+
+    try {
+      await orchestrateIssueCommand({
+        repository: REPO,
+        issueNumber: ISSUE,
+        command: "approve",
+        commandArgs: "",
+        actor: "maintainer",
+        commentId: 900,
+        fallbackGithubToken: "ghs_test",
+        llmApiKey: "key_test",
+        model: "openai/gpt-test",
+        asyncCiContinuation: true,
+        stateStore: store,
+        fetchImpl: router.fetch
+      });
+    } finally {
+      vi.restoreAllMocks();
+    }
+
+    expect(router.unmatched).toEqual([]);
+    const state = await readState(store);
+    expect(state).toMatchObject({ phase: "review", status: "active", subphase: "waiting_feature_ci" });
+    const stateRequests = Object.values(state.token_usage ?? {})
+      .flatMap((phases) => Object.values(phases))
+      .flatMap((models) => Object.values(models ?? {}))
+      .reduce((sum, counts) => sum + counts.requests, 0);
+    expect(stateRequests).toBe(8);
+    expect(patchedFeaturePrBodies(router).at(-1)).toBe(
+      `${PR_BEFORE}${prSection("4,000,000 input tokens (1,200,000 cached) · 600,000 output (10,000 thinking) · 8 requests · 4 without usage data · ≥ $11.00")}${PR_AFTER}`
+    );
+  });
+
+  it("gate-3-continuation-posts-each-ticket-and-the-epic-total-and-rewrites-the-feature-pr-usage-section", async () => {
+    const store = await seedState({
+      status: "active",
+      subphase: "waiting_feature_ci",
+      active_ticket_number: ISSUE,
+      active_pr_number: 105,
+      active_head_sha: HEAD_SHA,
+      plan_manifest: {
+        planBranch: "plan/77-async-ci-feature",
+        tickets: [{ ticketIssueNumber: 78, slug: "ship", title: "Ship", description: "d", acceptanceCriteria: ["a"], blockedByIssueNumbers: [], filesToTouch: [] }]
+      },
+      token_usage: SEEDED_USAGE
+    });
+    const router = declareOpenFeaturePr(
+      declareIssueWrites(declareCiSnapshot(declareIssueReads(createGitHubMockRouter()), "success")),
+      `${PR_BEFORE}${prSection("stale")}${PR_AFTER}`
+    ).on("GET", `${R}/contents/.github/agents.yml?ref=dev`, base64File(PRICING_YAML));
+    const total = "4,000,000 input tokens (1,200,000 cached) · 600,000 output (10,000 thinking) · 5 requests · 1 without usage data · ≥ $11.00";
+
+    await run(router, store, { command: "continue", actor: "github-actions[bot]", ...TRIGGERS.workflowRunForIssue });
+
+    expect(router.unmatched).toEqual([]);
+    expect((await readState(store)).status).toBe("awaiting_human_approval");
+    expect(postedComments(router)).toEqual([
+      expect.stringContaining(
+        [
+          `Tickets intégrés à \`${FEATURE_BRANCH}\` :`,
+          "- **#78** (Ship) — LLM usage: 3,000,000 input tokens (1,000,000 cached) · 500,000 output (0 thinking) · 3 requests · 1 without usage data · ≥ $8.50",
+          "",
+          "## LLM Usage",
+          `- **Epic total**: ${total}`
+        ].join("\n")
+      )
+    ]);
+    expect(patchedFeaturePrBodies(router)).toEqual([`${PR_BEFORE}${prSection(total)}${PR_AFTER}`]);
   });
 });
 
