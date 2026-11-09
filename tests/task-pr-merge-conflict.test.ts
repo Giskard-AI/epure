@@ -355,4 +355,150 @@ describe("ticket execution — a conflicting task PR is re-synced instead of wai
     expect(reviewedShas).toEqual(["new-commit-sha-70", "human-push-sha"]);
     expect(mergeShas).toEqual(["new-commit-sha-70", "human-push-sha"]);
   });
+
+  const MULTI_HUNK_POSTGRES = [
+    "export const header = 'base';",
+    "",
+    "export function keepMiddle() {",
+    "  const a = 1;",
+    "  const b = 2;",
+    "  const c = 3;",
+    "  const d = 4;",
+    "  return a + b + c + d;",
+    "}",
+    "",
+    "export const footer = 'base';",
+    ""
+  ].join("\n");
+
+  it.each([
+    {
+      id: "dirty-pr-with-409-and-disjoint-hunks-merges-locally-without-calling-conflict_resolver",
+      taskVersion: MULTI_HUNK_POSTGRES.replace("header = 'base'", "header = 'task'"),
+      featureVersion: MULTI_HUNK_POSTGRES.replace("footer = 'base'", "footer = 'feature'"),
+      expectedRoles: ["implementer"]
+    },
+    {
+      id: "dirty-pr-with-409-and-overlapping-hunks-invokes-conflict_resolver-on-checkout",
+      taskVersion: MULTI_HUNK_POSTGRES.replace("header = 'base'", "header = 'task'"),
+      featureVersion: MULTI_HUNK_POSTGRES.replace("header = 'base'", "header = 'feature'"),
+      expectedRoles: ["implementer", "conflict_resolver"]
+    }
+  ])("$id", async ({ taskVersion, featureVersion, expectedRoles }) => {
+    const base64File = (text: string) =>
+      new Response(
+        JSON.stringify({ type: "file", encoding: "base64", content: Buffer.from(text).toString("base64") }),
+        { status: 200 }
+      );
+    const seenRoles: string[] = [];
+    const engine: AgentEngine = {
+      name: "scripted",
+      run: async (req) => {
+        seenRoles.push(req.role);
+        if (req.role === "conflict_resolver") {
+          const onDisk = readFileSync(join(req.worktree, "src/postgres.ts"), "utf8");
+          expect(onDisk).toContain("<<<<<<<");
+          const resolved = MULTI_HUNK_POSTGRES.replace("header = 'base'", "header = 'task+feature'");
+          return {
+            finalMessage: "Resolved conflict.",
+            diff: {
+              files: [{ path: "src/postgres.ts", content: resolved, mode: "100644" }],
+              deleted_files: [],
+              skipped: []
+            }
+          };
+        }
+        return {
+          finalMessage: "Implemented.",
+          diff: {
+            files: [{ path: "src/postgres.ts", content: taskVersion, mode: "100644" }],
+            deleted_files: [],
+            skipped: []
+          }
+        };
+      }
+    };
+
+    const ANC_SHA = "a".repeat(40);
+    const FEAT_SHA = "f".repeat(40);
+    const TASK_SHA = "b".repeat(40);
+    let conflictTriggered = false;
+
+    const { result } = await runTicket({
+      mergeStatuses: [200],
+      resyncStatus: 204,
+      firstMergeableState: "dirty",
+      agent: {
+        engine,
+        reviewFindings: () => [],
+        route: (method, path) => {
+          if (!seenRoles.includes("implementer")) {
+            return undefined;
+          }
+          if (method === "POST" && path.endsWith("/merges") && !conflictTriggered) {
+            conflictTriggered = true;
+            return new Response(JSON.stringify({ message: "Merge conflict" }), { status: 409 });
+          }
+          if (method === "GET" && path.includes("/git/ref/heads/feature%2F")) {
+            return new Response(JSON.stringify({ object: { sha: FEAT_SHA } }), { status: 200 });
+          }
+          if (method === "GET" && path.includes(`/git/ref/heads/${encodeURIComponent(TASK_BRANCH)}`)) {
+            return new Response(JSON.stringify({ object: { sha: TASK_SHA } }), { status: 200 });
+          }
+          if (method === "GET" && path.includes(`/compare/${TASK_SHA}...${FEAT_SHA}`)) {
+            return new Response(
+              JSON.stringify({ merge_base_commit: { sha: ANC_SHA }, files: [{ filename: "src/postgres.ts" }], ahead_by: 1 }),
+              { status: 200 }
+            );
+          }
+          if (method === "GET" && path.includes("/compare/new-commit-sha-70...")) {
+            return new Response(
+              JSON.stringify({ merge_base_commit: { sha: ANC_SHA }, files: [{ filename: "src/postgres.ts" }], ahead_by: 1 }),
+              { status: 200 }
+            );
+          }
+          if (method === "GET" && path.includes(`/git/trees/${ANC_SHA}`)) {
+            return new Response(
+              JSON.stringify({ sha: ANC_SHA, truncated: false, tree: [{ path: "src/postgres.ts", mode: "100644", type: "blob", sha: "blob-anc", size: 50 }] }),
+              { status: 200 }
+            );
+          }
+          if (method === "GET" && path.includes(`/git/trees/${FEAT_SHA}`)) {
+            return new Response(
+              JSON.stringify({ sha: FEAT_SHA, truncated: false, tree: [{ path: "src/postgres.ts", mode: "100644", type: "blob", sha: "blob-feat", size: 50 }] }),
+              { status: 200 }
+            );
+          }
+          if (method === "GET" && path.includes(`/git/trees/${TASK_SHA}`)) {
+            return new Response(
+              JSON.stringify({ sha: TASK_SHA, truncated: false, tree: [{ path: "src/postgres.ts", mode: "100644", type: "blob", sha: "blob-task", size: 50 }] }),
+              { status: 200 }
+            );
+          }
+          if (method === "GET" && path.includes(`/contents/src/postgres.ts?ref=${ANC_SHA}`)) {
+            return base64File(MULTI_HUNK_POSTGRES);
+          }
+          if (method === "GET" && path.includes(`/contents/src/postgres.ts?ref=${FEAT_SHA}`)) {
+            return base64File(featureVersion);
+          }
+          if (method === "GET" && path.includes(`/contents/src/postgres.ts?ref=${TASK_SHA}`)) {
+            return base64File(taskVersion);
+          }
+          if (method === "GET" && path.includes("/contents/src/postgres.ts?ref=")) {
+            return base64File(MULTI_HUNK_POSTGRES);
+          }
+          if (method === "GET" && path.includes("/pulls/172/files")) {
+            return new Response(
+              JSON.stringify([{ filename: "src/postgres.ts", status: "modified", patch: "@@ -1 +1 @@" }]),
+              { status: 200 }
+            );
+          }
+          return undefined;
+        }
+      }
+    });
+
+    expect(seenRoles).toEqual(expectedRoles);
+    expect(result.status).toBe("done");
+  });
 });

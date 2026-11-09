@@ -76,6 +76,7 @@ function gitRunner(gitDir: string, worktree: string, extraEnv: Readonly<Record<s
         [
           "-c", "core.hooksPath=/dev/null",
           "-c", "core.fsmonitor=false",
+          "-c", "protocol.file.allow=never",
           "-c", "core.autocrlf=false",
           "-c", "core.symlinks=true",
           `--git-dir=${gitDir}`,
@@ -89,6 +90,7 @@ function gitRunner(gitDir: string, worktree: string, extraEnv: Readonly<Record<s
             HOME: gitDir,
             GIT_CONFIG_NOSYSTEM: "1",
             GIT_CONFIG_GLOBAL: "/dev/null",
+            GIT_ATTR_NOSYSTEM: "1",
             GIT_LITERAL_PATHSPECS: "1",
             ...extraEnv
           },

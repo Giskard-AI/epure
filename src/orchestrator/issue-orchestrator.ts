@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { AgentEngineError } from "../agent/engine.js";
 import {
   mintRepositoryInstallationToken,
   revokeGitHubInstallationToken
@@ -17,6 +18,7 @@ import {
   discoverExpectedExternalWorkflows,
   evaluateSingleExternalCiSnapshot,
   formatNeedsHumanEscalationComment,
+  resolveAgentEngineEscalationReason,
   resolveLlmEscalationReason,
   type NeedsHumanEscalationReason
 } from "../execution/external-ci-gate.js";
@@ -1047,7 +1049,12 @@ async function runMeteredIssueCommand(
           onTransientRetriesUsed: (used) => {
             totalTransientRetriesUsed += used;
           },
-          fetchImpl: effectiveInput.fetchImpl
+          fetchImpl: effectiveInput.fetchImpl,
+          agentEngine:
+            effectiveInput.agentEngine?.name === "pi"
+              ? effectiveInput.agentEngine
+              : undefined,
+          activeToken
         }));
       } catch (err) {
         if (err instanceof LLMError) {
@@ -1150,7 +1157,11 @@ async function runMeteredIssueCommand(
             transientRetryBackoffSeconds:
               phaseModels.transientRetryBackoffSeconds,
             requestTimeoutMs: phaseModels.requestTimeoutMs,
-            fetchImpl: effectiveInput.fetchImpl
+            fetchImpl: effectiveInput.fetchImpl,
+            agentEngine:
+              effectiveInput.agentEngine?.name === "pi"
+                ? effectiveInput.agentEngine
+                : undefined
           });
         }
 
@@ -1167,7 +1178,8 @@ async function runMeteredIssueCommand(
           transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
           requestTimeoutMs: phaseModels.requestTimeoutMs,
           sandboxRunner: effectiveInput.sandboxRunner,
-          reviewersDir
+          reviewersDir,
+          agentEngine: effectiveInput.agentEngine
         });
 
         if (syncRes.status === "escalated") {
@@ -1199,7 +1211,8 @@ async function runMeteredIssueCommand(
                   phaseModels.transientRetryBackoffSeconds,
                 requestTimeoutMs: phaseModels.requestTimeoutMs,
                 sandboxRunner: effectiveInput.sandboxRunner,
-                reviewersDir
+                reviewersDir,
+                agentEngine: effectiveInput.agentEngine
               })
           );
           if (taskSyncRes.status === "escalated") {
@@ -1563,7 +1576,8 @@ async function runMeteredIssueCommand(
                         phaseModels.transientRetryBackoffSeconds,
                       requestTimeoutMs: phaseModels.requestTimeoutMs,
                       sandboxRunner: effectiveInput.sandboxRunner,
-                      reviewersDir
+                      reviewersDir,
+                      agentEngine: effectiveInput.agentEngine
                     })
                 );
                 if (resync.status === "escalated") {
@@ -1899,7 +1913,11 @@ async function runMeteredIssueCommand(
           maxTransientRetries: phaseModels.maxTransientRetries,
           transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
           requestTimeoutMs: phaseModels.requestTimeoutMs,
-          fetchImpl: effectiveInput.fetchImpl
+          fetchImpl: effectiveInput.fetchImpl,
+          agentEngine:
+            effectiveInput.agentEngine?.name === "pi"
+              ? effectiveInput.agentEngine
+              : undefined
         });
         await updateIssueStateWithCas({
           issueNumber: effectiveInput.issueNumber,
@@ -2117,7 +2135,12 @@ async function runMeteredIssueCommand(
             onTransientRetriesUsed: (used) => {
               totalTransientRetriesUsed += used;
             },
-            fetchImpl: effectiveInput.fetchImpl
+            fetchImpl: effectiveInput.fetchImpl,
+            agentEngine:
+              effectiveInput.agentEngine?.name === "pi"
+                ? effectiveInput.agentEngine
+                : undefined,
+            activeToken
           });
 
           if (convergenceAudit.verdict === "CONVERGED") {
@@ -2287,12 +2310,16 @@ async function runMeteredIssueCommand(
           initialFeatureCodeFixAttemptsUsed,
           baseSyncGuard,
           resumeContextMarkdown,
-          stopIfFeaturePrMerged
+          stopIfFeaturePrMerged,
+          agentEngine: effectiveInput.agentEngine
         }));
       } catch (err) {
-        if (err instanceof LLMError) {
+        if (err instanceof LLMError || err instanceof AgentEngineError) {
           return await escalateToNeedsHuman({
-            reason: resolveLlmEscalationReason(err),
+            reason:
+              err instanceof LLMError
+                ? resolveLlmEscalationReason(err)
+                : resolveAgentEngineEscalationReason(err),
             ticketNumber: effectiveInput.issueNumber,
             branch: featureBranch,
             phase: "implementation",
@@ -2327,7 +2354,9 @@ async function runMeteredIssueCommand(
         reason:
           err instanceof LLMError
             ? resolveLlmEscalationReason(err)
-            : err instanceof GitHubRateLimitError
+            : err instanceof AgentEngineError
+              ? resolveAgentEngineEscalationReason(err)
+              : err instanceof GitHubRateLimitError
               ? "github_rate_limited"
               : err instanceof BranchUpdateConflictError
                 ? "branch_update_conflict"

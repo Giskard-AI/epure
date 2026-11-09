@@ -1,4 +1,16 @@
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import type { AgentEngine, AgentSessionRequest } from "../src/agent/engine.js";
 import { parseEpureCommand } from "../src/auth/issue-command-gate.js";
 import { evaluateSingleExternalCiSnapshot } from "../src/execution/external-ci-gate.js";
 import {
@@ -7,13 +19,19 @@ import {
   renumberCollidingAdrs,
   syncBranchWithBase
 } from "../src/orchestrator/github/branch-sync.js";
+import { createGitHubRestHelper } from "../src/orchestrator/github/rest-client.js";
 import { orchestrateIssueCommand } from "../src/orchestrator/issue-orchestrator.js";
 import type { GitHubRestHelper } from "../src/orchestrator/types.js";
 import {
   createInMemoryGitRefStateStore,
   updateIssueStateWithCas
 } from "../src/state/git-ref-state.js";
-import { createGitHubMockRouter, json, notFound } from "./fixtures/github-mock-router.js";
+import {
+  createGitHubMockRouter,
+  installFakeGitDataApi,
+  json,
+  notFound
+} from "./fixtures/github-mock-router.js";
 
 describe("EPURE v1.2 Chantier 1 & 2 — Git Sync, Concurrency & Event-Driven CI Continuation", () => {
   describe("parseEpureCommand for /epure sync, /epure rebase, and /epure continue", () => {
@@ -302,6 +320,256 @@ describe("EPURE v1.2 Chantier 1 & 2 — Git Sync, Concurrency & Event-Driven CI 
         model: "google/gemini-3.8-flash"
       });
       expect(res.status).toBe(expectedStatus);
+    });
+
+    const SHARED_MULTI_HUNK_FILE = [
+      "export function headerSection() {",
+      "  return 'header-base';",
+      "}",
+      "",
+      "export function middleSection() {",
+      "  const line1 = 'unchanged-1';",
+      "  const line2 = 'unchanged-2';",
+      "  const line3 = 'unchanged-3';",
+      "  const line4 = 'unchanged-4';",
+      "  const line5 = 'unchanged-5';",
+      "  return [line1, line2, line3, line4, line5].join(',');",
+      "}",
+      "",
+      "export function footerSection() {",
+      "  return 'footer-base';",
+      "}",
+      ""
+    ].join("\n");
+
+    it.each([
+      {
+        id: "disjoint-hunks-in-same-file-merge-cleanly-via-local-3-way-git-merge-without-calling-agent-or-llm",
+        oursContent: SHARED_MULTI_HUNK_FILE.replace("'header-base'", "'header-ours'"),
+        theirsContent: SHARED_MULTI_HUNK_FILE.replace("'footer-base'", "'footer-theirs'"),
+        agentOutcome: "unused" as const,
+        expectedStatus: "merged" as const,
+        expectedConflictsResolved: [] as string[],
+        expectedAgentCalls: 0,
+        expectedMergedSubstrings: ["'header-ours'", "'unchanged-3'", "'footer-theirs'"]
+      },
+      {
+        id: "overlapping-hunks-in-same-file-invoke-conflict_resolver-agent-on-checkout-with-git-conflict-markers",
+        oursContent: SHARED_MULTI_HUNK_FILE.replace("'header-base'", "'header-ours'"),
+        theirsContent: SHARED_MULTI_HUNK_FILE.replace("'header-base'", "'header-theirs'"),
+        agentOutcome: "resolve_cleanly" as const,
+        expectedStatus: "resolved" as const,
+        expectedConflictsResolved: ["src/service.ts"],
+        expectedAgentCalls: 1,
+        expectedMergedSubstrings: ["'header-ours+theirs'", "'unchanged-3'", "'footer-base'"]
+      },
+      {
+        id: "overlapping-hunks-where-conflict_resolver-leaves-conflict-markers-escalate-merge_conflict_unresolved",
+        oursContent: SHARED_MULTI_HUNK_FILE.replace("'header-base'", "'header-ours'"),
+        theirsContent: SHARED_MULTI_HUNK_FILE.replace("'header-base'", "'header-theirs'"),
+        agentOutcome: "leave_markers" as const,
+        expectedStatus: "escalated" as const,
+        expectedConflictsResolved: [] as string[],
+        expectedAgentCalls: 1,
+        expectedMergedSubstrings: ["'header-ours'"]
+      },
+      {
+        id: "overlapping-hunks-where-conflict_resolver-touches-protected-path-escalate-merge_conflict_unresolved",
+        oursContent: SHARED_MULTI_HUNK_FILE.replace("'header-base'", "'header-ours'"),
+        theirsContent: SHARED_MULTI_HUNK_FILE.replace("'header-base'", "'header-theirs'"),
+        agentOutcome: "touch_protected" as const,
+        expectedStatus: "escalated" as const,
+        expectedConflictsResolved: [] as string[],
+        expectedAgentCalls: 1,
+        expectedMergedSubstrings: ["'header-ours'"]
+      }
+    ])(
+      "$id",
+      async ({
+        oursContent,
+        theirsContent,
+        agentOutcome,
+        expectedStatus,
+        expectedConflictsResolved,
+        expectedAgentCalls,
+        expectedMergedSubstrings
+      }) => {
+        const router = createGitHubMockRouter();
+        const git = installFakeGitDataApi(router, "acme/demo");
+        git.commitFiles("dev", { "src/service.ts": SHARED_MULTI_HUNK_FILE }, "base");
+        git.setRef("refs/heads/feature/42-sync", git.getRef("refs/heads/dev")!);
+        git.commitFiles("feature/42-sync", { "src/service.ts": oursContent }, "ours");
+        git.commitFiles("dev", { "src/service.ts": theirsContent }, "theirs");
+        const gh = createGitHubRestHelper({
+          repository: "acme/demo",
+          token: "ghs_test",
+          fetchImpl: router.fetch
+        });
+
+        const seenRequests: AgentSessionRequest[] = [];
+        const seenWorktreeMarkerContents: string[] = [];
+        const engine: AgentEngine = {
+          name: "mock-pi",
+          run: async (req) => {
+            seenRequests.push(req);
+            const targetFile = join(req.worktree, "src/service.ts");
+            const diskWithMarkers = readFileSync(targetFile, "utf8");
+            seenWorktreeMarkerContents.push(diskWithMarkers);
+            if (agentOutcome === "resolve_cleanly") {
+              const resolved = SHARED_MULTI_HUNK_FILE.replace(
+                "'header-base'",
+                "'header-ours+theirs'"
+              );
+              writeFileSync(targetFile, resolved, "utf8");
+              return {
+                finalMessage: "Resolved conflict in src/service.ts",
+                diff: {
+                  files: [{ path: "src/service.ts", content: resolved, mode: "100644" }],
+                  deleted_files: [],
+                  skipped: []
+                }
+              };
+            }
+            if (agentOutcome === "touch_protected") {
+              mkdirSync(join(req.worktree, ".github/workflows"), { recursive: true });
+              writeFileSync(join(req.worktree, ".github/workflows/ci.yml"), "name: pwn\n", "utf8");
+              return {
+                finalMessage: "Touched workflow",
+                diff: {
+                  files: [],
+                  deleted_files: [],
+                  skipped: [{ path: ".github/workflows/ci.yml", reason: "protected" }]
+                }
+              };
+            }
+            return {
+              finalMessage: "Left conflict markers",
+              diff: {
+                files: [{ path: "src/service.ts", content: diskWithMarkers, mode: "100644" }],
+                deleted_files: [],
+                skipped: []
+              }
+            };
+          }
+        };
+
+        const res = await syncBranchWithBase({
+          gh,
+          baseBranch: "dev",
+          targetBranch: "feature/42-sync",
+          issueNumber: 42,
+          model: "google/gemini-3.8-flash",
+          agentEngine: engine
+        });
+
+        expect(router.unmatched).toEqual([]);
+        expect(res.status).toBe(expectedStatus);
+        expect(res.conflictsResolved).toEqual(expectedConflictsResolved);
+        expect(seenRequests).toHaveLength(expectedAgentCalls);
+        if (expectedAgentCalls > 0) {
+          expect(seenRequests[0]?.role).toBe("conflict_resolver");
+          expect(seenRequests[0]?.toolPolicy).toBe("write");
+          expect(seenWorktreeMarkerContents[0]).toMatch(/^<{7} /m);
+          expect(seenWorktreeMarkerContents[0]).toMatch(/^={7}$/m);
+          expect(seenWorktreeMarkerContents[0]).toMatch(/^>{7} /m);
+        }
+        const finalBranchContent = git.readFile("feature/42-sync", "src/service.ts") ?? "";
+        for (const snippet of expectedMergedSubstrings) {
+          expect(finalBranchContent).toContain(snippet);
+        }
+      }
+    );
+
+    it.each([
+      {
+        id: "untrusted-.git/hooks-and-.git/config-in-worktree-are-never-executed-during-disjoint-hunk-3-way-merge",
+        oursEdit: SHARED_MULTI_HUNK_FILE.replace("'header-base'", "'header-ours'"),
+        theirsEdit: SHARED_MULTI_HUNK_FILE.replace("'footer-base'", "'footer-theirs'"),
+        expectedStatus: "merged" as const
+      },
+      {
+        id: "untrusted-.git/hooks-and-.git/config-in-worktree-are-never-executed-during-conflicting-hunk-3-way-merge",
+        oursEdit: SHARED_MULTI_HUNK_FILE.replace("'header-base'", "'header-ours'"),
+        theirsEdit: SHARED_MULTI_HUNK_FILE.replace("'header-base'", "'header-theirs'"),
+        expectedStatus: "resolved" as const
+      }
+    ])("$id", async ({ oursEdit, theirsEdit, expectedStatus }) => {
+      const worktreeDir = mkdtempSync(join(tmpdir(), "epure-untrusted-git-"));
+      try {
+        const markerFile = join(worktreeDir, "hook-or-config-executed.txt");
+        const hooksDir = join(worktreeDir, ".git", "hooks");
+        mkdirSync(hooksDir, { recursive: true });
+        const payloadScript = `#!/bin/sh\necho pwned > "${markerFile}"\nexit 1\n`;
+        for (const hookName of [
+          "pre-commit",
+          "post-commit",
+          "pre-merge-commit",
+          "post-merge",
+          "post-checkout",
+          "fsmonitor-watchman"
+        ]) {
+          const hookPath = join(hooksDir, hookName);
+          writeFileSync(hookPath, payloadScript, "utf8");
+          chmodSync(hookPath, 0o755);
+        }
+        writeFileSync(
+          join(worktreeDir, ".git", "config"),
+          [
+            "[core]",
+            `  hooksPath = ${hooksDir}`,
+            `  fsmonitor = ${join(hooksDir, "fsmonitor-watchman")}`,
+            '[filter "pwn"]',
+            `  clean = sh -c 'echo pwned > "${markerFile}"'`,
+            `  smudge = sh -c 'echo pwned > "${markerFile}"'`,
+            ""
+          ].join("\n"),
+          "utf8"
+        );
+        writeFileSync(join(worktreeDir, ".gitattributes"), "* filter=pwn\n", "utf8");
+
+        const router = createGitHubMockRouter();
+        const git = installFakeGitDataApi(router, "acme/demo");
+        git.commitFiles("dev", { "src/service.ts": SHARED_MULTI_HUNK_FILE }, "base");
+        git.setRef("refs/heads/feature/42-sync", git.getRef("refs/heads/dev")!);
+        git.commitFiles("feature/42-sync", { "src/service.ts": oursEdit }, "ours");
+        git.commitFiles("dev", { "src/service.ts": theirsEdit }, "theirs");
+        const gh = createGitHubRestHelper({
+          repository: "acme/demo",
+          token: "ghs_test",
+          fetchImpl: router.fetch
+        });
+
+        const engine: AgentEngine = {
+          name: "mock-pi",
+          run: async (req) => {
+            const resolved = SHARED_MULTI_HUNK_FILE.replace("'header-base'", "'header-both'");
+            writeFileSync(join(req.worktree, "src/service.ts"), resolved, "utf8");
+            return {
+              finalMessage: "Resolved",
+              diff: {
+                files: [{ path: "src/service.ts", content: resolved, mode: "100644" }],
+                deleted_files: [],
+                skipped: []
+              }
+            };
+          }
+        };
+
+        const res = await syncBranchWithBase({
+          gh,
+          baseBranch: "dev",
+          targetBranch: "feature/42-sync",
+          issueNumber: 42,
+          model: "google/gemini-3.8-flash",
+          worktreeDir,
+          agentEngine: engine
+        });
+
+        expect(res.status).toBe(expectedStatus);
+        expect(existsSync(markerFile)).toBe(false);
+      } finally {
+        rmSync(worktreeDir, { recursive: true, force: true });
+      }
     });
   });
 

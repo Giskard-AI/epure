@@ -2,7 +2,7 @@
 import { appendFileSync } from "node:fs";
 
 // src/agent/pi-engine.ts
-import { existsSync as existsSync2, mkdtempSync as mkdtempSync3, rmSync as rmSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { existsSync as existsSync2, mkdirSync as mkdirSync3, mkdtempSync as mkdtempSync3, rmSync as rmSync3, symlinkSync, writeFileSync as writeFileSync3 } from "node:fs";
 import { tmpdir as tmpdir2 } from "node:os";
 import { dirname as dirname2, join as join2, resolve as resolve2 } from "node:path";
 import { createInterface } from "node:readline";
@@ -1968,7 +1968,7 @@ var LLMClient = class {
     const rateLimitFallback = options.rateLimitFallbackSeconds ?? defaultRateLimitFallback;
     const sleepMs = options.sleepMs ?? (async (ms) => {
       if (ms > 0) {
-        await new Promise((resolve4) => setTimeout(resolve4, ms));
+        await new Promise((resolve5) => setTimeout(resolve5, ms));
       }
     });
     let totalTransientRetriesUsed = 0;
@@ -2333,6 +2333,24 @@ function meterResponse(provider, model, contentType, contentEncoding) {
 
 // src/sandbox/llm-sandbox.ts
 var SECRET_ENV_NAME_PATTERN = /^(?:.*API_KEY|.*_TOKEN|.*_SECRET|.*PRIVATE_KEY|LLM_API_KEY|GITHUB_TOKEN|GH_TOKEN|GITHUB_PAT|EPURE_.*(?:KEY|TOKEN|SECRET)|AWS_.*|AZURE_.*|GCP_.*|NPM_TOKEN|NODE_AUTH_TOKEN|ACTIONS_RUNTIME_TOKEN|ACTIONS_ID_TOKEN_REQUEST_TOKEN)$/i;
+var SANDBOX_STRIPPED_GIT_ENV_NAMES = /* @__PURE__ */ new Set([
+  "GIT_AUTHOR_NAME",
+  "GIT_AUTHOR_EMAIL",
+  "GIT_AUTHOR_DATE",
+  "GIT_COMMITTER_NAME",
+  "GIT_COMMITTER_EMAIL",
+  "GIT_COMMITTER_DATE",
+  "GIT_CONFIG_GLOBAL",
+  "GIT_CONFIG_SYSTEM",
+  "GIT_DIR",
+  "GIT_WORK_TREE"
+]);
+var SANDBOX_DEFAULT_GIT_IDENTITY_ENV = {
+  GIT_AUTHOR_NAME: "EPURE Agent",
+  GIT_AUTHOR_EMAIL: "epure-agent@localhost",
+  GIT_COMMITTER_NAME: "EPURE Agent",
+  GIT_COMMITTER_EMAIL: "epure-agent@localhost"
+};
 var NONCE_HEADER = "x-epure-proxy-nonce";
 var CREDENTIAL_HEADERS = [
   NONCE_HEADER,
@@ -2370,11 +2388,15 @@ function buildSanitizedSandboxEnv(runnerEnv, proxy) {
     if (SECRET_ENV_NAME_PATTERN.test(key)) {
       continue;
     }
+    if (SANDBOX_STRIPPED_GIT_ENV_NAMES.has(key) || /^GIT_/i.test(key)) {
+      continue;
+    }
     if (containsPrivateKeyMaterial(value)) {
       continue;
     }
     sanitized[key] = value;
   }
+  Object.assign(sanitized, SANDBOX_DEFAULT_GIT_IDENTITY_ENV);
   sanitized.EPURE_SANDBOX_ACTIVE = "true";
   if (proxy) {
     sanitized.EPURE_LLM_PROXY_URL = proxy.proxyUrl;
@@ -2397,9 +2419,17 @@ function buildAgentSessionEnv(runnerEnv, home, proxy, sessionEnv) {
       env[name] = value;
     }
   }
+  const customSessionEnv = sessionEnv?.(home);
+  if (customSessionEnv) {
+    for (const [key, value] of Object.entries(customSessionEnv)) {
+      if (!SANDBOX_STRIPPED_GIT_ENV_NAMES.has(key) && !/^GIT_/i.test(key)) {
+        env[key] = value;
+      }
+    }
+  }
   return {
     ...env,
-    ...sessionEnv?.(home),
+    ...SANDBOX_DEFAULT_GIT_IDENTITY_ENV,
     HOME: home,
     TMPDIR: home,
     EPURE_SANDBOX_ACTIVE: "true",
@@ -2425,8 +2455,11 @@ function buildLandrunInvocation(params) {
   for (const p of params.readOnlyPaths ?? []) {
     roxPaths.add(sanitizeLandrunPath(resolve(p)));
   }
+  if (params.readOnlyCwd) {
+    roxPaths.add(resolvedCwd);
+  }
   const rwxPaths = /* @__PURE__ */ new Set([
-    resolvedCwd,
+    ...params.readOnlyCwd ? [] : [resolvedCwd],
     params.agentDir ? sanitizeLandrunPath(resolve(params.agentDir)) : "/tmp",
     ...packageCacheDirs(params.networkPolicy, params.sanitizedEnv).map(sanitizeLandrunPath)
   ]);
@@ -2483,7 +2516,7 @@ function buildBubblewrapInvocation(params) {
     "/run/systemd/resolve",
     "/run/systemd/resolve",
     ...extraBinds,
-    "--bind",
+    params.readOnlyCwd ? "--ro-bind" : "--bind",
     resolvedCwd,
     resolvedCwd,
     "--chdir",
@@ -2516,6 +2549,7 @@ function buildKernelSandboxedCommand(input) {
     proxyPort: input.proxyPort,
     readOnlyPaths: input.readOnlyPaths,
     agentDir: input.agentDir,
+    readOnlyCwd: input.readOnlyCwd,
     writableDevNull: backend === "bubblewrap+landrun"
   });
   const bubblewrap = (command, args) => buildBubblewrapInvocation({
@@ -2525,6 +2559,7 @@ function buildKernelSandboxedCommand(input) {
     readOnlyPaths: input.readOnlyPaths,
     agentDir: input.agentDir,
     writablePaths: packageCacheDirs(input.networkPolicy, input.sanitizedEnv),
+    readOnlyCwd: input.readOnlyCwd,
     underLandrun: backend === "bubblewrap+landrun"
   });
   switch (backend) {
@@ -2885,19 +2920,19 @@ async function createLlmSandboxProxy(options) {
       }
     });
   });
-  await new Promise((resolve4, reject) => {
+  await new Promise((resolve5, reject) => {
     server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => resolve4());
+    server.listen(0, "127.0.0.1", () => resolve5());
   });
   const address = server.address();
   const proxyUrl = `http://127.0.0.1:${address.port}`;
   return {
     proxyUrl,
     proxyNonce,
-    close: () => new Promise((resolve4) => {
+    close: () => new Promise((resolve5) => {
       agent.destroy();
       server.closeAllConnections();
-      server.close(() => resolve4());
+      server.close(() => resolve5());
     })
   };
 }
@@ -3041,7 +3076,8 @@ async function runInUntrustedCodeSandbox(input) {
       proxyPort,
       capabilities,
       readOnlyPaths: input.readOnlyPaths,
-      agentDir
+      agentDir,
+      readOnlyCwd: input.readOnlyCwd ?? input.agentSession?.readOnlyCwd
     });
     return spawnCaptured(wrapped.command, wrapped.args, cwd, env, timeoutMs, interact, (kill) => {
       killChild = kill;
@@ -3299,6 +3335,8 @@ function gitRunner(gitDir, worktree, extraEnv = {}) {
         "-c",
         "core.fsmonitor=false",
         "-c",
+        "protocol.file.allow=never",
+        "-c",
         "core.autocrlf=false",
         "-c",
         "core.symlinks=true",
@@ -3313,6 +3351,7 @@ function gitRunner(gitDir, worktree, extraEnv = {}) {
           HOME: gitDir,
           GIT_CONFIG_NOSYSTEM: "1",
           GIT_CONFIG_GLOBAL: "/dev/null",
+          GIT_ATTR_NOSYSTEM: "1",
           GIT_LITERAL_PATHSPECS: "1",
           ...extraEnv
         },
@@ -3590,6 +3629,17 @@ function createPiAgentEngine(options) {
       const sessionDir = mkdtempSync3(join2(tmpdir2(), "epure-pi-session-"));
       const instructionsPath = join2(sessionDir, "instructions.md");
       writeFileSync3(instructionsPath, request.instructions, "utf8");
+      const fdPath = options.fdPath ?? "/usr/bin/fd";
+      const fdfindPath = options.fdfindPath ?? "/usr/bin/fdfind";
+      let sessionBinDir;
+      if (!existsSync2(fdPath) && existsSync2(fdfindPath)) {
+        sessionBinDir = join2(sessionDir, "bin");
+        mkdirSync3(sessionBinDir, { recursive: true });
+        symlinkSync(fdfindPath, join2(sessionBinDir, "fd"));
+      }
+      const basePath = options.runnerEnv.PATH ?? process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
+      const sessionPath = sessionBinDir ? basePath ? `${sessionBinDir}:${basePath}` : sessionBinDir : void 0;
+      const readOnlyCwd = request.toolPolicy === "read_only";
       const outcome = { settled: false, timedOut: false, lineTooLong: false, finalMessage: "" };
       let upstreamError;
       let proxyNonce = "";
@@ -3599,10 +3649,16 @@ function createPiAgentEngine(options) {
           trackedPaths: request.trackedPaths,
           isProtectedPath: request.isProtectedPath
         });
+        const capabilities = options.kernelCapabilities ?? probeKernelSandboxCapabilities(options.runnerEnv);
+        const backend = selectKernelBackend("proxy_only", capabilities);
+        console.info(
+          `[pi-engine] session starting (role=${request.role}, policy=${request.toolPolicy}, sandbox=${backend})`
+        );
         const result = await sandboxRunner({
           isolationAvailable: true,
-          runnerEnv: options.runnerEnv,
+          runnerEnv: sessionPath ? { ...options.runnerEnv, PATH: sessionPath } : options.runnerEnv,
           enforceKernelSandbox: options.enforceKernelSandbox ?? true,
+          ...options.kernelCapabilities ? { kernelCapabilities: options.kernelCapabilities } : {},
           command: process.execPath,
           args: [
             join2(piDir, "rpc-entry.js"),
@@ -3626,12 +3682,14 @@ function createPiAgentEngine(options) {
             instructionsPath
           ],
           cwd: request.worktree,
+          readOnlyCwd,
           networkPolicy: "proxy_only",
           timeoutMs: request.timeoutMs + SHUTDOWN_GRACE_MS,
           llm: { model: request.model, providers: request.providers },
           maxLlmRequests: request.maxLlmRequests,
           readOnlyPaths: [piDir, sessionDir],
           agentSession: {
+            readOnlyCwd,
             homeFiles: (proxy) => {
               proxyNonce = proxy?.proxyNonce ?? "";
               return proxy ? {
@@ -3640,6 +3698,7 @@ function createPiAgentEngine(options) {
               } : {};
             },
             env: (home) => ({
+              ...sessionPath ? { PATH: sessionPath } : {},
               PI_CODING_AGENT_DIR: `${home}/.pi/agent`,
               PI_OFFLINE: "1",
               PI_TELEMETRY: "0",
@@ -9298,7 +9357,7 @@ import {
   cpSync,
   existsSync as existsSync4,
   lstatSync as lstatSync2,
-  mkdirSync as mkdirSync3,
+  mkdirSync as mkdirSync4,
   mkdtempSync as mkdtempSync4,
   readFileSync as readFileSync2,
   realpathSync,
@@ -9596,7 +9655,7 @@ function materializeSeedFilesIntoWorkspace(workDir, seedFiles) {
       continue;
     }
     const targetPath = resolve3(resolvedRoot, cleanRel);
-    mkdirSync3(dirname3(targetPath), { recursive: true });
+    mkdirSync4(dirname3(targetPath), { recursive: true });
     writeFileSync4(targetPath, content, "utf8");
   }
 }
@@ -9618,7 +9677,7 @@ function syncWorkspaceFiles(workDir, files, deletedFiles, fileModes = /* @__PURE
 }
 function prepareRepositorySandboxWorkspace(input) {
   const workDir = input.workDir ?? mkdtempSync4(join4(tmpdir3(), "epure-polyglot-sandbox-"));
-  mkdirSync3(workDir, { recursive: true });
+  mkdirSync4(workDir, { recursive: true });
   const repoSlug = (input.repository ?? "").trim();
   const [owner, repo] = repoSlug.split("/");
   const cleanRemoteUrl = owner && repo ? `https://github.com/${owner}/${repo}.git` : "";
@@ -9666,7 +9725,7 @@ function prepareRepositorySandboxWorkspace(input) {
   } finally {
     if (cleanRemoteUrl) {
       if (clonedFromRemote && !existsSync4(join4(workDir, ".git"))) {
-        mkdirSync3(join4(workDir, ".git"), { recursive: true });
+        mkdirSync4(join4(workDir, ".git"), { recursive: true });
       }
       sanitizeGitConfigFile(workDir, cleanRemoteUrl);
     }
@@ -9926,7 +9985,7 @@ function shouldSkipDefaultNodeStepInOfflineTempDir(params) {
 async function runPolyglotStage1Verification(input) {
   const ownsTempWorkDir = !input.workDir;
   const workDir = input.workDir ?? mkdtempSync4(join4(tmpdir3(), "epure-stage1-sandbox-"));
-  mkdirSync3(workDir, { recursive: true });
+  mkdirSync4(workDir, { recursive: true });
   const hasCustomSandboxRunner = Boolean(input.sandboxRunner);
   const sandboxRunner = input.sandboxRunner ?? runInUntrustedCodeSandbox;
   const bootstrapped = input.bootstrappedTargets ?? /* @__PURE__ */ new Set();
@@ -9967,7 +10026,7 @@ async function runPolyglotStage1Verification(input) {
     for (const file of input.files ?? []) {
       const cleanRel = file.path.replace(/^\/+/, "");
       const fullPath = resolve3(resolvedRoot, cleanRel);
-      mkdirSync3(dirname3(fullPath), { recursive: true });
+      mkdirSync4(dirname3(fullPath), { recursive: true });
       writeFileSync4(fullPath, file.content, "utf8");
     }
     for (const del of input.deleted_files ?? []) {
@@ -10008,7 +10067,7 @@ async function runPolyglotStage1Verification(input) {
           });
           continue;
         }
-        mkdirSync3(targetCwd, { recursive: true });
+        mkdirSync4(targetCwd, { recursive: true });
       }
       if (target.kind === "node") {
         const nodeCheck = shouldSkipDefaultNodeStepInOfflineTempDir({
@@ -10647,7 +10706,7 @@ async function waitForExternalCiChecks(input) {
   const timeoutMs = (input.timeoutMinutes ?? 15) * 60 * 1e3;
   const graceWindowMs = (input.graceWindowSeconds ?? 45) * 1e3;
   const pollIntervalMs = input.pollIntervalMs ?? 5e3;
-  const sleepFn = input.sleepFn ?? ((ms) => new Promise((resolve4) => setTimeout(resolve4, ms)));
+  const sleepFn = input.sleepFn ?? ((ms) => new Promise((resolve5) => setTimeout(resolve5, ms)));
   let simulatedElapsedMs = 0;
   const startWallMs = input.nowFn ? input.nowFn() : Date.now();
   const getElapsedMs = () => {
@@ -11493,6 +11552,20 @@ function formatStatusUsageLines(record, pricing) {
     ...costShown ? [`  - Prices from \`.github/agents.yml\`: ${priced.join("; ")}`] : []
   ];
 }
+
+// src/orchestrator/github/branch-sync.ts
+import { spawn as spawn3 } from "node:child_process";
+import {
+  existsSync as existsSync5,
+  lstatSync as lstatSync3,
+  mkdirSync as mkdirSync5,
+  mkdtempSync as mkdtempSync5,
+  readFileSync as readFileSync3,
+  rmSync as rmSync5,
+  writeFileSync as writeFileSync5
+} from "node:fs";
+import { tmpdir as tmpdir4 } from "node:os";
+import { dirname as dirname4, join as join5, resolve as resolve4 } from "node:path";
 
 // src/orchestrator/prompts/code-discipline.ts
 var EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT = [
@@ -13359,8 +13432,41 @@ function pickLlmRequestTuning(source) {
     requestTimeoutMs: source.requestTimeoutMs
   };
 }
+function parseAdrReconciliationFromText(text) {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const fenceMatch = /```(?:json)?\s*([\s\S]*?)```/i.exec(trimmed);
+  const candidates = [
+    ...fenceMatch && fenceMatch[1] ? [fenceMatch[1].trim()] : [],
+    trimmed
+  ];
+  const firstBrace = trimmed.indexOf("{");
+  const lastBrace = trimmed.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    candidates.push(trimmed.slice(firstBrace, lastBrace + 1));
+  }
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(
+        candidate
+      );
+      if (parsed && typeof parsed === "object" && Array.isArray(parsed.updated_files) && Array.isArray(parsed.deleted_adr_paths)) {
+        return {
+          coherent: typeof parsed.coherent === "boolean" ? parsed.coherent : true,
+          summary: typeof parsed.summary === "string" ? parsed.summary : "",
+          updated_files: parsed.updated_files,
+          deleted_adr_paths: parsed.deleted_adr_paths
+        };
+      }
+    } catch {
+    }
+  }
+  return null;
+}
 async function reconcileAdrsWithLlm(input) {
-  if (!input.llmClient && !input.llmApiKey) {
+  if (!input.agentEngine && !input.llmClient && !input.llmApiKey) {
     return null;
   }
   if (input.devAdrs.length === 0 || input.featureAdrs.length === 0) {
@@ -13403,6 +13509,96 @@ ${wrapUntrustedContent("untrusted_workspace_files", s.content)}`
     ] : []
   ].join("\n");
   try {
+    if (input.agentEngine) {
+      const seedEntries = /* @__PURE__ */ new Map();
+      for (const a of input.devAdrs) {
+        seedEntries.set(a.path.trim().replace(/^\/+/, ""), a.content);
+      }
+      for (const a of input.featureAdrs) {
+        seedEntries.set(a.path.trim().replace(/^\/+/, ""), a.content);
+      }
+      for (const s of input.specFiles) {
+        seedEntries.set(s.path.trim().replace(/^\/+/, ""), s.content);
+      }
+      if (input.glossaryContent !== void 0) {
+        seedEntries.set("GLOSSARY.md", input.glossaryContent);
+      }
+      const tempWorktreeDir = mkdtempSync5(join5(tmpdir4(), "epure-adr-reconcile-"));
+      let outerSnapshot;
+      try {
+        for (const [relPath, content] of seedEntries.entries()) {
+          const fullPath = join5(tempWorktreeDir, relPath);
+          mkdirSync5(dirname4(fullPath), { recursive: true });
+          writeFileSync5(fullPath, content, "utf8");
+        }
+        const trackedPaths = Array.from(seedEntries.keys());
+        outerSnapshot = await snapshotWorktree(tempWorktreeDir, {
+          trackedPaths
+        });
+        const session = await input.agentEngine.run({
+          role: "adr_reconciler",
+          toolPolicy: "write",
+          instructions: systemInstruction,
+          prompt: userPrompt,
+          worktree: tempWorktreeDir,
+          timeoutMs: input.requestTimeoutMs ?? 30 * 60 * 1e3,
+          model: input.model,
+          providers: input.providers,
+          trackedPaths
+        });
+        const outerDiff = await outerSnapshot.collect();
+        const fileMap = /* @__PURE__ */ new Map();
+        for (const f of outerDiff.files) {
+          fileMap.set(f.path.trim().replace(/^\/+/, ""), f.content);
+        }
+        for (const f of session.diff.files) {
+          fileMap.set(f.path.trim().replace(/^\/+/, ""), f.content);
+        }
+        const deletedSet = /* @__PURE__ */ new Set([
+          ...outerDiff.deleted_files.map((p) => p.trim().replace(/^\/+/, "")),
+          ...session.diff.deleted_files.map((p) => p.trim().replace(/^\/+/, ""))
+        ]);
+        const updated_files = Array.from(fileMap.entries()).filter(
+          ([path]) => !deletedSet.has(path) && (path === "GLOSSARY.md" || path.startsWith("docs/adr/") || path.startsWith("docs/specs/"))
+        ).map(([path, content]) => ({ path, content }));
+        const deleted_adr_paths = Array.from(deletedSet).filter(
+          (path) => path.startsWith("docs/adr/")
+        );
+        if (updated_files.length > 0 || deleted_adr_paths.length > 0) {
+          return {
+            coherent: true,
+            summary: session.finalMessage.trim() || "Reconciled ADRs and GLOSSARY.md via agentEngine.",
+            updated_files,
+            deleted_adr_paths
+          };
+        }
+        const parsedFromMessage = parseAdrReconciliationFromText(
+          session.finalMessage
+        );
+        if (parsedFromMessage) {
+          return {
+            ...parsedFromMessage,
+            updated_files: parsedFromMessage.updated_files.filter(
+              (f) => !parsedFromMessage.deleted_adr_paths.includes(f.path)
+            )
+          };
+        }
+        if (!input.llmClient && !input.llmApiKey) {
+          return {
+            coherent: true,
+            summary: session.finalMessage.trim() || "No ADR updates required.",
+            updated_files: [],
+            deleted_adr_paths: []
+          };
+        }
+      } finally {
+        outerSnapshot?.dispose();
+        try {
+          rmSync5(tempWorktreeDir, { recursive: true, force: true });
+        } catch {
+        }
+      }
+    }
     if (input.llmClient) {
       return await input.llmClient.completeStructured({
         model: input.model,
@@ -13428,7 +13624,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", s.content)}`
   }
 }
 async function applyAdrLlmReconciliation(params) {
-  if (!params.llmClient && !params.llmApiKey) {
+  if (!params.agentEngine && !params.llmClient && !params.llmApiKey) {
     return;
   }
   const devAdrsLoaded = [];
@@ -13447,7 +13643,8 @@ async function applyAdrLlmReconciliation(params) {
     llmApiKey: params.llmApiKey,
     model: params.model,
     ...pickLlmRequestTuning(params),
-    fetchImpl: params.fetchImpl
+    fetchImpl: params.fetchImpl,
+    agentEngine: params.agentEngine
   });
   if (!llmReconciled) {
     return;
@@ -13465,8 +13662,14 @@ async function applyAdrLlmReconciliation(params) {
     }
   }
   for (const delPath of llmReconciled.deleted_adr_paths) {
-    if (delPath.startsWith("docs/adr/") && !params.deletedAdrPaths.includes(delPath)) {
-      params.deletedAdrPaths.push(delPath);
+    if (delPath.startsWith("docs/adr/")) {
+      if (!params.deletedAdrPaths.includes(delPath)) {
+        params.deletedAdrPaths.push(delPath);
+      }
+      const idx = params.filesToMutate.findIndex((f) => f.path === delPath);
+      if (idx >= 0) {
+        params.filesToMutate.splice(idx, 1);
+      }
     }
   }
 }
@@ -13621,7 +13824,8 @@ async function integratePlanBranchIntoFeature(params) {
       llmApiKey: params.llmApiKey,
       model: params.model,
       ...pickLlmRequestTuning(params),
-      fetchImpl: params.fetchImpl
+      fetchImpl: params.fetchImpl,
+      agentEngine: params.agentEngine
     });
   }
   if (filesToCommit.length === 0) {
@@ -13646,9 +13850,196 @@ async function integratePlanBranchIntoFeature(params) {
     ...closedLegacyPlanPrNumber !== void 0 ? { closedLegacyPlanPrNumber } : {}
   };
 }
-var GIT_CONFLICT_MARKER_LINE_REGEX = /^(?:<{7}|>{7}|\|{7})(?: |$)/m;
+var GIT_CONFLICT_MARKER_LINE_REGEX = /^(?:<{7,}|>{7,}|\|{7,})(?: |$)/m;
 function containsGitConflictMarkers(content) {
   return GIT_CONFLICT_MARKER_LINE_REGEX.test(content.replace(/\r\n/g, "\n"));
+}
+function verifyNoSymlinkSegments(worktreeDir, relPath) {
+  const root = resolve4(worktreeDir);
+  const segments = relPath.replace(/\\/g, "/").replace(/^\/+/, "").split("/").filter(Boolean);
+  if (segments.length === 0 || segments.some((s) => s === "." || s === "..")) {
+    throw new Error(`Unsafe worktree relative path: ${relPath}`);
+  }
+  let current = root;
+  for (const seg of segments) {
+    current = join5(current, seg);
+    try {
+      if (lstatSync3(current).isSymbolicLink()) {
+        throw new Error(`Symlink segment detected in worktree path: ${relPath}`);
+      }
+    } catch (err) {
+      if (err.code === "ENOENT") {
+        continue;
+      }
+      throw err;
+    }
+  }
+  return current;
+}
+function assertSafeWorktreeTarget(worktreeDir, relPath) {
+  const abs = verifyNoSymlinkSegments(worktreeDir, relPath);
+  rmSync5(abs, { force: true });
+  return abs;
+}
+var LOCAL_GIT_MERGE_TIMEOUT_MS = 6e4;
+async function runIsolatedGitThreeWayMerge(params) {
+  if (params.files.length === 0) {
+    return { autoMergedFiles: [], autoDeletedPaths: [], conflictingFiles: [] };
+  }
+  const gitDir = mkdtempSync5(join5(tmpdir4(), "epure-merge-git-"));
+  const runGit = (args, options = {}) => new Promise((resolvePromise, reject) => {
+    const allowCodes = options.allowExitCodes ?? [0];
+    const child = spawn3(
+      "git",
+      [
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "protocol.file.allow=never",
+        "-c",
+        "core.autocrlf=false",
+        "-c",
+        "core.symlinks=true",
+        "-c",
+        "user.name=EPURE",
+        "-c",
+        "user.email=epure@local",
+        `--git-dir=${gitDir}`,
+        `--work-tree=${params.worktreeDir}`,
+        ...args
+      ],
+      {
+        cwd: params.worktreeDir,
+        env: {
+          PATH: process.env.PATH ?? "/usr/bin:/bin",
+          HOME: gitDir,
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_CONFIG_GLOBAL: "/dev/null",
+          GIT_ATTR_NOSYSTEM: "1",
+          GIT_LITERAL_PATHSPECS: "1"
+        },
+        stdio: ["pipe", "pipe", "pipe"]
+      }
+    );
+    const out = [];
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`Local 3-way git ${args[0] ?? ""} timed out after ${LOCAL_GIT_MERGE_TIMEOUT_MS} ms`));
+    }, LOCAL_GIT_MERGE_TIMEOUT_MS);
+    child.stdout.on("data", (chunk) => out.push(chunk));
+    child.stderr.on("data", (chunk) => {
+      stderr = (stderr + chunk.toString("utf8")).slice(-2e3);
+    });
+    child.stdin.on("error", () => {
+    });
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      const exitCode = code ?? 1;
+      if (allowCodes.includes(exitCode)) {
+        resolvePromise({ code: exitCode, stdout: Buffer.concat(out), stderr });
+      } else {
+        reject(new Error(`Local 3-way git ${args[0] ?? ""} exited with code ${exitCode}: ${stderr.trim()}`));
+      }
+    });
+    child.stdin.end(options.input ?? "");
+  });
+  const applySide = async (pick) => {
+    const presentPaths = [];
+    const absentPaths = [];
+    for (const f of params.files) {
+      const content = pick(f);
+      const abs = assertSafeWorktreeTarget(params.worktreeDir, f.path);
+      if (content !== null) {
+        mkdirSync5(dirname4(abs), { recursive: true });
+        writeFileSync5(abs, content, "utf8");
+        presentPaths.push(f.path);
+      } else {
+        absentPaths.push(f.path);
+      }
+    }
+    if (presentPaths.length > 0) {
+      await runGit(["add", "--force", "--pathspec-from-file=-", "--pathspec-file-nul"], {
+        input: presentPaths.join("\0")
+      });
+    }
+    if (absentPaths.length > 0) {
+      await runGit(
+        ["rm", "--force", "--ignore-unmatch", "--quiet", "--pathspec-from-file=-", "--pathspec-file-nul"],
+        { input: absentPaths.join("\0") }
+      );
+    }
+  };
+  try {
+    await runGit(["init", "--quiet"]);
+    mkdirSync5(join5(gitDir, "info"), { recursive: true });
+    writeFileSync5(
+      join5(gitDir, "info", "attributes"),
+      "* -filter -diff merge=text conflict-marker-size=7\n",
+      "utf8"
+    );
+    await applySide((f) => f.baseContent);
+    await runGit(["commit", "--quiet", "--allow-empty", "-m", "base"]);
+    const baseCommitSha = (await runGit(["rev-parse", "HEAD"])).stdout.toString("utf8").trim();
+    await runGit(["checkout", "--quiet", "-b", "theirs"]);
+    await applySide((f) => f.theirsContent);
+    await runGit(["commit", "--quiet", "--allow-empty", "-m", "theirs"]);
+    await runGit(["checkout", "--quiet", "-B", "ours", baseCommitSha]);
+    await applySide((f) => f.oursContent);
+    await runGit(["commit", "--quiet", "--allow-empty", "-m", "ours"]);
+    await runGit(["merge", "--no-commit", "--no-ff", "theirs"], { allowExitCodes: [0, 1] });
+    const unmergedRaw = (await runGit(["ls-files", "-z", "--unmerged"])).stdout.toString("utf8");
+    const unmergedPaths = /* @__PURE__ */ new Set();
+    for (const record of unmergedRaw.split("\0")) {
+      if (!record) continue;
+      const tabIdx = record.indexOf("	");
+      if (tabIdx !== -1) {
+        unmergedPaths.add(record.slice(tabIdx + 1));
+      }
+    }
+    const autoMergedFiles = [];
+    const autoDeletedPaths = [];
+    const conflictingFiles = [];
+    for (const f of params.files) {
+      const abs = verifyNoSymlinkSegments(params.worktreeDir, f.path);
+      if (unmergedPaths.has(f.path)) {
+        conflictingFiles.push(f);
+        const currentDisk = existsSync5(abs) && lstatSync3(abs).isFile() ? readFileSync3(abs, "utf8") : "";
+        if (!containsGitConflictMarkers(currentDisk)) {
+          assertSafeWorktreeTarget(params.worktreeDir, f.path);
+          mkdirSync5(dirname4(abs), { recursive: true });
+          writeFileSync5(
+            abs,
+            [
+              `<<<<<<< ${params.targetBranch}`,
+              (f.oursContent ?? "").replace(/\n$/, ""),
+              "=======",
+              (f.theirsContent ?? "").replace(/\n$/, ""),
+              `>>>>>>> ${params.baseBranch}`,
+              ""
+            ].join("\n"),
+            "utf8"
+          );
+        }
+      } else if (existsSync5(abs) && lstatSync3(abs).isFile()) {
+        autoMergedFiles.push({
+          path: f.path,
+          content: readFileSync3(abs, "utf8")
+        });
+      } else {
+        autoDeletedPaths.push(f.path);
+      }
+    }
+    return { autoMergedFiles, autoDeletedPaths, conflictingFiles };
+  } finally {
+    rmSync5(gitDir, { recursive: true, force: true });
+  }
 }
 function createBaseSyncGuard(input) {
   let baseSha = null;
@@ -13751,7 +14142,8 @@ async function syncBranchWithBase(input) {
           llmApiKey: input.llmApiKey,
           model: input.model,
           ...pickLlmRequestTuning(input),
-          fetchImpl: input.fetchImpl
+          fetchImpl: input.fetchImpl,
+          agentEngine: input.agentEngine?.name === "pi" ? input.agentEngine : void 0
         });
         if (adrFilesToUpdate.length > 0 || adrDeletedPaths.length > 0) {
           const reconciledSha = await input.gh.commitFilesToBranch({
@@ -13864,14 +14256,12 @@ async function syncBranchWithBase(input) {
       }
     );
   }
-  const codeConflictPaths = candidateFiles.filter((p) => p !== "GLOSSARY.md");
-  const hasLlmResolver = Boolean(input.llmClient || input.llmApiKey);
-  if (codeConflictPaths.length > maxConflicts || codeConflictPaths.length > 0 && !hasLlmResolver) {
-    return await escalateConflict(
-      codeConflictPaths.length > maxConflicts ? `3-way merge conflict involves ${codeConflictPaths.length} files (exceeds automated limit of ${maxConflicts}).` : `3-way merge conflict on ${codeConflictPaths.join(", ")} requires LLM client for resolution.`
-    );
-  }
+  const bothSidesCodeFiles = candidateFiles.filter((p) => p !== "GLOSSARY.md");
+  const hasLlmResolver = Boolean(
+    input.agentEngine || input.llmClient || input.llmApiKey
+  );
   const resolvedFiles = [];
+  const autoMergedFiles = [];
   const baseOnlyBlobs = [];
   const baseDeletedFiles = [];
   for (const basePath of baseOnlyChangedFiles) {
@@ -13892,107 +14282,293 @@ async function syncBranchWithBase(input) {
       content: mergeGlossaryMarkdownAdditively(theirsGlossary, oursGlossary)
     });
   }
-  if (codeConflictPaths.length > 0 && hasLlmResolver) {
-    const fileTriplets = [];
-    for (const filePath of codeConflictPaths) {
+  if (bothSidesCodeFiles.length > 0) {
+    const readOptionalVersion = async (blobs, sha, path) => blobs.has(path) ? await readPinnedFile(sha, path) : null;
+    const threeWayFiles = [];
+    for (const filePath of bothSidesCodeFiles) {
       const [baseContent, oursContent, theirsContent] = await Promise.all([
-        readVersion(ancestorBlobs, mergeBaseSha, filePath),
-        readVersion(targetBlobs, targetHeadSha, filePath),
-        readVersion(baseBlobs, baseHeadSha, filePath)
+        readOptionalVersion(ancestorBlobs, mergeBaseSha, filePath),
+        readOptionalVersion(targetBlobs, targetHeadSha, filePath),
+        readOptionalVersion(baseBlobs, baseHeadSha, filePath)
       ]);
-      fileTriplets.push(
-        [
-          `### File: \`${filePath}\` (untruncated 3-way versions)`,
-          "#### `<base_version>` (common ancestor):",
-          wrapUntrustedContent("untrusted_workspace_files", baseContent),
-          `#### \`<ours_target_branch>\` (\`${input.targetBranch}\`):`,
-          wrapUntrustedContent("untrusted_workspace_files", oursContent),
-          `#### \`<theirs_base_branch>\` (\`${input.baseBranch}\`):`,
-          wrapUntrustedContent("untrusted_workspace_files", theirsContent)
-        ].join("\n")
-      );
-    }
-    const systemInstruction = [
-      "Tu es un ing\xE9nieur expert charg\xE9 de r\xE9soudre un conflit de fusion Git \xE0 3 voies (3-way merge).",
-      "Produis pour chaque fichier en conflit une version fusionn\xE9e propre, sans aucun marqueur de conflit (`<<<<<<<`, `=======`, `>>>>>>>`), pr\xE9servant \xE0 la fois les \xE9volutions de `<theirs_base_branch>` et celles de `<ours_target_branch>`.",
-      EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
-    ].join("\n\n");
-    const userPrompt = [
-      `R\xE9sous les conflits 3-way suivants lors de la synchronisation de \`${input.baseBranch}\` vers \`${input.targetBranch}\` :`,
-      "",
-      fileTriplets.join("\n\n")
-    ].join("\n");
-    let resolutionData;
-    if (input.llmClient) {
-      resolutionData = await input.llmClient.completeStructured({
-        model: input.model,
-        ...pickLlmRequestTuning(input),
-        systemInstruction,
-        userPrompt,
-        responseSchema: CONFLICT_RESOLUTION_SCHEMA,
-        temperature: 0.1
-      });
-    } else {
-      resolutionData = await callLlmJson({
-        apiKey: input.llmApiKey ?? "",
-        model: input.model,
-        ...pickLlmRequestTuning(input),
-        systemInstruction,
-        prompt: userPrompt,
-        temperature: 0.1,
-        responseSchema: CONFLICT_RESOLUTION_SCHEMA,
-        fetchImpl: input.fetchImpl
+      threeWayFiles.push({
+        path: filePath,
+        baseContent,
+        oursContent,
+        theirsContent
       });
     }
-    const expectedPathsSet = new Set(
-      codeConflictPaths.map((p) => p.trim().replace(/^\/+/, ""))
-    );
-    const returnedNormalizedPaths = resolutionData.resolved_files.map(
-      (rf) => rf.path.trim().replace(/^\/+/, "")
-    );
-    const returnedPathsSet = new Set(returnedNormalizedPaths);
-    const hasExact1To1Coverage = returnedNormalizedPaths.length === expectedPathsSet.size && returnedPathsSet.size === expectedPathsSet.size && Array.from(expectedPathsSet).every((p) => returnedPathsSet.has(p));
-    if (!hasExact1To1Coverage) {
-      return await escalateConflict(
-        `LLM conflict resolution path mismatch: expected [${Array.from(expectedPathsSet).join(", ")}], received [${returnedNormalizedPaths.join(", ")}].`
-      );
-    }
-    const resolvedPathGuard = validateWorkspaceFileOperations({
-      workDir: process.cwd(),
-      files: returnedNormalizedPaths.map((path) => ({ path })),
-      targets: [],
-      isTaskBranch: true,
-      reviewersDir: input.reviewersDir
-    });
-    if (!resolvedPathGuard.allowed) {
-      return await escalateConflict(
-        `LLM conflict resolution returned forbidden paths: ${[...resolvedPathGuard.sensitivePaths, ...resolvedPathGuard.traversalPaths].join(", ")}`,
-        {
-          sensitivePaths: resolvedPathGuard.sensitivePaths,
-          traversalPaths: resolvedPathGuard.traversalPaths
+    const tempWorktreeDir = input.worktreeDir ? void 0 : mkdtempSync5(join5(tmpdir4(), "epure-merge-worktree-"));
+    const worktreeDir = input.worktreeDir ?? tempWorktreeDir;
+    try {
+      const localMerge = await runIsolatedGitThreeWayMerge({
+        worktreeDir,
+        targetBranch: input.targetBranch,
+        baseBranch: input.baseBranch,
+        files: threeWayFiles
+      });
+      for (const merged of localMerge.autoMergedFiles) {
+        autoMergedFiles.push(merged);
+      }
+      for (const deleted of localMerge.autoDeletedPaths) {
+        if (!baseDeletedFiles.includes(deleted)) {
+          baseDeletedFiles.push(deleted);
         }
-      );
-    }
-    for (const rf of resolutionData.resolved_files) {
-      if (containsGitConflictMarkers(rf.content)) {
+      }
+      const conflictingFiles = localMerge.conflictingFiles;
+      const codeConflictPaths = conflictingFiles.map((f) => f.path);
+      if (codeConflictPaths.length > maxConflicts || codeConflictPaths.length > 0 && !hasLlmResolver) {
         return await escalateConflict(
-          `LLM conflict resolution for '${rf.path}' still contained Git conflict markers.`
+          codeConflictPaths.length > maxConflicts ? `3-way merge conflict involves ${codeConflictPaths.length} files (exceeds automated limit of ${maxConflicts}).` : `3-way merge conflict on ${codeConflictPaths.join(", ")} requires LLM client for resolution.`
         );
       }
-      resolvedFiles.push({
-        path: rf.path.trim().replace(/^\/+/, ""),
-        content: rf.content
-      });
+      if (codeConflictPaths.length > 0 && input.agentEngine) {
+        const expectedPathsSet = new Set(
+          codeConflictPaths.map((p) => p.trim().replace(/^\/+/, ""))
+        );
+        const outerSnapshot = await snapshotWorktree(worktreeDir, {
+          trackedPaths: bothSidesCodeFiles,
+          isProtectedPath: (path) => isSensitiveTaskBranchPath(path, input.reviewersDir)
+        });
+        let sessionResult;
+        let outerDiff;
+        try {
+          sessionResult = await input.agentEngine.run({
+            role: "conflict_resolver",
+            toolPolicy: "write",
+            instructions: [
+              "Tu es un ing\xE9nieur expert charg\xE9 de r\xE9soudre un conflit de fusion Git \xE0 3 voies (3-way merge) directement dans le r\xE9pertoire de travail.",
+              PROMPT_INJECTION_IMMUNITY_CLAUSE,
+              "Les fichiers en conflit contiennent des marqueurs Git (`<<<<<<<`, `=======`, `>>>>>>>`). \xC9dite chaque fichier en conflit sur place pour produire une version fusionn\xE9e propre, sans aucun marqueur de conflit, pr\xE9servant les \xE9volutions des deux branches.",
+              `Ne modifie JAMAIS ${(input.reviewersDir ?? DEFAULT_REVIEWERS_DIR).replace(/\/+$/, "")}/**, .github/workflows/**, .github/agents.yml, .env* ni .git/.`,
+              EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
+            ].join("\n\n"),
+            prompt: [
+              `R\xE9sous les conflits de fusion 3-way lors de la synchronisation de \`${input.baseBranch}\` vers \`${input.targetBranch}\`.`,
+              `Fichiers contenant des hunks en conflit : ${codeConflictPaths.map((p) => `\`${p}\``).join(", ")}.`
+            ].join("\n"),
+            worktree: worktreeDir,
+            timeoutMs: input.requestTimeoutMs ?? 30 * 60 * 1e3,
+            model: input.model,
+            providers: input.providers,
+            trackedPaths: bothSidesCodeFiles,
+            isProtectedPath: (path) => isSensitiveTaskBranchPath(path, input.reviewersDir),
+            maxLlmRequests: input.maxLlmRequests,
+            secrets: [
+              input.llmApiKey ?? "",
+              ...collectRunnerSecretValues(process.env)
+            ].filter(Boolean)
+          });
+          outerDiff = await outerSnapshot.collect();
+        } finally {
+          outerSnapshot.dispose();
+        }
+        const protectedSkipped = [
+          ...sessionResult.diff.skipped,
+          ...outerDiff.skipped
+        ].filter((s) => s.reason === "protected").map((s) => s.path.trim().replace(/^\/+/, ""));
+        if (protectedSkipped.length > 0) {
+          const uniqueProtected = Array.from(new Set(protectedSkipped));
+          return await escalateConflict(
+            `LLM conflict resolution returned forbidden paths: ${uniqueProtected.join(", ")}`,
+            {
+              sensitivePaths: uniqueProtected,
+              traversalPaths: []
+            }
+          );
+        }
+        const effectiveDiffFileMap = /* @__PURE__ */ new Map();
+        for (const f of outerDiff.files) {
+          effectiveDiffFileMap.set(f.path.trim().replace(/^\/+/, ""), f.content);
+        }
+        for (const f of sessionResult.diff.files) {
+          effectiveDiffFileMap.set(f.path.trim().replace(/^\/+/, ""), f.content);
+        }
+        const effectiveDeletedPaths = Array.from(
+          /* @__PURE__ */ new Set([
+            ...outerDiff.deleted_files.map((p) => p.trim().replace(/^\/+/, "")),
+            ...sessionResult.diff.deleted_files.map(
+              (p) => p.trim().replace(/^\/+/, "")
+            )
+          ])
+        );
+        const allTouchedPaths = Array.from(
+          /* @__PURE__ */ new Set([...effectiveDiffFileMap.keys(), ...effectiveDeletedPaths])
+        );
+        if (allTouchedPaths.length > 0) {
+          const resolvedPathGuard = validateWorkspaceFileOperations({
+            workDir: process.cwd(),
+            files: allTouchedPaths.map((path) => ({ path })),
+            targets: [],
+            isTaskBranch: true,
+            reviewersDir: input.reviewersDir
+          });
+          if (!resolvedPathGuard.allowed) {
+            return await escalateConflict(
+              `LLM conflict resolution returned forbidden paths: ${[...resolvedPathGuard.sensitivePaths, ...resolvedPathGuard.traversalPaths].join(", ")}`,
+              {
+                sensitivePaths: resolvedPathGuard.sensitivePaths,
+                traversalPaths: resolvedPathGuard.traversalPaths
+              }
+            );
+          }
+          const outOfScope = allTouchedPaths.filter(
+            (p) => !expectedPathsSet.has(p)
+          );
+          if (outOfScope.length > 0) {
+            return await escalateConflict(
+              `LLM conflict resolution path mismatch: expected [${Array.from(expectedPathsSet).join(", ")}], received [${allTouchedPaths.join(", ")}].`
+            );
+          }
+        }
+        for (const conflictPath of codeConflictPaths) {
+          const normalizedPath = conflictPath.trim().replace(/^\/+/, "");
+          let diskContent = null;
+          if (!effectiveDiffFileMap.has(normalizedPath)) {
+            try {
+              const diskPath = verifyNoSymlinkSegments(worktreeDir, normalizedPath);
+              if (existsSync5(diskPath) && lstatSync3(diskPath).isFile()) {
+                diskContent = readFileSync3(diskPath, "utf8");
+              }
+            } catch {
+              diskContent = null;
+            }
+          }
+          const resolvedContent = effectiveDiffFileMap.get(normalizedPath) ?? diskContent;
+          if (resolvedContent === null) {
+            return await escalateConflict(
+              `LLM conflict resolution path mismatch: expected [${Array.from(expectedPathsSet).join(", ")}], received [${allTouchedPaths.join(", ")}].`
+            );
+          }
+          if (containsGitConflictMarkers(resolvedContent)) {
+            return await escalateConflict(
+              `LLM conflict resolution for '${normalizedPath}' still contained Git conflict markers.`
+            );
+          }
+          resolvedFiles.push({
+            path: normalizedPath,
+            content: resolvedContent
+          });
+        }
+        assertNoSecretMaterial(
+          resolvedFiles.map((f) => ({ label: f.path, text: f.content })),
+          [
+            input.llmApiKey ?? "",
+            ...collectRunnerSecretValues(process.env)
+          ].filter(Boolean)
+        );
+      } else if (codeConflictPaths.length > 0 && hasLlmResolver) {
+        const fileTriplets = [];
+        for (const f of conflictingFiles) {
+          fileTriplets.push(
+            [
+              `### File: \`${f.path}\` (untruncated 3-way versions)`,
+              "#### `<base_version>` (common ancestor):",
+              wrapUntrustedContent(
+                "untrusted_workspace_files",
+                f.baseContent ?? ""
+              ),
+              `#### \`<ours_target_branch>\` (\`${input.targetBranch}\`):`,
+              wrapUntrustedContent(
+                "untrusted_workspace_files",
+                f.oursContent ?? ""
+              ),
+              `#### \`<theirs_base_branch>\` (\`${input.baseBranch}\`):`,
+              wrapUntrustedContent(
+                "untrusted_workspace_files",
+                f.theirsContent ?? ""
+              )
+            ].join("\n")
+          );
+        }
+        const systemInstruction = [
+          "Tu es un ing\xE9nieur expert charg\xE9 de r\xE9soudre un conflit de fusion Git \xE0 3 voies (3-way merge).",
+          "Produis pour chaque fichier en conflit une version fusionn\xE9e propre, sans aucun marqueur de conflit (`<<<<<<<`, `=======`, `>>>>>>>`), pr\xE9servant \xE0 la fois les \xE9volutions de `<theirs_base_branch>` et celles de `<ours_target_branch>`.",
+          EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
+        ].join("\n\n");
+        const userPrompt = [
+          `R\xE9sous les conflits 3-way suivants lors de la synchronisation de \`${input.baseBranch}\` vers \`${input.targetBranch}\` :`,
+          "",
+          fileTriplets.join("\n\n")
+        ].join("\n");
+        let resolutionData;
+        if (input.llmClient) {
+          resolutionData = await input.llmClient.completeStructured({
+            model: input.model,
+            ...pickLlmRequestTuning(input),
+            systemInstruction,
+            userPrompt,
+            responseSchema: CONFLICT_RESOLUTION_SCHEMA,
+            temperature: 0.1
+          });
+        } else {
+          resolutionData = await callLlmJson({
+            apiKey: input.llmApiKey ?? "",
+            model: input.model,
+            ...pickLlmRequestTuning(input),
+            systemInstruction,
+            prompt: userPrompt,
+            temperature: 0.1,
+            responseSchema: CONFLICT_RESOLUTION_SCHEMA,
+            fetchImpl: input.fetchImpl
+          });
+        }
+        const expectedPathsSet = new Set(
+          codeConflictPaths.map((p) => p.trim().replace(/^\/+/, ""))
+        );
+        const returnedNormalizedPaths = resolutionData.resolved_files.map(
+          (rf) => rf.path.trim().replace(/^\/+/, "")
+        );
+        const returnedPathsSet = new Set(returnedNormalizedPaths);
+        const hasExact1To1Coverage = returnedNormalizedPaths.length === expectedPathsSet.size && returnedPathsSet.size === expectedPathsSet.size && Array.from(expectedPathsSet).every((p) => returnedPathsSet.has(p));
+        if (!hasExact1To1Coverage) {
+          return await escalateConflict(
+            `LLM conflict resolution path mismatch: expected [${Array.from(expectedPathsSet).join(", ")}], received [${returnedNormalizedPaths.join(", ")}].`
+          );
+        }
+        const resolvedPathGuard = validateWorkspaceFileOperations({
+          workDir: process.cwd(),
+          files: returnedNormalizedPaths.map((path) => ({ path })),
+          targets: [],
+          isTaskBranch: true,
+          reviewersDir: input.reviewersDir
+        });
+        if (!resolvedPathGuard.allowed) {
+          return await escalateConflict(
+            `LLM conflict resolution returned forbidden paths: ${[...resolvedPathGuard.sensitivePaths, ...resolvedPathGuard.traversalPaths].join(", ")}`,
+            {
+              sensitivePaths: resolvedPathGuard.sensitivePaths,
+              traversalPaths: resolvedPathGuard.traversalPaths
+            }
+          );
+        }
+        for (const rf of resolutionData.resolved_files) {
+          if (containsGitConflictMarkers(rf.content)) {
+            return await escalateConflict(
+              `LLM conflict resolution for '${rf.path}' still contained Git conflict markers.`
+            );
+          }
+          resolvedFiles.push({
+            path: rf.path.trim().replace(/^\/+/, ""),
+            content: rf.content
+          });
+        }
+      }
+    } finally {
+      if (tempWorktreeDir) {
+        rmSync5(tempWorktreeDir, { recursive: true, force: true });
+      }
     }
   }
-  if (input.sandboxRunner && resolvedFiles.length + baseOnlyBlobs.length > 0) {
+  const filesToCommit = [...autoMergedFiles, ...resolvedFiles];
+  if (input.sandboxRunner && filesToCommit.length + baseOnlyBlobs.length > 0) {
     const baseOnlyFiles = await Promise.all(
       baseOnlyBlobs.map(async (b) => ({
         path: b.path,
         content: await readPinnedFile(baseHeadSha, b.path)
       }))
     );
-    const allFilesToCommit = [...baseOnlyFiles, ...resolvedFiles];
+    const allFilesToCommit = [...baseOnlyFiles, ...filesToCommit];
     const workspaceFiles = await input.gh.readBranchWorkspaceFiles(
       input.targetBranch,
       allFilesToCommit.map((f) => f.path).join(" "),
@@ -14039,15 +14615,15 @@ ${stage1Result.output.slice(0, 4e3)}`;
   }
   const headSha = await input.gh.commitFilesToBranch({
     branch: input.targetBranch,
-    commitMessage: `chore(sync): resolve merge conflicts from ${input.baseBranch} into ${input.targetBranch}`,
-    files: resolvedFiles,
+    commitMessage: resolvedFiles.length > 0 ? `chore(sync): resolve merge conflicts from ${input.baseBranch} into ${input.targetBranch}` : `chore(sync): merge ${input.baseBranch} into ${input.targetBranch}`,
+    files: filesToCommit,
     blobs: baseOnlyBlobs,
     ...baseDeletedFiles.length > 0 ? { deletedFiles: baseDeletedFiles } : {},
     // Without the base as second parent the merge base never moves: the PR stays `dirty` and GitHub runs no `pull_request` CI.
     mergeParentSha: baseHeadSha
   });
   return {
-    status: "resolved",
+    status: resolvedFiles.length > 0 ? "resolved" : "merged",
     headSha,
     conflictsResolved: resolvedFiles.map((f) => f.path)
   };
@@ -14214,6 +14790,11 @@ async function handleEpicClosedByHuman(params) {
   };
 }
 
+// src/orchestrator/phases/epic-convergence.ts
+import { mkdtempSync as mkdtempSync7, rmSync as rmSync7 } from "node:fs";
+import { tmpdir as tmpdir6 } from "node:os";
+import { join as join7 } from "node:path";
+
 // src/orchestrator/plan-manifest.ts
 function isEpureAuthored(item, identity) {
   return item.performed_via_github_app?.id === identity.appId;
@@ -14335,6 +14916,11 @@ function resolvePhaseModels(inputModel, agentsConfig) {
     ...transientRetryBackoffSeconds !== void 0 ? { transientRetryBackoffSeconds } : {}
   };
 }
+
+// src/orchestrator/phases/grill-and-plan.ts
+import { mkdirSync as mkdirSync6, mkdtempSync as mkdtempSync6, rmSync as rmSync6, writeFileSync as writeFileSync6 } from "node:fs";
+import { tmpdir as tmpdir5 } from "node:os";
+import { dirname as dirname5, join as join6 } from "node:path";
 
 // src/frontend/impeccable-planning.ts
 function planImpeccableDesignSession(input) {
@@ -14654,6 +15240,215 @@ var IMPLEMENTATION_STARTED_PHASES = /* @__PURE__ */ new Set([
   "review",
   "completed"
 ]);
+function extractJsonCandidatesFromText(text) {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return [];
+  }
+  const fenceMatch = /```(?:json)?\s*([\s\S]*?)```/i.exec(trimmed);
+  const candidates = [
+    ...fenceMatch && fenceMatch[1] ? [fenceMatch[1].trim()] : [],
+    trimmed
+  ];
+  const firstBrace = trimmed.indexOf("{");
+  const lastBrace = trimmed.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    candidates.push(trimmed.slice(firstBrace, lastBrace + 1));
+  }
+  return candidates;
+}
+function parseJsonWithSchemaFromText(text, schema) {
+  for (const candidate of extractJsonCandidatesFromText(text)) {
+    try {
+      const raw = JSON.parse(candidate);
+      return schema.validate(raw);
+    } catch {
+    }
+  }
+  return null;
+}
+function extractSpecArtifactsFromAgentSession(params) {
+  const {
+    finalMessage,
+    fileMap,
+    planSlug,
+    defaultSpecPath,
+    existingGlossary,
+    existingSpec,
+    existingAdrs
+  } = params;
+  const specFileEntry = Array.from(fileMap.entries()).find(
+    ([path, content]) => path.startsWith("docs/specs/") && path.endsWith(".md") && content.trim().length > 0
+  );
+  const writtenGlossary = fileMap.get("GLOSSARY.md");
+  const writtenAdrs = Array.from(fileMap.entries()).filter(
+    ([path, content]) => /^docs\/adr\/\d{4}-[a-z0-9-]+\.md$/.test(path) && content.trim().length > 0
+  ).map(([path, content]) => {
+    const filename = path.split("/").pop() ?? path;
+    return {
+      path,
+      content,
+      filename,
+      title: filename,
+      markdown: content
+    };
+  });
+  const parsedFull = parseJsonWithSchemaFromText(
+    finalMessage,
+    GENERATED_SPEC_ARTIFACTS_SCHEMA
+  );
+  if (parsedFull) {
+    return {
+      ...parsedFull,
+      ...writtenGlossary && writtenGlossary.trim().length > 0 ? { glossary_markdown: writtenGlossary } : {},
+      ...writtenAdrs.length > 0 ? { adrs: writtenAdrs } : {},
+      ...specFileEntry ? {
+        spec_path: specFileEntry[0],
+        spec_markdown: specFileEntry[1]
+      } : {}
+    };
+  }
+  let rawObj = null;
+  for (const candidate of extractJsonCandidatesFromText(finalMessage)) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        rawObj = parsed;
+        break;
+      }
+    } catch {
+    }
+  }
+  const trimmedMsg = finalMessage.trim();
+  const looksLikeMarkdownSpec = !rawObj && trimmedMsg.startsWith("#") && (trimmedMsg.includes("\n## ") || trimmedMsg.length >= 80);
+  if (!specFileEntry && !rawObj && !looksLikeMarkdownSpec) {
+    return null;
+  }
+  const resolvedAdrs = writtenAdrs.length > 0 ? writtenAdrs : Array.isArray(rawObj?.adrs) && rawObj.adrs.length > 0 ? rawObj.adrs : existingAdrs && existingAdrs.length > 0 ? existingAdrs : [];
+  if (resolvedAdrs.length === 0) {
+    return null;
+  }
+  const candidateRaw = {
+    plan_slug: typeof rawObj?.plan_slug === "string" && rawObj.plan_slug.trim().length > 0 ? rawObj.plan_slug : planSlug,
+    glossary_markdown: writtenGlossary && writtenGlossary.trim().length > 0 ? writtenGlossary : typeof rawObj?.glossary_markdown === "string" && rawObj.glossary_markdown.trim().length > 0 ? rawObj.glossary_markdown : existingGlossary && existingGlossary.trim().length > 0 ? existingGlossary : "# Glossary\n\n- **Domain Term**: Canonical project definition.\n",
+    adrs: resolvedAdrs,
+    spec_path: specFileEntry ? specFileEntry[0] : typeof rawObj?.spec_path === "string" && rawObj.spec_path.trim().startsWith("docs/specs/") ? rawObj.spec_path : defaultSpecPath,
+    spec_markdown: specFileEntry ? specFileEntry[1] : typeof rawObj?.spec_markdown === "string" && rawObj.spec_markdown.trim().length > 0 ? rawObj.spec_markdown : looksLikeMarkdownSpec ? trimmedMsg : existingSpec ?? "",
+    ...Array.isArray(rawObj?.target_files_hint) ? { target_files_hint: rawObj.target_files_hint } : {},
+    ...rawObj?.epic_goal_contract && typeof rawObj.epic_goal_contract === "object" ? { epic_goal_contract: rawObj.epic_goal_contract } : {}
+  };
+  try {
+    return GENERATED_SPEC_ARTIFACTS_SCHEMA.validate(candidateRaw);
+  } catch {
+    return null;
+  }
+}
+async function runReadOnlyPlanningAgentSession(params) {
+  let tempWorktreeDir;
+  let effectiveWorktreeDir = params.worktreeDir;
+  if (!effectiveWorktreeDir) {
+    tempWorktreeDir = mkdtempSync6(join6(tmpdir5(), `epure-${params.role}-wt-`));
+    effectiveWorktreeDir = tempWorktreeDir;
+    syncWorkspaceFiles(tempWorktreeDir, params.seedFiles, /* @__PURE__ */ new Set());
+  }
+  try {
+    const session = await params.agentEngine.run({
+      role: params.role,
+      toolPolicy: "read_only",
+      instructions: params.instructions,
+      prompt: params.prompt,
+      worktree: effectiveWorktreeDir,
+      timeoutMs: params.phaseModels.requestTimeoutMs ?? 30 * 60 * 1e3,
+      model: params.phaseModels.planningModel,
+      providers: params.phaseModels.providers,
+      ...params.activeToken ? { secrets: [params.activeToken] } : {}
+    });
+    return session.finalMessage;
+  } finally {
+    if (tempWorktreeDir) {
+      try {
+        rmSync6(tempWorktreeDir, { recursive: true, force: true });
+      } catch {
+      }
+    }
+  }
+}
+async function runSpecWriterAgentSession(params) {
+  let tempWorktreeDir;
+  let effectiveWorktreeDir = params.worktreeDir;
+  const seedEntries = new Map(params.seedFiles);
+  if (params.existingGlossary && params.existingGlossary.trim().length > 0) {
+    seedEntries.set("GLOSSARY.md", params.existingGlossary);
+  }
+  if (params.existingSpec && params.existingSpec.trim().length > 0) {
+    seedEntries.set(
+      params.defaultSpecPath.trim().replace(/^\/+/, ""),
+      params.existingSpec
+    );
+  }
+  for (const adr of params.existingAdrs ?? []) {
+    const normalizedAdrPath = adr.path.trim().replace(/^\/+/, "");
+    if (normalizedAdrPath && adr.content.trim().length > 0) {
+      seedEntries.set(normalizedAdrPath, adr.content);
+    }
+  }
+  if (!effectiveWorktreeDir) {
+    tempWorktreeDir = mkdtempSync6(join6(tmpdir5(), "epure-spec-writer-wt-"));
+    effectiveWorktreeDir = tempWorktreeDir;
+    for (const [relPath, content] of seedEntries.entries()) {
+      const normalized = relPath.trim().replace(/^\/+/, "");
+      if (!normalized) continue;
+      const fullPath = join6(tempWorktreeDir, normalized);
+      mkdirSync6(dirname5(fullPath), { recursive: true });
+      writeFileSync6(fullPath, content, "utf8");
+    }
+  }
+  const trackedPaths = Array.from(seedEntries.keys()).map(
+    (p) => p.trim().replace(/^\/+/, "")
+  );
+  const outerSnapshot = await snapshotWorktree(effectiveWorktreeDir, {
+    trackedPaths
+  });
+  try {
+    const session = await params.agentEngine.run({
+      role: "spec_writer",
+      toolPolicy: "write",
+      instructions: params.instructions,
+      prompt: params.prompt,
+      worktree: effectiveWorktreeDir,
+      timeoutMs: params.phaseModels.requestTimeoutMs ?? 30 * 60 * 1e3,
+      model: params.phaseModels.planningModel,
+      providers: params.phaseModels.providers,
+      trackedPaths,
+      ...params.activeToken ? { secrets: [params.activeToken] } : {}
+    });
+    const outerDiff = await outerSnapshot.collect();
+    const fileMap = /* @__PURE__ */ new Map();
+    for (const f of outerDiff.files) {
+      fileMap.set(f.path.trim().replace(/^\/+/, ""), f.content);
+    }
+    for (const f of session.diff.files) {
+      fileMap.set(f.path.trim().replace(/^\/+/, ""), f.content);
+    }
+    return extractSpecArtifactsFromAgentSession({
+      finalMessage: session.finalMessage,
+      fileMap,
+      planSlug: params.planSlug,
+      defaultSpecPath: params.defaultSpecPath,
+      existingGlossary: params.existingGlossary,
+      existingSpec: params.existingSpec,
+      existingAdrs: params.existingAdrs
+    });
+  } finally {
+    outerSnapshot.dispose();
+    if (tempWorktreeDir) {
+      try {
+        rmSync6(tempWorktreeDir, { recursive: true, force: true });
+      } catch {
+      }
+    }
+  }
+}
 async function runGrillAndPlanPhase(params) {
   const {
     command,
@@ -14675,7 +15470,10 @@ async function runGrillAndPlanPhase(params) {
     phaseModels,
     reviewersDir = DEFAULT_REVIEWERS_DIR,
     onTransientRetriesUsed,
-    fetchImpl
+    fetchImpl,
+    agentEngine,
+    worktreeDir,
+    activeToken
   } = params;
   const supersededTickets = command === "to-tickets" ? planManifest?.tickets ?? [] : [];
   const implementationStarted = command === "to-tickets" && (IMPLEMENTATION_STARTED_PHASES.has(currentPhase ?? "") || supersededTickets.length > 0 && (await gh.listBranchesByPrefix(`feature/${issueNumber}-`)).length > 0);
@@ -14750,23 +15548,47 @@ Corps :
 ${issue.body}`
       )
     ].join("\n");
-    const grillQuestions = await callLlmText({
-      apiKey: llmApiKey,
-      model: phaseModels.planningModel,
-      providers: phaseModels.providers,
-      maxTransientRetries: phaseModels.maxTransientRetries,
-      transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
-      requestTimeoutMs: phaseModels.requestTimeoutMs,
-      onTransientRetriesUsed,
-      systemInstruction: grillSystemInstruction,
-      prompt: grillPrompt,
-      temperature: 0.2,
-      tools: grillRepoTools.tools,
-      toolHandlers: grillRepoTools.toolHandlers,
-      maxToolRounds: 8,
-      logLabel: `grill-round-1#${issueNumber}`,
-      fetchImpl
-    });
+    let grillQuestions = null;
+    if (agentEngine) {
+      const rawGrillMsg = await runReadOnlyPlanningAgentSession({
+        agentEngine,
+        role: "griller",
+        instructions: grillSystemInstruction,
+        prompt: grillPrompt,
+        phaseModels,
+        seedFiles: grillExplorationCache,
+        worktreeDir,
+        activeToken
+      });
+      const parsedGrillEval = parseJsonWithSchemaFromText(
+        rawGrillMsg,
+        GRILL_ROUND_EVALUATION_SCHEMA
+      );
+      if (parsedGrillEval && parsedGrillEval.follow_up_questions_markdown.trim().length > 0) {
+        grillQuestions = parsedGrillEval.follow_up_questions_markdown.trim();
+      } else if (rawGrillMsg.trim().length > 0) {
+        grillQuestions = rawGrillMsg.trim();
+      }
+    }
+    if (!grillQuestions) {
+      grillQuestions = await callLlmText({
+        apiKey: llmApiKey,
+        model: phaseModels.planningModel,
+        providers: phaseModels.providers,
+        maxTransientRetries: phaseModels.maxTransientRetries,
+        transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+        requestTimeoutMs: phaseModels.requestTimeoutMs,
+        onTransientRetriesUsed,
+        systemInstruction: grillSystemInstruction,
+        prompt: grillPrompt,
+        temperature: 0.2,
+        tools: grillRepoTools.tools,
+        toolHandlers: grillRepoTools.toolHandlers,
+        maxToolRounds: 8,
+        logLabel: `grill-round-1#${issueNumber}`,
+        fetchImpl
+      });
+    }
     const commentBody = appendEpureCommandsSpoiler(
       [
         updated2.issue_mirror_markdown,
@@ -14837,24 +15659,43 @@ ${issue.body}`
         fullConversationHistory
       )
     ].join("\n");
-    const evalResult = await callLlmJson({
-      apiKey: llmApiKey,
-      model: phaseModels.planningModel,
-      providers: phaseModels.providers,
-      maxTransientRetries: phaseModels.maxTransientRetries,
-      transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
-      requestTimeoutMs: phaseModels.requestTimeoutMs,
-      onTransientRetriesUsed,
-      systemInstruction: grillLoopEvalSystemInstruction,
-      prompt: grillLoopEvalPrompt,
-      temperature: 0.1,
-      tools: grillRepoTools.tools,
-      toolHandlers: grillRepoTools.toolHandlers,
-      maxToolRounds: 8,
-      logLabel: `grill-eval#${issueNumber}`,
-      responseSchema: GRILL_ROUND_EVALUATION_SCHEMA,
-      fetchImpl
-    });
+    let evalResult = null;
+    if (agentEngine) {
+      const rawEvalMsg = await runReadOnlyPlanningAgentSession({
+        agentEngine,
+        role: "griller",
+        instructions: grillLoopEvalSystemInstruction,
+        prompt: grillLoopEvalPrompt,
+        phaseModels,
+        seedFiles: grillExplorationCache,
+        worktreeDir,
+        activeToken
+      });
+      evalResult = parseJsonWithSchemaFromText(
+        rawEvalMsg,
+        GRILL_ROUND_EVALUATION_SCHEMA
+      );
+    }
+    if (!evalResult) {
+      evalResult = await callLlmJson({
+        apiKey: llmApiKey,
+        model: phaseModels.planningModel,
+        providers: phaseModels.providers,
+        maxTransientRetries: phaseModels.maxTransientRetries,
+        transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+        requestTimeoutMs: phaseModels.requestTimeoutMs,
+        onTransientRetriesUsed,
+        systemInstruction: grillLoopEvalSystemInstruction,
+        prompt: grillLoopEvalPrompt,
+        temperature: 0.1,
+        tools: grillRepoTools.tools,
+        toolHandlers: grillRepoTools.toolHandlers,
+        maxToolRounds: 8,
+        logLabel: `grill-eval#${issueNumber}`,
+        responseSchema: GRILL_ROUND_EVALUATION_SCHEMA,
+        fetchImpl
+      });
+    }
     if (!evalResult.frontier_resolved && evalResult.follow_up_questions_markdown.trim().length > 0) {
       const nextRoundNumber = evalResult.round_number || priorGrillRoundsCount + 1;
       const updatedGrill = await updateIssueStateWithCas({
@@ -15006,7 +15847,43 @@ ${issue.body}`
         fullConversationHistory || humanContext
       )
     ].join("\n");
-    let specArtifacts = await callLlmJson({
+    const existingGlossaryForSpec = await readRepoFileSafely("GLOSSARY.md", planBranch) ?? await readRepoFileSafely("GLOSSARY.md", "dev") ?? void 0;
+    const existingAdrsForSpec = [];
+    const candidateSpecAdrPaths = [
+      ...specManifest?.adrPaths ?? [],
+      ...gh.listDirectoryPaths ? await gh.listDirectoryPaths(planBranch, "docs/adr").catch(() => []) : []
+    ];
+    for (const adrPath of new Set(candidateSpecAdrPaths)) {
+      const adrContent = await readRepoFileSafely(adrPath, planBranch);
+      if (adrContent && adrContent.trim().length > 0) {
+        const filename = adrPath.split("/").pop() ?? adrPath;
+        existingAdrsForSpec.push({
+          path: adrPath,
+          content: adrContent,
+          filename,
+          title: filename,
+          markdown: adrContent
+        });
+      }
+    }
+    let specArtifactsFromAgent = null;
+    if (agentEngine) {
+      specArtifactsFromAgent = await runSpecWriterAgentSession({
+        agentEngine,
+        instructions: specOnlySystemInstruction,
+        prompt: specOnlyPrompt,
+        phaseModels,
+        planSlug,
+        defaultSpecPath: specManifest?.specPath ?? `docs/specs/${planSlug}.md`,
+        existingGlossary: existingGlossaryForSpec,
+        existingSpec: currentSpecOnBranch ?? void 0,
+        existingAdrs: existingAdrsForSpec,
+        seedFiles: grillExplorationCache,
+        worktreeDir,
+        activeToken
+      });
+    }
+    let specArtifacts = specArtifactsFromAgent ?? await callLlmJson({
       apiKey: llmApiKey,
       model: phaseModels.planningModel,
       providers: phaseModels.providers,
@@ -15025,20 +15902,22 @@ ${issue.body}`
       fetchImpl
     });
     let goldfishAudit = null;
-    try {
-      goldfishAudit = await runGoldfishSpecAudit({
-        specArtifacts,
-        apiKey: llmApiKey,
-        model: phaseModels.reviewModel,
-        providers: phaseModels.providers,
-        maxTransientRetries: phaseModels.maxTransientRetries,
-        transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
-        requestTimeoutMs: phaseModels.requestTimeoutMs,
-        onTransientRetriesUsed,
-        fetchImpl
-      });
-    } catch {
-      goldfishAudit = null;
+    if (llmApiKey.trim().length > 0) {
+      try {
+        goldfishAudit = await runGoldfishSpecAudit({
+          specArtifacts,
+          apiKey: llmApiKey,
+          model: phaseModels.reviewModel,
+          providers: phaseModels.providers,
+          maxTransientRetries: phaseModels.maxTransientRetries,
+          transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+          requestTimeoutMs: phaseModels.requestTimeoutMs,
+          onTransientRetriesUsed,
+          fetchImpl
+        });
+      } catch {
+        goldfishAudit = null;
+      }
     }
     if (goldfishAudit && !goldfishAudit.passed) {
       const amendmentPrompt = [
@@ -15154,20 +16033,27 @@ ${issue.body}`
       alreadyAnsweredTopics: ["theme", "layout"],
       candidateDesignTopics: ["theme", "layout", "accessibility"]
     });
-    const designGate2 = touchesFrontendUi2 ? await runUserAdvocateDesignGate({
-      repository,
-      planTitle: issue.title,
-      glossaryMarkdown: specArtifacts.glossary_markdown,
-      specMarkdown: specArtifacts.spec_markdown,
-      llmApiKey,
-      model: phaseModels.reviewModel,
-      providers: phaseModels.providers,
-      maxTransientRetries: phaseModels.maxTransientRetries,
-      transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
-      requestTimeoutMs: phaseModels.requestTimeoutMs,
-      onTransientRetriesUsed,
-      fetchImpl
-    }) : null;
+    let designGate2 = null;
+    if (touchesFrontendUi2 && llmApiKey.trim().length > 0) {
+      try {
+        designGate2 = await runUserAdvocateDesignGate({
+          repository,
+          planTitle: issue.title,
+          glossaryMarkdown: specArtifacts.glossary_markdown,
+          specMarkdown: specArtifacts.spec_markdown,
+          llmApiKey,
+          model: phaseModels.reviewModel,
+          providers: phaseModels.providers,
+          maxTransientRetries: phaseModels.maxTransientRetries,
+          transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
+          requestTimeoutMs: phaseModels.requestTimeoutMs,
+          onTransientRetriesUsed,
+          fetchImpl
+        });
+      } catch {
+        designGate2 = null;
+      }
+    }
     const plannedStack2 = detectRepositoryStack({
       targetFilesHint
     });
@@ -15332,7 +16218,30 @@ ${issue.body}`
         fullConversationHistory || humanContext
       )
     ].join("\n");
-    const ticketDag = await callLlmJson({
+    let ticketDagFromAgent = null;
+    if (agentEngine) {
+      const ticketSeedFiles = new Map(grillExplorationCache);
+      ticketSeedFiles.set("GLOSSARY.md", existingGlossary);
+      ticketSeedFiles.set(candidateSpecPath, existingSpecOnPlanBranch);
+      for (const adr of loadedAdrs) {
+        ticketSeedFiles.set(adr.path, adr.content);
+      }
+      const rawTicketDagMsg = await runReadOnlyPlanningAgentSession({
+        agentEngine,
+        role: "ticket_splitter",
+        instructions: ticketsOnlySystemInstruction,
+        prompt: ticketsOnlyPrompt,
+        phaseModels,
+        seedFiles: ticketSeedFiles,
+        worktreeDir,
+        activeToken
+      });
+      ticketDagFromAgent = parseJsonWithSchemaFromText(
+        rawTicketDagMsg,
+        GENERATED_TICKET_DAG_SCHEMA
+      );
+    }
+    const ticketDag = ticketDagFromAgent ?? await callLlmJson({
       apiKey: llmApiKey,
       model: phaseModels.planningModel,
       providers: phaseModels.providers,
@@ -15413,7 +16322,74 @@ ${issue.body}`
         fullConversationHistory || humanContext
       )
     ].join("\n");
-    bundle = await callLlmJson({
+    let bundleFromAgent = null;
+    if (agentEngine) {
+      const rawBundleMsg = await runReadOnlyPlanningAgentSession({
+        agentEngine,
+        role: "ticket_splitter",
+        instructions: specSystemInstruction,
+        prompt: specGenerationPrompt,
+        phaseModels,
+        seedFiles: grillExplorationCache,
+        worktreeDir,
+        activeToken
+      });
+      bundleFromAgent = parseJsonWithSchemaFromText(
+        rawBundleMsg,
+        GENERATED_PLANNING_BUNDLE_SCHEMA
+      );
+      if (!bundleFromAgent) {
+        const dagOnly = parseJsonWithSchemaFromText(
+          rawBundleMsg,
+          GENERATED_TICKET_DAG_SCHEMA
+        );
+        if (dagOnly) {
+          const existingAdrsFromCache = [];
+          for (const [p, c] of grillExplorationCache.entries()) {
+            const norm = p.trim().replace(/^\/+/, "");
+            if (/^docs\/adr\/\d{4}-[a-z0-9-]+\.md$/.test(norm) && c.trim().length > 0) {
+              const filename = norm.split("/").pop() ?? norm;
+              existingAdrsFromCache.push({
+                path: norm,
+                content: c,
+                filename,
+                title: filename,
+                markdown: c
+              });
+            }
+          }
+          if (existingAdrsFromCache.length === 0 && gh.listDirectoryPaths) {
+            const dirAdrs = await gh.listDirectoryPaths(planBranch, "docs/adr").catch(() => []);
+            for (const adrPath of dirAdrs) {
+              const content = await readRepoFileSafely(adrPath, planBranch);
+              if (content && content.trim().length > 0) {
+                const filename = adrPath.split("/").pop() ?? adrPath;
+                existingAdrsFromCache.push({
+                  path: adrPath,
+                  content,
+                  filename,
+                  title: filename,
+                  markdown: content
+                });
+              }
+            }
+          }
+          if (existingAdrsFromCache.length > 0) {
+            bundleFromAgent = {
+              plan_slug: planSlug,
+              glossary_markdown: grillExplorationCache.get("GLOSSARY.md") ?? "# Glossary\n\n- **Domain Term**: Canonical project definition.\n",
+              adrs: existingAdrsFromCache,
+              spec_path: candidateSpecPath,
+              spec_markdown: grillExplorationCache.get(candidateSpecPath) ?? `# Specification (${planSlug})
+
+${issue.body}`,
+              tickets: dagOnly.tickets
+            };
+          }
+        }
+      }
+    }
+    bundle = bundleFromAgent ?? await callLlmJson({
       apiKey: llmApiKey,
       model: phaseModels.planningModel,
       providers: phaseModels.providers,
@@ -15508,7 +16484,7 @@ ${issue.body}`
     alreadyAnsweredTopics: ["theme", "layout"],
     candidateDesignTopics: ["theme", "layout", "accessibility"]
   });
-  const designGate = touchesFrontendUi ? await runUserAdvocateDesignGate({
+  const designGate = touchesFrontendUi && !agentEngine ? await runUserAdvocateDesignGate({
     repository,
     planTitle: issue.title,
     glossaryMarkdown: bundle.glossary_markdown,
@@ -15715,6 +16691,41 @@ ${issue.body}`
 }
 
 // src/orchestrator/phases/epic-convergence.ts
+function parseConvergenceAuditFromText(text) {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const fenceMatch = /```(?:json)?\s*([\s\S]*?)```/i.exec(trimmed);
+  const candidates = [
+    ...fenceMatch && fenceMatch[1] ? [fenceMatch[1].trim()] : [],
+    trimmed
+  ];
+  const firstBrace = trimmed.indexOf("{");
+  const lastBrace = trimmed.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    candidates.push(trimmed.slice(firstBrace, lastBrace + 1));
+  }
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(
+        candidate
+      );
+      if (parsed && typeof parsed === "object" && (parsed.verdict === "CONVERGED" || parsed.verdict === "INCOMPLETE") && Array.isArray(parsed.unwired_modules) && Array.isArray(parsed.stub_violations) && Array.isArray(parsed.unmet_criteria) && Array.isArray(parsed.remediation_tickets)) {
+        return {
+          verdict: parsed.verdict,
+          rationale: typeof parsed.rationale === "string" ? parsed.rationale : "",
+          unwired_modules: parsed.unwired_modules,
+          stub_violations: parsed.stub_violations,
+          unmet_criteria: parsed.unmet_criteria,
+          remediation_tickets: parsed.remediation_tickets
+        };
+      }
+    } catch {
+    }
+  }
+  return null;
+}
 async function runEpicConvergenceAudit(params) {
   const explorationTools = buildRepoExplorationToolsAndHandlers({
     gh: params.gh,
@@ -15790,9 +16801,47 @@ ${content}`
       wrapUntrustedContent("untrusted_test_output", params.stage1Summary)
     ] : []
   ].join("\n");
-  return await withUsageAttribution(
-    { phase: "integration" },
-    () => callLlmJson({
+  return await withUsageAttribution({ phase: "integration" }, async () => {
+    if (params.agentEngine) {
+      let tempWorktreeDir;
+      let effectiveWorktreeDir = params.worktreeDir;
+      try {
+        if (!effectiveWorktreeDir) {
+          tempWorktreeDir = mkdtempSync7(join7(tmpdir6(), "epure-convergence-wt-"));
+          effectiveWorktreeDir = tempWorktreeDir;
+          const filesMap = new Map(params.accumulatedFiles);
+          for (const [k, v] of params.featureChangedFilesMap.entries()) {
+            filesMap.set(k, v);
+          }
+          syncWorkspaceFiles(tempWorktreeDir, filesMap, /* @__PURE__ */ new Set());
+        }
+        const session = await params.agentEngine.run({
+          role: "convergence_auditor",
+          toolPolicy: "read_only",
+          instructions: systemInstruction,
+          prompt: userPrompt,
+          worktree: effectiveWorktreeDir,
+          timeoutMs: params.phaseModels.requestTimeoutMs ?? 30 * 60 * 1e3,
+          model: params.phaseModels.reviewModel,
+          providers: params.phaseModels.providers,
+          thinking: "high",
+          maxLlmRequests: params.maxLlmRequests,
+          ...params.activeToken ? { secrets: [params.activeToken] } : {}
+        });
+        const parsed = parseConvergenceAuditFromText(session.finalMessage);
+        if (parsed) {
+          return parsed;
+        }
+      } finally {
+        if (tempWorktreeDir) {
+          try {
+            rmSync7(tempWorktreeDir, { recursive: true, force: true });
+          } catch {
+          }
+        }
+      }
+    }
+    return await callLlmJson({
       apiKey: params.llmApiKey,
       model: params.phaseModels.reviewModel,
       providers: params.phaseModels.providers,
@@ -15809,8 +16858,8 @@ ${content}`
       logLabel: `epic-convergence-audit#${params.issueNumber}`,
       responseSchema: EPIC_CONVERGENCE_AUDIT_SCHEMA,
       fetchImpl: params.fetchImpl
-    })
-  );
+    });
+  });
 }
 async function spawnPhase2ConvergenceTickets(params) {
   const sourceTickets = params.auditResult.remediation_tickets;
@@ -15992,6 +17041,11 @@ function prepareFeatureToDevPullRequest(input) {
     pr_body: prBody
   };
 }
+
+// src/review/multi-agent-pr-review.ts
+import { mkdtempSync as mkdtempSync8, rmSync as rmSync8 } from "node:fs";
+import { tmpdir as tmpdir7 } from "node:os";
+import { join as join8 } from "node:path";
 
 // src/frontend/impeccable-pr-gate.ts
 function evaluateImpeccableFrontendPr(input) {
@@ -16361,15 +17415,63 @@ function buildReviewerInspectionTools(input) {
   };
   return { declarations, handlers };
 }
+var MAX_CONCURRENT_REVIEWERS = 4;
+function parseReviewerFindingsFromText(text) {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const fenceMatch = /```(?:json)?\s*([\s\S]*?)```/i.exec(trimmed);
+  const candidates = [
+    ...fenceMatch && fenceMatch[1] ? [fenceMatch[1].trim()] : [],
+    trimmed
+  ];
+  const firstBrace = trimmed.indexOf("{");
+  const lastBrace = trimmed.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    candidates.push(trimmed.slice(firstBrace, lastBrace + 1));
+  }
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (parsed && typeof parsed === "object" && Array.isArray(parsed.findings)) {
+        return {
+          summary: typeof parsed.summary === "string" ? parsed.summary : "",
+          findings: parsed.findings
+        };
+      }
+    } catch {
+    }
+  }
+  return null;
+}
+async function mapWithConcurrencyLimit(items, limit, worker) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.max(1, Math.min(limit, items.length));
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (true) {
+        const currentIndex = nextIndex;
+        nextIndex += 1;
+        if (currentIndex >= items.length) {
+          return;
+        }
+        results[currentIndex] = await worker(items[currentIndex], currentIndex);
+      }
+    })
+  );
+  return results;
+}
 async function executeSingleReviewerPass(params) {
-  const { reviewer, input } = params;
+  const { reviewer, input, worktreeDir } = params;
   const trustedPrompt = resolveTrustedReviewerPrompt({
     reviewer,
     repository: input.repository,
     trustedBaseBranchFiles: input.trustedBaseBranchFiles,
     reviewersDir: input.reviewersDir
   });
-  if (!input.llmApiKey || !input.llmApiKey.trim()) {
+  if (!input.agentEngine && (!input.llmApiKey || !input.llmApiKey.trim())) {
     return {
       reviewer,
       prompt_source: trustedPrompt.source,
@@ -16421,25 +17523,47 @@ ${wrapUntrustedContent("untrusted_spec_content", input.designMarkdown)}` : "",
     wrapUntrustedContent("untrusted_pr_diff", fullFilesDump)
   ].join("\n");
   try {
-    const parsed = await callLlmJson({
-      apiKey: input.llmApiKey,
-      model: input.model,
-      providers: input.providers,
-      maxTransientRetries: input.maxTransientRetries,
-      transientRetryBackoffSeconds: input.transientRetryBackoffSeconds,
-      requestTimeoutMs: input.requestTimeoutMs,
-      onTransientRetriesUsed: input.onTransientRetriesUsed,
-      thinkingLevel: "HIGH",
-      logLabel: `review:${reviewer}#PR${input.prNumber}`,
-      systemInstruction,
-      prompt,
-      responseMimeType: "application/json",
-      responseSchema: REVIEWER_FINDINGS_SCHEMA,
-      temperature: 0,
-      tools: reviewerTools.declarations,
-      toolHandlers: reviewerTools.handlers,
-      fetchImpl: input.fetchImpl
-    });
+    let parsed = null;
+    if (input.agentEngine && worktreeDir) {
+      const session = await input.agentEngine.run({
+        role: "reviewer",
+        toolPolicy: "read_only",
+        instructions: systemInstruction,
+        prompt,
+        worktree: worktreeDir,
+        timeoutMs: input.requestTimeoutMs ?? 30 * 60 * 1e3,
+        model: input.model,
+        providers: input.providers,
+        thinking: "high",
+        maxLlmRequests: input.maxLlmRequests,
+        ...input.githubToken ? { secrets: [input.githubToken] } : {}
+      });
+      parsed = parseReviewerFindingsFromText(session.finalMessage);
+      if (!parsed && (!input.llmApiKey || !input.llmApiKey.trim())) {
+        throw new Error(`Reviewer ${reviewer} returned unparseable findings JSON`);
+      }
+    }
+    if (!parsed) {
+      parsed = await callLlmJson({
+        apiKey: input.llmApiKey ?? "",
+        model: input.model,
+        providers: input.providers,
+        maxTransientRetries: input.maxTransientRetries,
+        transientRetryBackoffSeconds: input.transientRetryBackoffSeconds,
+        requestTimeoutMs: input.requestTimeoutMs,
+        onTransientRetriesUsed: input.onTransientRetriesUsed,
+        thinkingLevel: "HIGH",
+        logLabel: `review:${reviewer}#PR${input.prNumber}`,
+        systemInstruction,
+        prompt,
+        responseMimeType: "application/json",
+        responseSchema: REVIEWER_FINDINGS_SCHEMA,
+        temperature: 0,
+        tools: reviewerTools.declarations,
+        toolHandlers: reviewerTools.handlers,
+        fetchImpl: input.fetchImpl
+      });
+    }
     const findings = (parsed.findings ?? []).map((f) => ({
       reviewer,
       category: normalizeFindingCategory(f.category, f.severity),
@@ -16459,6 +17583,25 @@ ${wrapUntrustedContent("untrusted_spec_content", input.designMarkdown)}` : "",
   } catch (error) {
     if (error instanceof AuthenticationError || error instanceof QuotaExhaustedError) {
       throw error;
+    }
+    if (error instanceof Error && error.message.includes("returned unparseable findings JSON")) {
+      return {
+        reviewer,
+        prompt_source: trustedPrompt.source,
+        summary: error.message,
+        findings: [
+          {
+            reviewer,
+            category: "must_fix",
+            severity: "high",
+            path: input.changedFiles[0]?.path ?? "",
+            line: 1,
+            title: error.message,
+            rationale: error.message,
+            suggested_action: "Ensure the reviewer agent outputs a valid JSON findings object."
+          }
+        ]
+      };
     }
     return {
       reviewer,
@@ -16484,11 +17627,42 @@ async function runMultiAgentPrReviewPass(input) {
 `
     );
   }
-  const passes = await Promise.all(
-    selection.selected_reviewers.map(
-      (reviewer) => executeSingleReviewerPass({ reviewer, input })
-    )
-  );
+  let tempWorktreeDir;
+  let effectiveWorktreeDir = input.worktreeDir;
+  let passes;
+  try {
+    if (input.agentEngine && !effectiveWorktreeDir) {
+      tempWorktreeDir = mkdtempSync8(join8(tmpdir7(), "epure-review-wt-"));
+      effectiveWorktreeDir = tempWorktreeDir;
+      const filesMap = /* @__PURE__ */ new Map();
+      if (input.workspaceFiles) {
+        const entries = input.workspaceFiles instanceof Map || typeof input.workspaceFiles.entries === "function" ? Array.from(input.workspaceFiles.entries()) : Object.entries(input.workspaceFiles);
+        for (const [k, v] of entries) {
+          filesMap.set(k, v);
+        }
+      }
+      for (const f of input.changedFiles) {
+        filesMap.set(f.path, f.content);
+      }
+      syncWorkspaceFiles(tempWorktreeDir, filesMap, new Set(input.deletedFiles ?? []));
+    }
+    passes = await mapWithConcurrencyLimit(
+      selection.selected_reviewers,
+      MAX_CONCURRENT_REVIEWERS,
+      (reviewer) => executeSingleReviewerPass({
+        reviewer,
+        input,
+        worktreeDir: effectiveWorktreeDir
+      })
+    );
+  } finally {
+    if (tempWorktreeDir) {
+      try {
+        rmSync8(tempWorktreeDir, { recursive: true, force: true });
+      } catch {
+      }
+    }
+  }
   const mustFixFindings = [];
   const informationalFindings = [];
   const isTaskBranch = input.headBranch.replace(/^refs\/heads\//, "").startsWith("task/");
@@ -16703,7 +17877,8 @@ async function runFeatureIntegrationPhase(params) {
       transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
       requestTimeoutMs: params.phaseModels.requestTimeoutMs,
       sandboxRunner: params.sandboxRunner,
-      reviewersDir
+      reviewersDir,
+      agentEngine: params.agentEngine
     });
     if (featureSync.status === "escalated") {
       return await escalate({
@@ -16828,7 +18003,8 @@ async function runFeatureIntegrationPhase(params) {
       transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
       requestTimeoutMs: params.phaseModels.requestTimeoutMs,
       sandboxRunner: params.sandboxRunner,
-      reviewersDir
+      reviewersDir,
+      agentEngine: params.agentEngine
     });
     if (resync.status === "escalated") {
       return await escalate({
@@ -16878,7 +18054,10 @@ async function runFeatureIntegrationPhase(params) {
       transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
       requestTimeoutMs: params.phaseModels.requestTimeoutMs,
       onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
-      fetchImpl: params.fetchImpl
+      fetchImpl: params.fetchImpl,
+      agentEngine: params.agentEngine?.name === "pi" ? params.agentEngine : void 0,
+      githubToken: params.activeToken,
+      maxLlmRequests: params.parsedDevAgentsConfig?.agent_max_llm_requests ?? 200
     }));
     await params.gh.postPullRequestReview(featurePr.number, {
       commitId: passParams.headSha,
@@ -17109,31 +18288,231 @@ ${c}`).join("\n\n");
         "Fichiers actuels du workspace :",
         wrapUntrustedContent("untrusted_workspace_files", currentFilesContext)
       );
-      const parsedFeatureFix = await withUsageAttribution({ phase: "fixes" }, () => callLlmJson({
-        apiKey: params.llmApiKey,
-        model: params.phaseModels.implementationModel,
-        providers: params.phaseModels.providers,
-        maxTransientRetries: params.phaseModels.maxTransientRetries,
-        transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
-        requestTimeoutMs: params.phaseModels.requestTimeoutMs,
-        onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
-        thinkingLevel: "HIGH",
-        logLabel: `feature-review-fix:#PR${featurePr.number}/iter-${featureReviewFixAttempt}`,
-        systemInstruction: featureFixSystemInstruction,
-        prompt: featureFixPromptParts.join("\n"),
-        temperature: 0.1,
-        ...buildRepoExplorationToolsAndHandlers({
+      const featureFileModes = /* @__PURE__ */ new Map();
+      const runFeatureFixWithAgentOrLlm = async (promptText, logLabel) => {
+        if (params.agentEngine) {
+          const engine = params.agentEngine;
+          syncWorkspaceFiles(
+            featureSandbox.workDir,
+            params.accumulatedFiles,
+            params.featureDeletedFilesSet,
+            featureFileModes
+          );
+          const trackedPaths = Array.from(params.accumulatedFiles.keys());
+          const outerSnapshot = await snapshotWorktree(featureSandbox.workDir, {
+            trackedPaths,
+            isProtectedPath: (p) => isSensitiveTaskBranchPath(p, reviewersDir)
+          });
+          try {
+            const session = await withUsageAttribution(
+              { phase: "fixes" },
+              () => engine.run({
+                role: "fixer",
+                toolPolicy: "write",
+                instructions: [
+                  "Tu es un ing\xE9nieur TDD EPURE corrigeant les \xE9checs d\xE9crits dans le message (v\xE9rification Stage 1, constats 'must_fix' de revue, CI externe) sur la PR finale de feature en gardant 100% des cibles Stage 1 au vert.",
+                  PROMPT_INJECTION_IMMUNITY_CLAUSE,
+                  "Tu travailles directement dans le checkout du d\xE9p\xF4t (r\xE9pertoire courant) avec tes outils : les fichiers que tu laisses modifi\xE9s, cr\xE9\xE9s ou supprim\xE9s constituent le livrable.",
+                  `Ne modifie JAMAIS ${reviewersDir}/**, .github/workflows/**, .github/agents.yml, .env* ni .git/.`,
+                  "",
+                  verificationGuideMarkdown,
+                  "",
+                  EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
+                ].join("\n"),
+                prompt: promptText,
+                worktree: featureSandbox.workDir,
+                timeoutMs: params.phaseModels.requestTimeoutMs ?? 30 * 60 * 1e3,
+                model: params.phaseModels.implementationModel,
+                providers: params.phaseModels.providers,
+                thinking: "high",
+                trackedPaths,
+                isProtectedPath: (p) => isSensitiveTaskBranchPath(p, reviewersDir),
+                maxLlmRequests: params.parsedDevAgentsConfig?.agent_max_llm_requests ?? 200,
+                secrets: [params.activeToken]
+              })
+            );
+            const outerDiff = await outerSnapshot.collect();
+            const protectedSkipped = [
+              ...outerDiff.skipped,
+              ...session.diff.skipped
+            ].filter((s) => s.reason === "protected").map((s) => s.path.trim().replace(/^\/+/, ""));
+            if (protectedSkipped.length > 0) {
+              return {
+                parsed: {
+                  commit_message: `fix(review): address final feature review findings on #${params.issueNumber}`,
+                  test_summary: "",
+                  files: [],
+                  patches: [],
+                  deleted_files: []
+                },
+                protectedPaths: Array.from(new Set(protectedSkipped))
+              };
+            }
+            const fileMap = /* @__PURE__ */ new Map();
+            for (const f of outerDiff.files) {
+              const p = f.path.trim().replace(/^\/+/, "");
+              fileMap.set(p, f.content);
+              featureFileModes.set(p, f.mode);
+            }
+            for (const f of session.diff.files) {
+              const p = f.path.trim().replace(/^\/+/, "");
+              fileMap.set(p, f.content);
+              featureFileModes.set(p, f.mode);
+            }
+            const deletedFiles = Array.from(
+              /* @__PURE__ */ new Set([
+                ...outerDiff.deleted_files.map(
+                  (p) => p.trim().replace(/^\/+/, "")
+                ),
+                ...session.diff.deleted_files.map(
+                  (p) => p.trim().replace(/^\/+/, "")
+                )
+              ])
+            );
+            const commitMessage = `fix(review): address final feature review findings on #${params.issueNumber}`;
+            const testSummary = session.finalMessage.trim() || "Addressed final feature review findings and verified test suite";
+            if (fileMap.size > 0 || deletedFiles.length > 0) {
+              assertNoSecretMaterial(
+                [
+                  { label: "the commit message", text: commitMessage },
+                  { label: "the test summary", text: testSummary },
+                  ...Array.from(fileMap.entries()).map(([path, content]) => ({
+                    label: path,
+                    text: content
+                  }))
+                ],
+                [
+                  params.activeToken,
+                  params.llmApiKey,
+                  ...collectRunnerSecretValues(process.env)
+                ]
+              );
+              return {
+                parsed: {
+                  commit_message: commitMessage,
+                  test_summary: testSummary,
+                  files: Array.from(fileMap.entries()).map(
+                    ([path, content]) => ({ path, content })
+                  ),
+                  patches: [],
+                  deleted_files: deletedFiles
+                },
+                protectedPaths: []
+              };
+            }
+            let parsedPayload;
+            try {
+              const parsedJson = JSON.parse(
+                session.finalMessage.trim()
+              );
+              if (parsedJson && typeof parsedJson === "object" && (Array.isArray(parsedJson.files) || Array.isArray(parsedJson.patches) || Array.isArray(parsedJson.deleted_files))) {
+                parsedPayload = {
+                  commit_message: parsedJson.commit_message ?? commitMessage,
+                  test_summary: parsedJson.test_summary ?? testSummary,
+                  files: parsedJson.files ?? [],
+                  patches: parsedJson.patches ?? [],
+                  deleted_files: parsedJson.deleted_files ?? []
+                };
+              }
+            } catch {
+            }
+            if (parsedPayload) {
+              assertNoSecretMaterial(
+                [
+                  {
+                    label: "the commit message",
+                    text: parsedPayload.commit_message ?? ""
+                  },
+                  {
+                    label: "the test summary",
+                    text: parsedPayload.test_summary ?? ""
+                  },
+                  ...(parsedPayload.files ?? []).map((f) => ({
+                    label: f.path,
+                    text: f.content
+                  })),
+                  ...(parsedPayload.patches ?? []).flatMap(
+                    (p) => p.edits.map((e) => ({
+                      label: p.path,
+                      text: e.new_string ?? e.replace ?? ""
+                    }))
+                  )
+                ],
+                [
+                  params.activeToken,
+                  params.llmApiKey,
+                  ...collectRunnerSecretValues(process.env)
+                ]
+              );
+              return {
+                parsed: parsedPayload,
+                protectedPaths: []
+              };
+            }
+            if (!params.llmApiKey || !params.llmApiKey.trim()) {
+              return {
+                parsed: {
+                  commit_message: commitMessage,
+                  test_summary: testSummary,
+                  files: [],
+                  patches: [],
+                  deleted_files: []
+                },
+                protectedPaths: []
+              };
+            }
+          } finally {
+            outerSnapshot.dispose();
+          }
+        }
+        const parsed = await withUsageAttribution(
+          { phase: "fixes" },
+          () => callLlmJson({
+            apiKey: params.llmApiKey,
+            model: params.phaseModels.implementationModel,
+            providers: params.phaseModels.providers,
+            maxTransientRetries: params.phaseModels.maxTransientRetries,
+            transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
+            requestTimeoutMs: params.phaseModels.requestTimeoutMs,
+            onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
+            thinkingLevel: "HIGH",
+            logLabel,
+            systemInstruction: featureFixSystemInstruction,
+            prompt: promptText,
+            temperature: 0.1,
+            ...buildRepoExplorationToolsAndHandlers({
+              branch: params.featureBranch,
+              featureBranch: params.featureBranch,
+              accumulatedFiles: params.accumulatedFiles,
+              deletedFilesSet: params.featureDeletedFilesSet,
+              devBranchPaths: params.devBranchPaths,
+              reviewersDir,
+              gh: params.gh
+            }),
+            responseSchema: GENERATED_TICKET_IMPLEMENTATION_SCHEMA,
+            fetchImpl: params.fetchImpl
+          })
+        );
+        return { parsed, protectedPaths: [] };
+      };
+      const initialFixOutcome = await runFeatureFixWithAgentOrLlm(
+        featureFixPromptParts.join("\n"),
+        `feature-review-fix:#PR${featurePr.number}/iter-${featureReviewFixAttempt}`
+      );
+      if (initialFixOutcome.protectedPaths.length > 0) {
+        return await escalate({
+          reason: "sensitive_path_violation",
+          ticketNumber: params.issueNumber,
           branch: params.featureBranch,
-          featureBranch: params.featureBranch,
-          accumulatedFiles: params.accumulatedFiles,
-          deletedFilesSet: params.featureDeletedFilesSet,
-          devBranchPaths: params.devBranchPaths,
-          reviewersDir,
-          gh: params.gh
-        }),
-        responseSchema: GENERATED_TICKET_IMPLEMENTATION_SCHEMA,
-        fetchImpl: params.fetchImpl
-      }));
+          prNumber: featurePr.number,
+          prUrl: featurePr.html_url,
+          featurePrUrl: featurePr.html_url,
+          codeFixAttemptsUsed: featureReviewFixAttempt,
+          sensitivePaths: initialFixOutcome.protectedPaths,
+          traversalPaths: []
+        });
+      }
+      const parsedFeatureFix = initialFixOutcome.parsed;
       const featureFixPreCheck = validateWorkspaceFileOperations({
         workDir: featureSandbox.workDir,
         files: [
@@ -17198,18 +18577,8 @@ ${c}`).join("\n\n");
           params.accumulatedFiles.entries()
         ).map(([p, c]) => `--- FILE: ${p} ---
 ${c}`).join("\n\n");
-        const retryParsed = await withUsageAttribution({ phase: "fixes" }, () => callLlmJson({
-          apiKey: params.llmApiKey,
-          model: params.phaseModels.implementationModel,
-          providers: params.phaseModels.providers,
-          maxTransientRetries: params.phaseModels.maxTransientRetries,
-          transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
-          requestTimeoutMs: params.phaseModels.requestTimeoutMs,
-          onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
-          thinkingLevel: "HIGH",
-          logLabel: `feature-review-test-retry:#PR${featurePr.number}/iter-${featureReviewFixAttempt}`,
-          systemInstruction: featureFixSystemInstruction,
-          prompt: [
+        const retryOutcome = await runFeatureFixWithAgentOrLlm(
+          [
             `La correction de review finale a \xE9chou\xE9 \xE0 la v\xE9rification Stage 1 (tentative ${featureReviewFixAttempt}/${maxFeatureReviewFixAttempts}) :`,
             wrapUntrustedContent(
               "untrusted_test_output",
@@ -17230,19 +18599,22 @@ ${c}`).join("\n\n");
               retryFilesContext
             )
           ].join("\n"),
-          temperature: 0.1,
-          ...buildRepoExplorationToolsAndHandlers({
+          `feature-review-test-retry:#PR${featurePr.number}/iter-${featureReviewFixAttempt}`
+        );
+        if (retryOutcome.protectedPaths.length > 0) {
+          return await escalate({
+            reason: "sensitive_path_violation",
+            ticketNumber: params.issueNumber,
             branch: params.featureBranch,
-            featureBranch: params.featureBranch,
-            accumulatedFiles: params.accumulatedFiles,
-            deletedFilesSet: params.featureDeletedFilesSet,
-            devBranchPaths: params.devBranchPaths,
-            reviewersDir,
-            gh: params.gh
-          }),
-          responseSchema: GENERATED_TICKET_IMPLEMENTATION_SCHEMA,
-          fetchImpl: params.fetchImpl
-        }));
+            prNumber: featurePr.number,
+            prUrl: featurePr.html_url,
+            featurePrUrl: featurePr.html_url,
+            codeFixAttemptsUsed: featureReviewFixAttempt,
+            sensitivePaths: retryOutcome.protectedPaths,
+            traversalPaths: []
+          });
+        }
+        const retryParsed = retryOutcome.parsed;
         const retryPreCheck = validateWorkspaceFileOperations({
           workDir: featureSandbox.workDir,
           files: [
@@ -17311,8 +18683,25 @@ ${c}`).join("\n\n");
           diagnosticExcerpt: featureTestCheck.output.slice(-2e3)
         });
       }
+      if (changedFixFilesMap.size === 0 && changedDeletedFilesSet.size === 0) {
+        return await escalate({
+          reason: "remediation_exhausted",
+          ticketNumber: params.issueNumber,
+          branch: params.featureBranch,
+          prNumber: featurePr.number,
+          prUrl: featurePr.html_url,
+          featurePrUrl: featurePr.html_url,
+          codeFixAttemptsUsed: featureReviewFixAttempt,
+          mustFixFindings: finalFeatureReview.must_fix_findings,
+          diagnosticExcerpt: "Review-fix agent produced no file modifications or deletions."
+        });
+      }
       const changedFixFiles = Array.from(changedFixFilesMap.entries()).map(
-        ([path, content]) => ({ path, content })
+        ([path, content]) => ({
+          path,
+          content,
+          mode: featureFileModes.get(path)
+        })
       );
       const fixTaskBranch = `task/review-fix-${params.issueNumber}-${featureReviewFixAttempt}`;
       const fixCommitTitle = parsedFeatureFix.commit_message && /^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9._/-]+\))?!?: .+/i.test(
@@ -17694,7 +19083,14 @@ var SKIPPED_PATH_LABELS = {
 };
 var TICKET_AGENT_ROLE_HEADLINES = {
   implementer: "Tu es un ing\xE9nieur TDD EPURE impl\xE9mentant un ticket approuv\xE9.",
-  fixer: "Tu es un ing\xE9nieur TDD EPURE corrigeant les \xE9checs d\xE9crits dans le message (v\xE9rification Stage 1, constats 'must_fix' de revue, CI externe) en gardant 100% des cibles Stage 1 au vert."
+  fixer: "Tu es un ing\xE9nieur TDD EPURE corrigeant les \xE9checs d\xE9crits dans le message (v\xE9rification Stage 1, constats 'must_fix' de revue, CI externe) en gardant 100% des cibles Stage 1 au vert.",
+  conflict_resolver: "Tu es un ing\xE9nieur expert charg\xE9 de r\xE9soudre un conflit de fusion Git \xE0 3 voies (3-way merge) directement dans le r\xE9pertoire de travail.",
+  reviewer: "Tu es un ing\xE9nieur EPURE en revue de code (lecture seule).",
+  convergence_auditor: "Tu es un auditeur de convergence EPURE \xE9valuant l'alignement global du d\xE9p\xF4t (lecture seule).",
+  adr_reconciler: "Tu es un architecte EPURE r\xE9conciliant GLOSSARY.md et docs/adr/ apr\xE8s un audit de convergence.",
+  griller: "Tu es un ing\xE9nieur EPURE menant un entretien de cadrage (grilling) sur une demande.",
+  spec_writer: "Tu es un ing\xE9nieur EPURE r\xE9digeant une sp\xE9cification technique \xE0 partir d'un entretien valid\xE9.",
+  ticket_splitter: "Tu es un ing\xE9nieur EPURE d\xE9coupant une sp\xE9cification approuv\xE9e en tickets atomiques."
 };
 function ticketAgentInstructions(role, reviewersDir) {
   return [
@@ -18167,7 +19563,9 @@ async function runTicketExecutionLoop(params) {
         transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
         requestTimeoutMs: params.phaseModels.requestTimeoutMs,
         sandboxRunner: params.sandboxRunner,
-        reviewersDir
+        reviewersDir,
+        agentEngine: params.agentEngine,
+        maxLlmRequests: params.parsedDevAgentsConfig?.agent_max_llm_requests ?? DEFAULT_AGENT_MAX_LLM_REQUESTS
       }));
       if (featureSync.status === "escalated") {
         const escalated = await params.escalateToNeedsHuman({
@@ -18198,7 +19596,9 @@ async function runTicketExecutionLoop(params) {
       transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
       requestTimeoutMs: params.phaseModels.requestTimeoutMs,
       sandboxRunner: params.sandboxRunner,
-      reviewersDir
+      reviewersDir,
+      agentEngine: params.agentEngine,
+      maxLlmRequests: params.parsedDevAgentsConfig?.agent_max_llm_requests ?? DEFAULT_AGENT_MAX_LLM_REQUESTS
     }));
     if (syncWithBase) {
       const taskSync = await syncTaskBranchWithFeature();
@@ -18927,7 +20327,11 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
           transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
           requestTimeoutMs: params.phaseModels.requestTimeoutMs,
           onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
-          fetchImpl: params.fetchImpl
+          fetchImpl: params.fetchImpl,
+          agentEngine: params.agentEngine?.name === "pi" ? params.agentEngine : void 0,
+          worktreeDir: sandboxWorkspace.workDir,
+          githubToken: params.activeToken,
+          maxLlmRequests: params.parsedDevAgentsConfig?.agent_max_llm_requests ?? DEFAULT_AGENT_MAX_LLM_REQUESTS
         }));
         await params.gh.postPullRequestReview(openTaskPr.number, {
           commitId: passParams.headSha,
@@ -20304,7 +21708,9 @@ async function runMeteredIssueCommand(input, ledger) {
             onTransientRetriesUsed: (used) => {
               totalTransientRetriesUsed += used;
             },
-            fetchImpl: effectiveInput.fetchImpl
+            fetchImpl: effectiveInput.fetchImpl,
+            agentEngine: effectiveInput.agentEngine?.name === "pi" ? effectiveInput.agentEngine : void 0,
+            activeToken
           }));
         } catch (err) {
           if (err instanceof LLMError) {
@@ -20385,7 +21791,8 @@ async function runMeteredIssueCommand(input, ledger) {
             maxTransientRetries: phaseModels.maxTransientRetries,
             transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
             requestTimeoutMs: phaseModels.requestTimeoutMs,
-            fetchImpl: effectiveInput.fetchImpl
+            fetchImpl: effectiveInput.fetchImpl,
+            agentEngine: effectiveInput.agentEngine?.name === "pi" ? effectiveInput.agentEngine : void 0
           });
         }
         const syncRes = await syncBranchWithBase({
@@ -20401,7 +21808,8 @@ async function runMeteredIssueCommand(input, ledger) {
           transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
           requestTimeoutMs: phaseModels.requestTimeoutMs,
           sandboxRunner: effectiveInput.sandboxRunner,
-          reviewersDir
+          reviewersDir,
+          agentEngine: effectiveInput.agentEngine
         });
         if (syncRes.status === "escalated") {
           return await escalateSuspension({
@@ -20429,7 +21837,8 @@ async function runMeteredIssueCommand(input, ledger) {
               transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
               requestTimeoutMs: phaseModels.requestTimeoutMs,
               sandboxRunner: effectiveInput.sandboxRunner,
-              reviewersDir
+              reviewersDir,
+              agentEngine: effectiveInput.agentEngine
             })
           );
           if (taskSyncRes.status === "escalated") {
@@ -20722,7 +22131,8 @@ async function runMeteredIssueCommand(input, ledger) {
                     transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
                     requestTimeoutMs: phaseModels.requestTimeoutMs,
                     sandboxRunner: effectiveInput.sandboxRunner,
-                    reviewersDir
+                    reviewersDir,
+                    agentEngine: effectiveInput.agentEngine
                   })
                 );
                 if (resync.status === "escalated") {
@@ -20979,7 +22389,8 @@ async function runMeteredIssueCommand(input, ledger) {
             maxTransientRetries: phaseModels.maxTransientRetries,
             transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
             requestTimeoutMs: phaseModels.requestTimeoutMs,
-            fetchImpl: effectiveInput.fetchImpl
+            fetchImpl: effectiveInput.fetchImpl,
+            agentEngine: effectiveInput.agentEngine?.name === "pi" ? effectiveInput.agentEngine : void 0
           });
           await updateIssueStateWithCas({
             issueNumber: effectiveInput.issueNumber,
@@ -21173,7 +22584,9 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
               onTransientRetriesUsed: (used) => {
                 totalTransientRetriesUsed += used;
               },
-              fetchImpl: effectiveInput.fetchImpl
+              fetchImpl: effectiveInput.fetchImpl,
+              agentEngine: effectiveInput.agentEngine?.name === "pi" ? effectiveInput.agentEngine : void 0,
+              activeToken
             });
             if (convergenceAudit.verdict === "CONVERGED") {
               epicConvergenceSummary = convergenceAudit.rationale || `All required entrypoints (${epicGoalContract.required_entrypoints.join(", ")}) wired and verified in Phase ${currentEpicPhase}.`;
@@ -21328,12 +22741,13 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
             initialFeatureCodeFixAttemptsUsed,
             baseSyncGuard,
             resumeContextMarkdown,
-            stopIfFeaturePrMerged
+            stopIfFeaturePrMerged,
+            agentEngine: effectiveInput.agentEngine
           }));
         } catch (err) {
-          if (err instanceof LLMError) {
+          if (err instanceof LLMError || err instanceof AgentEngineError) {
             return await escalateToNeedsHuman({
-              reason: resolveLlmEscalationReason(err),
+              reason: err instanceof LLMError ? resolveLlmEscalationReason(err) : resolveAgentEngineEscalationReason(err),
               ticketNumber: effectiveInput.issueNumber,
               branch: featureBranch,
               phase: "implementation",
@@ -21364,7 +22778,7 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
       }
       const rawErrMessage = err instanceof Error ? err.message : String(err);
       const escalation = {
-        reason: err instanceof LLMError ? resolveLlmEscalationReason(err) : err instanceof GitHubRateLimitError ? "github_rate_limited" : err instanceof BranchUpdateConflictError ? "branch_update_conflict" : err instanceof MissingModelConfigError ? "model_config_missing" : err instanceof AmbiguousFeatureBranchError ? "ambiguous_feature_branch" : "internal_error",
+        reason: err instanceof LLMError ? resolveLlmEscalationReason(err) : err instanceof AgentEngineError ? resolveAgentEngineEscalationReason(err) : err instanceof GitHubRateLimitError ? "github_rate_limited" : err instanceof BranchUpdateConflictError ? "branch_update_conflict" : err instanceof MissingModelConfigError ? "model_config_missing" : err instanceof AmbiguousFeatureBranchError ? "ambiguous_feature_branch" : "internal_error",
         missingModelKeys: err instanceof MissingModelConfigError ? err.missingKeys : void 0,
         diagnosticExcerpt: redactSecrets(rawErrMessage, [
           activeToken,

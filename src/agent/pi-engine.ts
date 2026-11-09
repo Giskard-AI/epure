@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -7,7 +7,10 @@ import { parseModelIdentifier } from "../llm/client.js";
 import { classifyHttpError, LLMError } from "../llm/errors.js";
 import {
   collectRunnerSecretValues,
+  probeKernelSandboxCapabilities,
   runInUntrustedCodeSandbox,
+  selectKernelBackend,
+  type KernelSandboxCapabilities,
   type LlmProxyExchange,
   type LlmProxyResponseObserver,
   type SandboxExecutionInput,
@@ -51,8 +54,11 @@ export interface PiAgentEngineOptions {
     | undefined;
   // Default true: a session fails closed without bubblewrap and landrun. Only tests turn it off.
   readonly enforceKernelSandbox?: boolean | undefined;
+  readonly kernelCapabilities?: KernelSandboxCapabilities | undefined;
   // Values a diff must not contain, besides the runner's secret variables, provider keys and the proxy nonce.
   readonly extraSecrets?: readonly string[] | undefined;
+  readonly fdPath?: string | undefined;
+  readonly fdfindPath?: string | undefined;
 }
 
 // dist/vendor/pi, seen from the bundled actions (dist/actions/*), the CLI (dist/cli) or the sources (src/agent).
@@ -95,6 +101,21 @@ export function createPiAgentEngine(options: PiAgentEngineOptions): AgentEngine 
       const sessionDir = mkdtempSync(join(tmpdir(), "epure-pi-session-"));
       const instructionsPath = join(sessionDir, "instructions.md");
       writeFileSync(instructionsPath, request.instructions, "utf8");
+      const fdPath = options.fdPath ?? "/usr/bin/fd";
+      const fdfindPath = options.fdfindPath ?? "/usr/bin/fdfind";
+      let sessionBinDir: string | undefined;
+      if (!existsSync(fdPath) && existsSync(fdfindPath)) {
+        sessionBinDir = join(sessionDir, "bin");
+        mkdirSync(sessionBinDir, { recursive: true });
+        symlinkSync(fdfindPath, join(sessionBinDir, "fd"));
+      }
+      const basePath = options.runnerEnv.PATH ?? process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
+      const sessionPath = sessionBinDir
+        ? basePath
+          ? `${sessionBinDir}:${basePath}`
+          : sessionBinDir
+        : undefined;
+      const readOnlyCwd = request.toolPolicy === "read_only";
       const outcome: RpcOutcome = { settled: false, timedOut: false, lineTooLong: false, finalMessage: "" };
       let upstreamError: UpstreamError | undefined;
       let proxyNonce = "";
@@ -105,10 +126,17 @@ export function createPiAgentEngine(options: PiAgentEngineOptions): AgentEngine 
           trackedPaths: request.trackedPaths,
           isProtectedPath: request.isProtectedPath
         });
+        const capabilities =
+          options.kernelCapabilities ?? probeKernelSandboxCapabilities(options.runnerEnv);
+        const backend = selectKernelBackend("proxy_only", capabilities);
+        console.info(
+          `[pi-engine] session starting (role=${request.role}, policy=${request.toolPolicy}, sandbox=${backend})`
+        );
         const result = await sandboxRunner({
           isolationAvailable: true,
-          runnerEnv: options.runnerEnv,
+          runnerEnv: sessionPath ? { ...options.runnerEnv, PATH: sessionPath } : options.runnerEnv,
           enforceKernelSandbox: options.enforceKernelSandbox ?? true,
+          ...(options.kernelCapabilities ? { kernelCapabilities: options.kernelCapabilities } : {}),
           command: process.execPath,
           args: [
             join(piDir, "rpc-entry.js"),
@@ -132,12 +160,14 @@ export function createPiAgentEngine(options: PiAgentEngineOptions): AgentEngine 
             instructionsPath
           ],
           cwd: request.worktree,
+          readOnlyCwd,
           networkPolicy: "proxy_only",
           timeoutMs: request.timeoutMs + SHUTDOWN_GRACE_MS,
           llm: { model: request.model, providers: request.providers },
           maxLlmRequests: request.maxLlmRequests,
           readOnlyPaths: [piDir, sessionDir],
           agentSession: {
+            readOnlyCwd,
             homeFiles: (proxy) => {
               proxyNonce = proxy?.proxyNonce ?? "";
               return proxy
@@ -148,6 +178,7 @@ export function createPiAgentEngine(options: PiAgentEngineOptions): AgentEngine 
                 : {};
             },
             env: (home) => ({
+              ...(sessionPath ? { PATH: sessionPath } : {}),
               PI_CODING_AGENT_DIR: `${home}/.pi/agent`,
               PI_OFFLINE: "1",
               PI_TELEMETRY: "0",
