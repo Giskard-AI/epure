@@ -1,10 +1,13 @@
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { createPiAgentEngine } from "../../src/agent/pi-engine.js";
 import { LLMClient, type ProviderConfig } from "../../src/llm/index.js";
 import { orchestrateIssueCommand } from "../../src/orchestrator/issue-orchestrator.js";
 import { GRILL_ROUND_EVALUATION_SCHEMA } from "../../src/orchestrator/prompts/schemas.js";
 import { createInMemoryGitRefStateStore } from "../../src/state/git-ref-state.js";
+import { runWithTokenUsageLedger, TokenUsageLedger } from "../../src/usage/token-usage.js";
 
 export interface LiveLLMTargetConfig {
   readonly id: string;
@@ -561,6 +564,50 @@ describeLive(
         console.log(`[${target.id}] token_usage ${JSON.stringify(usage)}`);
       },
       600_000
+    );
+
+    it.each(
+      liveTargets.length > 0
+        ? liveTargets
+        : [{ id: "skipped", planningModel: "google/gemini-3-flash-preview" }]
+    )(
+      "[$id] 3. Pi agent session in the sandbox edits the worktree through the proxy and reports usage once",
+      async (target) => {
+        const model = target.executionModel ?? target.planningModel;
+        const worktree = mkdtempSync(join(tmpdir(), "epure-live-pi-"));
+        writeFileSync(join(worktree, "sum.ts"), "export const sum = (a: number, b: number): number => a - b;\n");
+        writeFileSync(join(worktree, "obsolete.txt"), "remove me\n");
+        const engine = createPiAgentEngine({ runnerEnv: { ...process.env, LLM_API_KEY: target.apiKey ?? "" } });
+        const ledger = new TokenUsageLedger();
+
+        try {
+          const result = await runWithTokenUsageLedger(ledger, { phase: "implementation", ticket: 7 }, () =>
+            engine.run({
+              role: "fixer",
+              toolPolicy: "write",
+              instructions: "You fix small bugs in the current directory with your tools. Keep changes minimal.",
+              prompt: "sum.ts subtracts instead of adding: make sum return a + b. Delete obsolete.txt. Then reply with one sentence.",
+              worktree,
+              timeoutMs: 300_000,
+              model,
+              providers: target.providers
+            })
+          );
+
+          expect(result.diff.files.map((f) => f.path)).toEqual(["sum.ts"]);
+          expect(result.diff.files[0]!.content).toMatch(/a\s*\+\s*b/);
+          expect(result.diff.deleted_files).toEqual(["obsolete.txt"]);
+          expect(result.finalMessage.trim().length).toBeGreaterThan(0);
+          const counts = ledger.current()["7"]?.implementation?.[model];
+          expect(counts?.requests).toBeGreaterThan(0);
+          expect(counts?.input_tokens).toBeGreaterThan(0);
+          expect(counts?.output_tokens).toBeGreaterThan(0);
+          console.log(`[${target.id}] pi session usage ${JSON.stringify(counts)} confined=${process.env.CI === "true"}`);
+        } finally {
+          rmSync(worktree, { recursive: true, force: true });
+        }
+      },
+      400_000
     );
   }
 );
