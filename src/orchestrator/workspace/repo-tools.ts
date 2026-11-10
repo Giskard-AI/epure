@@ -148,7 +148,7 @@ function evaluateManifestScriptMapDegradation(params: {
         createIntegrityViolation(
           "verification_script_degradation",
           params.cleanPath,
-          `Manifest '${params.cleanPath}' degraded verification command '${key}' from '${baseCmd}' to '${newCmd || "<deleted>"}'. Replacing verification scripts with echo/true stubs is strictly forbidden (ADR-0032, Q113).`
+          `Manifest '${params.cleanPath}' degraded verification command '${key}' from '${baseCmd}' to '${newCmd || "<deleted>"}'. Replacing verification scripts with echo/true stubs is strictly forbidden (https://giskard-ai.github.io/epure/architecture).`
         )
       );
       continue;
@@ -167,7 +167,7 @@ function evaluateManifestScriptMapDegradation(params: {
           createIntegrityViolation(
             "verification_script_degradation",
             params.cleanPath,
-            `Manifest '${params.cleanPath}' degraded 'build' command from '${baseCmd}' to unit-test command '${newCmd}'. Preserve the real build/compilation command (ADR-0032, Q113).`
+            `Manifest '${params.cleanPath}' degraded 'build' command from '${baseCmd}' to unit-test command '${newCmd}'. Preserve the real build/compilation command (https://giskard-ai.github.io/epure/architecture).`
           )
         );
       }
@@ -268,7 +268,7 @@ export function validateTicketIntegrityGuard(
           createIntegrityViolation(
             "unauthorized_test_deletion",
             delPath,
-            `Existing test file '${delPath}' cannot be deleted by a ticket unless explicitly targeted for removal/replacement in the ticket scope (ADR-0032, Q113).`
+            `Existing test file '${delPath}' cannot be deleted by a ticket unless explicitly targeted for removal/replacement in the ticket scope (https://giskard-ai.github.io/epure/architecture).`
           )
         );
       }
@@ -297,7 +297,7 @@ export function validateTicketIntegrityGuard(
           createIntegrityViolation(
             "unauthorized_test_deletion",
             cleanPath,
-            `Existing test file '${cleanPath}' lost ${baseNonEmptyLines - newNonEmptyLines}/${baseNonEmptyLines} non-empty lines. Tickets must preserve existing regression tests from prior tickets and base branch (ADR-0032, Q113).`
+            `Existing test file '${cleanPath}' lost ${baseNonEmptyLines - newNonEmptyLines}/${baseNonEmptyLines} non-empty lines. Tickets must preserve existing regression tests from prior tickets and base branch (https://giskard-ai.github.io/epure/architecture).`
           )
         );
         continue;
@@ -320,7 +320,7 @@ export function validateTicketIntegrityGuard(
           createIntegrityViolation(
             "out_of_scope_file_truncation",
             cleanPath,
-            `Out-of-scope file '${cleanPath}' (not in ticket filesToTouch) was truncated from ${baseNonEmptyLines} to ${newNonEmptyLines} non-empty lines (${baseSymbols} -> ${newSymbols} public symbols). Use surgical patches and preserve existing code outside ticket scope (ADR-0032, Q113).`
+            `Out-of-scope file '${cleanPath}' (not in ticket filesToTouch) was truncated from ${baseNonEmptyLines} to ${newNonEmptyLines} non-empty lines (${baseSymbols} -> ${newSymbols} public symbols). Use surgical patches and preserve existing code outside ticket scope (https://giskard-ai.github.io/epure/architecture).`
           )
         );
       }
@@ -408,7 +408,7 @@ export function validateTicketIntegrityGuard(
     violations.length === 0
       ? ""
       : [
-          "[EPURE][TicketIntegrityGuard] Inter-ticket integrity violation(s) blocked pre-commit (ADR-0032, Q113):",
+          "[EPURE][TicketIntegrityGuard] Inter-ticket integrity violation(s) blocked pre-commit (https://giskard-ai.github.io/epure/architecture):",
           ...violations.map(
             (v) => `- [${v.kind}] (${v.path}): ${v.details}`
           ),

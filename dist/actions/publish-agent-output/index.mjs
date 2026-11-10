@@ -56,6 +56,48 @@ var GENERATE = String.raw`:(?:generateContent|streamGenerateContent)`;
 import { AsyncLocalStorage } from "node:async_hooks";
 var usageContext = new AsyncLocalStorage();
 
+// package.json
+var package_default = {
+  name: "@giskard-ai/epure",
+  version: "3.0.0",
+  private: true,
+  description: "EPURE (Giskard-AI/epure) \u2014 Public Reusable Workflows, TypeScript Custom Actions (Node.js 24 LTS), and Agent Skills",
+  license: "Apache-2.0",
+  type: "module",
+  engines: {
+    node: ">=24.0.0"
+  },
+  bin: {
+    "epure-setup-repo": "./dist/cli/setup-repo.mjs"
+  },
+  scripts: {
+    build: "node scripts/build-actions.mjs",
+    typecheck: "tsc --noEmit",
+    test: "vitest run --exclude 'tests/live/**' --exclude 'tests/live-github/**' --exclude 'tests/e2e/**'",
+    "test:live": "vitest run tests/live/",
+    "test:live:github": "EPURE_LIVE_GITHUB=1 vitest run tests/live-github/",
+    "test:e2e": "EPURE_E2E=run vitest run tests/e2e/sandbox-epic.e2e.test.ts",
+    "test:e2e:reset": "EPURE_E2E=reset vitest run tests/e2e/sandbox-epic.e2e.test.ts",
+    "docs:diagrams": "node scripts/build-diagrams.mjs",
+    "docs:llms": "node scripts/build-llms-txt.mjs",
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "node scripts/build-llms-txt.mjs && vitepress build docs",
+    "docs:preview": "vitepress preview docs"
+  },
+  devDependencies: {
+    "@cursor/sdk": "1.3.1",
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@types/node": "24.19.2",
+    esbuild: "0.28.2",
+    typescript: "7.0.2",
+    vitepress: "1.6.4",
+    vitest: "5.0.5"
+  }
+};
+
+// src/contract/epure-contract.ts
+var EPURE_PUBLIC_VERSION = package_default.version;
+
 // src/sandbox/llm-sandbox.ts
 var NONCE_HEADER = "x-epure-proxy-nonce";
 var CREDENTIAL_HEADERS = [
@@ -96,6 +138,33 @@ var MAX_GIT_OUTPUT_BYTES = 256 * 1024 * 1024;
 
 // src/review/reviewers-dir.ts
 var DEFAULT_REVIEWERS_DIR = ".agents/reviewers";
+
+// src/bootstrap/setup-repo.ts
+var DEFAULT_EPURE_PINNED_SHA = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+var MANAGED_WORKFLOW_PATHS = [
+  ".github/workflows/epure-issue-command.yml",
+  ".github/workflows/epure-check.yml",
+  ".github/workflows/pr-title.yml",
+  ".github/workflows/release.yml"
+];
+var MANAGED_FILE_PATHS = [
+  ...MANAGED_WORKFLOW_PATHS,
+  ".github/zizmor.yml"
+];
+var EMPTY_MIGRATION_CHECKLIST = {
+  is_upgrade: false,
+  previous_version: null,
+  previous_pinned_sha: null,
+  target_version: `v${EPURE_PUBLIC_VERSION.replace(/^v/, "")}`,
+  target_pinned_sha: DEFAULT_EPURE_PINNED_SHA,
+  managed_files_to_update: [],
+  conflicting_managed_files: [],
+  preserved_bootstrapped_files: [],
+  new_agents_yml_keys: [],
+  deprecated_agents_yml_keys: [],
+  ruleset_diffs: [],
+  secret_and_permission_changes: []
+};
 
 // src/orchestrator/github/rate-limit.ts
 var GITHUB_RATE_LIMIT_MAX_WAIT_MS = 5 * 60 * 1e3;
@@ -159,7 +228,7 @@ function verifyAgentJobIsolation(env) {
       return {
         isolated: false,
         error_code: "AGENT_ENV_PRIVATE_KEY_FORBIDDEN",
-        error_message: `Agent execution environment must never contain GitHub App private key '${key}' (ADR-0004, ADR-0023).`
+        error_message: `Agent execution environment must never contain GitHub App private key '${key}' (https://giskard-ai.github.io/epure/architecture).`
       };
     }
   }
@@ -178,7 +247,7 @@ function verifyAgentJobIsolation(env) {
       return {
         isolated: false,
         error_code: "AGENT_ENV_WRITE_TOKEN_FORBIDDEN",
-        error_message: `Agent execution environment must not receive write token '${key}' (ADR-0004).`
+        error_message: `Agent execution environment must not receive write token '${key}' (https://giskard-ai.github.io/epure/architecture).`
       };
     }
   }
@@ -292,7 +361,7 @@ function validateAgentProposal(rawProposal, scope) {
       return {
         valid: false,
         error_code: "PROTECTED_BRANCH_FORBIDDEN",
-        error_message: `Direct push to protected branch '${targetBranch}' is forbidden (ADR-0004, ADR-0011).`
+        error_message: `Direct push to protected branch '${targetBranch}' is forbidden (https://giskard-ai.github.io/epure/architecture).`
       };
     }
     if (!targetBranch.startsWith(scope.assignedBranchPrefix)) {

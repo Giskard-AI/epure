@@ -105,7 +105,7 @@ describe("Public Custom Action contract (actions/epure-contract pre-bundled on N
       expectedExitCode: 0,
       expectedOutputs: {
         status: "ok",
-        version: "1.0.0",
+        version: "3.0.0",
         contract_valid: "true",
         error_code: "NONE"
       }
@@ -120,7 +120,7 @@ describe("Public Custom Action contract (actions/epure-contract pre-bundled on N
       expectedExitCode: 0,
       expectedOutputs: {
         status: "ok",
-        version: "1.0.0",
+        version: "3.0.0",
         contract_valid: "true",
         error_code: "NONE"
       }
@@ -135,7 +135,7 @@ describe("Public Custom Action contract (actions/epure-contract pre-bundled on N
       expectedExitCode: 1,
       expectedOutputs: {
         status: "error",
-        version: "1.0.0",
+        version: "3.0.0",
         contract_valid: "false",
         error_code: "MUTABLE_FLOATING_TAG_FORBIDDEN"
       }
@@ -150,7 +150,7 @@ describe("Public Custom Action contract (actions/epure-contract pre-bundled on N
       expectedExitCode: 1,
       expectedOutputs: {
         status: "error",
-        version: "1.0.0",
+        version: "3.0.0",
         contract_valid: "false",
         error_code: "INVALID_SHA_PINNING"
       }
@@ -165,7 +165,7 @@ describe("Public Custom Action contract (actions/epure-contract pre-bundled on N
       expectedExitCode: 1,
       expectedOutputs: {
         status: "error",
-        version: "1.0.0",
+        version: "3.0.0",
         contract_valid: "false",
         error_code: "INVALID_REPOSITORY_SLUG"
       }
@@ -181,7 +181,7 @@ describe("Public Custom Action contract (actions/epure-contract pre-bundled on N
       expectedExitCode: 1,
       expectedOutputs: {
         status: "error",
-        version: "1.0.0",
+        version: "3.0.0",
         contract_valid: "false",
         error_code: "SHARED_MAINTAINER_CREDENTIAL_FORBIDDEN"
       }

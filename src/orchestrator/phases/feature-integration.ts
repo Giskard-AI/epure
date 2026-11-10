@@ -292,7 +292,7 @@ export async function runFeatureIntegrationPhase(
       "",
       "## Governance",
       provenanceLine,
-      "- Requires human review and squash-merge into `dev` in the GitHub UI (ADR-0001, ADR-0027, Q45, Q91, Q95)."
+      "- Requires human review and squash-merge into `dev` in the GitHub UI (https://giskard-ai.github.io/epure/architecture)."
     ].join("\n"),
     {
       phase: "completed",
@@ -1272,7 +1272,7 @@ export async function runFeatureIntegrationPhase(
       ...formatEpicUsageSection(currentTokenUsage(), params.parsedDevAgentsConfig?.pricing),
       "",
       `👉 **Pull Request finale ouverte vers \`dev\`** : ${featurePr.html_url}`,
-      "Conformément à la gouvernance EPURE (Q45, Q91, Q95), la fusion finale `feature/* → dev` est réservée à la validation humaine dans l'interface GitHub."
+      "Conformément à la gouvernance EPURE (https://giskard-ai.github.io/epure/architecture), la fusion finale `feature/* → dev` est réservée à la validation humaine dans l'interface GitHub."
     ].join("\n"),
     {
       phase: "completed",

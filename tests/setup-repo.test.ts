@@ -23,9 +23,12 @@ import {
 import {
   DEFAULT_AGENTS_CONFIG,
   DEFAULT_EPURE_PINNED_SHA,
+  applyGitHubRepositoryGovernance,
+  buildGovernanceRulesets,
   parseAgentsYaml,
   planAndApplyRepoSetup,
   resolveAgentsConfig,
+  resolveEpureVersionTag,
   serializeAgentsYml,
   validateOrgSecretSharingScope
 } from "../src/bootstrap/setup-repo.js";
@@ -74,7 +77,7 @@ describe("1. Dry-run simulation & guided application (planAndApplyRepoSetup)", (
       ]);
       for (const wf of result.planned_workflows) {
         expect(wf.action).toBe("create");
-        expect(wf.content).toContain(`@${DEFAULT_EPURE_PINNED_SHA} # v1.1.0`);
+        expect(wf.content).toContain(`@${DEFAULT_EPURE_PINNED_SHA} # v3.0.0`);
       }
 
       expect(result.planned_reviewer_roster).toHaveLength(10);
@@ -1316,3 +1319,280 @@ describe("5. Pre-bundled CLI (dist/cli/setup-repo.mjs) & skill (.agents/skills/s
     }
   );
 });
+
+describe("6. v3.0.0 Managed vs Bootstrapped Files, Real Versions, Migration Checklist, Required Checks & Upgrade Wizard (#102, #119, #132)", () => {
+  it.each([
+    {
+      id: "managed-file-with-header-and-older-sha-is-updated-in-place",
+      relPath: ".github/workflows/epure-check.yml",
+      existingContent: "# Managed by Giskard-AI/epure@0000000000000000000000000000000000000000 # v1.5.9\nname: Old\n",
+      forceBootstrap: false,
+      expectedAction: "update" as const,
+      expectedMutated: true,
+      expectedConflict: false
+    },
+    {
+      id: "managed-file-hand-written-without-header-reports-conflict-and-is-not-overwritten",
+      relPath: ".github/workflows/epure-check.yml",
+      existingContent: "name: Hand Written Custom Check\non: [push]\n",
+      forceBootstrap: false,
+      expectedAction: "conflict" as const,
+      expectedMutated: false,
+      expectedConflict: true
+    },
+    {
+      id: "bootstrapped-ci-workflow-is-preserved-as-noop-by-default",
+      relPath: ".github/workflows/ci.yml",
+      existingContent: "name: Custom CI\non:\n  pull_request:\n    branches: [dev, 'feature/**']\njobs:\n  q:\n    name: \"Quality (Format, Lint, Typecheck, Test & Build)\"\n    runs-on: ubuntu-26.04\n    steps: []\n  z:\n    name: \"Zizmor\"\n    runs-on: ubuntu-26.04\n    steps: []\n",
+      forceBootstrap: false,
+      expectedAction: "noop" as const,
+      expectedMutated: false,
+      expectedConflict: false
+    },
+    {
+      id: "bootstrapped-ci-workflow-is-updated-when-force-bootstrap-is-true",
+      relPath: ".github/workflows/ci.yml",
+      existingContent: "name: Custom CI\non: [push]\n",
+      forceBootstrap: true,
+      expectedAction: "update" as const,
+      expectedMutated: true,
+      expectedConflict: false
+    }
+  ])(
+    "$id",
+    ({
+      relPath,
+      existingContent,
+      forceBootstrap,
+      expectedAction,
+      expectedMutated,
+      expectedConflict
+    }) => {
+      const tempRepoDir = mkdtempSync(join(tmpdir(), "epure-v3-lifecycle-"));
+      try {
+        // First bootstrap the repo
+        planAndApplyRepoSetup({
+          repository: "acme-org/payments",
+          repoRootDir: tempRepoDir,
+          dryRun: false,
+          epurePinnedSha: DEFAULT_EPURE_PINNED_SHA
+        });
+        writeFileSync(join(tempRepoDir, relPath), existingContent, "utf8");
+
+        const second = planAndApplyRepoSetup({
+          repository: "acme-org/payments",
+          repoRootDir: tempRepoDir,
+          dryRun: false,
+          forceBootstrap,
+          epurePinnedSha: DEFAULT_EPURE_PINNED_SHA
+        });
+
+        const wf = second.planned_workflows.find((w) => w.path === relPath);
+        expect(wf?.action).toBe(expectedAction);
+        expect(second.mutated_files.includes(relPath)).toBe(expectedMutated);
+        expect(second.conflicts.some((c) => c.path === relPath)).toBe(expectedConflict);
+        if (expectedConflict) {
+          expect(readFileSync(join(tempRepoDir, relPath), "utf8")).toBe(existingContent);
+        }
+      } finally {
+        rmSync(tempRepoDir, { recursive: true, force: true });
+      }
+    }
+  );
+
+  it("populates migration_checklist on upgrade from v1/v2, merges .github/agents.yml, and migrates deprecated keys", () => {
+    const tempRepoDir = mkdtempSync(join(tmpdir(), "epure-v3-migration-"));
+    const oldSha = "1111111111111111111111111111111111111111";
+    const newSha = "2222222222222222222222222222222222222222";
+    try {
+      mkdirSync(join(tempRepoDir, ".github", "workflows"), { recursive: true });
+      mkdirSync(join(tempRepoDir, ".agents", "reviewers"), { recursive: true });
+      writeFileSync(
+        join(tempRepoDir, ".github", "agents.yml"),
+        [
+          "version: v1.5.9",
+          "harness: codex",
+          "model: anthropic/claude-3-7-sonnet",
+          "llm_environment: custom-llm",
+          ""
+        ].join("\n"),
+        "utf8"
+      );
+      writeFileSync(
+        join(tempRepoDir, ".github", "workflows", "epure-check.yml"),
+        `# Managed by Giskard-AI/epure@${oldSha} # v1.5.9\nname: Old Check\n`,
+        "utf8"
+      );
+      writeFileSync(
+        join(tempRepoDir, ".github", "workflows", "release.yml"),
+        "name: Hand Written Release Workflow\n",
+        "utf8"
+      );
+      writeFileSync(
+        join(tempRepoDir, "renovate.json"),
+        '{"extends":["config:recommended"]}\n',
+        "utf8"
+      );
+
+      const res = planAndApplyRepoSetup({
+        repository: "acme-org/payments",
+        repoRootDir: tempRepoDir,
+        dryRun: true,
+        epurePinnedSha: newSha
+      });
+
+      expect(res.migration_checklist.is_upgrade).toBe(true);
+      expect(res.migration_checklist.previous_version).toBe("v1.5.9");
+      expect(res.migration_checklist.previous_pinned_sha).toBe(oldSha);
+      expect(res.migration_checklist.target_version).toBe("v3.0.0");
+      expect(res.migration_checklist.target_pinned_sha).toBe(newSha);
+      expect(res.migration_checklist.managed_files_to_update).toContain(
+        ".github/workflows/epure-check.yml"
+      );
+      expect(res.migration_checklist.conflicting_managed_files).toEqual([
+        ".github/workflows/release.yml"
+      ]);
+      expect(res.migration_checklist.preserved_bootstrapped_files).toContain(
+        "renovate.json"
+      );
+      expect(res.migration_checklist.deprecated_agents_yml_keys).toEqual(
+        expect.arrayContaining(["version", "model", "harness: codex"])
+      );
+      expect(res.agents_config.harness).toBe("pi");
+      expect(res.agents_config.llm_environment).toBe("custom-llm");
+      expect(res.agents_config.models.planning).toBe("anthropic/claude-3-7-sonnet");
+      expect(res.summary_markdown).toContain("### Migration Checklist");
+    } finally {
+      rmSync(tempRepoDir, { recursive: true, force: true });
+    }
+  });
+
+  it("detects missing required PR status checks when a custom ci.yml omits Quality or Zizmor and blocks applyGitHubRepositoryGovernance unless allowMissingRequiredChecks is true (#132)", async () => {
+    const tempRepoDir = mkdtempSync(join(tmpdir(), "epure-v3-missing-checks-"));
+    try {
+      planAndApplyRepoSetup({
+        repository: "acme-org/payments",
+        repoRootDir: tempRepoDir,
+        dryRun: false,
+        epurePinnedSha: DEFAULT_EPURE_PINNED_SHA
+      });
+      // Replace bootstrapped ci.yml with a custom workflow that only defines "Unit Tests"
+      writeFileSync(
+        join(tempRepoDir, ".github", "workflows", "ci.yml"),
+        [
+          "name: Custom CI",
+          "on:",
+          "  pull_request:",
+          "    branches: [dev, 'feature/**']",
+          "jobs:",
+          "  unit:",
+          '    name: "Unit Tests"',
+          "    runs-on: ubuntu-26.04",
+          "    steps:",
+          "      - run: echo ok",
+          ""
+        ].join("\n"),
+        "utf8"
+      );
+
+      const plan = planAndApplyRepoSetup({
+        repository: "acme-org/payments",
+        repoRootDir: tempRepoDir,
+        dryRun: true,
+        epurePinnedSha: DEFAULT_EPURE_PINNED_SHA
+      });
+      expect(plan.missing_required_checks).toEqual([
+        "Quality (Format, Lint, Typecheck, Test & Build)",
+        "Zizmor"
+      ]);
+      expect(plan.warnings.some((w) => w.includes("Missing required pull_request status check(s)"))).toBe(true);
+
+      const rulesets = buildGovernanceRulesets({
+        agentAppName: "acme-org-epure-agent",
+        releaseAppName: "acme-org-epure-release"
+      });
+      const mockFetch: typeof fetch = async (input, init) => {
+        const method = init?.method ?? "GET";
+        if (method === "GET") {
+          return new Response("[]", { status: 200 });
+        }
+        return new Response(JSON.stringify({ id: 1 }), { status: method === "POST" ? 201 : 200 });
+      };
+
+      await expect(
+        applyGitHubRepositoryGovernance({
+          repository: "acme-org/payments",
+          githubToken: "ghs_testToken",
+          governanceRulesets: rulesets.all,
+          agentAppIntegrationId: 10,
+          releaseAppIntegrationId: 20,
+          repoRootDir: tempRepoDir,
+          fetchImpl: mockFetch
+        })
+      ).rejects.toThrow(/required pull_request status check\(s\)/);
+
+      const allowed = await applyGitHubRepositoryGovernance({
+        repository: "acme-org/payments",
+        githubToken: "ghs_testToken",
+        governanceRulesets: rulesets.all,
+        agentAppIntegrationId: 10,
+        releaseAppIntegrationId: 20,
+        repoRootDir: tempRepoDir,
+        allowMissingRequiredChecks: true,
+        fetchImpl: mockFetch
+      });
+      expect(allowed.applied).toBe(true);
+    } finally {
+      rmSync(tempRepoDir, { recursive: true, force: true });
+    }
+  });
+
+  it("stamps real version v3.0.0 and emits zero internal ADR-NNNN or QNN references in generated consumer files", () => {
+    expect(resolveEpureVersionTag()).toBe("v3.0.0");
+    const tempRepoDir = mkdtempSync(join(tmpdir(), "epure-v3-no-internal-refs-"));
+    try {
+      const res = planAndApplyRepoSetup({
+        repository: "acme-org/payments",
+        repoRootDir: tempRepoDir,
+        dryRun: false,
+        epurePinnedSha: DEFAULT_EPURE_PINNED_SHA
+      });
+
+      for (const relPath of res.mutated_files) {
+        const content = readFileSync(join(tempRepoDir, relPath), "utf8");
+        expect(content, relPath).not.toMatch(/\bADR-\d{4}\b/);
+        expect(content, relPath).not.toMatch(/\bQ\d{2,3}\b/);
+      }
+    } finally {
+      rmSync(tempRepoDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    {
+      id: "upgrade-wizard-bash-syntax-check",
+      args: ["-n", "scripts/wizards/upgrade-consumer-wizard.sh"],
+      expectedSubstrings: [] as readonly string[]
+    },
+    {
+      id: "upgrade-wizard-help-output",
+      args: ["scripts/wizards/upgrade-consumer-wizard.sh", "--help"],
+      expectedSubstrings: [
+        "Usage: bash scripts/wizards/upgrade-consumer-wizard.sh",
+        "Stage 1:",
+        "Stage 5:"
+      ]
+    }
+  ])("validates scripts/wizards/upgrade-consumer-wizard.sh ($id)", ({ args, expectedSubstrings }) => {
+    const wizardPath = join(ROOT_DIR, "scripts", "wizards", "upgrade-consumer-wizard.sh");
+    expect(existsSync(wizardPath)).toBe(true);
+    const stdout = execFileSync("bash", args, {
+      cwd: ROOT_DIR,
+      encoding: "utf8"
+    });
+    for (const expected of expectedSubstrings) {
+      expect(stdout).toContain(expected);
+    }
+  });
+});
+

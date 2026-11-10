@@ -3004,7 +3004,7 @@ async function runInUntrustedCodeSandbox(input) {
     return {
       isolated: false,
       error_code: "SANDBOX_ISOLATION_UNAVAILABLE",
-      error_message: "Fail-closed: container/process sandbox isolation is unavailable on this runner (ADR-0011, ADR-0023).",
+      error_message: "Fail-closed: container/process sandbox isolation is unavailable on this runner (https://giskard-ai.github.io/epure/architecture).",
       exit_code: 1,
       stdout: "",
       stderr: "",
@@ -3040,7 +3040,7 @@ async function runInUntrustedCodeSandbox(input) {
     return {
       isolated: false,
       error_code: "SANDBOX_ISOLATION_UNAVAILABLE",
-      error_message: "Fail-closed: kernel confinement is mandatory in CI or with EPURE_ENFORCE_KERNEL_SANDBOX=true, and this runner lacks a working bubblewrap (plus landrun for networked phases) (ADR-0034).",
+      error_message: "Fail-closed: kernel confinement is mandatory in CI or with EPURE_ENFORCE_KERNEL_SANDBOX=true, and this runner lacks a working bubblewrap (plus landrun for networked phases) (https://giskard-ai.github.io/epure/architecture).",
       exit_code: 1,
       stdout: "",
       stderr: "",
@@ -3218,7 +3218,7 @@ function spawnCaptured(command, args, cwd, env, timeoutMs, interact, onSpawn) {
 }
 
 // src/sandbox/polyglot-workspace-runner.ts
-import { execFileSync } from "node:child_process";
+import { execFileSync as execFileSync2 } from "node:child_process";
 import {
   chmodSync,
   cpSync,
@@ -3321,12 +3321,78 @@ function extractJsonObject2(rawText, schemaSpec) {
   return parseAndValidateStructuredOutput(rawText, schemaSpec);
 }
 
+// package.json
+var package_default = {
+  name: "@giskard-ai/epure",
+  version: "3.0.0",
+  private: true,
+  description: "EPURE (Giskard-AI/epure) \u2014 Public Reusable Workflows, TypeScript Custom Actions (Node.js 24 LTS), and Agent Skills",
+  license: "Apache-2.0",
+  type: "module",
+  engines: {
+    node: ">=24.0.0"
+  },
+  bin: {
+    "epure-setup-repo": "./dist/cli/setup-repo.mjs"
+  },
+  scripts: {
+    build: "node scripts/build-actions.mjs",
+    typecheck: "tsc --noEmit",
+    test: "vitest run --exclude 'tests/live/**' --exclude 'tests/live-github/**' --exclude 'tests/e2e/**'",
+    "test:live": "vitest run tests/live/",
+    "test:live:github": "EPURE_LIVE_GITHUB=1 vitest run tests/live-github/",
+    "test:e2e": "EPURE_E2E=run vitest run tests/e2e/sandbox-epic.e2e.test.ts",
+    "test:e2e:reset": "EPURE_E2E=reset vitest run tests/e2e/sandbox-epic.e2e.test.ts",
+    "docs:diagrams": "node scripts/build-diagrams.mjs",
+    "docs:llms": "node scripts/build-llms-txt.mjs",
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "node scripts/build-llms-txt.mjs && vitepress build docs",
+    "docs:preview": "vitepress preview docs"
+  },
+  devDependencies: {
+    "@cursor/sdk": "1.3.1",
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@types/node": "24.19.2",
+    esbuild: "0.28.2",
+    typescript: "7.0.2",
+    vitepress: "1.6.4",
+    vitest: "5.0.5"
+  }
+};
+
+// src/contract/epure-contract.ts
+var EPURE_PUBLIC_VERSION = package_default.version;
+
 // src/review/reviewers-dir.ts
 var DEFAULT_REVIEWERS_DIR = ".agents/reviewers";
 
 // src/bootstrap/ci-and-renovate.ts
+import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
+var EXACT_SEMVER_TAG_PATTERN = /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+function resolveEpureVersionTag(repoRootOrVersion) {
+  const fallback = `v${EPURE_PUBLIC_VERSION.replace(/^v/, "")}`;
+  if (!repoRootOrVersion || repoRootOrVersion.trim().length === 0) {
+    return fallback;
+  }
+  const trimmed = repoRootOrVersion.trim();
+  if (EXACT_SEMVER_TAG_PATTERN.test(trimmed)) {
+    return trimmed.startsWith("v") ? trimmed : `v${trimmed}`;
+  }
+  try {
+    const described = execFileSync("git", ["describe", "--tags", "--exact-match"], {
+      cwd: trimmed,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    }).trim();
+    if (/^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(described)) {
+      return described;
+    }
+  } catch {
+  }
+  return fallback;
+}
 var PINNED_ACTIONS_CHECKOUT_SHA = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1";
 var PINNED_ACTIONS_SETUP_NODE_SHA = "actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0";
 var PINNED_ACTIONS_SETUP_PYTHON_SHA = "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0";
@@ -4090,16 +4156,19 @@ function detectRepositoryStack(params) {
     verification
   };
 }
-function buildZizmorConfigYaml() {
+function buildZizmorConfigYaml(params) {
+  const pinnedSha = params?.pinnedSha ?? "1111111111111111111111111111111111111111";
+  const versionTag = resolveEpureVersionTag(params?.epureVersionTag);
   return {
     path: ".github/zizmor.yml",
     content: [
-      "# zizmor static analysis config for GitHub Actions workflows (ADR-0017).",
+      `# Managed by Giskard-AI/epure@${pinnedSha} # ${versionTag}`,
+      "# zizmor static analysis config for GitHub Actions workflows (https://giskard-ai.github.io/epure/architecture).",
       "# https://docs.zizmor.sh/",
       "rules:",
       "  dangerous-triggers:",
       "    ignore:",
-      "      # EPURE Issue Command Gate enforces write-permission verification before any privileged execution (ADR-0004).",
+      "      # EPURE Issue Command Gate enforces write-permission verification before any privileged execution (https://giskard-ai.github.io/epure/architecture).",
       "      - epure-issue-command.yml",
       "  ref-version-mismatch:",
       "    ignore:",
@@ -4391,10 +4460,11 @@ function buildQualityJobStepsForStack(stack) {
 }
 function buildStackAwareCiWorkflowYaml(params) {
   const qualitySteps = buildQualityJobStepsForStack(params.stack);
+  const versionTag = resolveEpureVersionTag(params.epureVersionTag);
   return {
     path: ".github/workflows/ci.yml",
     content: [
-      `# Managed by Giskard-AI/epure@${params.pinnedSha} # v1.1.0`,
+      `# Managed by Giskard-AI/epure@${params.pinnedSha} # ${versionTag}`,
       "# Continuous Integration: Zizmor workflow security audit + Stack-aware Format, Lint/Typecheck, Tests, Build & E2E.",
       'name: "CI"',
       "",
@@ -4440,6 +4510,7 @@ function buildStackAwareCiWorkflowYaml(params) {
 }
 
 // src/bootstrap/setup-repo.ts
+var DEFAULT_EPURE_PINNED_SHA = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
 var CONVENTIONAL_COMMIT_PATTERN_REGEX = "^(feat|fix|docs|style|refactor|perf|test|chore|ci|build|revert)(\\([a-z0-9/-]+\\))?(!)?: .+";
 var DEFAULT_VERIFICATION_PROFILE = {
   wait_for_external_ci: true,
@@ -4566,7 +4637,7 @@ function resolveAgentsConfig(overrides = {}) {
       return {
         valid: false,
         error_code: "SECURITY_INVARIANT_VIOLATION",
-        error_message: "Local .github/agents.yml cannot disable effective write permission verification (ADR-0004, ADR-0010).",
+        error_message: "Local .github/agents.yml cannot disable effective write permission verification (https://giskard-ai.github.io/epure/configuration).",
         config: DEFAULT_AGENTS_CONFIG
       };
     }
@@ -4574,7 +4645,7 @@ function resolveAgentsConfig(overrides = {}) {
       return {
         valid: false,
         error_code: "SECURITY_INVARIANT_VIOLATION",
-        error_message: "Local .github/agents.yml cannot disable untrusted code sandbox isolation (ADR-0011, ADR-0023).",
+        error_message: "Local .github/agents.yml cannot disable untrusted code sandbox isolation (https://giskard-ai.github.io/epure/architecture).",
         config: DEFAULT_AGENTS_CONFIG
       };
     }
@@ -4582,7 +4653,7 @@ function resolveAgentsConfig(overrides = {}) {
       return {
         valid: false,
         error_code: "SECURITY_INVARIANT_VIOLATION",
-        error_message: "Local .github/agents.yml cannot grant release authority to the Agent App (ADR-0009, ADR-0010).",
+        error_message: "Local .github/agents.yml cannot grant release authority to the Agent App (https://giskard-ai.github.io/epure/architecture).",
         config: DEFAULT_AGENTS_CONFIG
       };
     }
@@ -4590,7 +4661,7 @@ function resolveAgentsConfig(overrides = {}) {
       return {
         valid: false,
         error_code: "SECURITY_INVARIANT_VIOLATION",
-        error_message: "Local .github/agents.yml cannot enable automatic merging into 'dev' or 'main' (ADR-0011).",
+        error_message: "Local .github/agents.yml cannot enable automatic merging into 'dev' or 'main' (https://giskard-ai.github.io/epure/configuration).",
         config: DEFAULT_AGENTS_CONFIG
       };
     }
@@ -4627,7 +4698,7 @@ function resolveAgentsConfig(overrides = {}) {
       return {
         valid: false,
         error_code: "PAGES_PREVIEW_CONSENT_OR_ORIGIN_REQUIRED",
-        error_message: "GitHub Pages previews require explicit human consent (github_pages_human_consent: true) and an isolated non-production origin (preview_separate_origin: true) per Q70/Q73.",
+        error_message: "GitHub Pages previews require explicit human consent (github_pages_human_consent: true) and an isolated non-production origin (preview_separate_origin: true) (https://giskard-ai.github.io/epure/configuration).",
         config: DEFAULT_AGENTS_CONFIG
       };
     }
@@ -4683,6 +4754,8 @@ function resolveAgentsConfig(overrides = {}) {
     trace_retention_days: overrides.trace_retention_days ?? DEFAULT_AGENTS_CONFIG.trace_retention_days,
     preview_retention_days: overrides.preview_retention_days ?? DEFAULT_AGENTS_CONFIG.preview_retention_days,
     github_pages_previews: pagesPreviews,
+    ...overrides.github_pages_human_consent !== void 0 ? { github_pages_human_consent: overrides.github_pages_human_consent } : {},
+    ...overrides.preview_separate_origin !== void 0 ? { preview_separate_origin: overrides.preview_separate_origin } : {},
     verification,
     ...webTools ? { web_tools: webTools } : {},
     ...overrides.pricing ? { pricing: overrides.pricing } : {}
@@ -5266,6 +5339,30 @@ function parseAgentsYaml(yamlContent) {
     ...Object.keys(securityOverrides).length > 0 ? { security_overrides: securityOverrides } : {}
   };
 }
+var MANAGED_WORKFLOW_PATHS = [
+  ".github/workflows/epure-issue-command.yml",
+  ".github/workflows/epure-check.yml",
+  ".github/workflows/pr-title.yml",
+  ".github/workflows/release.yml"
+];
+var MANAGED_FILE_PATHS = [
+  ...MANAGED_WORKFLOW_PATHS,
+  ".github/zizmor.yml"
+];
+var EMPTY_MIGRATION_CHECKLIST = {
+  is_upgrade: false,
+  previous_version: null,
+  previous_pinned_sha: null,
+  target_version: `v${EPURE_PUBLIC_VERSION.replace(/^v/, "")}`,
+  target_pinned_sha: DEFAULT_EPURE_PINNED_SHA,
+  managed_files_to_update: [],
+  conflicting_managed_files: [],
+  preserved_bootstrapped_files: [],
+  new_agents_yml_keys: [],
+  deprecated_agents_yml_keys: [],
+  ruleset_diffs: [],
+  secret_and_permission_changes: []
+};
 
 // src/state/git-ref-state.ts
 function toTerminalState(prev, update) {
@@ -5762,12 +5859,12 @@ function verifyPublisherMergeBoundary(params) {
   const cleanBase = params.baseBranch.trim().replace(/^refs\/heads\//, "");
   if (cleanBase === "main" || cleanBase === "master") {
     throw new Error(
-      `HARDWARE_GUARD: Agent App is strictly forbidden from merging '${cleanHead}' into release branch '${cleanBase}' (ADR-0009, Q91).`
+      `HARDWARE_GUARD: Agent App is strictly forbidden from merging '${cleanHead}' into release branch '${cleanBase}' (https://giskard-ai.github.io/epure/architecture).`
     );
   }
   if (cleanBase === "dev" && !cleanHead.startsWith("plan/")) {
     throw new Error(
-      `HARDWARE_GUARD: Agent App is strictly forbidden from auto-merging '${cleanHead}' into 'dev'. Only human maintainers may merge 'feature/* -> dev' in the GitHub UI (ADR-0001, Q45, Q91, Q95).`
+      `HARDWARE_GUARD: Agent App is strictly forbidden from auto-merging '${cleanHead}' into 'dev'. Only human maintainers may merge 'feature/* -> dev' in the GitHub UI (https://giskard-ai.github.io/epure/architecture).`
     );
   }
 }
@@ -8739,7 +8836,7 @@ function prepareRepositorySandboxWorkspace(input) {
         workDir
       ];
       const gitRunner2 = input.execGitImpl ?? ((args, opts) => {
-        execFileSync("git", [...args], {
+        execFileSync2("git", [...args], {
           cwd: opts.cwd,
           stdio: "pipe",
           timeout: 12e4
@@ -11242,7 +11339,7 @@ function formatNeedsHumanEscalationComment(input) {
   } else if (input.reason === "epic_convergence_exhausted") {
     const usedPhases = input.epicConvergenceDetails?.epicPhase ?? 2;
     const maxPhases = input.epicConvergenceDetails?.maxEpicPhases ?? 2;
-    reasonHeadline = `Non-convergence de la fonctionnalit\xE9 apr\xE8s \`${usedPhases}/${maxPhases}\` phases de tickets (\`epic_convergence_exhausted\`, ADR-0032)`;
+    reasonHeadline = `Non-convergence de la fonctionnalit\xE9 apr\xE8s \`${usedPhases}/${maxPhases}\` phases de tickets (\`epic_convergence_exhausted\`, https://giskard-ai.github.io/epure/guides/how-to-drive-an-issue)`;
   } else if (input.reason === "grace_window_timeout") {
     const gw = input.graceWindowSeconds ?? 45;
     reasonHeadline = `${gw}s external CI workflow registration timeout (fail-closed)`;
@@ -11259,7 +11356,7 @@ function formatNeedsHumanEscalationComment(input) {
   } else if (input.reason === "transient_llm_api_exhausted") {
     reasonHeadline = "Transient LLM API retries or unitary request timeout exhausted (`max_transient_api_retries`) \u2014 code-fix budget preserved";
   } else if (input.reason === "llm_quota_or_auth_failure") {
-    reasonHeadline = "LLM provider quota/billing exhaustion or authentication failure (ADR-0012: no automatic fallback)";
+    reasonHeadline = "LLM provider quota/billing exhaustion or authentication failure (https://giskard-ai.github.io/epure/configuration: no automatic fallback)";
   } else if (input.reason === "llm_request_invalid") {
     reasonHeadline = "LLM request rejected or response invalid after structured-output retry (non-transient) \u2014 code-fix budget preserved";
   } else if (input.reason === "llm_refusal") {
@@ -11385,7 +11482,7 @@ function formatNeedsHumanEscalationComment(input) {
     `#### \u{1F6E0}\uFE0F Playbook de reprise (\`${resumeCommand}\`)`,
     "1. Inspectez les checks ou fichiers signal\xE9s ci-dessus (ou ajustez `verification.targets` dans `.github/agents.yml` sur `dev` si n\xE9cessaire).",
     `2. Poussez un correctif sur \`${input.branch}\` ou mettez \xE0 jour la configuration sur \`dev\`.`,
-    input.resumeCommand ? `3. Republiez \`${resumeCommand}\` sur cette issue (#${input.issueNumber}) pour reprendre (une r\xE9ponse libre suffit pendant le grill et la revue de sp\xE9cification).` : `3. Postez \`/epure continue\` (ou \`/epure approve\`) sur cette issue (#${input.issueNumber}) : l'orchestrateur r\xE9conciliera automatiquement la PR existante et reprendra la validation sans dupliquer le travail (ADR-0028, Q110). Une r\xE9ponse libre ne reprend pas l'ex\xE9cution ; les commentaires publi\xE9s d'ici l\xE0 par un contributeur \`write\` ou sup\xE9rieur (hors commandes \`/epure\` et bots, ${RESUME_CONTEXT_MAX_COMMENTS} derniers, ${RESUME_CONTEXT_MAX_CHARS} caract\xE8res au plus) sont transmis \xE0 la session reprise.`
+    input.resumeCommand ? `3. Republiez \`${resumeCommand}\` sur cette issue (#${input.issueNumber}) pour reprendre (une r\xE9ponse libre suffit pendant le grill et la revue de sp\xE9cification).` : `3. Postez \`/epure continue\` (ou \`/epure approve\`) sur cette issue (#${input.issueNumber}) : l'orchestrateur r\xE9conciliera automatiquement la PR existante et reprendra la validation sans dupliquer le travail (https://giskard-ai.github.io/epure/guides/how-to-drive-an-issue). Une r\xE9ponse libre ne reprend pas l'ex\xE9cution ; les commentaires publi\xE9s d'ici l\xE0 par un contributeur \`write\` ou sup\xE9rieur (hors commandes \`/epure\` et bots, ${RESUME_CONTEXT_MAX_COMMENTS} derniers, ${RESUME_CONTEXT_MAX_CHARS} caract\xE8res au plus) sont transmis \xE0 la session reprise.`
   );
   if (input.reason === "remediation_exhausted" && !input.resumeCommand) {
     lines.push(
@@ -11896,7 +11993,7 @@ function evaluateManifestScriptMapDegradation(params) {
         createIntegrityViolation(
           "verification_script_degradation",
           params.cleanPath,
-          `Manifest '${params.cleanPath}' degraded verification command '${key}' from '${baseCmd}' to '${newCmd || "<deleted>"}'. Replacing verification scripts with echo/true stubs is strictly forbidden (ADR-0032, Q113).`
+          `Manifest '${params.cleanPath}' degraded verification command '${key}' from '${baseCmd}' to '${newCmd || "<deleted>"}'. Replacing verification scripts with echo/true stubs is strictly forbidden (https://giskard-ai.github.io/epure/architecture).`
         )
       );
       continue;
@@ -11908,7 +12005,7 @@ function evaluateManifestScriptMapDegradation(params) {
           createIntegrityViolation(
             "verification_script_degradation",
             params.cleanPath,
-            `Manifest '${params.cleanPath}' degraded 'build' command from '${baseCmd}' to unit-test command '${newCmd}'. Preserve the real build/compilation command (ADR-0032, Q113).`
+            `Manifest '${params.cleanPath}' degraded 'build' command from '${baseCmd}' to unit-test command '${newCmd}'. Preserve the real build/compilation command (https://giskard-ai.github.io/epure/architecture).`
           )
         );
       }
@@ -11975,7 +12072,7 @@ function validateTicketIntegrityGuard(input) {
           createIntegrityViolation(
             "unauthorized_test_deletion",
             delPath,
-            `Existing test file '${delPath}' cannot be deleted by a ticket unless explicitly targeted for removal/replacement in the ticket scope (ADR-0032, Q113).`
+            `Existing test file '${delPath}' cannot be deleted by a ticket unless explicitly targeted for removal/replacement in the ticket scope (https://giskard-ai.github.io/epure/architecture).`
           )
         );
       }
@@ -11996,7 +12093,7 @@ function validateTicketIntegrityGuard(input) {
           createIntegrityViolation(
             "unauthorized_test_deletion",
             cleanPath,
-            `Existing test file '${cleanPath}' lost ${baseNonEmptyLines - newNonEmptyLines}/${baseNonEmptyLines} non-empty lines. Tickets must preserve existing regression tests from prior tickets and base branch (ADR-0032, Q113).`
+            `Existing test file '${cleanPath}' lost ${baseNonEmptyLines - newNonEmptyLines}/${baseNonEmptyLines} non-empty lines. Tickets must preserve existing regression tests from prior tickets and base branch (https://giskard-ai.github.io/epure/architecture).`
           )
         );
         continue;
@@ -12013,7 +12110,7 @@ function validateTicketIntegrityGuard(input) {
           createIntegrityViolation(
             "out_of_scope_file_truncation",
             cleanPath,
-            `Out-of-scope file '${cleanPath}' (not in ticket filesToTouch) was truncated from ${baseNonEmptyLines} to ${newNonEmptyLines} non-empty lines (${baseSymbols} -> ${newSymbols} public symbols). Use surgical patches and preserve existing code outside ticket scope (ADR-0032, Q113).`
+            `Out-of-scope file '${cleanPath}' (not in ticket filesToTouch) was truncated from ${baseNonEmptyLines} to ${newNonEmptyLines} non-empty lines (${baseSymbols} -> ${newSymbols} public symbols). Use surgical patches and preserve existing code outside ticket scope (https://giskard-ai.github.io/epure/architecture).`
           )
         );
       }
@@ -12081,7 +12178,7 @@ function validateTicketIntegrityGuard(input) {
     }
   }
   const diagnosticMarkdown = violations.length === 0 ? "" : [
-    "[EPURE][TicketIntegrityGuard] Inter-ticket integrity violation(s) blocked pre-commit (ADR-0032, Q113):",
+    "[EPURE][TicketIntegrityGuard] Inter-ticket integrity violation(s) blocked pre-commit (https://giskard-ai.github.io/epure/architecture):",
     ...violations.map(
       (v) => `- [${v.kind}] (${v.path}): ${v.details}`
     ),
@@ -14211,7 +14308,7 @@ function validatePlanningArtifactsAndGraph(bundle) {
     return {
       valid: false,
       error_code: "GLOSSARY_MISSING_FOR_DOMAIN_TERMS",
-      error_message: "GLOSSARY.md is required when domain terms are introduced or refined (ADR-0007).",
+      error_message: "GLOSSARY.md is required when domain terms are introduced or refined (https://giskard-ai.github.io/epure/basic-usage).",
       ready_ticket_ids: [],
       blocked_ticket_ids: []
     };
@@ -14220,7 +14317,7 @@ function validatePlanningArtifactsAndGraph(bundle) {
     return {
       valid: false,
       error_code: "ADR_MISSING_OR_INCOMPLETE",
-      error_message: "At least one numbered ADR under docs/adr/NNNN-*.md is required before implementation (ADR-0007).",
+      error_message: "At least one numbered ADR under docs/adr/NNNN-*.md is required before implementation (https://giskard-ai.github.io/epure/basic-usage).",
       ready_ticket_ids: [],
       blocked_ticket_ids: []
     };
@@ -14240,7 +14337,7 @@ function validatePlanningArtifactsAndGraph(bundle) {
     return {
       valid: false,
       error_code: "SPEC_MISSING_OR_INCOMPLETE",
-      error_message: "Approved specification under docs/specs/<slug>.md is missing or empty (ADR-0002, ADR-0007).",
+      error_message: "Approved specification under docs/specs/<slug>.md is missing or empty (https://giskard-ai.github.io/epure/basic-usage).",
       ready_ticket_ids: [],
       blocked_ticket_ids: []
     };
@@ -14258,7 +14355,7 @@ function validatePlanningArtifactsAndGraph(bundle) {
     return {
       valid: false,
       error_code: "TICKET_GRAPH_CYCLE_DETECTED",
-      error_message: "Ticket dependency graph contains a cycle; blocked_by edges must form a strict DAG (ADR-0003).",
+      error_message: "Ticket dependency graph contains a cycle; blocked_by edges must form a strict DAG (https://giskard-ai.github.io/epure/basic-usage).",
       ready_ticket_ids: [],
       blocked_ticket_ids: []
     };
@@ -16703,7 +16800,7 @@ function prepareFeatureToDevPullRequest(input) {
     return {
       ready_to_open: false,
       error_code: "FEATURE_TO_DEV_AUTO_MERGE_FORBIDDEN",
-      error_message: "Automatic merge from feature/* into dev is strictly forbidden; human review and approval are mandatory (ADR-0001, ADR-0002).",
+      error_message: "Automatic merge from feature/* into dev is strictly forbidden; human review and approval are mandatory (https://giskard-ai.github.io/epure/architecture).",
       head_branch: input.featureBranch,
       base_branch: "dev",
       auto_merge_allowed: false,
@@ -17408,7 +17505,7 @@ async function runMultiAgentPrReviewPass(input) {
         path: sensitivePath,
         line: 1,
         title: `Forbidden modification of sensitive path '${sensitivePath}' on task branch`,
-        rationale: `Per ADR-0004, ADR-0017 and Q92, task/* branches must never modify ${input.reviewersDir ?? DEFAULT_REVIEWERS_DIR}/**, .github/workflows/**, or .github/agents.yml.`,
+        rationale: `Per https://giskard-ai.github.io/epure/architecture, task/* branches must never modify ${input.reviewersDir ?? DEFAULT_REVIEWERS_DIR}/**, .github/workflows/**, or .github/agents.yml.`,
         suggested_action: `Revert changes to '${sensitivePath}' and keep reviewer prompts exclusively on the trusted base branch.`
       });
     }
@@ -17707,7 +17804,7 @@ async function runFeatureIntegrationPhase(params) {
       "",
       "## Governance",
       provenanceLine,
-      "- Requires human review and squash-merge into `dev` in the GitHub UI (ADR-0001, ADR-0027, Q45, Q91, Q95)."
+      "- Requires human review and squash-merge into `dev` in the GitHub UI (https://giskard-ai.github.io/epure/architecture)."
     ].join("\n"),
     {
       phase: "completed",
@@ -18540,7 +18637,7 @@ Refs #${params.issueNumber}`
       ...formatEpicUsageSection(currentTokenUsage(), params.parsedDevAgentsConfig?.pricing),
       "",
       `\u{1F449} **Pull Request finale ouverte vers \`dev\`** : ${featurePr.html_url}`,
-      "Conform\xE9ment \xE0 la gouvernance EPURE (Q45, Q91, Q95), la fusion finale `feature/* \u2192 dev` est r\xE9serv\xE9e \xE0 la validation humaine dans l'interface GitHub."
+      "Conform\xE9ment \xE0 la gouvernance EPURE (https://giskard-ai.github.io/epure/architecture), la fusion finale `feature/* \u2192 dev` est r\xE9serv\xE9e \xE0 la validation humaine dans l'interface GitHub."
     ].join("\n"),
     {
       phase: "completed",
@@ -18612,7 +18709,7 @@ function evaluateReviewFeedbackTrigger(input) {
     return {
       should_process: false,
       error_code: "BOT_COMMENT_IGNORED",
-      error_message: "Ordinary bot comments are ignored as review triggers to prevent self-reply loops (ADR-0017).",
+      error_message: "Ordinary bot comments are ignored as review triggers to prevent self-reply loops (https://giskard-ai.github.io/epure/architecture).",
       escalate_to_human: false,
       updated_reviewed_commit_shas: input.alreadyReviewedCommitShas
     };
@@ -18630,7 +18727,7 @@ function evaluateReviewFeedbackTrigger(input) {
     return {
       should_process: false,
       error_code: "COMMIT_SHA_ALREADY_REVIEWED",
-      error_message: `Commit SHA '${input.commitSha}' has already undergone its automated review pass (ADR-0017).`,
+      error_message: `Commit SHA '${input.commitSha}' has already undergone its automated review pass (https://giskard-ai.github.io/epure/architecture).`,
       escalate_to_human: false,
       updated_reviewed_commit_shas: input.alreadyReviewedCommitShas
     };
@@ -19006,7 +19103,7 @@ async function runTicketExecutionLoop(params) {
             "",
             `- **Ticket d\xE9pendant** : #${ticket.ticketIssueNumber} (${ticket.title})`,
             `- **Ticket(s) bloquant(s) non prouv\xE9(s)** : ${unprovenList}`,
-            '- **Raison** : Un ticket bloquant a \xE9t\xE9 ferm\xE9 avec `state_reason: "not_planned"` ou n\'est pas r\xE9solu de mani\xE8re prouv\xE9e sur la branche `feature/*` (ADR-0003, ADR-0029).'
+            '- **Raison** : Un ticket bloquant a \xE9t\xE9 ferm\xE9 avec `state_reason: "not_planned"` ou n\'est pas r\xE9solu de mani\xE8re prouv\xE9e sur la branche `feature/*` (https://giskard-ai.github.io/epure/guides/how-to-drive-an-issue).'
           ].join("\n"),
           {
             phase: "suspended",
@@ -19394,7 +19491,7 @@ ${ticket.acceptanceCriteria.join("\n")}`
         }
         impl = {
           commit_message: existingTaskPr.title || `feat(ticket-${ticket.ticketIssueNumber}): ${ticket.title}`,
-          test_summary: "Reconciled existing open Pull Request on task branch (Q110)",
+          test_summary: "Reconciled existing open Pull Request on task branch (https://giskard-ai.github.io/epure/guides/how-to-drive-an-issue)",
           files: Array.from(ticketChangedFilesMap.entries()).map(
             ([path, content]) => ({ path, content })
           )

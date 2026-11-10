@@ -917,7 +917,7 @@ export async function runMultiAgentPrReviewPass(
         line: 1,
         title: `Forbidden modification of sensitive path '${sensitivePath}' on task branch`,
         rationale:
-          `Per ADR-0004, ADR-0017 and Q92, task/* branches must never modify ${input.reviewersDir ?? DEFAULT_REVIEWERS_DIR}/**, .github/workflows/**, or .github/agents.yml.`,
+          `Per https://giskard-ai.github.io/epure/architecture, task/* branches must never modify ${input.reviewersDir ?? DEFAULT_REVIEWERS_DIR}/**, .github/workflows/**, or .github/agents.yml.`,
         suggested_action: `Revert changes to '${sensitivePath}' and keep reviewer prompts exclusively on the trusted base branch.`
       });
     }

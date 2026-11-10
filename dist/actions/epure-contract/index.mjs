@@ -1,8 +1,47 @@
 // actions/epure-contract/index.ts
 import { appendFileSync } from "node:fs";
 
+// package.json
+var package_default = {
+  name: "@giskard-ai/epure",
+  version: "3.0.0",
+  private: true,
+  description: "EPURE (Giskard-AI/epure) \u2014 Public Reusable Workflows, TypeScript Custom Actions (Node.js 24 LTS), and Agent Skills",
+  license: "Apache-2.0",
+  type: "module",
+  engines: {
+    node: ">=24.0.0"
+  },
+  bin: {
+    "epure-setup-repo": "./dist/cli/setup-repo.mjs"
+  },
+  scripts: {
+    build: "node scripts/build-actions.mjs",
+    typecheck: "tsc --noEmit",
+    test: "vitest run --exclude 'tests/live/**' --exclude 'tests/live-github/**' --exclude 'tests/e2e/**'",
+    "test:live": "vitest run tests/live/",
+    "test:live:github": "EPURE_LIVE_GITHUB=1 vitest run tests/live-github/",
+    "test:e2e": "EPURE_E2E=run vitest run tests/e2e/sandbox-epic.e2e.test.ts",
+    "test:e2e:reset": "EPURE_E2E=reset vitest run tests/e2e/sandbox-epic.e2e.test.ts",
+    "docs:diagrams": "node scripts/build-diagrams.mjs",
+    "docs:llms": "node scripts/build-llms-txt.mjs",
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "node scripts/build-llms-txt.mjs && vitepress build docs",
+    "docs:preview": "vitepress preview docs"
+  },
+  devDependencies: {
+    "@cursor/sdk": "1.3.1",
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@types/node": "24.19.2",
+    esbuild: "0.28.2",
+    typescript: "7.0.2",
+    vitepress: "1.6.4",
+    vitest: "5.0.5"
+  }
+};
+
 // src/contract/epure-contract.ts
-var EPURE_PUBLIC_VERSION = "1.0.0";
+var EPURE_PUBLIC_VERSION = package_default.version;
 var REPO_SLUG_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 var FLOATING_TAG_PATTERN = /@v\d+(?:\.\d+)?(?:\s*(?:#.*)?)$/;
 var IMMUTABLE_SEMVER_TAG_PATTERN = /^Giskard-AI\/epure\/[A-Za-z0-9_./-]+@v\d+\.\d+\.\d+(?:\s*(?:#.*)?)?$/;
@@ -42,7 +81,7 @@ function verifyPublicContract(input) {
       version: EPURE_PUBLIC_VERSION,
       contract_valid: "false",
       error_code: "MUTABLE_FLOATING_TAG_FORBIDDEN",
-      error_message: `Floating tag reference '${pinnedRef}' is forbidden by ADR-0025; pin a 40-char Git SHA or immutable vMAJOR.MINOR.PATCH tag.`
+      error_message: `Floating tag reference '${pinnedRef}' is forbidden (https://giskard-ai.github.io/epure/architecture); pin a 40-char Git SHA or immutable vMAJOR.MINOR.PATCH tag.`
     };
   }
   if (input.strictShaPinning) {

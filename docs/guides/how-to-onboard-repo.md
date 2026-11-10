@@ -103,3 +103,20 @@ git push origin dev
 
 - **Solo Maintainer (Default `--require-pr-approvals 0`)**: GitHub does not allow a user to approve their own Pull Request. Setting `required_approving_review_count: 0` on `epure-dev-governance` ensures you can click **Squash and merge** on `feature/* -> dev` PRs opened by EPURE while still blocking the `Agent App` from self-merging.
 - **Multi-Maintainer Team (`--require-pr-approvals 1` or higher)**: Require at least one peer human approval in addition to green `verify-contract` and `ai-review` checks before merging into `dev`.
+
+---
+
+## 5. Managed vs. Bootstrapped Files & Upgrading an Existing Repository
+
+`setup-repo` distinguishes two file lifecycles so upgrades never clobber project-specific customizations:
+
+- **Managed files** (`.github/workflows/epure-issue-command.yml`, `.github/workflows/epure-check.yml`, `.github/workflows/pr-title.yml`, `.github/workflows/release.yml`, `.github/zizmor.yml`): stamped with `# Managed by Giskard-AI/epure@<40-char-sha> # v3.0.0`. Updated automatically on subsequent `--apply` runs when the header is present; if a file was hand-edited without the managed header, `setup-repo` reports `action: "conflict"` in the migration checklist and leaves it untouched.
+- **Bootstrapped files** (`.github/workflows/ci.yml`, `renovate.json`, `<reviewers_dir>/*.md`): scaffolded once on initial onboarding and left as `noop` on later runs unless `--force-bootstrap` is explicitly passed.
+- **`.github/agents.yml` 3-way merge**: preserves your `models`, `providers`, `verification.targets`, `reviewers_dir`, and `llm_environment` while migrating deprecated v1/v2 keys (`harness: codex` -> `pi`, `model:` -> `models:`).
+
+To upgrade an existing v1/v2 consumer repository interactively (inspecting the migration checklist, verifying required PR checks before updating rulesets, and merging `.github/agents.yml`), run the upgrade wizard:
+
+```bash
+bash scripts/wizards/upgrade-consumer-wizard.sh
+```
+

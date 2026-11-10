@@ -87,7 +87,7 @@ export function validatePlanningArtifactsAndGraph(
       valid: false,
       error_code: "GLOSSARY_MISSING_FOR_DOMAIN_TERMS",
       error_message:
-        "GLOSSARY.md is required when domain terms are introduced or refined (ADR-0007).",
+        "GLOSSARY.md is required when domain terms are introduced or refined (https://giskard-ai.github.io/epure/basic-usage).",
       ready_ticket_ids: [],
       blocked_ticket_ids: []
     };
@@ -98,7 +98,7 @@ export function validatePlanningArtifactsAndGraph(
       valid: false,
       error_code: "ADR_MISSING_OR_INCOMPLETE",
       error_message:
-        "At least one numbered ADR under docs/adr/NNNN-*.md is required before implementation (ADR-0007).",
+        "At least one numbered ADR under docs/adr/NNNN-*.md is required before implementation (https://giskard-ai.github.io/epure/basic-usage).",
       ready_ticket_ids: [],
       blocked_ticket_ids: []
     };
@@ -127,7 +127,7 @@ export function validatePlanningArtifactsAndGraph(
       valid: false,
       error_code: "SPEC_MISSING_OR_INCOMPLETE",
       error_message:
-        "Approved specification under docs/specs/<slug>.md is missing or empty (ADR-0002, ADR-0007).",
+        "Approved specification under docs/specs/<slug>.md is missing or empty (https://giskard-ai.github.io/epure/basic-usage).",
       ready_ticket_ids: [],
       blocked_ticket_ids: []
     };
@@ -148,7 +148,7 @@ export function validatePlanningArtifactsAndGraph(
       valid: false,
       error_code: "TICKET_GRAPH_CYCLE_DETECTED",
       error_message:
-        "Ticket dependency graph contains a cycle; blocked_by edges must form a strict DAG (ADR-0003).",
+        "Ticket dependency graph contains a cycle; blocked_by edges must form a strict DAG (https://giskard-ai.github.io/epure/basic-usage).",
       ready_ticket_ids: [],
       blocked_ticket_ids: []
     };

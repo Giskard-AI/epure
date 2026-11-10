@@ -1,5 +1,33 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
+import { EPURE_PUBLIC_VERSION } from "../contract/epure-contract.js";
+
+const EXACT_SEMVER_TAG_PATTERN = /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+
+export function resolveEpureVersionTag(repoRootOrVersion?: string): string {
+  const fallback = `v${EPURE_PUBLIC_VERSION.replace(/^v/, "")}`;
+  if (!repoRootOrVersion || repoRootOrVersion.trim().length === 0) {
+    return fallback;
+  }
+  const trimmed = repoRootOrVersion.trim();
+  if (EXACT_SEMVER_TAG_PATTERN.test(trimmed)) {
+    return trimmed.startsWith("v") ? trimmed : `v${trimmed}`;
+  }
+  try {
+    const described = execFileSync("git", ["describe", "--tags", "--exact-match"], {
+      cwd: trimmed,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    }).trim();
+    if (/^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(described)) {
+      return described;
+    }
+  } catch {
+    // Fallback to package.json version tag
+  }
+  return fallback;
+}
 
 export type DetectedStackKind =
   | "node"
@@ -1229,16 +1257,23 @@ export function detectRepositoryStack(params: {
   };
 }
 
-export function buildZizmorConfigYaml(): GeneratedRepoGovernanceFile {
+export function buildZizmorConfigYaml(params?: {
+  readonly pinnedSha?: string | undefined;
+  readonly epureVersionTag?: string | undefined;
+}): GeneratedRepoGovernanceFile {
+  const pinnedSha =
+    params?.pinnedSha ?? "1111111111111111111111111111111111111111";
+  const versionTag = resolveEpureVersionTag(params?.epureVersionTag);
   return {
     path: ".github/zizmor.yml",
     content: [
-      "# zizmor static analysis config for GitHub Actions workflows (ADR-0017).",
+      `# Managed by Giskard-AI/epure@${pinnedSha} # ${versionTag}`,
+      "# zizmor static analysis config for GitHub Actions workflows (https://giskard-ai.github.io/epure/architecture).",
       "# https://docs.zizmor.sh/",
       "rules:",
       "  dangerous-triggers:",
       "    ignore:",
-      "      # EPURE Issue Command Gate enforces write-permission verification before any privileged execution (ADR-0004).",
+      "      # EPURE Issue Command Gate enforces write-permission verification before any privileged execution (https://giskard-ai.github.io/epure/architecture).",
       "      - epure-issue-command.yml",
       "  ref-version-mismatch:",
       "    ignore:",
@@ -1549,13 +1584,15 @@ function buildQualityJobStepsForStack(stack: DetectedStackProfile): readonly str
 export function buildStackAwareCiWorkflowYaml(params: {
   readonly pinnedSha: string;
   readonly stack: DetectedStackProfile;
+  readonly epureVersionTag?: string | undefined;
 }): GeneratedRepoGovernanceFile {
   const qualitySteps = buildQualityJobStepsForStack(params.stack);
+  const versionTag = resolveEpureVersionTag(params.epureVersionTag);
 
   return {
     path: ".github/workflows/ci.yml",
     content: [
-      `# Managed by Giskard-AI/epure@${params.pinnedSha} # v1.1.0`,
+      `# Managed by Giskard-AI/epure@${params.pinnedSha} # ${versionTag}`,
       "# Continuous Integration: Zizmor workflow security audit + Stack-aware Format, Lint/Typecheck, Tests, Build & E2E.",
       'name: "CI"',
       "",

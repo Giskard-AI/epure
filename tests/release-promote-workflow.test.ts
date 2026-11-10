@@ -87,6 +87,12 @@ describe("release-promote.yml hardening invariants", () => {
       scenario: "requests only contents write on the Release App token",
       holds: (wf: string) =>
         wf.match(/permission-[a-z-]+:/g)?.join(",") === "permission-contents:"
+    },
+    {
+      scenario: "verifies package.json version matches semver_tag when package.json is present",
+      holds: (wf: string) =>
+        wf.includes(":package.json") &&
+        wf.includes("does not match semver_tag")
     }
   ])("$scenario", ({ holds }) => {
     expect(holds(RELEASE_PROMOTE_WORKFLOW)).toBe(true);

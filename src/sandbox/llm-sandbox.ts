@@ -1015,7 +1015,7 @@ export async function runInUntrustedCodeSandbox(
       isolated: false,
       error_code: "SANDBOX_ISOLATION_UNAVAILABLE",
       error_message:
-        "Fail-closed: container/process sandbox isolation is unavailable on this runner (ADR-0011, ADR-0023).",
+        "Fail-closed: container/process sandbox isolation is unavailable on this runner (https://giskard-ai.github.io/epure/architecture).",
       exit_code: 1,
       stdout: "",
       stderr: "",
@@ -1063,7 +1063,7 @@ export async function runInUntrustedCodeSandbox(
       isolated: false,
       error_code: "SANDBOX_ISOLATION_UNAVAILABLE",
       error_message:
-        "Fail-closed: kernel confinement is mandatory in CI or with EPURE_ENFORCE_KERNEL_SANDBOX=true, and this runner lacks a working bubblewrap (plus landrun for networked phases) (ADR-0034).",
+        "Fail-closed: kernel confinement is mandatory in CI or with EPURE_ENFORCE_KERNEL_SANDBOX=true, and this runner lacks a working bubblewrap (plus landrun for networked phases) (https://giskard-ai.github.io/epure/architecture).",
       exit_code: 1,
       stdout: "",
       stderr: "",

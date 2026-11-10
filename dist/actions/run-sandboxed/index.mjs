@@ -40,6 +40,48 @@ function containsPrivateKeyMaterial(text) {
   return PRIVATE_KEY_DETECTION_PATTERN.test(text);
 }
 
+// package.json
+var package_default = {
+  name: "@giskard-ai/epure",
+  version: "3.0.0",
+  private: true,
+  description: "EPURE (Giskard-AI/epure) \u2014 Public Reusable Workflows, TypeScript Custom Actions (Node.js 24 LTS), and Agent Skills",
+  license: "Apache-2.0",
+  type: "module",
+  engines: {
+    node: ">=24.0.0"
+  },
+  bin: {
+    "epure-setup-repo": "./dist/cli/setup-repo.mjs"
+  },
+  scripts: {
+    build: "node scripts/build-actions.mjs",
+    typecheck: "tsc --noEmit",
+    test: "vitest run --exclude 'tests/live/**' --exclude 'tests/live-github/**' --exclude 'tests/e2e/**'",
+    "test:live": "vitest run tests/live/",
+    "test:live:github": "EPURE_LIVE_GITHUB=1 vitest run tests/live-github/",
+    "test:e2e": "EPURE_E2E=run vitest run tests/e2e/sandbox-epic.e2e.test.ts",
+    "test:e2e:reset": "EPURE_E2E=reset vitest run tests/e2e/sandbox-epic.e2e.test.ts",
+    "docs:diagrams": "node scripts/build-diagrams.mjs",
+    "docs:llms": "node scripts/build-llms-txt.mjs",
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "node scripts/build-llms-txt.mjs && vitepress build docs",
+    "docs:preview": "vitepress preview docs"
+  },
+  devDependencies: {
+    "@cursor/sdk": "1.3.1",
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@types/node": "24.19.2",
+    esbuild: "0.28.2",
+    typescript: "7.0.2",
+    vitepress: "1.6.4",
+    vitest: "5.0.5"
+  }
+};
+
+// src/contract/epure-contract.ts
+var EPURE_PUBLIC_VERSION = package_default.version;
+
 // src/llm/errors.ts
 var LLMError = class extends Error {
   status;
@@ -1243,7 +1285,7 @@ async function runInUntrustedCodeSandbox(input) {
     return {
       isolated: false,
       error_code: "SANDBOX_ISOLATION_UNAVAILABLE",
-      error_message: "Fail-closed: container/process sandbox isolation is unavailable on this runner (ADR-0011, ADR-0023).",
+      error_message: "Fail-closed: container/process sandbox isolation is unavailable on this runner (https://giskard-ai.github.io/epure/architecture).",
       exit_code: 1,
       stdout: "",
       stderr: "",
@@ -1279,7 +1321,7 @@ async function runInUntrustedCodeSandbox(input) {
     return {
       isolated: false,
       error_code: "SANDBOX_ISOLATION_UNAVAILABLE",
-      error_message: "Fail-closed: kernel confinement is mandatory in CI or with EPURE_ENFORCE_KERNEL_SANDBOX=true, and this runner lacks a working bubblewrap (plus landrun for networked phases) (ADR-0034).",
+      error_message: "Fail-closed: kernel confinement is mandatory in CI or with EPURE_ENFORCE_KERNEL_SANDBOX=true, and this runner lacks a working bubblewrap (plus landrun for networked phases) (https://giskard-ai.github.io/epure/architecture).",
       exit_code: 1,
       stdout: "",
       stderr: "",
@@ -1495,6 +1537,7 @@ var DEFAULT_WORKTREE_DIFF_LIMITS = {
 var MAX_GIT_OUTPUT_BYTES = 256 * 1024 * 1024;
 
 // src/bootstrap/setup-repo.ts
+var DEFAULT_EPURE_PINNED_SHA = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
 var DEFAULT_VERIFICATION_PROFILE = {
   wait_for_external_ci: true,
   external_ci_timeout_minutes: 15,
@@ -1620,7 +1663,7 @@ function resolveAgentsConfig(overrides = {}) {
       return {
         valid: false,
         error_code: "SECURITY_INVARIANT_VIOLATION",
-        error_message: "Local .github/agents.yml cannot disable effective write permission verification (ADR-0004, ADR-0010).",
+        error_message: "Local .github/agents.yml cannot disable effective write permission verification (https://giskard-ai.github.io/epure/configuration).",
         config: DEFAULT_AGENTS_CONFIG
       };
     }
@@ -1628,7 +1671,7 @@ function resolveAgentsConfig(overrides = {}) {
       return {
         valid: false,
         error_code: "SECURITY_INVARIANT_VIOLATION",
-        error_message: "Local .github/agents.yml cannot disable untrusted code sandbox isolation (ADR-0011, ADR-0023).",
+        error_message: "Local .github/agents.yml cannot disable untrusted code sandbox isolation (https://giskard-ai.github.io/epure/architecture).",
         config: DEFAULT_AGENTS_CONFIG
       };
     }
@@ -1636,7 +1679,7 @@ function resolveAgentsConfig(overrides = {}) {
       return {
         valid: false,
         error_code: "SECURITY_INVARIANT_VIOLATION",
-        error_message: "Local .github/agents.yml cannot grant release authority to the Agent App (ADR-0009, ADR-0010).",
+        error_message: "Local .github/agents.yml cannot grant release authority to the Agent App (https://giskard-ai.github.io/epure/architecture).",
         config: DEFAULT_AGENTS_CONFIG
       };
     }
@@ -1644,7 +1687,7 @@ function resolveAgentsConfig(overrides = {}) {
       return {
         valid: false,
         error_code: "SECURITY_INVARIANT_VIOLATION",
-        error_message: "Local .github/agents.yml cannot enable automatic merging into 'dev' or 'main' (ADR-0011).",
+        error_message: "Local .github/agents.yml cannot enable automatic merging into 'dev' or 'main' (https://giskard-ai.github.io/epure/configuration).",
         config: DEFAULT_AGENTS_CONFIG
       };
     }
@@ -1681,7 +1724,7 @@ function resolveAgentsConfig(overrides = {}) {
       return {
         valid: false,
         error_code: "PAGES_PREVIEW_CONSENT_OR_ORIGIN_REQUIRED",
-        error_message: "GitHub Pages previews require explicit human consent (github_pages_human_consent: true) and an isolated non-production origin (preview_separate_origin: true) per Q70/Q73.",
+        error_message: "GitHub Pages previews require explicit human consent (github_pages_human_consent: true) and an isolated non-production origin (preview_separate_origin: true) (https://giskard-ai.github.io/epure/configuration).",
         config: DEFAULT_AGENTS_CONFIG
       };
     }
@@ -1737,6 +1780,8 @@ function resolveAgentsConfig(overrides = {}) {
     trace_retention_days: overrides.trace_retention_days ?? DEFAULT_AGENTS_CONFIG.trace_retention_days,
     preview_retention_days: overrides.preview_retention_days ?? DEFAULT_AGENTS_CONFIG.preview_retention_days,
     github_pages_previews: pagesPreviews,
+    ...overrides.github_pages_human_consent !== void 0 ? { github_pages_human_consent: overrides.github_pages_human_consent } : {},
+    ...overrides.preview_separate_origin !== void 0 ? { preview_separate_origin: overrides.preview_separate_origin } : {},
     verification,
     ...webTools ? { web_tools: webTools } : {},
     ...overrides.pricing ? { pricing: overrides.pricing } : {}
@@ -2320,6 +2365,30 @@ function parseAgentsYaml(yamlContent) {
     ...Object.keys(securityOverrides).length > 0 ? { security_overrides: securityOverrides } : {}
   };
 }
+var MANAGED_WORKFLOW_PATHS = [
+  ".github/workflows/epure-issue-command.yml",
+  ".github/workflows/epure-check.yml",
+  ".github/workflows/pr-title.yml",
+  ".github/workflows/release.yml"
+];
+var MANAGED_FILE_PATHS = [
+  ...MANAGED_WORKFLOW_PATHS,
+  ".github/zizmor.yml"
+];
+var EMPTY_MIGRATION_CHECKLIST = {
+  is_upgrade: false,
+  previous_version: null,
+  previous_pinned_sha: null,
+  target_version: `v${EPURE_PUBLIC_VERSION.replace(/^v/, "")}`,
+  target_pinned_sha: DEFAULT_EPURE_PINNED_SHA,
+  managed_files_to_update: [],
+  conflicting_managed_files: [],
+  preserved_bootstrapped_files: [],
+  new_agents_yml_keys: [],
+  deprecated_agents_yml_keys: [],
+  ruleset_diffs: [],
+  secret_and_permission_changes: []
+};
 
 // src/orchestrator/github/rate-limit.ts
 var GITHUB_RATE_LIMIT_MAX_WAIT_MS = 5 * 60 * 1e3;
@@ -2356,12 +2425,12 @@ function verifyPublisherMergeBoundary(params) {
   const cleanBase = params.baseBranch.trim().replace(/^refs\/heads\//, "");
   if (cleanBase === "main" || cleanBase === "master") {
     throw new Error(
-      `HARDWARE_GUARD: Agent App is strictly forbidden from merging '${cleanHead}' into release branch '${cleanBase}' (ADR-0009, Q91).`
+      `HARDWARE_GUARD: Agent App is strictly forbidden from merging '${cleanHead}' into release branch '${cleanBase}' (https://giskard-ai.github.io/epure/architecture).`
     );
   }
   if (cleanBase === "dev" && !cleanHead.startsWith("plan/")) {
     throw new Error(
-      `HARDWARE_GUARD: Agent App is strictly forbidden from auto-merging '${cleanHead}' into 'dev'. Only human maintainers may merge 'feature/* -> dev' in the GitHub UI (ADR-0001, Q45, Q91, Q95).`
+      `HARDWARE_GUARD: Agent App is strictly forbidden from auto-merging '${cleanHead}' into 'dev'. Only human maintainers may merge 'feature/* -> dev' in the GitHub UI (https://giskard-ai.github.io/epure/architecture).`
     );
   }
 }

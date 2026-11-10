@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { buildConsumerAppManifests, GITHUB_ACTIONS_APP_ID } from "../auth/github-apps.js";
 import { EPURE_PUBLIC_VERSION } from "../contract/epure-contract.js";
@@ -22,6 +22,7 @@ import {
   buildZizmorConfigYaml,
   detectRepositoryStack,
   discoverVerificationProfile,
+  resolveEpureVersionTag,
   type DetectedStackProfile,
   type VerificationProfile,
   type VerificationTargetKind,
@@ -30,6 +31,7 @@ import {
 
 export {
   discoverVerificationProfile,
+  resolveEpureVersionTag,
   type ProviderConfig,
   type ProviderKind,
   type VerificationProfile,
@@ -59,7 +61,7 @@ export type AutoMergeWarningCode =
   | "NONE"
   | "AUTO_MERGE_DISABLED_MISSING_PROTECTIONS";
 
-export type ResourcePlanAction = "create" | "update" | "noop";
+export type ResourcePlanAction = "create" | "update" | "noop" | "conflict";
 
 export interface AgentsModelsConfig {
   readonly planning: string;
@@ -97,6 +99,8 @@ export interface AgentsConfig {
   readonly trace_retention_days: number;
   readonly preview_retention_days: number;
   readonly github_pages_previews: boolean;
+  readonly github_pages_human_consent?: boolean | undefined;
+  readonly preview_separate_origin?: boolean | undefined;
   readonly verification?: VerificationProfile | undefined;
   readonly web_tools?: WebToolsConfig | undefined;
   // Keyed by `<provider>/<model>`; only used to show a cost next to token usage.
@@ -243,11 +247,39 @@ export interface SetupRepoInput {
   readonly repoRootDir?: string | undefined;
   readonly dryRun?: boolean | undefined;
   readonly epurePinnedSha?: string | undefined;
+  readonly epureVersionTag?: string | undefined;
+  readonly forceBootstrap?: boolean | undefined;
   readonly requirePrApprovalsOnDev?: number | undefined;
   readonly includeFrontendReviewers?: boolean | undefined;
   readonly customDomainSpecialists?: readonly CustomDomainReviewerSpec[] | undefined;
   readonly agentsOverrides?: AgentsConfigOverrides | undefined;
   readonly existingState?: ExistingRepositoryState | undefined;
+}
+
+export interface SetupRepoConflict {
+  readonly path: string;
+  readonly reason: string;
+}
+
+export interface RulesetDiffSummary {
+  readonly name: string;
+  readonly action: ResourcePlanAction;
+  readonly summary: string;
+}
+
+export interface MigrationChecklist {
+  readonly is_upgrade: boolean;
+  readonly previous_version: string | null;
+  readonly previous_pinned_sha: string | null;
+  readonly target_version: string;
+  readonly target_pinned_sha: string;
+  readonly managed_files_to_update: readonly string[];
+  readonly conflicting_managed_files: readonly string[];
+  readonly preserved_bootstrapped_files: readonly string[];
+  readonly new_agents_yml_keys: readonly string[];
+  readonly deprecated_agents_yml_keys: readonly string[];
+  readonly ruleset_diffs: readonly RulesetDiffSummary[];
+  readonly secret_and_permission_changes: readonly string[];
 }
 
 export interface SetupRepoResult {
@@ -258,6 +290,8 @@ export interface SetupRepoResult {
   readonly repository: string;
   readonly agents_config: AgentsConfig;
   readonly agents_config_action: ResourcePlanAction;
+  readonly zizmor_action: ResourcePlanAction;
+  readonly renovate_action: ResourcePlanAction;
   readonly planned_workflows: readonly PlannedWorkflowFile[];
   readonly planned_reviewer_roster: readonly PlannedReviewerRosterFile[];
   readonly expected_secrets: readonly ExpectedSecretSpec[];
@@ -272,6 +306,10 @@ export interface SetupRepoResult {
   readonly auto_merge_warning_code: AutoMergeWarningCode;
   readonly human_interventions: readonly HumanInterventionStep[];
   readonly mutated_files: readonly string[];
+  readonly conflicts: readonly SetupRepoConflict[];
+  readonly warnings: readonly string[];
+  readonly missing_required_checks: readonly string[];
+  readonly migration_checklist: MigrationChecklist;
   readonly summary_markdown: string;
 }
 
@@ -281,6 +319,10 @@ export interface ApplyGitHubRepositoryGovernanceInput {
   readonly governanceRulesets: readonly RepositoryRulesetSpec[];
   readonly agentAppIntegrationId?: number | undefined;
   readonly releaseAppIntegrationId?: number | undefined;
+  readonly repoRootDir?: string | undefined;
+  readonly workflowFiles?: Readonly<Record<string, string>> | undefined;
+  readonly missingRequiredChecks?: readonly string[] | undefined;
+  readonly allowMissingRequiredChecks?: boolean | undefined;
   readonly fetchImpl?: typeof fetch | undefined;
 }
 
@@ -488,7 +530,7 @@ export function resolveAgentsConfig(
         valid: false,
         error_code: "SECURITY_INVARIANT_VIOLATION",
         error_message:
-          "Local .github/agents.yml cannot disable effective write permission verification (ADR-0004, ADR-0010).",
+          "Local .github/agents.yml cannot disable effective write permission verification (https://giskard-ai.github.io/epure/configuration).",
         config: DEFAULT_AGENTS_CONFIG
       };
     }
@@ -497,7 +539,7 @@ export function resolveAgentsConfig(
         valid: false,
         error_code: "SECURITY_INVARIANT_VIOLATION",
         error_message:
-          "Local .github/agents.yml cannot disable untrusted code sandbox isolation (ADR-0011, ADR-0023).",
+          "Local .github/agents.yml cannot disable untrusted code sandbox isolation (https://giskard-ai.github.io/epure/architecture).",
         config: DEFAULT_AGENTS_CONFIG
       };
     }
@@ -506,7 +548,7 @@ export function resolveAgentsConfig(
         valid: false,
         error_code: "SECURITY_INVARIANT_VIOLATION",
         error_message:
-          "Local .github/agents.yml cannot grant release authority to the Agent App (ADR-0009, ADR-0010).",
+          "Local .github/agents.yml cannot grant release authority to the Agent App (https://giskard-ai.github.io/epure/architecture).",
         config: DEFAULT_AGENTS_CONFIG
       };
     }
@@ -515,7 +557,7 @@ export function resolveAgentsConfig(
         valid: false,
         error_code: "SECURITY_INVARIANT_VIOLATION",
         error_message:
-          "Local .github/agents.yml cannot enable automatic merging into 'dev' or 'main' (ADR-0011).",
+          "Local .github/agents.yml cannot enable automatic merging into 'dev' or 'main' (https://giskard-ai.github.io/epure/configuration).",
         config: DEFAULT_AGENTS_CONFIG
       };
     }
@@ -572,7 +614,7 @@ export function resolveAgentsConfig(
         valid: false,
         error_code: "PAGES_PREVIEW_CONSENT_OR_ORIGIN_REQUIRED",
         error_message:
-          "GitHub Pages previews require explicit human consent (github_pages_human_consent: true) and an isolated non-production origin (preview_separate_origin: true) per Q70/Q73.",
+          "GitHub Pages previews require explicit human consent (github_pages_human_consent: true) and an isolated non-production origin (preview_separate_origin: true) (https://giskard-ai.github.io/epure/configuration).",
         config: DEFAULT_AGENTS_CONFIG
       };
     }
@@ -686,6 +728,12 @@ export function resolveAgentsConfig(
       overrides.preview_retention_days ??
       DEFAULT_AGENTS_CONFIG.preview_retention_days,
     github_pages_previews: pagesPreviews,
+    ...(overrides.github_pages_human_consent !== undefined
+      ? { github_pages_human_consent: overrides.github_pages_human_consent }
+      : {}),
+    ...(overrides.preview_separate_origin !== undefined
+      ? { preview_separate_origin: overrides.preview_separate_origin }
+      : {}),
     verification,
     ...(webTools ? { web_tools: webTools } : {}),
     ...(overrides.pricing ? { pricing: overrides.pricing } : {})
@@ -884,7 +932,7 @@ export function serializeAgentsConfigYaml(
 
   return [
     "# EPURE Consumer Repository Configuration (.github/agents.yml)",
-    "# Generated by setup-repo — security boundaries are enforced by shared workflows (ADR-0010, ADR-0023).",
+    "# Generated by setup-repo — security boundaries are enforced by shared workflows (https://giskard-ai.github.io/epure/configuration).",
     `harness: ${config.harness}`,
     "models:",
     `  planning: ${config.models.planning}`,
@@ -896,15 +944,27 @@ export function serializeAgentsConfigYaml(
     `merge_policy: ${config.merge_policy}`,
     `task_auto_merge_enabled: ${taskAutoMergeEnabled}`,
     `max_code_fix_attempts: ${config.max_code_fix_attempts}`,
+    ...(config.max_epic_phases !== undefined
+      ? [`max_epic_phases: ${config.max_epic_phases}`]
+      : []),
     `max_transient_api_retries: ${config.max_transient_api_retries}`,
     `transient_retry_backoff_seconds: [${config.transient_retry_backoff_seconds.join(", ")}]`,
     `llm_request_timeout_seconds: ${config.llm_request_timeout_seconds}`,
     `job_timeout_minutes: ${config.job_timeout_minutes}`,
     `review_timeout_minutes: ${config.review_timeout_minutes}`,
+    ...(config.agent_max_llm_requests !== undefined
+      ? [`agent_max_llm_requests: ${config.agent_max_llm_requests}`]
+      : []),
     `max_concurrent_tasks_per_feature: ${config.max_concurrent_tasks_per_feature}`,
     `trace_retention_days: ${config.trace_retention_days}`,
     `preview_retention_days: ${config.preview_retention_days}`,
     `github_pages_previews: ${config.github_pages_previews}`,
+    ...(config.github_pages_human_consent !== undefined
+      ? [`github_pages_human_consent: ${config.github_pages_human_consent}`]
+      : []),
+    ...(config.preview_separate_origin !== undefined
+      ? [`preview_separate_origin: ${config.preview_separate_origin}`]
+      : []),
     ...verificationLines,
     ...webToolsLines,
     ...pricingLines,
@@ -1701,16 +1761,23 @@ function buildCallerWorkflows(
   stack: DetectedStackProfile,
   jobTimeoutMinutes: number = DEFAULT_AGENTS_CONFIG.job_timeout_minutes,
   llmEnvironment: string = DEFAULT_AGENTS_CONFIG.llm_environment,
-  harness: AgentHarness = DEFAULT_AGENTS_CONFIG.harness
+  harness: AgentHarness = DEFAULT_AGENTS_CONFIG.harness,
+  epureVersionTag?: string
 ): ReadonlyArray<{
   readonly path: string;
   readonly content: string;
 }> {
-  const ciWorkflow = buildStackAwareCiWorkflowYaml({ pinnedSha, stack });
+  const versionTag = resolveEpureVersionTag(epureVersionTag);
+  const ciWorkflow = buildStackAwareCiWorkflowYaml({
+    pinnedSha,
+    stack,
+    epureVersionTag: versionTag
+  });
   return [
     {
       path: ".github/workflows/epure-issue-command.yml",
       content: [
+        `# Managed by Giskard-AI/epure@${pinnedSha} # ${versionTag}`,
         'name: "EPURE Issue Command Gate"',
         "on:",
         "  issue_comment:",
@@ -1741,7 +1808,7 @@ function buildCallerWorkflows(
         "    steps:",
         "      - name: Run pre-bundled EPURE authorization gate",
         "        id: gate",
-        `        uses: Giskard-AI/epure/actions/authorize-command@${pinnedSha} # v1.1.0`,
+        `        uses: Giskard-AI/epure/actions/authorize-command@${pinnedSha} # ${versionTag}`,
         "        with:",
         "          repository: ${{ github.repository }}",
         "          issue_number: ${{ github.event.issue.number }}",
@@ -1797,7 +1864,7 @@ function buildCallerWorkflows(
         ...buildSandboxToolingSetupSteps(),
         "      - name: Run pre-bundled EPURE issue orchestrator",
         "        id: orchestrate",
-        `        uses: Giskard-AI/epure/actions/orchestrate-issue@${pinnedSha} # v1.1.0`,
+        `        uses: Giskard-AI/epure/actions/orchestrate-issue@${pinnedSha} # ${versionTag}`,
         "        env:",
         "          EPURE_JOB_STARTED_AT_MS: ${{ steps.job-start.outputs.ms }}",
         "        with:",
@@ -1822,6 +1889,7 @@ function buildCallerWorkflows(
     {
       path: ".github/workflows/epure-check.yml",
       content: [
+        `# Managed by Giskard-AI/epure@${pinnedSha} # ${versionTag}`,
         'name: "EPURE Contract Verification"',
         "on:",
         "  pull_request:",
@@ -1834,10 +1902,10 @@ function buildCallerWorkflows(
         "jobs:",
         "  verify-contract:",
         '    name: "Verify EPURE Consumer Contract"',
-        `    uses: Giskard-AI/epure/.github/workflows/epure-check.yml@${pinnedSha} # v1.1.0`,
+        `    uses: Giskard-AI/epure/.github/workflows/epure-check.yml@${pinnedSha} # ${versionTag}`,
         "    with:",
         "      repository: ${{ github.repository }}",
-        `      pinned_ref: "Giskard-AI/epure/.github/workflows/epure-check.yml@${pinnedSha} # v1.1.0"`,
+        `      pinned_ref: "Giskard-AI/epure/.github/workflows/epure-check.yml@${pinnedSha} # ${versionTag}"`,
         "      strict_sha_pinning: true",
         ""
       ].join("\n")
@@ -1845,7 +1913,7 @@ function buildCallerWorkflows(
     {
       path: ".github/workflows/pr-title.yml",
       content: [
-        `# Managed by Giskard-AI/epure@${pinnedSha} # v1.1.0`,
+        `# Managed by Giskard-AI/epure@${pinnedSha} # ${versionTag}`,
         'name: "Conventional Commit PR Title"',
         "on:",
         "  pull_request:",
@@ -1878,6 +1946,7 @@ function buildCallerWorkflows(
     {
       path: ".github/workflows/release.yml",
       content: [
+        `# Managed by Giskard-AI/epure@${pinnedSha} # ${versionTag}`,
         'name: "EPURE Controlled Release (dev -> main)"',
         "on:",
         "  workflow_dispatch:",
@@ -1900,7 +1969,7 @@ function buildCallerWorkflows(
         "    permissions:",
         "      contents: read # read history, tags and releases before any write (writes use the Release App token)",
         "      actions: read # look up the CI workflow run of the promoted SHA",
-        `    uses: Giskard-AI/epure/.github/workflows/release-promote.yml@${pinnedSha} # v1.1.0`,
+        `    uses: Giskard-AI/epure/.github/workflows/release-promote.yml@${pinnedSha} # ${versionTag}`,
         "    with:",
         "      semver_tag: ${{ inputs.semver_tag }}",
         "      expected_dev_sha: ${{ inputs.expected_dev_sha }}",
@@ -1909,6 +1978,24 @@ function buildCallerWorkflows(
     }
   ];
 }
+
+export const MANAGED_WORKFLOW_PATHS = [
+  ".github/workflows/epure-issue-command.yml",
+  ".github/workflows/epure-check.yml",
+  ".github/workflows/pr-title.yml",
+  ".github/workflows/release.yml"
+] as const;
+
+export const MANAGED_FILE_PATHS = [
+  ...MANAGED_WORKFLOW_PATHS,
+  ".github/zizmor.yml"
+] as const;
+
+export const BOOTSTRAPPED_ONCE_WORKFLOW_PATHS = [
+  ".github/workflows/ci.yml"
+] as const;
+
+const MANAGED_FILE_HEADER_PATTERN = /^# Managed by Giskard-AI\/epure@/m;
 
 function computeFilePlanAction(
   repoRootDir: string | undefined,
@@ -1926,14 +2013,359 @@ function computeFilePlanAction(
   return existing === desiredContent ? "noop" : "update";
 }
 
+function computeManagedFilePlanAction(
+  repoRootDir: string | undefined,
+  relPath: string,
+  desiredContent: string
+): { readonly action: ResourcePlanAction; readonly conflictReason?: string } {
+  if (!repoRootDir) {
+    return { action: "create" };
+  }
+  const fullPath = join(repoRootDir, relPath);
+  if (!existsSync(fullPath)) {
+    return { action: "create" };
+  }
+  const existing = readFileSync(fullPath, "utf8");
+  if (existing === desiredContent) {
+    return { action: "noop" };
+  }
+  if (MANAGED_FILE_HEADER_PATTERN.test(existing)) {
+    return { action: "update" };
+  }
+  return {
+    action: "conflict",
+    conflictReason: `Existing '${relPath}' was modified or created without the '# Managed by Giskard-AI/epure@' header; refusing to overwrite hand-written file.`
+  };
+}
+
+function computeBootstrappedFilePlanAction(
+  repoRootDir: string | undefined,
+  relPath: string,
+  desiredContent: string,
+  forceBootstrap: boolean
+): { readonly action: ResourcePlanAction; readonly preserved: boolean } {
+  if (!repoRootDir) {
+    return { action: "create", preserved: false };
+  }
+  const fullPath = join(repoRootDir, relPath);
+  if (!existsSync(fullPath)) {
+    return { action: "create", preserved: false };
+  }
+  if (!forceBootstrap) {
+    return { action: "noop", preserved: true };
+  }
+  const existing = readFileSync(fullPath, "utf8");
+  return {
+    action: existing === desiredContent ? "noop" : "update",
+    preserved: false
+  };
+}
+
 // Job names the generated pull_request workflows report. `ai-review` is left out: only EPURE publishes it,
 // so a Renovate or human PR into dev would wait for it forever.
-const REQUIRED_CI_CHECKS = [
+export const REQUIRED_CI_CHECKS = [
   "Verify EPURE Consumer Contract / Verify EPURE Consumer Contract",
   "PR title",
   "Quality (Format, Lint, Typecheck, Test & Build)",
   "Zizmor"
 ] as const;
+
+export const REQUIRED_PR_CHECKS = REQUIRED_CI_CHECKS;
+
+function extractTopLevelYamlKeys(yamlContent: string): string[] {
+  const keys: string[] = [];
+  for (const rawLine of yamlContent.split(/\r?\n/)) {
+    const trimmed = rawLine.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+    const match = /^([A-Za-z0-9_]+):/.exec(rawLine);
+    if (match && match[1] && !keys.includes(match[1])) {
+      keys.push(match[1]);
+    }
+  }
+  return keys;
+}
+
+const CANONICAL_AGENTS_YML_TOP_LEVEL_KEYS = new Set<string>([
+  "harness",
+  "models",
+  "providers",
+  "reviewers_dir",
+  "llm_environment",
+  "merge_policy",
+  "task_auto_merge_enabled",
+  "max_code_fix_attempts",
+  "max_epic_phases",
+  "max_transient_api_retries",
+  "transient_retry_backoff_seconds",
+  "llm_request_timeout_seconds",
+  "job_timeout_minutes",
+  "review_timeout_minutes",
+  "agent_max_llm_requests",
+  "max_concurrent_tasks_per_feature",
+  "trace_retention_days",
+  "preview_retention_days",
+  "github_pages_previews",
+  "github_pages_human_consent",
+  "preview_separate_origin",
+  "verification",
+  "web_tools",
+  "pricing",
+  "security_invariants",
+  "security_overrides"
+]);
+
+function inspectAndParseExistingAgentsYaml(existingRaw: string): {
+  readonly parsed: ParsedAgentsConfig | undefined;
+  readonly existingTopLevelKeys: readonly string[];
+  readonly deprecatedKeys: readonly string[];
+} {
+  const existingTopLevelKeys = extractTopLevelYamlKeys(existingRaw);
+  const deprecatedKeys: string[] = [];
+  const sanitizedLines: string[] = [];
+
+  for (const rawLine of existingRaw.split(/\r?\n/)) {
+    const topMatch = /^([A-Za-z0-9_]+):\s*(.*)$/.exec(rawLine);
+    if (topMatch) {
+      const key = topMatch[1]!;
+      const val = topMatch[2]!.replace(/\s+#.*$/, "").trim().replace(/^["']|["']$/g, "");
+      if (!CANONICAL_AGENTS_YML_TOP_LEVEL_KEYS.has(key)) {
+        if (!deprecatedKeys.includes(key)) {
+          deprecatedKeys.push(key);
+        }
+        if (key === "model" && val && !existingTopLevelKeys.includes("models")) {
+          sanitizedLines.push(
+            "models:",
+            `  planning: ${val}`,
+            `  implementation: ${val}`,
+            `  review: ${val}`
+          );
+        }
+        continue;
+      }
+      if (key === "harness" && val !== "pi" && val !== "cursor") {
+        const depEntry = `harness: ${val}`;
+        if (!deprecatedKeys.includes(depEntry)) {
+          deprecatedKeys.push(depEntry);
+        }
+        sanitizedLines.push("harness: pi");
+        continue;
+      }
+      if (key === "reviewers_dir" && isUnsafeReviewersDir(val.replace(/^(?:\.\/)+/, "").replace(/\/+$/, ""))) {
+        sanitizedLines.push(`reviewers_dir: ${DEFAULT_AGENTS_CONFIG.reviewers_dir}`);
+        continue;
+      }
+      if (key === "llm_environment" && !LLM_ENVIRONMENT_NAME_PATTERN.test(val)) {
+        sanitizedLines.push(`llm_environment: ${DEFAULT_AGENTS_CONFIG.llm_environment}`);
+        continue;
+      }
+    }
+    sanitizedLines.push(rawLine);
+  }
+
+  try {
+    const parsed = parseAgentsYaml(sanitizedLines.join("\n"));
+    return {
+      parsed,
+      existingTopLevelKeys,
+      deprecatedKeys
+    };
+  } catch {
+    return {
+      parsed: undefined,
+      existingTopLevelKeys,
+      deprecatedKeys
+    };
+  }
+}
+
+function branchPatternCoversRef(pattern: string, target: "dev" | "feature"): boolean {
+  const clean = pattern.trim().replace(/^['"]|['"]$/g, "");
+  if (clean === "*" || clean === "**") {
+    return true;
+  }
+  if (target === "dev") {
+    return clean === "dev";
+  }
+  return (
+    clean === "feature/**" ||
+    clean === "feature/*" ||
+    clean.startsWith("feature/")
+  );
+}
+
+function parsePullRequestBranchCoverage(yamlContent: string): {
+  readonly triggersOnPr: boolean;
+  readonly coversDev: boolean;
+  readonly coversFeature: boolean;
+} {
+  const lines = yamlContent.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    const inlineOn = /^on:\s*(.+)$/.exec(line);
+    if (inlineOn) {
+      const rest = inlineOn[1]!.replace(/\s+#.*$/, "").trim();
+      if (rest === "pull_request" || /\bpull_request\b/.test(rest)) {
+        return { triggersOnPr: true, coversDev: true, coversFeature: true };
+      }
+    }
+    if (/^on:\s*(?:#.*)?$/.test(line)) {
+      let inPr = false;
+      let inBranchesList = false;
+      const branches: string[] = [];
+      let sawPrTrigger = false;
+      for (let j = i + 1; j < lines.length; j++) {
+        const sub = lines[j]!;
+        const trimmed = sub.trim();
+        if (!trimmed || trimmed.startsWith("#")) {
+          continue;
+        }
+        const indent = sub.length - sub.trimStart().length;
+        if (indent === 0) {
+          break;
+        }
+        if (indent === 2) {
+          if (/^  pull_request(?::|\s*$)/.test(sub)) {
+            inPr = true;
+            sawPrTrigger = true;
+            inBranchesList = false;
+          } else {
+            inPr = false;
+            inBranchesList = false;
+          }
+          continue;
+        }
+        if (inPr && indent === 4) {
+          const brInline = /^    branches:\s*\[(.*)\]\s*(?:#.*)?$/.exec(sub);
+          if (brInline) {
+            for (const part of brInline[1]!.split(",")) {
+              const item = part.trim();
+              if (item) {
+                branches.push(item);
+              }
+            }
+            inBranchesList = false;
+            continue;
+          }
+          if (/^    branches:\s*(?:#.*)?$/.test(sub)) {
+            inBranchesList = true;
+            continue;
+          }
+          inBranchesList = false;
+        }
+        if (inPr && inBranchesList && indent >= 6) {
+          const itemMatch = /^\s*-\s*(.+?)\s*(?:#.*)?$/.exec(sub);
+          if (itemMatch && itemMatch[1]) {
+            branches.push(itemMatch[1]);
+          }
+        }
+      }
+      if (!sawPrTrigger) {
+        return { triggersOnPr: false, coversDev: false, coversFeature: false };
+      }
+      if (branches.length === 0) {
+        return { triggersOnPr: true, coversDev: true, coversFeature: true };
+      }
+      return {
+        triggersOnPr: true,
+        coversDev: branches.some((b) => branchPatternCoversRef(b, "dev")),
+        coversFeature: branches.some((b) => branchPatternCoversRef(b, "feature"))
+      };
+    }
+  }
+  return { triggersOnPr: false, coversDev: false, coversFeature: false };
+}
+
+function extractWorkflowPrChecks(yamlContent: string): {
+  readonly devChecks: readonly string[];
+  readonly featureChecks: readonly string[];
+} {
+  const coverage = parsePullRequestBranchCoverage(yamlContent);
+  if (!coverage.triggersOnPr) {
+    return { devChecks: [], featureChecks: [] };
+  }
+  const lines = yamlContent.split(/\r?\n/);
+  let inJobs = false;
+  let currentJobId: string | null = null;
+  let currentJobName: string | null = null;
+  let currentJobUses: string | null = null;
+  const checkNames: string[] = [];
+
+  const flushJob = () => {
+    if (!currentJobId) {
+      return;
+    }
+    const displayName = currentJobName ?? currentJobId;
+    checkNames.push(displayName);
+    if (currentJobUses && currentJobUses.includes("epure-check.yml")) {
+      checkNames.push(`${displayName} / Verify EPURE Consumer Contract`);
+    }
+    currentJobId = null;
+    currentJobName = null;
+    currentJobUses = null;
+  };
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+    const indent = line.length - line.trimStart().length;
+    if (indent === 0) {
+      flushJob();
+      inJobs = /^jobs:\s*(?:#.*)?$/.test(line);
+      continue;
+    }
+    if (!inJobs) {
+      continue;
+    }
+    if (indent === 2) {
+      const jobMatch = /^  ([A-Za-z0-9_-]+):\s*(?:#.*)?$/.exec(line);
+      if (jobMatch && jobMatch[1]) {
+        flushJob();
+        currentJobId = jobMatch[1];
+      }
+      continue;
+    }
+    if (indent === 4 && currentJobId) {
+      const nameMatch = /^    name:\s*(.+?)\s*$/.exec(line);
+      if (nameMatch && nameMatch[1]) {
+        const raw = nameMatch[1].replace(/\s+#.*$/, "").trim();
+        currentJobName = raw.replace(/^["']|["']$/g, "");
+      }
+      const usesMatch = /^    uses:\s*(.+?)\s*$/.exec(line);
+      if (usesMatch && usesMatch[1]) {
+        currentJobUses = usesMatch[1].replace(/\s+#.*$/, "").trim();
+      }
+    }
+  }
+  flushJob();
+
+  return {
+    devChecks: coverage.coversDev ? checkNames : [],
+    featureChecks: coverage.coversFeature ? checkNames : []
+  };
+}
+
+export function detectMissingRequiredPrChecks(
+  workflowFiles: Readonly<Record<string, string>>
+): readonly string[] {
+  const devChecks = new Set<string>();
+  const featureChecks = new Set<string>();
+  for (const content of Object.values(workflowFiles)) {
+    const extracted = extractWorkflowPrChecks(content);
+    for (const c of extracted.devChecks) {
+      devChecks.add(c);
+    }
+    for (const c of extracted.featureChecks) {
+      featureChecks.add(c);
+    }
+  }
+  return REQUIRED_CI_CHECKS.filter(
+    (req) => !devChecks.has(req) || !featureChecks.has(req)
+  );
+}
 
 export function buildGovernanceRulesets(params: {
   readonly agentAppName: string;
@@ -2049,10 +2481,105 @@ export function buildGovernanceRulesets(params: {
   };
 }
 
+const EMPTY_MIGRATION_CHECKLIST: MigrationChecklist = {
+  is_upgrade: false,
+  previous_version: null,
+  previous_pinned_sha: null,
+  target_version: `v${EPURE_PUBLIC_VERSION.replace(/^v/, "")}`,
+  target_pinned_sha: DEFAULT_EPURE_PINNED_SHA,
+  managed_files_to_update: [],
+  conflicting_managed_files: [],
+  preserved_bootstrapped_files: [],
+  new_agents_yml_keys: [],
+  deprecated_agents_yml_keys: [],
+  ruleset_diffs: [],
+  secret_and_permission_changes: []
+};
+
+function detectExistingEpureInstallation(repoRootDir: string | undefined): {
+  readonly isOnboarded: boolean;
+  readonly previousVersion: string | null;
+  readonly previousPinnedSha: string | null;
+} {
+  if (!repoRootDir) {
+    return { isOnboarded: false, previousVersion: null, previousPinnedSha: null };
+  }
+  let isOnboarded = false;
+  let previousVersion: string | null = null;
+  let previousPinnedSha: string | null = null;
+
+  const agentsPath = join(repoRootDir, ".github", "agents.yml");
+  if (existsSync(agentsPath)) {
+    isOnboarded = true;
+    try {
+      const raw = readFileSync(agentsPath, "utf8");
+      const versionMatch = /^version:\s*["']?v?([0-9]+(?:\.[0-9]+){0,2})["']?\s*(?:#.*)?$/m.exec(raw);
+      if (versionMatch?.[1]) {
+        const parts = versionMatch[1].split(".");
+        previousVersion = `v${parts[0]}.${parts[1] ?? "0"}.${parts[2] ?? "0"}`;
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  const candidatePaths: string[] = [join(repoRootDir, ".github", "zizmor.yml")];
+  const wfDir = join(repoRootDir, ".github", "workflows");
+  if (existsSync(wfDir)) {
+    try {
+      for (const entry of readdirSync(wfDir).sort()) {
+        if (/\.ya?ml$/i.test(entry)) {
+          candidatePaths.push(join(wfDir, entry));
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  const shaAndTagPattern =
+    /Giskard-AI\/epure(?:\/[A-Za-z0-9_./-]+)?@([0-9a-f]{40})(?:\s+#\s*(v[0-9]+\.[0-9]+\.[0-9]+))?/;
+  const tagOnlyPattern =
+    /Giskard-AI\/epure(?:\/[A-Za-z0-9_./-]+)?@(v[0-9]+\.[0-9]+\.[0-9]+)/;
+
+  for (const filePath of candidatePaths) {
+    if (!existsSync(filePath)) {
+      continue;
+    }
+    try {
+      const content = readFileSync(filePath, "utf8");
+      const shaMatch = shaAndTagPattern.exec(content);
+      if (shaMatch) {
+        isOnboarded = true;
+        if (!previousPinnedSha && shaMatch[1]) {
+          previousPinnedSha = shaMatch[1];
+        }
+        if (!previousVersion && shaMatch[2]) {
+          previousVersion = shaMatch[2];
+        }
+      } else {
+        const tagMatch = tagOnlyPattern.exec(content);
+        if (tagMatch) {
+          isOnboarded = true;
+          if (!previousVersion && tagMatch[1]) {
+            previousVersion = tagMatch[1];
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return { isOnboarded, previousVersion, previousPinnedSha };
+}
+
 export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
   const repository = input.repository.trim();
   const dryRun = input.dryRun ?? true;
+  const forceBootstrap = input.forceBootstrap === true;
   const pinnedSha = (input.epurePinnedSha ?? DEFAULT_EPURE_PINNED_SHA).trim();
+  const versionTag = resolveEpureVersionTag(input.epureVersionTag);
 
   const resolvedConfig = resolveAgentsConfig(input.agentsOverrides);
   const ownerSlug = repository.split("/")[0] ?? "consumer";
@@ -2132,6 +2659,8 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
       repository,
       agents_config: resolvedConfig.config,
       agents_config_action: "noop",
+      zizmor_action: "noop",
+      renovate_action: "noop",
       planned_workflows: [],
       planned_reviewer_roster: [],
       expected_secrets: expectedSecrets,
@@ -2146,6 +2675,14 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
       auto_merge_warning_code: "AUTO_MERGE_DISABLED_MISSING_PROTECTIONS",
       human_interventions: [],
       mutated_files: [],
+      conflicts: [],
+      warnings: [],
+      missing_required_checks: [],
+      migration_checklist: {
+        ...EMPTY_MIGRATION_CHECKLIST,
+        target_version: versionTag,
+        target_pinned_sha: pinnedSha
+      },
       summary_markdown: "### EPURE setup-repo Error (`INVALID_REPOSITORY_SLUG`)"
     };
   }
@@ -2159,6 +2696,8 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
       repository,
       agents_config: resolvedConfig.config,
       agents_config_action: "noop",
+      zizmor_action: "noop",
+      renovate_action: "noop",
       planned_workflows: [],
       planned_reviewer_roster: [],
       expected_secrets: expectedSecrets,
@@ -2173,10 +2712,19 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
       auto_merge_warning_code: "AUTO_MERGE_DISABLED_MISSING_PROTECTIONS",
       human_interventions: [],
       mutated_files: [],
+      conflicts: [],
+      warnings: [],
+      missing_required_checks: [],
+      migration_checklist: {
+        ...EMPTY_MIGRATION_CHECKLIST,
+        target_version: versionTag,
+        target_pinned_sha: pinnedSha
+      },
       summary_markdown: `### EPURE setup-repo Blocked (\`${resolvedConfig.error_code}\`)\n- ${resolvedConfig.error_message}`
     };
   }
 
+  const existingInstall = detectExistingEpureInstallation(input.repoRootDir);
   const hasCi = input.existingState?.hasRequiredCiChecks === true;
   const hasProtection = input.existingState?.hasBranchProtection === true;
   const taskAutoMergeEnabled = hasCi && hasProtection;
@@ -2188,46 +2736,31 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
     repoRootDir: input.repoRootDir
   });
 
-  // Load existing .github/agents.yml if present to preserve user-customized verification.targets on re-run
-  let existingHarness: AgentHarness | undefined;
-  let existingVerification: VerificationProfile | undefined;
-  let existingProviders: Readonly<Record<string, ProviderConfig>> | undefined;
-  let existingLlmRequestTimeoutSeconds: number | undefined;
-  let existingReviewersDir: string | undefined;
-  let existingLlmEnvironment: string | undefined;
-  let existingModels: Partial<AgentsModelsConfig> | undefined;
-  let existingPricing: PricingTable | undefined;
+  // Load existing .github/agents.yml if present to preserve user-customized fields on re-run / upgrade
+  let parsedExistingAgents: ParsedAgentsConfig | undefined;
+  let existingAgentsTopLevelKeys: readonly string[] = [];
+  let deprecatedAgentsYmlKeys: readonly string[] = [];
+  let hadExistingAgentsYml = false;
   if (
     input.repoRootDir &&
     existsSync(join(input.repoRootDir, ".github", "agents.yml"))
   ) {
+    hadExistingAgentsYml = true;
     try {
       const existingRaw = readFileSync(
         join(input.repoRootDir, ".github", "agents.yml"),
         "utf8"
       );
-      const parsedExisting = parseAgentsYaml(existingRaw);
-      existingHarness = parsedExisting.harness;
-      existingVerification = parsedExisting.verification;
-      existingProviders = parsedExisting.providers;
-      existingLlmRequestTimeoutSeconds =
-        parsedExisting.llm_request_timeout_seconds;
-      existingReviewersDir = parsedExisting.reviewers_dir;
-      existingLlmEnvironment = parsedExisting.llm_environment;
-      existingModels = parsedExisting.models;
-      existingPricing = parsedExisting.pricing;
+      const inspected = inspectAndParseExistingAgentsYaml(existingRaw);
+      parsedExistingAgents = inspected.parsed;
+      existingAgentsTopLevelKeys = inspected.existingTopLevelKeys;
+      deprecatedAgentsYmlKeys = inspected.deprecatedKeys;
     } catch {
-      existingHarness = undefined;
-      existingVerification = undefined;
-      existingProviders = undefined;
-      existingLlmRequestTimeoutSeconds = undefined;
-      existingReviewersDir = undefined;
-      existingLlmEnvironment = undefined;
-      existingModels = undefined;
-      existingPricing = undefined;
+      parsedExistingAgents = undefined;
     }
   }
 
+  const existingVerification = parsedExistingAgents?.verification;
   const resetTargets =
     input.agentsOverrides?.reset_verification_targets === true;
   const overrideVerification = input.agentsOverrides?.verification;
@@ -2295,15 +2828,21 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
   const effectiveVerification: VerificationProfile = {
     wait_for_external_ci:
       overrideVerification?.wait_for_external_ci ??
-      existingVerification?.wait_for_external_ci ??
+      (existingAgentsTopLevelKeys.includes("verification")
+        ? existingVerification?.wait_for_external_ci
+        : undefined) ??
       discoveredVerification.wait_for_external_ci,
     external_ci_timeout_minutes:
       overrideVerification?.external_ci_timeout_minutes ??
-      existingVerification?.external_ci_timeout_minutes ??
+      (existingAgentsTopLevelKeys.includes("verification")
+        ? existingVerification?.external_ci_timeout_minutes
+        : undefined) ??
       discoveredVerification.external_ci_timeout_minutes,
     grace_window_seconds:
       overrideVerification?.grace_window_seconds ??
-      existingVerification?.grace_window_seconds ??
+      (existingAgentsTopLevelKeys.includes("verification")
+        ? existingVerification?.grace_window_seconds
+        : undefined) ??
       discoveredVerification.grace_window_seconds,
     ...(deferredSet.size > 0
       ? { deferred_external_workflows: Array.from(deferredSet) }
@@ -2311,22 +2850,54 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
     targets: mergedTargets
   };
 
+  const ov = input.agentsOverrides;
   const effectiveProviders =
-    resolvedConfig.config.providers ?? existingProviders;
-  const effectivePricing = resolvedConfig.config.pricing ?? existingPricing;
-  const effectiveLlmRequestTimeoutSeconds =
-    input.agentsOverrides?.llm_request_timeout_seconds !== undefined
-      ? resolvedConfig.config.llm_request_timeout_seconds
-      : (existingLlmRequestTimeoutSeconds ??
-        resolvedConfig.config.llm_request_timeout_seconds);
+    ov?.providers !== undefined
+      ? resolvedConfig.config.providers
+      : parsedExistingAgents?.providers;
+  const effectivePricing =
+    ov?.pricing !== undefined
+      ? resolvedConfig.config.pricing
+      : parsedExistingAgents?.pricing;
+  const effectiveWebTools =
+    ov?.web_tools !== undefined
+      ? resolvedConfig.config.web_tools
+      : existingAgentsTopLevelKeys.includes("web_tools")
+        ? parsedExistingAgents?.web_tools
+        : undefined;
+  const effectiveMaxEpicPhases =
+    ov?.max_epic_phases !== undefined
+      ? resolvedConfig.config.max_epic_phases
+      : existingAgentsTopLevelKeys.includes("max_epic_phases")
+        ? parsedExistingAgents?.max_epic_phases
+        : undefined;
+  const effectiveAgentMaxLlmRequests =
+    ov?.agent_max_llm_requests !== undefined
+      ? resolvedConfig.config.agent_max_llm_requests
+      : existingAgentsTopLevelKeys.includes("agent_max_llm_requests")
+        ? parsedExistingAgents?.agent_max_llm_requests
+        : undefined;
+  const effectivePagesHumanConsent =
+    ov?.github_pages_human_consent !== undefined
+      ? resolvedConfig.config.github_pages_human_consent
+      : existingAgentsTopLevelKeys.includes("github_pages_human_consent")
+        ? parsedExistingAgents?.github_pages_human_consent
+        : undefined;
+  const effectivePreviewSeparateOrigin =
+    ov?.preview_separate_origin !== undefined
+      ? resolvedConfig.config.preview_separate_origin
+      : existingAgentsTopLevelKeys.includes("preview_separate_origin")
+        ? parsedExistingAgents?.preview_separate_origin
+        : undefined;
 
-  const overrideModels = input.agentsOverrides?.models;
+  const overrideModels = ov?.models;
+  const existingModels = parsedExistingAgents?.models;
   const effectiveAgentsConfig: AgentsConfig = {
     ...resolvedConfig.config,
     harness:
-      input.agentsOverrides?.harness !== undefined
+      ov?.harness !== undefined
         ? resolvedConfig.config.harness
-        : (existingHarness ?? resolvedConfig.config.harness),
+        : (parsedExistingAgents?.harness ?? resolvedConfig.config.harness),
     models: {
       planning:
         overrideModels?.planning ??
@@ -2342,22 +2913,94 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
         resolvedConfig.config.models.review
     },
     reviewers_dir:
-      input.agentsOverrides?.reviewers_dir !== undefined
+      ov?.reviewers_dir !== undefined
         ? resolvedConfig.config.reviewers_dir
-        : (existingReviewersDir ?? resolvedConfig.config.reviewers_dir),
+        : (parsedExistingAgents?.reviewers_dir ?? resolvedConfig.config.reviewers_dir),
     llm_environment:
-      input.agentsOverrides?.llm_environment !== undefined
+      ov?.llm_environment !== undefined
         ? resolvedConfig.config.llm_environment
-        : (existingLlmEnvironment ?? resolvedConfig.config.llm_environment),
-    llm_request_timeout_seconds: effectiveLlmRequestTimeoutSeconds,
+        : (parsedExistingAgents?.llm_environment ?? resolvedConfig.config.llm_environment),
+    merge_policy:
+      ov?.merge_policy !== undefined
+        ? resolvedConfig.config.merge_policy
+        : (parsedExistingAgents?.merge_policy ?? resolvedConfig.config.merge_policy),
+    max_code_fix_attempts:
+      ov?.max_code_fix_attempts !== undefined
+        ? resolvedConfig.config.max_code_fix_attempts
+        : (parsedExistingAgents?.max_code_fix_attempts ??
+          resolvedConfig.config.max_code_fix_attempts),
+    ...(effectiveMaxEpicPhases !== undefined
+      ? { max_epic_phases: effectiveMaxEpicPhases }
+      : {}),
+    max_transient_api_retries:
+      ov?.max_transient_api_retries !== undefined
+        ? resolvedConfig.config.max_transient_api_retries
+        : (parsedExistingAgents?.max_transient_api_retries ??
+          resolvedConfig.config.max_transient_api_retries),
+    transient_retry_backoff_seconds:
+      ov?.transient_retry_backoff_seconds !== undefined
+        ? resolvedConfig.config.transient_retry_backoff_seconds
+        : (parsedExistingAgents?.transient_retry_backoff_seconds ??
+          resolvedConfig.config.transient_retry_backoff_seconds),
+    llm_request_timeout_seconds:
+      ov?.llm_request_timeout_seconds !== undefined
+        ? resolvedConfig.config.llm_request_timeout_seconds
+        : (parsedExistingAgents?.llm_request_timeout_seconds ??
+          resolvedConfig.config.llm_request_timeout_seconds),
+    job_timeout_minutes:
+      ov?.job_timeout_minutes !== undefined
+        ? resolvedConfig.config.job_timeout_minutes
+        : (parsedExistingAgents?.job_timeout_minutes ??
+          resolvedConfig.config.job_timeout_minutes),
+    review_timeout_minutes:
+      ov?.review_timeout_minutes !== undefined
+        ? resolvedConfig.config.review_timeout_minutes
+        : (parsedExistingAgents?.review_timeout_minutes ??
+          resolvedConfig.config.review_timeout_minutes),
+    ...(effectiveAgentMaxLlmRequests !== undefined
+      ? { agent_max_llm_requests: effectiveAgentMaxLlmRequests }
+      : {}),
+    max_concurrent_tasks_per_feature:
+      ov?.max_concurrent_tasks_per_feature !== undefined
+        ? resolvedConfig.config.max_concurrent_tasks_per_feature
+        : (parsedExistingAgents?.max_concurrent_tasks_per_feature ??
+          resolvedConfig.config.max_concurrent_tasks_per_feature),
+    trace_retention_days:
+      ov?.trace_retention_days !== undefined
+        ? resolvedConfig.config.trace_retention_days
+        : (parsedExistingAgents?.trace_retention_days ??
+          resolvedConfig.config.trace_retention_days),
+    preview_retention_days:
+      ov?.preview_retention_days !== undefined
+        ? resolvedConfig.config.preview_retention_days
+        : (parsedExistingAgents?.preview_retention_days ??
+          resolvedConfig.config.preview_retention_days),
+    github_pages_previews:
+      ov?.github_pages_previews !== undefined
+        ? resolvedConfig.config.github_pages_previews
+        : (parsedExistingAgents?.github_pages_previews ??
+          resolvedConfig.config.github_pages_previews),
+    ...(effectivePagesHumanConsent !== undefined
+      ? { github_pages_human_consent: effectivePagesHumanConsent }
+      : {}),
+    ...(effectivePreviewSeparateOrigin !== undefined
+      ? { preview_separate_origin: effectivePreviewSeparateOrigin }
+      : {}),
     ...(effectiveProviders ? { providers: effectiveProviders } : {}),
     ...(effectivePricing ? { pricing: effectivePricing } : {}),
+    ...(effectiveWebTools ? { web_tools: effectiveWebTools } : {}),
     verification: effectiveVerification
   };
 
+  const effectiveTaskAutoMergeEnabled =
+    input.existingState?.hasRequiredCiChecks !== undefined ||
+    input.existingState?.hasBranchProtection !== undefined
+      ? taskAutoMergeEnabled
+      : (parsedExistingAgents?.task_auto_merge_enabled ?? taskAutoMergeEnabled);
+
   const agentsYamlContent = serializeAgentsConfigYaml(
     effectiveAgentsConfig,
-    taskAutoMergeEnabled
+    effectiveTaskAutoMergeEnabled
   );
   const agentsConfigAction = computeFilePlanAction(
     input.repoRootDir,
@@ -2365,31 +3008,67 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
     agentsYamlContent
   );
 
-  const zizmorConfig = buildZizmorConfigYaml();
-  const renovateConfig = buildRenovateConfigJson(detectedStack);
-  const zizmorAction = computeFilePlanAction(
+  const conflicts: SetupRepoConflict[] = [];
+  const preservedBootstrappedFiles: string[] = [];
+
+  const zizmorConfig = buildZizmorConfigYaml({
+    pinnedSha,
+    epureVersionTag: versionTag
+  });
+  const zizmorPlan = computeManagedFilePlanAction(
     input.repoRootDir,
     zizmorConfig.path,
     zizmorConfig.content
   );
-  const renovateAction = computeFilePlanAction(
+  const zizmorAction = zizmorPlan.action;
+  if (zizmorPlan.conflictReason) {
+    conflicts.push({ path: zizmorConfig.path, reason: zizmorPlan.conflictReason });
+  }
+
+  const renovateConfig = buildRenovateConfigJson(detectedStack);
+  const renovatePlan = computeBootstrappedFilePlanAction(
     input.repoRootDir,
     renovateConfig.path,
-    renovateConfig.content
+    renovateConfig.content,
+    forceBootstrap
   );
+  const renovateAction = renovatePlan.action;
+  if (renovatePlan.preserved) {
+    preservedBootstrappedFiles.push(renovateConfig.path);
+  }
 
   const workflowTemplates = buildCallerWorkflows(
     pinnedSha,
     detectedStack,
     effectiveAgentsConfig.job_timeout_minutes,
     effectiveAgentsConfig.llm_environment,
-    effectiveAgentsConfig.harness
+    effectiveAgentsConfig.harness,
+    versionTag
   );
-  const plannedWorkflows: PlannedWorkflowFile[] = workflowTemplates.map((wf) => ({
-    path: wf.path,
-    action: computeFilePlanAction(input.repoRootDir, wf.path, wf.content),
-    content: wf.content
-  }));
+  const bootstrappedWorkflowSet = new Set<string>(BOOTSTRAPPED_ONCE_WORKFLOW_PATHS);
+  const plannedWorkflows: PlannedWorkflowFile[] = workflowTemplates.map((wf) => {
+    if (bootstrappedWorkflowSet.has(wf.path)) {
+      const plan = computeBootstrappedFilePlanAction(
+        input.repoRootDir,
+        wf.path,
+        wf.content,
+        forceBootstrap
+      );
+      if (plan.preserved) {
+        preservedBootstrappedFiles.push(wf.path);
+      }
+      return { path: wf.path, action: plan.action, content: wf.content };
+    }
+    const plan = computeManagedFilePlanAction(
+      input.repoRootDir,
+      wf.path,
+      wf.content
+    );
+    if (plan.conflictReason) {
+      conflicts.push({ path: wf.path, reason: plan.conflictReason });
+    }
+    return { path: wf.path, action: plan.action, content: wf.content };
+  });
 
   const rosterTemplates = buildDefaultReviewerRosterFiles({
     repository,
@@ -2399,12 +3078,23 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
     reviewersDir: effectiveAgentsConfig.reviewers_dir
   });
   const plannedReviewerRoster: PlannedReviewerRosterFile[] = rosterTemplates.map(
-    (item) => ({
-      name: item.name,
-      path: item.path,
-      action: computeFilePlanAction(input.repoRootDir, item.path, item.content),
-      content: item.content
-    })
+    (item) => {
+      const plan = computeBootstrappedFilePlanAction(
+        input.repoRootDir,
+        item.path,
+        item.content,
+        forceBootstrap
+      );
+      if (plan.preserved) {
+        preservedBootstrappedFiles.push(item.path);
+      }
+      return {
+        name: item.name,
+        path: item.path,
+        action: plan.action,
+        content: item.content
+      };
+    }
   );
 
   const existingApps = new Set(input.existingState?.existingAppNames ?? []);
@@ -2423,26 +3113,26 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
 
   const mutatedFiles: string[] = [];
   if (!dryRun && input.repoRootDir) {
-    if (agentsConfigAction !== "noop") {
+    if (agentsConfigAction === "create" || agentsConfigAction === "update") {
       const targetPath = join(input.repoRootDir, ".github/agents.yml");
       mkdirSync(dirname(targetPath), { recursive: true });
       writeFileSync(targetPath, agentsYamlContent, "utf8");
       mutatedFiles.push(".github/agents.yml");
     }
-    if (zizmorAction !== "noop") {
+    if (zizmorAction === "create" || zizmorAction === "update") {
       const targetPath = join(input.repoRootDir, zizmorConfig.path);
       mkdirSync(dirname(targetPath), { recursive: true });
       writeFileSync(targetPath, zizmorConfig.content, "utf8");
       mutatedFiles.push(zizmorConfig.path);
     }
-    if (renovateAction !== "noop") {
+    if (renovateAction === "create" || renovateAction === "update") {
       const targetPath = join(input.repoRootDir, renovateConfig.path);
       mkdirSync(dirname(targetPath), { recursive: true });
       writeFileSync(targetPath, renovateConfig.content, "utf8");
       mutatedFiles.push(renovateConfig.path);
     }
     for (const wf of plannedWorkflows) {
-      if (wf.action !== "noop") {
+      if (wf.action === "create" || wf.action === "update") {
         const targetPath = join(input.repoRootDir, wf.path);
         mkdirSync(dirname(targetPath), { recursive: true });
         writeFileSync(targetPath, wf.content, "utf8");
@@ -2450,7 +3140,7 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
       }
     }
     for (const agentFile of plannedReviewerRoster) {
-      if (agentFile.action !== "noop") {
+      if (agentFile.action === "create" || agentFile.action === "update") {
         const targetPath = join(input.repoRootDir, agentFile.path);
         mkdirSync(dirname(targetPath), { recursive: true });
         writeFileSync(targetPath, agentFile.content, "utf8");
@@ -2458,6 +3148,83 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
       }
     }
   }
+
+  // Build effective workflow map to detect missing required PR status checks (#127)
+  const effectiveWorkflowFiles: Record<string, string> = {};
+  if (input.repoRootDir && existsSync(join(input.repoRootDir, ".github", "workflows"))) {
+    try {
+      for (const entry of readdirSync(join(input.repoRootDir, ".github", "workflows")).sort()) {
+        if (/\.ya?ml$/i.test(entry)) {
+          const relPath = `.github/workflows/${entry}`;
+          effectiveWorkflowFiles[relPath] = readFileSync(join(input.repoRootDir, relPath), "utf8");
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+  for (const wf of plannedWorkflows) {
+    if (wf.action === "create" || wf.action === "update" || !input.repoRootDir) {
+      effectiveWorkflowFiles[wf.path] = wf.content;
+    } else if (!(wf.path in effectiveWorkflowFiles)) {
+      effectiveWorkflowFiles[wf.path] = wf.content;
+    }
+  }
+  const missingRequiredChecks = detectMissingRequiredPrChecks(effectiveWorkflowFiles);
+
+  const warnings: string[] = [];
+  for (const conflict of conflicts) {
+    warnings.push(conflict.reason);
+  }
+  if (missingRequiredChecks.length > 0) {
+    warnings.push(
+      `Missing required pull_request status check(s) on dev and feature/**: ${missingRequiredChecks.join(", ")}. Ensure your workflows (e.g. .github/workflows/ci.yml) define jobs with these exact names or pass --force-bootstrap / --allow-missing-required-checks.`
+    );
+  }
+
+  const newAgentsYmlKeys = hadExistingAgentsYml
+    ? extractTopLevelYamlKeys(agentsYamlContent).filter(
+        (k) => !existingAgentsTopLevelKeys.includes(k)
+      )
+    : [];
+
+  const managedFilesToUpdate = [
+    ...(zizmorAction === "update" ? [zizmorConfig.path] : []),
+    ...plannedWorkflows
+      .filter((w) => !bootstrappedWorkflowSet.has(w.path) && w.action === "update")
+      .map((w) => w.path)
+  ];
+  const conflictingManagedFiles = conflicts.map((c) => c.path);
+
+  const rulesetDiffs: RulesetDiffSummary[] = governanceRulesets.map((r) => ({
+    name: r.name,
+    action: existingRulesets.has(r.name) ? "noop" : "create",
+    summary: `target=${r.target}, refs=${r.targetRefs.join(",")}`
+  }));
+
+  const secretAndPermissionChanges: string[] = existingInstall.isOnboarded
+    ? [
+        `Environment '${effectiveAgentsConfig.llm_environment}' secrets: EPURE_AGENT_APP_ID, EPURE_AGENT_APP_PRIVATE_KEY, LLM_API_KEY${effectiveAgentsConfig.harness === "cursor" ? ", CURSOR_API_KEY" : ""}`,
+        "Environment 'release' secrets: EPURE_RELEASE_APP_ID, EPURE_RELEASE_APP_PRIVATE_KEY",
+        `Agent App (${manifests.agentApp.name}) permissions: contents:write, issues:write, pull_requests:write, checks:write`,
+        `Release App (${manifests.releaseApp.name}) permissions: contents:write, metadata:read`
+      ]
+    : [];
+
+  const migrationChecklist: MigrationChecklist = {
+    is_upgrade: existingInstall.isOnboarded,
+    previous_version: existingInstall.previousVersion,
+    previous_pinned_sha: existingInstall.previousPinnedSha,
+    target_version: versionTag,
+    target_pinned_sha: pinnedSha,
+    managed_files_to_update: managedFilesToUpdate,
+    conflicting_managed_files: conflictingManagedFiles,
+    preserved_bootstrapped_files: preservedBootstrappedFiles,
+    new_agents_yml_keys: newAgentsYmlKeys,
+    deprecated_agents_yml_keys: deprecatedAgentsYmlKeys,
+    ruleset_diffs: rulesetDiffs,
+    secret_and_permission_changes: secretAndPermissionChanges
+  };
 
   const effectiveExpectedSecrets: readonly ExpectedSecretSpec[] =
     effectiveAgentsConfig.harness === "cursor"
@@ -2519,19 +3286,41 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
     return `| \`${t.name}\` | \`${t.kind}\` | \`${t.working_directory}\` | ${patternsStr} | ${stage1Cmds || "none"} |`;
   });
 
+  const migrationChecklistSection = migrationChecklist.is_upgrade
+    ? [
+        "",
+        "### Migration Checklist",
+        `- **Upgrade Path**: \`${migrationChecklist.previous_version ?? "unknown"}\` (\`${migrationChecklist.previous_pinned_sha ?? "unpinned"}\`) -> \`${migrationChecklist.target_version}\` (\`${migrationChecklist.target_pinned_sha}\`)`,
+        `- **Managed Files to Update**: ${migrationChecklist.managed_files_to_update.length > 0 ? migrationChecklist.managed_files_to_update.map((f) => `\`${f}\``).join(", ") : "none"}`,
+        `- **Conflicting Managed Files (hand-written, not overwritten)**: ${migrationChecklist.conflicting_managed_files.length > 0 ? migrationChecklist.conflicting_managed_files.map((f) => `\`${f}\``).join(", ") : "none"}`,
+        `- **Preserved Bootstrapped Files**: ${migrationChecklist.preserved_bootstrapped_files.length > 0 ? migrationChecklist.preserved_bootstrapped_files.map((f) => `\`${f}\``).join(", ") : "none"}`,
+        `- **New \`.github/agents.yml\` Keys**: ${migrationChecklist.new_agents_yml_keys.length > 0 ? migrationChecklist.new_agents_yml_keys.map((k) => `\`${k}\``).join(", ") : "none"}`,
+        `- **Deprecated \`.github/agents.yml\` Keys Migrated/Removed**: ${migrationChecklist.deprecated_agents_yml_keys.length > 0 ? migrationChecklist.deprecated_agents_yml_keys.map((k) => `\`${k}\``).join(", ") : "none"}`,
+        `- **Missing Required PR Checks**: ${missingRequiredChecks.length > 0 ? missingRequiredChecks.map((c) => `\`${c}\``).join(", ") : "none"}`
+      ]
+    : [];
+
+  const warningsSection =
+    warnings.length > 0
+      ? ["", "#### Warnings & Conflicts", ...warnings.map((w) => `- ${w}`)]
+      : [];
+
   const summaryMarkdown = [
     `### EPURE setup-repo (${dryRun ? "Dry-Run Simulation" : "Guided Application"})`,
     `- **Repository**: \`${repository}\``,
+    `- **EPURE Version**: \`${versionTag}\` (\`${pinnedSha}\`)`,
     `- **Merge Governance**: \`squash-only\` (\`allow_merge_commit=false\`, \`allow_rebase_merge=false\`, \`delete_branch_on_merge=true\`)`,
     `- **Agents Config (\`.github/agents.yml\`)**: \`${agentsConfigAction}\` (harness=\`${effectiveAgentsConfig.harness}\`, merge_policy=\`${effectiveAgentsConfig.merge_policy}\`)`,
     ...(effectiveAgentsConfig.harness === "cursor"
       ? [`- **Harness Security Notice**: ${CURSOR_ISOLATION_WARNING}`]
       : []),
     `- **Reviewer Roster (\`${effectiveAgentsConfig.reviewers_dir}/*.md\`)**: \`${plannedReviewerRoster.length}\` agents (specialists + cross-cutting + \`user-advocate\`)`,
-    `- **Task Auto-Merge Enabled**: \`${taskAutoMergeEnabled}\` (${autoMergeWarningCode})`,
+    `- **Task Auto-Merge Enabled**: \`${effectiveTaskAutoMergeEnabled}\` (${autoMergeWarningCode})`,
     `- **Governance Rulesets**: ${governanceRulesets.map((r) => `\`${r.name}\``).join(", ")}`,
     `- **Deferred External Workflows**: ${deferredWorkflowsList.length > 0 ? deferredWorkflowsList.map((w) => `\`${w}\``).join(", ") : "none"}`,
     `- **Mutated Files**: ${mutatedFiles.length > 0 ? mutatedFiles.map((f) => `\`${f}\``).join(", ") : "none"}`,
+    ...warningsSection,
+    ...migrationChecklistSection,
     "",
     "#### Discovered Verification Targets (`verification.targets`)",
     "| Name | Kind | Working Directory | Path Patterns | Stage 1 Commands |",
@@ -2547,6 +3336,8 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
     repository,
     agents_config: effectiveAgentsConfig,
     agents_config_action: agentsConfigAction,
+    zizmor_action: zizmorAction,
+    renovate_action: renovateAction,
     planned_workflows: plannedWorkflows,
     planned_reviewer_roster: plannedReviewerRoster,
     expected_secrets: effectiveExpectedSecrets,
@@ -2557,10 +3348,14 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
     release_rulesets_action: releaseRulesetsAction,
     apps_action: appsAction,
     release_environment: releaseEnvironment,
-    task_auto_merge_enabled: taskAutoMergeEnabled,
+    task_auto_merge_enabled: effectiveTaskAutoMergeEnabled,
     auto_merge_warning_code: autoMergeWarningCode,
     human_interventions: humanInterventions,
     mutated_files: mutatedFiles,
+    conflicts,
+    warnings,
+    missing_required_checks: missingRequiredChecks,
+    migration_checklist: migrationChecklist,
     summary_markdown: summaryMarkdown
   };
 }
@@ -2662,7 +3457,13 @@ export function buildGitHubRulesetApiPayload(
 
 interface GitHubRulesetShape {
   readonly target?: string;
-  readonly conditions?: { readonly ref_name?: { readonly include?: readonly string[] } };
+  readonly enforcement?: string;
+  readonly conditions?: {
+    readonly ref_name?: {
+      readonly include?: readonly string[];
+      readonly exclude?: readonly string[];
+    };
+  };
   readonly rules?: ReadonlyArray<{
     readonly type: string;
     readonly parameters?: {
@@ -2672,6 +3473,17 @@ interface GitHubRulesetShape {
         readonly context: string;
         readonly integration_id?: number;
       }>;
+      readonly allowed_merge_methods?: readonly string[];
+      readonly dismiss_stale_reviews_on_push?: boolean;
+      readonly require_code_owner_review?: boolean;
+      readonly require_last_push_approval?: boolean;
+      readonly required_approving_review_count?: number;
+      readonly required_review_thread_resolution?: boolean;
+      readonly name?: string;
+      readonly negate?: boolean;
+      readonly operator?: string;
+      readonly pattern?: string;
+      readonly update_allows_fetch_and_merge?: boolean;
     };
   }>;
   readonly bypass_actors?: ReadonlyArray<{
@@ -2681,26 +3493,59 @@ interface GitHubRulesetShape {
   }>;
 }
 
-// Only the required checks are compared among rule parameters: GitHub fills in defaults the payload never sends.
 function ruleFingerprint(rule: NonNullable<GitHubRulesetShape["rules"]>[number]): string {
-  if (rule.type !== "required_status_checks") {
-    return rule.type;
+  switch (rule.type) {
+    case "required_status_checks": {
+      const checks = (rule.parameters?.required_status_checks ?? [])
+        .map((c) => `${c.context}@${c.integration_id ?? "any"}`)
+        .sort();
+      return JSON.stringify([
+        rule.type,
+        rule.parameters?.strict_required_status_checks_policy === true,
+        rule.parameters?.do_not_enforce_on_create === true,
+        checks
+      ]);
+    }
+    case "pull_request": {
+      const allowedMergeMethods = [
+        ...(rule.parameters?.allowed_merge_methods ?? ["squash"])
+      ].sort();
+      return JSON.stringify([
+        rule.type,
+        allowedMergeMethods,
+        rule.parameters?.dismiss_stale_reviews_on_push ?? true,
+        rule.parameters?.require_code_owner_review ?? false,
+        rule.parameters?.require_last_push_approval ?? false,
+        rule.parameters?.required_approving_review_count ?? 0,
+        rule.parameters?.required_review_thread_resolution ?? true
+      ]);
+    }
+    case "commit_message_pattern": {
+      return JSON.stringify([
+        rule.type,
+        rule.parameters?.name ?? "Conventional Commit format",
+        rule.parameters?.negate ?? false,
+        rule.parameters?.operator ?? "regex",
+        rule.parameters?.pattern ?? CONVENTIONAL_COMMIT_PATTERN_REGEX
+      ]);
+    }
+    case "update": {
+      return JSON.stringify([
+        rule.type,
+        rule.parameters?.update_allows_fetch_and_merge === true
+      ]);
+    }
+    default:
+      return rule.type;
   }
-  const checks = (rule.parameters?.required_status_checks ?? [])
-    .map((c) => `${c.context}@${c.integration_id ?? "any"}`)
-    .sort();
-  return JSON.stringify([
-    rule.type,
-    rule.parameters?.strict_required_status_checks_policy === true,
-    rule.parameters?.do_not_enforce_on_create === true,
-    checks
-  ]);
 }
 
-function rulesetFingerprint(ruleset: GitHubRulesetShape): string {
+export function rulesetFingerprint(ruleset: GitHubRulesetShape): string {
   return JSON.stringify({
-    target: ruleset.target,
+    target: ruleset.target ?? "branch",
+    enforcement: ruleset.enforcement ?? "active",
     include: [...(ruleset.conditions?.ref_name?.include ?? [])].sort(),
+    exclude: [...(ruleset.conditions?.ref_name?.exclude ?? [])].sort(),
     rules: (ruleset.rules ?? []).map(ruleFingerprint).sort(),
     bypass: (ruleset.bypass_actors ?? [])
       .map((a) => `${a.actor_type}:${a.actor_id}:${a.bypass_mode}`)
@@ -2727,6 +3572,55 @@ function assertBypassAppIds(input: ApplyGitHubRepositoryGovernanceInput): void {
   }
 }
 
+interface GitHubRulesetListItem {
+  readonly id: number;
+  readonly name: string;
+  readonly source_type?: string;
+}
+
+async function listRepositoryRulesets(params: {
+  readonly baseRepoUrl: string;
+  readonly headers: Readonly<Record<string, string>>;
+  readonly fetchFn: typeof fetch;
+  readonly repository: string;
+  readonly errorActionLabel: string;
+}): Promise<ReadonlyArray<{ readonly id: number; readonly name: string }>> {
+  const collected: Array<{ id: number; name: string }> = [];
+  let page = 1;
+  let nextUrl: string | null = `${params.baseRepoUrl}/rulesets?per_page=100`;
+
+  while (nextUrl) {
+    const resp = await params.fetchFn(nextUrl, {
+      method: "GET",
+      headers: params.headers
+    });
+    if (!resp.ok) {
+      throw new Error(
+        `Failed to ${params.errorActionLabel} on ${params.repository} (HTTP ${resp.status}): ${await resp.text()}`
+      );
+    }
+    const items = (await resp.json()) as GitHubRulesetListItem[];
+    for (const item of items) {
+      if ((item.source_type ?? "Repository") === "Repository") {
+        collected.push({ id: item.id, name: item.name });
+      }
+    }
+    const linkHeader = resp.headers?.get?.("link") ?? null;
+    const nextMatch = linkHeader ? /<([^>]+)>;\s*rel="next"/.exec(linkHeader) : null;
+    if (nextMatch?.[1]) {
+      nextUrl = nextMatch[1];
+      page += 1;
+    } else if (items.length === 100) {
+      page += 1;
+      nextUrl = `${params.baseRepoUrl}/rulesets?per_page=100&page=${page}`;
+    } else {
+      nextUrl = null;
+    }
+  }
+
+  return collected;
+}
+
 /** Read-only counterpart of `applyGitHubRepositoryGovernance` for `--dry-run`. */
 export async function planGitHubRulesetChanges(
   input: ApplyGitHubRepositoryGovernanceInput
@@ -2749,7 +3643,13 @@ export async function planGitHubRulesetChanges(
     return (await resp.json()) as T;
   };
 
-  const existing = await get<Array<{ id: number; name: string }>>("/rulesets");
+  const existing = await listRepositoryRulesets({
+    baseRepoUrl: baseUrl,
+    headers,
+    fetchFn,
+    repository: input.repository,
+    errorActionLabel: "read /rulesets"
+  });
   const plan: Array<{ name: string; action: ResourcePlanAction }> = [];
   for (const spec of input.governanceRulesets) {
     const match = existing.find((r) => r.name === spec.name);
@@ -2768,6 +3668,43 @@ export async function planGitHubRulesetChanges(
   return plan;
 }
 
+function resolveMissingRequiredChecksForGovernance(
+  input: ApplyGitHubRepositoryGovernanceInput
+): readonly string[] {
+  if (input.allowMissingRequiredChecks === true) {
+    return [];
+  }
+  if (input.missingRequiredChecks !== undefined) {
+    return input.missingRequiredChecks;
+  }
+  if (input.workflowFiles !== undefined) {
+    return detectMissingRequiredPrChecks(input.workflowFiles);
+  }
+  if (
+    input.repoRootDir &&
+    existsSync(join(input.repoRootDir, ".github", "workflows"))
+  ) {
+    const wfMap: Record<string, string> = {};
+    try {
+      for (const entry of readdirSync(
+        join(input.repoRootDir, ".github", "workflows")
+      ).sort()) {
+        if (/\.ya?ml$/i.test(entry)) {
+          const relPath = `.github/workflows/${entry}`;
+          wfMap[relPath] = readFileSync(
+            join(input.repoRootDir, relPath),
+            "utf8"
+          );
+        }
+      }
+      return detectMissingRequiredPrChecks(wfMap);
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
 export async function applyGitHubRepositoryGovernance(
   input: ApplyGitHubRepositoryGovernanceInput
 ): Promise<ApplyGitHubRepositoryGovernanceResult> {
@@ -2777,8 +3714,16 @@ export async function applyGitHubRepositoryGovernance(
   }
   assertBypassAppIds(input);
 
+  const missingChecks = resolveMissingRequiredChecksForGovernance(input);
+  if (missingChecks.length > 0) {
+    throw new Error(
+      `Refusing to apply GitHub rulesets on ${input.repository}: required pull_request status check(s) [${missingChecks.join(", ")}] are not produced by .github/workflows/ on dev and feature/**. Update your workflows (or pass --force-bootstrap) or pass --allow-missing-required-checks.`
+    );
+  }
+
   const fetchFn = input.fetchImpl ?? fetch;
   const baseUrl = "https://api.github.com";
+  const baseRepoUrl = `${baseUrl}/repos/${owner}/${repo}`;
   const headers = {
     Authorization: `Bearer ${input.githubToken.trim()}`,
     Accept: "application/vnd.github+json",
@@ -2787,7 +3732,7 @@ export async function applyGitHubRepositoryGovernance(
   };
 
   // 1. Configure Squash-Only & automatic head branch deletion on the repository
-  const patchRepoResp = await fetchFn(`${baseUrl}/repos/${owner}/${repo}`, {
+  const patchRepoResp = await fetchFn(baseRepoUrl, {
     method: "PATCH",
     headers,
     body: JSON.stringify(DEFAULT_REPOSITORY_MERGE_SETTINGS)
@@ -2799,24 +3744,14 @@ export async function applyGitHubRepositoryGovernance(
     );
   }
 
-  // 2. Fetch existing rulesets for idempotent create-or-update
-  const listRulesetsResp = await fetchFn(
-    `${baseUrl}/repos/${owner}/${repo}/rulesets`,
-    {
-      method: "GET",
-      headers
-    }
-  );
-  if (!listRulesetsResp.ok) {
-    const errText = await listRulesetsResp.text();
-    throw new Error(
-      `Failed to list rulesets on ${input.repository} (HTTP ${listRulesetsResp.status}): ${errText}`
-    );
-  }
-  const existingRulesets = (await listRulesetsResp.json()) as Array<{
-    id: number;
-    name: string;
-  }>;
+  // 2. Fetch existing repository-scoped rulesets across all pages for idempotent create-or-update
+  const existingRulesets = await listRepositoryRulesets({
+    baseRepoUrl,
+    headers,
+    fetchFn,
+    repository: input.repository,
+    errorActionLabel: "list rulesets"
+  });
   const existingByName = new Map<string, number>();
   for (const r of existingRulesets) {
     existingByName.set(r.name, r.id);
@@ -2837,7 +3772,7 @@ export async function applyGitHubRepositoryGovernance(
 
     if (typeof existingId === "number") {
       const updateResp = await fetchFn(
-        `${baseUrl}/repos/${owner}/${repo}/rulesets/${existingId}`,
+        `${baseRepoUrl}/rulesets/${existingId}`,
         {
           method: "PUT",
           headers,
@@ -2857,7 +3792,7 @@ export async function applyGitHubRepositoryGovernance(
       });
     } else {
       const createResp = await fetchFn(
-        `${baseUrl}/repos/${owner}/${repo}/rulesets`,
+        `${baseRepoUrl}/rulesets`,
         {
           method: "POST",
           headers,
@@ -2896,7 +3831,7 @@ export function validateOrgSecretSharingScope(
       allowed: false,
       error_code: "CROSS_REPO_TOKEN_SCOPE_FORBIDDEN",
       error_message:
-        "Organization-level secrets may be shared with a second repository, but the GitHub App installation token must not use 'all' repository selection (ADR-0010).",
+        "Organization-level secrets may be shared with a second repository, but the GitHub App installation token must not use 'all' repository selection (https://giskard-ai.github.io/epure/installation).",
       effective_token_repositories: []
     };
   }

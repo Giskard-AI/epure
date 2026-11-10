@@ -90,6 +90,14 @@ jobs:
           main_sha="$(git rev-parse refs/remotes/origin/main)"
           dev_sha="$(git rev-parse refs/remotes/origin/dev)"
 
+          if git cat-file -e "${EXPECTED_DEV_SHA}:package.json" 2>/dev/null; then
+            pkg_version="$(git show "${EXPECTED_DEV_SHA}:package.json" | node -e 'const p = JSON.parse(require("node:fs").readFileSync(0, "utf8")); process.stdout.write(String(p.version ?? ""));')"
+            expected_version="${SEMVER_TAG#v}"
+            if [[ -n "$pkg_version" && "$pkg_version" != "$expected_version" ]]; then
+              fail "package.json version (${pkg_version}) at ${EXPECTED_DEV_SHA} does not match semver_tag ${SEMVER_TAG} (expected ${expected_version})."
+            fi
+          fi
+
           # A re-run after a partial failure finds the tag and main already on the SHA: only the GitHub Release is left.
           mode=promote
           if tag_sha="$(git rev-parse -q --verify "refs/tags/${SEMVER_TAG}^{commit}")"; then
