@@ -186,6 +186,9 @@ async function runTicket(scenario: Scenario) {
     if (path.includes("/actions/workflows")) {
       return reply({ total_count: 0, workflows: [] });
     }
+    if (path.includes("/compare/") && method === "GET") {
+      return reply({ merge_base_commit: { sha: "base-sha-70" }, files: [], ahead_by: 1 });
+    }
     return reply({ ok: true });
   };
 
@@ -201,7 +204,24 @@ async function runTicket(scenario: Scenario) {
     llmApiKey: "AIzaMockKey",
     stateStore: store,
     fetchImpl,
-    agentEngine: scenario.agent?.engine,
+    agentEngine:
+      scenario.agent?.engine ?? {
+        name: "test-engine",
+        run: async () => ({
+          finalMessage: "Implemented src/postgres.ts",
+          diff: {
+            files: [
+              {
+                path: "src/postgres.ts",
+                content: "export const pg = true;\n",
+                mode: "100644"
+              }
+            ],
+            deleted_files: [],
+            skipped: []
+          }
+        })
+      },
     sandboxRunner: async () => ({
       isolated: true,
       error_code: "NONE",

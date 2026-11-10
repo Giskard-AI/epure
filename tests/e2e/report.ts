@@ -565,20 +565,16 @@ export interface EngineRecord {
   // What ran the epic, read from the installed caller workflow.
   readonly executed: string;
   readonly workflow_actions: readonly string[];
-  // `harness` from the generated agents.yml; the in-house loop does not read it.
+  // `harness` from the generated agents.yml.
   readonly agents_yml_harness: string | null;
 }
 
 export function deriveEngine(issueCommandWorkflow: string, agentsYml: string): EngineRecord {
   const actions = [...new Set([...issueCommandWorkflow.matchAll(/uses: Giskard-AI\/epure\/actions\/([\w-]+)@/g)].map((m) => m[1]!))];
   const harness = /^harness:\s*(\S+)/m.exec(agentsYml)?.[1] ?? null;
-  const executed = actions.includes("run-agent")
-    ? `agent harness (${harness ?? "default"})`
-    : actions.includes("orchestrate-issue")
-      ? harness === null || harness === "pi"
-        ? "pi"
-        : "epure-in-house-loop"
-      : "unknown";
+  const executed = actions.includes("orchestrate-issue")
+    ? (harness ?? "pi")
+    : "unknown";
   return { executed, workflow_actions: actions, agents_yml_harness: harness };
 }
 

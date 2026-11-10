@@ -7239,142 +7239,6 @@ var GENERATED_TICKET_DAG_SCHEMA = {
     };
   }
 };
-function createGeneratedTicketImplementationSchema(options) {
-  return {
-    name: "generated_ticket_implementation",
-    description: "Structured TDD code implementation or remediation payload for a ticket.",
-    schema: {
-      type: "object",
-      properties: {
-        commit_message: { type: "string" },
-        test_summary: { type: "string" },
-        files: {
-          type: "array",
-          items: {
-            type: "object",
-            properties: {
-              path: { type: "string" },
-              content: { type: "string" }
-            },
-            required: ["path", "content"]
-          }
-        },
-        patches: {
-          type: "array",
-          items: {
-            type: "object",
-            properties: {
-              path: { type: "string" },
-              edits: {
-                type: "array",
-                items: {
-                  type: "object",
-                  properties: {
-                    old_string: { type: "string" },
-                    new_string: { type: "string" },
-                    search: { type: "string" },
-                    replace: { type: "string" }
-                  },
-                  required: ["old_string", "new_string"]
-                }
-              }
-            },
-            required: ["path", "edits"]
-          }
-        },
-        deleted_files: {
-          type: "array",
-          items: { type: "string" }
-        }
-      },
-      required: [
-        "commit_message",
-        "test_summary",
-        "files",
-        "patches",
-        "deleted_files"
-      ]
-    },
-    validate(parsed) {
-      const obj = asRecord(parsed, "GeneratedTicketImplementation");
-      if (typeof obj.commit_message !== "string" || obj.commit_message.trim().length === 0) {
-        throw new Error(
-          "GeneratedTicketImplementation.commit_message must be a non-empty string."
-        );
-      }
-      const commitMessage = obj.commit_message.trim();
-      const testSummary = typeof obj.test_summary === "string" ? obj.test_summary : "";
-      const files = Array.isArray(obj.files) ? obj.files.map((item, idx) => {
-        const rec = asRecord(item, `GeneratedFileChange[${idx}]`);
-        if (typeof rec.path !== "string" || rec.path.trim().length === 0) {
-          throw new Error(
-            `GeneratedFileChange[${idx}].path must be a non-empty string.`
-          );
-        }
-        if (typeof rec.content !== "string") {
-          throw new Error(
-            `GeneratedFileChange[${idx}].content for '${rec.path.trim()}' must be a string.`
-          );
-        }
-        return {
-          path: rec.path.trim(),
-          content: rec.content
-        };
-      }) : void 0;
-      const patches = Array.isArray(
-        obj.patches
-      ) ? obj.patches.map((item, idx) => {
-        const rec = asRecord(item, `GeneratedFilePatch[${idx}]`);
-        if (typeof rec.path !== "string" || rec.path.trim().length === 0) {
-          throw new Error(
-            `GeneratedFilePatch[${idx}].path must be a non-empty string.`
-          );
-        }
-        const rawEdits = Array.isArray(rec.edits) ? rec.edits : [];
-        const edits = rawEdits.map(
-          (editItem, editIdx) => {
-            const editRec = asRecord(
-              editItem,
-              `GeneratedFilePatchEdit[${idx}][${editIdx}]`
-            );
-            const oldStr = typeof editRec.old_string === "string" ? editRec.old_string : typeof editRec.search === "string" ? editRec.search : "";
-            const newStr = typeof editRec.new_string === "string" ? editRec.new_string : typeof editRec.replace === "string" ? editRec.replace : "";
-            return {
-              old_string: oldStr,
-              new_string: newStr,
-              search: oldStr,
-              replace: newStr
-            };
-          }
-        );
-        return {
-          path: rec.path.trim(),
-          edits
-        };
-      }) : void 0;
-      const deletedFiles = Array.isArray(
-        obj.deleted_files
-      ) ? asStringArray(obj.deleted_files) : void 0;
-      const hasFiles = (files?.length ?? 0) > 0;
-      const hasPatches = (patches?.some((p) => p.edits.length > 0) ?? false) && (patches?.length ?? 0) > 0;
-      const hasDeleted = (deletedFiles?.length ?? 0) > 0;
-      const hasStaged = Boolean(options?.hasStagedMutations?.());
-      if (!hasFiles && !hasPatches && !hasDeleted && !hasStaged) {
-        throw new Error(
-          "GeneratedTicketImplementation must include at least one non-empty file in 'files', 'patches', or 'deleted_files'."
-        );
-      }
-      return {
-        commit_message: commitMessage,
-        test_summary: testSummary,
-        ...files !== void 0 ? { files } : {},
-        ...patches !== void 0 ? { patches } : {},
-        ...deletedFiles !== void 0 ? { deleted_files: deletedFiles } : {}
-      };
-    }
-  };
-}
-var GENERATED_TICKET_IMPLEMENTATION_SCHEMA = createGeneratedTicketImplementationSchema();
 var REVIEWER_FINDINGS_SCHEMA = {
   name: "reviewer_findings_payload",
   description: "Structured output from a single EPURE multi-agent PR reviewer pass.",
@@ -11593,538 +11457,6 @@ var EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT = [
   "- **Fronti\xE8re stricte d'Auto-Clarity (100 % exact et non abr\xE9g\xE9)** : ne compresse JAMAIS le code source, les chemins de fichiers, les commandes shell, les identifiants techniques, les sch\xE9mas JSON de sortie (`commit_message`, `test_summary`, `patches`, `files`, `deleted_files`), les diagnostics de s\xE9curit\xE9 ni les messages de commit Conventional Commits."
 ].join("\n");
 
-// src/orchestrator/workspace/web-tools.ts
-var DEFAULT_WEB_TOOLS_PHASES = [
-  "plan",
-  "spec",
-  "implementation"
-];
-var DEFAULT_MAX_REQUESTS_PER_RUN = 8;
-var DEFAULT_TIMEOUT_MS = 8e3;
-var DEFAULT_MAX_FETCH_BYTES = 16384;
-var MAX_REDIRECTS = 3;
-function isBlockedIpv4(host) {
-  const parts = host.split(".");
-  if (parts.length !== 4) {
-    return false;
-  }
-  const octets = [];
-  for (const part of parts) {
-    if (!/^\d{1,3}$/.test(part)) {
-      return false;
-    }
-    const n = Number(part);
-    if (!Number.isInteger(n) || n < 0 || n > 255) {
-      return true;
-    }
-    octets.push(n);
-  }
-  const [a, b] = octets;
-  if (a === 0) return true;
-  if (a === 10) return true;
-  if (a === 100 && b >= 64 && b <= 127) return true;
-  if (a === 127) return true;
-  if (a === 169 && b === 254) return true;
-  if (a === 172 && b >= 16 && b <= 31) return true;
-  if (a === 192 && b === 168) return true;
-  if (a >= 224) return true;
-  return false;
-}
-function isBlockedIpv6(rawHost) {
-  const host = rawHost.replace(/^\[|\]$/g, "").toLowerCase();
-  if (!host.includes(":")) {
-    return false;
-  }
-  if (host === "::1" || host === "::" || host === "0:0:0:0:0:0:0:1" || host === "0:0:0:0:0:0:0:0") {
-    return true;
-  }
-  if (host.startsWith("::ffff:") || host.startsWith("0:0:0:0:0:ffff:")) {
-    const tail = host.slice(host.lastIndexOf(":") + 1);
-    if (tail.includes(".")) {
-      return isBlockedIpv4(tail);
-    }
-    return true;
-  }
-  if (/^f[cd][0-9a-f]{0,2}:/.test(host)) {
-    return true;
-  }
-  if (/^fe[89ab][0-9a-f]?:/.test(host)) {
-    return true;
-  }
-  return false;
-}
-function validatePublicHttpsUrlForWebTool(rawUrl) {
-  let parsed;
-  try {
-    parsed = new URL(rawUrl.trim());
-  } catch {
-    return {
-      valid: false,
-      reason: "SSRF_BLOCKED: Invalid URL syntax."
-    };
-  }
-  if (parsed.protocol !== "https:") {
-    return {
-      valid: false,
-      reason: `SSRF_BLOCKED: Disallowed protocol '${parsed.protocol}'. Only 'https:' is permitted.`
-    };
-  }
-  if (parsed.port !== "" && parsed.port !== "443") {
-    return {
-      valid: false,
-      reason: `SSRF_BLOCKED: Disallowed port '${parsed.port}'. Only default HTTPS port 443 is permitted.`
-    };
-  }
-  if (parsed.username !== "" || parsed.password !== "") {
-    return {
-      valid: false,
-      reason: "SSRF_BLOCKED: URLs containing credentials are not permitted."
-    };
-  }
-  const hostname = parsed.hostname.toLowerCase().replace(/\.$/, "");
-  if (!hostname) {
-    return {
-      valid: false,
-      reason: "SSRF_BLOCKED: Empty hostname."
-    };
-  }
-  if (hostname === "localhost" || hostname.endsWith(".localhost") || hostname.endsWith(".local") || hostname.endsWith(".internal") || hostname.endsWith(".arpa") || hostname === "metadata.google.internal" || hostname === "instance-data" || hostname === "metadata") {
-    return {
-      valid: false,
-      reason: `SSRF_BLOCKED: Internal or local hostname '${hostname}' is forbidden.`
-    };
-  }
-  if (/^\d+$/.test(hostname) || /^0x[0-9a-f]+$/i.test(hostname)) {
-    return {
-      valid: false,
-      reason: `SSRF_BLOCKED: Numeric/hex IP encoding '${hostname}' is forbidden.`
-    };
-  }
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(hostname)) {
-    if (isBlockedIpv4(hostname)) {
-      return {
-        valid: false,
-        reason: `SSRF_BLOCKED: Private, loopback, link-local, or reserved IPv4 address '${hostname}' is forbidden.`
-      };
-    }
-  }
-  if (isBlockedIpv6(hostname)) {
-    return {
-      valid: false,
-      reason: `SSRF_BLOCKED: Loopback, link-local, or private IPv6 address '${hostname}' is forbidden.`
-    };
-  }
-  return {
-    valid: true,
-    normalizedUrl: parsed.toString()
-  };
-}
-function decodeHtmlEntities(input) {
-  return input.replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">").replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'").replace(/&#(\d+);/g, (_m, dec) => {
-    const code = Number(dec);
-    return Number.isFinite(code) && code > 0 && code <= 1114111 ? String.fromCodePoint(code) : "";
-  });
-}
-function cleanHtmlToReadableText(html, maxBytes = DEFAULT_MAX_FETCH_BYTES) {
-  const withoutScripts = html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ").replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ").replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, " ").replace(/<svg\b[^>]*>[\s\S]*?<\/svg>/gi, " ").replace(/<!--[\s\S]*?-->/g, " ");
-  const withLineBreaks = withoutScripts.replace(/<(br|hr)\b[^>]*\/?>/gi, "\n").replace(/<\/(p|div|li|tr|h[1-6]|section|article|blockquote|pre)>/gi, "\n");
-  const strippedTags = withLineBreaks.replace(/<[^>]+>/g, " ");
-  const decoded = decodeHtmlEntities(strippedTags);
-  const normalized = decoded.split("\n").map((line) => line.replace(/\s+/g, " ").trim()).filter(Boolean).join("\n");
-  return truncateUtf8Bytes(normalized, maxBytes);
-}
-function truncateUtf8Bytes(text, maxBytes) {
-  const buf = Buffer.from(text, "utf8");
-  if (buf.byteLength <= maxBytes) {
-    return text;
-  }
-  return buf.subarray(0, maxBytes).toString("utf8") + "\n...[truncated]";
-}
-async function safePublicHttpsFetch(params) {
-  const fetchFn = params.fetchImpl ?? globalThis.fetch;
-  const timeoutMs = params.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  let currentUrl = params.url;
-  for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount += 1) {
-    const check = validatePublicHttpsUrlForWebTool(currentUrl);
-    if (!check.valid || !check.normalizedUrl) {
-      return {
-        ok: false,
-        error: check.reason ?? "SSRF_BLOCKED: URL rejected."
-      };
-    }
-    let response;
-    try {
-      response = await fetchFn(check.normalizedUrl, {
-        method: "GET",
-        redirect: "manual",
-        headers: {
-          "User-Agent": "EPURE-WebExplorer/1.2 (+https://github.com/Giskard-AI/epure)",
-          Accept: "text/html,application/json,text/plain;q=0.9,*/*;q=0.8",
-          ...params.headers ?? {}
-        },
-        signal: AbortSignal.timeout(timeoutMs)
-      });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return {
-        ok: false,
-        error: `Fetch error for ${check.normalizedUrl}: ${msg}`
-      };
-    }
-    if (response.status === 301 || response.status === 302 || response.status === 303 || response.status === 307 || response.status === 308) {
-      if (redirectCount === MAX_REDIRECTS) {
-        return {
-          ok: false,
-          error: `SSRF_BLOCKED: Maximum redirects (${MAX_REDIRECTS}) exceeded.`
-        };
-      }
-      const location = response.headers.get("location");
-      if (!location) {
-        return {
-          ok: false,
-          error: `Redirect status ${response.status} without Location header.`
-        };
-      }
-      try {
-        currentUrl = new URL(location, check.normalizedUrl).toString();
-      } catch {
-        return {
-          ok: false,
-          error: `SSRF_BLOCKED: Invalid redirect Location '${location}'.`
-        };
-      }
-      const redirectCheck = validatePublicHttpsUrlForWebTool(currentUrl);
-      if (!redirectCheck.valid) {
-        return {
-          ok: false,
-          error: redirectCheck.reason ?? `SSRF_BLOCKED: Unsafe redirect target '${currentUrl}'.`
-        };
-      }
-      continue;
-    }
-    if (!response.ok) {
-      return {
-        ok: false,
-        error: `HTTP ${response.status} from ${check.normalizedUrl}`
-      };
-    }
-    const body = await response.text();
-    return {
-      ok: true,
-      status: response.status,
-      body,
-      finalUrl: check.normalizedUrl
-    };
-  }
-  return {
-    ok: false,
-    error: "SSRF_BLOCKED: Redirect loop detected."
-  };
-}
-function parseDuckDuckGoLiteResults(html, limit = 5) {
-  const results = [];
-  const linkRegex = /<a\b[^>]*class=["'][^"']*result-link[^"']*["'][^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
-  const snippetRegex = /<td\b[^>]*class=["'][^"']*result-snippet[^"']*["'][^>]*>([\s\S]*?)<\/td>/gi;
-  const links = [];
-  let match;
-  while ((match = linkRegex.exec(html)) !== null && links.length < limit) {
-    const rawUrl = decodeHtmlEntities(match[1] ?? "").trim();
-    const title = cleanHtmlToReadableText(match[2] ?? "", 512).replace(/\n+/g, " ");
-    if (rawUrl && title) {
-      links.push({ url: rawUrl, title });
-    }
-  }
-  const snippets = [];
-  while ((match = snippetRegex.exec(html)) !== null && snippets.length < limit) {
-    snippets.push(
-      cleanHtmlToReadableText(match[1] ?? "", 1024).replace(/\n+/g, " ")
-    );
-  }
-  for (let i = 0; i < links.length && results.length < limit; i += 1) {
-    results.push({
-      title: links[i].title,
-      url: links[i].url,
-      snippet: snippets[i] ?? ""
-    });
-  }
-  return results;
-}
-async function executeZeroKeyWebSearch(params) {
-  const q = params.query.trim();
-  if (!q) {
-    return { source: "none", error: "Search query must not be empty." };
-  }
-  const source = params.source ?? "auto";
-  if (source === "npm") {
-    const res = await safePublicHttpsFetch({
-      url: `https://registry.npmjs.org/-/v1/search?text=${encodeURIComponent(q)}&size=5`,
-      timeoutMs: params.timeoutMs,
-      fetchImpl: params.fetchImpl,
-      headers: { Accept: "application/json" }
-    });
-    if (!res.ok) {
-      return { source: "npm", error: res.error };
-    }
-    try {
-      const parsed = JSON.parse(res.body);
-      const items2 = (parsed.objects ?? []).slice(0, 5).map((obj) => ({
-        title: `${obj.package?.name ?? "unknown"}@${obj.package?.version ?? "latest"}`,
-        url: obj.package?.links?.npm ?? `https://www.npmjs.com/package/${obj.package?.name ?? ""}`,
-        snippet: obj.package?.description ?? ""
-      }));
-      return {
-        source: "npm",
-        results: items2,
-        content: wrapUntrustedContent(
-          "untrusted_web_content",
-          JSON.stringify(items2, null, 2)
-        )
-      };
-    } catch {
-      return { source: "npm", error: "Failed to parse npm registry response." };
-    }
-  }
-  if (source === "pypi") {
-    const pkgName = q.split(/\s+/)[0] ?? q;
-    const res = await safePublicHttpsFetch({
-      url: `https://pypi.org/pypi/${encodeURIComponent(pkgName)}/json`,
-      timeoutMs: params.timeoutMs,
-      fetchImpl: params.fetchImpl,
-      headers: { Accept: "application/json" }
-    });
-    if (!res.ok) {
-      return { source: "pypi", error: res.error };
-    }
-    try {
-      const parsed = JSON.parse(res.body);
-      const item = {
-        title: `${parsed.info?.name ?? pkgName}==${parsed.info?.version ?? "latest"}`,
-        url: parsed.info?.package_url ?? `https://pypi.org/project/${encodeURIComponent(pkgName)}/`,
-        snippet: parsed.info?.summary ?? ""
-      };
-      return {
-        source: "pypi",
-        results: [item],
-        content: wrapUntrustedContent(
-          "untrusted_web_content",
-          JSON.stringify([item], null, 2)
-        )
-      };
-    } catch {
-      return { source: "pypi", error: "Failed to parse PyPI JSON response." };
-    }
-  }
-  if (source === "crates") {
-    const res = await safePublicHttpsFetch({
-      url: `https://crates.io/api/v1/crates?q=${encodeURIComponent(q)}&per_page=5`,
-      timeoutMs: params.timeoutMs,
-      fetchImpl: params.fetchImpl,
-      headers: { Accept: "application/json" }
-    });
-    if (!res.ok) {
-      return { source: "crates", error: res.error };
-    }
-    try {
-      const parsed = JSON.parse(res.body);
-      const items2 = (parsed.crates ?? []).slice(0, 5).map((c) => ({
-        title: `${c.name ?? "unknown"} v${c.max_version ?? "0.0.0"}`,
-        url: `https://crates.io/crates/${c.name ?? ""}`,
-        snippet: c.description ?? ""
-      }));
-      return {
-        source: "crates",
-        results: items2,
-        content: wrapUntrustedContent(
-          "untrusted_web_content",
-          JSON.stringify(items2, null, 2)
-        )
-      };
-    } catch {
-      return { source: "crates", error: "Failed to parse crates.io response." };
-    }
-  }
-  if (source === "github") {
-    const res = await safePublicHttpsFetch({
-      url: `https://api.github.com/search/repositories?q=${encodeURIComponent(q)}&per_page=5`,
-      timeoutMs: params.timeoutMs,
-      fetchImpl: params.fetchImpl,
-      headers: { Accept: "application/vnd.github+json" }
-    });
-    if (!res.ok) {
-      return { source: "github", error: res.error };
-    }
-    try {
-      const parsed = JSON.parse(res.body);
-      const items2 = (parsed.items ?? []).slice(0, 5).map((repo) => ({
-        title: `${repo.full_name ?? "unknown"} (${repo.stargazers_count ?? 0}\u2605)`,
-        url: repo.html_url ?? "",
-        snippet: repo.description ?? ""
-      }));
-      return {
-        source: "github",
-        results: items2,
-        content: wrapUntrustedContent(
-          "untrusted_web_content",
-          JSON.stringify(items2, null, 2)
-        )
-      };
-    } catch {
-      return { source: "github", error: "Failed to parse GitHub search response." };
-    }
-  }
-  if (source === "wikipedia") {
-    const res = await safePublicHttpsFetch({
-      url: `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(q)}&utf8=1&format=json&srlimit=5`,
-      timeoutMs: params.timeoutMs,
-      fetchImpl: params.fetchImpl,
-      headers: { Accept: "application/json" }
-    });
-    if (!res.ok) {
-      return { source: "wikipedia", error: res.error };
-    }
-    try {
-      const parsed = JSON.parse(res.body);
-      const items2 = (parsed.query?.search ?? []).slice(0, 5).map((item) => ({
-        title: item.title ?? "",
-        url: `https://en.wikipedia.org/wiki/${encodeURIComponent((item.title ?? "").replace(/\s+/g, "_"))}`,
-        snippet: cleanHtmlToReadableText(item.snippet ?? "", 512)
-      }));
-      return {
-        source: "wikipedia",
-        results: items2,
-        content: wrapUntrustedContent(
-          "untrusted_web_content",
-          JSON.stringify(items2, null, 2)
-        )
-      };
-    } catch {
-      return {
-        source: "wikipedia",
-        error: "Failed to parse Wikipedia API response."
-      };
-    }
-  }
-  const ddgRes = await safePublicHttpsFetch({
-    url: `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(q)}`,
-    timeoutMs: params.timeoutMs,
-    fetchImpl: params.fetchImpl
-  });
-  if (!ddgRes.ok) {
-    return { source: "duckduckgo", error: ddgRes.error };
-  }
-  const items = parseDuckDuckGoLiteResults(ddgRes.body, 5);
-  return {
-    source: "duckduckgo",
-    results: items,
-    content: wrapUntrustedContent(
-      "untrusted_web_content",
-      JSON.stringify(items, null, 2)
-    )
-  };
-}
-function isWebToolsEnabledForPhase(phase, config) {
-  if (config?.enabled === false) {
-    return false;
-  }
-  const effectivePhase = phase ?? "implementation";
-  const allowedPhases = config?.phases && config.phases.length > 0 ? config.phases : DEFAULT_WEB_TOOLS_PHASES;
-  return allowedPhases.includes(effectivePhase);
-}
-function buildWebExplorationToolsAndHandlers(params) {
-  if (!isWebToolsEnabledForPhase(params?.phase, params?.webToolsConfig)) {
-    return { tools: [], toolHandlers: {} };
-  }
-  const maxRequests = params?.webToolsConfig?.max_requests_per_run ?? params?.webToolsConfig?.max_requests_per_turn ?? DEFAULT_MAX_REQUESTS_PER_RUN;
-  const timeoutMs = params?.webToolsConfig?.timeout_ms ?? DEFAULT_TIMEOUT_MS;
-  const maxFetchBytes = params?.webToolsConfig?.max_fetch_bytes ?? params?.webToolsConfig?.max_bytes_per_response ?? DEFAULT_MAX_FETCH_BYTES;
-  let requestsUsed = 0;
-  const tools = [
-    {
-      name: "web_search",
-      description: "Search the public web or package registries without API keys (DuckDuckGo Lite, npm, PyPI, crates.io, GitHub, Wikipedia). Returns top 5 results wrapped in <untrusted_web_content>.",
-      parameters: {
-        type: "OBJECT",
-        properties: {
-          query: {
-            type: "STRING",
-            description: "Search query or package name"
-          },
-          source: {
-            type: "STRING",
-            description: "Optional source: 'auto' | 'duckduckgo' | 'npm' | 'pypi' | 'crates' | 'github' | 'wikipedia'"
-          }
-        },
-        required: ["query"]
-      }
-    },
-    {
-      name: "web_fetch",
-      description: "Fetch a public HTTPS URL (port 443), strip HTML/scripts into clean text truncated to 16KB, and return it wrapped in <untrusted_web_content>. Blocks private IPs, localhost, and cloud metadata.",
-      parameters: {
-        type: "OBJECT",
-        properties: {
-          url: {
-            type: "STRING",
-            description: "Public https:// URL to fetch"
-          }
-        },
-        required: ["url"]
-      }
-    }
-  ];
-  const toolHandlers = {
-    web_search: async (args) => {
-      if (requestsUsed >= maxRequests) {
-        return {
-          error: `Web tool request budget (${maxRequests}) exceeded for this run.`
-        };
-      }
-      requestsUsed += 1;
-      const query = String(args.query ?? "").trim();
-      const rawSource = String(args.source ?? "auto").trim().toLowerCase();
-      const validSources = [
-        "auto",
-        "duckduckgo",
-        "github",
-        "npm",
-        "pypi",
-        "crates",
-        "wikipedia"
-      ];
-      const source = validSources.includes(rawSource) ? rawSource : "auto";
-      return executeZeroKeyWebSearch({
-        query,
-        source,
-        timeoutMs,
-        fetchImpl: params?.fetchImpl
-      });
-    },
-    web_fetch: async (args) => {
-      if (requestsUsed >= maxRequests) {
-        return {
-          error: `Web tool request budget (${maxRequests}) exceeded for this run.`
-        };
-      }
-      requestsUsed += 1;
-      const url = String(args.url ?? "").trim();
-      const fetched = await safePublicHttpsFetch({
-        url,
-        timeoutMs,
-        fetchImpl: params?.fetchImpl
-      });
-      if (!fetched.ok) {
-        return { error: fetched.error };
-      }
-      const cleaned = cleanHtmlToReadableText(fetched.body, maxFetchBytes);
-      return {
-        url: fetched.finalUrl,
-        content: wrapUntrustedContent("untrusted_web_content", cleaned)
-      };
-    }
-  };
-  return { tools, toolHandlers };
-}
-
 // src/orchestrator/workspace/repo-tools.ts
 var GUARDED_VERIFICATION_KEYS = [
   "build",
@@ -12522,64 +11854,6 @@ ${stage1Result.output.slice(-4e3)}
     }
   }
 }
-function checkIsExistingRepoWorkspace(accumulatedFiles, devBranchPaths) {
-  return accumulatedFiles.size > 0 || devBranchPaths.length > 0;
-}
-function createStagedTicketImplementationBuffer(ensureBaselineLoaded) {
-  const files = /* @__PURE__ */ new Map();
-  const deletedFiles = /* @__PURE__ */ new Set();
-  return {
-    files,
-    deletedFiles,
-    hasMutations: () => files.size > 0 || deletedFiles.size > 0,
-    ...ensureBaselineLoaded ? { ensureBaselineLoaded } : {}
-  };
-}
-function mergeStagedBufferIntoImplementationPayload(staged, parsed) {
-  if (!staged.hasMutations()) {
-    return parsed;
-  }
-  const mergedFilesMap = /* @__PURE__ */ new Map();
-  const mergedDeletedSet = /* @__PURE__ */ new Set();
-  for (const [path, content] of staged.files.entries()) {
-    const clean = path.trim().replace(/^\/+/, "");
-    if (clean) {
-      mergedFilesMap.set(clean, content);
-      mergedDeletedSet.delete(clean);
-    }
-  }
-  for (const del of staged.deletedFiles) {
-    const clean = del.trim().replace(/^\/+/, "");
-    if (clean) {
-      mergedFilesMap.delete(clean);
-      mergedDeletedSet.add(clean);
-    }
-  }
-  for (const f of parsed.files ?? []) {
-    const clean = f.path.trim().replace(/^\/+/, "");
-    if (clean) {
-      mergedFilesMap.set(clean, f.content);
-      mergedDeletedSet.delete(clean);
-    }
-  }
-  for (const del of parsed.deleted_files ?? []) {
-    const clean = del.trim().replace(/^\/+/, "");
-    if (clean) {
-      mergedFilesMap.delete(clean);
-      mergedDeletedSet.add(clean);
-    }
-  }
-  return {
-    commit_message: parsed.commit_message,
-    test_summary: parsed.test_summary,
-    files: Array.from(mergedFilesMap.entries()).map(([path, content]) => ({
-      path,
-      content
-    })),
-    ...parsed.patches && parsed.patches.length > 0 ? { patches: parsed.patches } : {},
-    deleted_files: Array.from(mergedDeletedSet)
-  };
-}
 function buildCompactWorkspaceFilesContext(input) {
   const maxLines = input.maxInlineLinesPerFile ?? 400;
   const maxChars = input.maxTotalInlineChars ?? 6e4;
@@ -12633,426 +11907,12 @@ ${content}`;
   if (catalogEntries.length > 0) {
     sections.push(
       [
-        "--- WORKSPACE FILE CATALOG (use `read_repo_file` or `search_in_repo_file` to inspect full content) ---",
+        "--- WORKSPACE FILE CATALOG (inspect files in the workspace for full content) ---",
         ...catalogEntries
       ].join("\n")
     );
   }
   return sections.join("\n\n");
-}
-function buildRepoExplorationToolsAndHandlers(params) {
-  if (!params.alwaysEnableRepoTools && !params.stagedImplementation && params.devBranchPaths.length === 0 && params.accumulatedFiles.size === 0 && process.env.GITHUB_ACTIONS !== "true" && params.webToolsConfig === void 0) {
-    return {};
-  }
-  const webExploration = buildWebExplorationToolsAndHandlers({
-    phase: params.phase,
-    webToolsConfig: params.webToolsConfig,
-    fetchImpl: params.fetchImpl
-  });
-  const isEffectiveDeleted = (cleanPath) => {
-    if (params.stagedImplementation?.deletedFiles.has(cleanPath)) {
-      return true;
-    }
-    if (params.stagedImplementation?.files.has(cleanPath)) {
-      return false;
-    }
-    return Boolean(params.deletedFilesSet?.has(cleanPath));
-  };
-  const resolveEffectiveFileContent = async (cleanPath) => {
-    if (isEffectiveDeleted(cleanPath)) {
-      return null;
-    }
-    const stagedContent = params.stagedImplementation?.files.get(cleanPath);
-    if (stagedContent !== void 0) {
-      return stagedContent;
-    }
-    let content = params.accumulatedFiles.get(cleanPath) ?? null;
-    if (content === null) {
-      content = await params.gh.readSingleBranchFile(params.branch, cleanPath) ?? (params.branch !== params.featureBranch ? await params.gh.readSingleBranchFile(
-        params.featureBranch,
-        cleanPath
-      ) : null);
-      if (content !== null) {
-        params.accumulatedFiles.set(cleanPath, content);
-      }
-    }
-    return content;
-  };
-  const searchInRepoHandler = async (args) => {
-    const p = String(args.path ?? "").trim().replace(/^\/+/, "");
-    const q = String(args.query ?? "").trim();
-    if (!p) {
-      if (!q) {
-        return { error: "Missing search query." };
-      }
-      const combinedFiles = new Map(params.accumulatedFiles);
-      if (params.stagedImplementation) {
-        for (const [sp, sc] of params.stagedImplementation.files.entries()) {
-          combinedFiles.set(sp, sc);
-        }
-      }
-      const crossFileMatches = [];
-      for (const [filePath, fileContent] of combinedFiles.entries()) {
-        if (isEffectiveDeleted(filePath) || isSensitiveTaskBranchPath(filePath, params.reviewersDir)) {
-          continue;
-        }
-        const fileLines = fileContent.split("\n");
-        for (let idx = 0; idx < fileLines.length; idx += 1) {
-          if (fileLines[idx].toLowerCase().includes(q.toLowerCase())) {
-            crossFileMatches.push({
-              path: filePath,
-              line: idx + 1,
-              text: wrapUntrustedContent(
-                "untrusted_workspace_files",
-                fileLines[idx]
-              )
-            });
-            if (crossFileMatches.length >= 25) {
-              break;
-            }
-          }
-        }
-        if (crossFileMatches.length >= 25) {
-          break;
-        }
-      }
-      return { query: q, matches: crossFileMatches };
-    }
-    if (p.includes("..") || isSensitiveTaskBranchPath(p, params.reviewersDir)) {
-      return { error: `Access denied or invalid path: ${p}` };
-    }
-    if (isEffectiveDeleted(p)) {
-      return { error: `File '${p}' was deleted in the current branch.` };
-    }
-    const content = await resolveEffectiveFileContent(p);
-    if (content === null) {
-      return { error: `File not found: ${p}` };
-    }
-    const lines = content.split("\n");
-    const snippets = [];
-    for (let i = 0; i < lines.length; i += 1) {
-      if (lines[i].toLowerCase().includes(q.toLowerCase())) {
-        const start = Math.max(0, i - 15);
-        const end = Math.min(lines.length, i + 20);
-        snippets.push(
-          wrapUntrustedContent(
-            "untrusted_workspace_files",
-            `Lines ${start + 1}-${end}:
-` + lines.slice(start, end).map((l, idx) => `${start + idx + 1}| ${l}`).join("\n")
-          )
-        );
-        i = end - 1;
-        if (snippets.length >= 8) {
-          break;
-        }
-      }
-    }
-    return {
-      path: p,
-      total_lines: lines.length,
-      matches: snippets
-    };
-  };
-  const mutationTools = params.stagedImplementation ? [
-    {
-      name: "write_repo_file",
-      description: "Create or overwrite a repository file in the transactional ticket buffer during implementation or remediation.",
-      parameters: {
-        type: "OBJECT",
-        properties: {
-          path: {
-            type: "STRING",
-            description: "Repository-relative file path"
-          },
-          content: {
-            type: "STRING",
-            description: "Complete file content to stage"
-          }
-        },
-        required: ["path", "content"]
-      }
-    },
-    {
-      name: "patch_repo_file",
-      description: "Apply exact old_string -> new_string surgical replacements to an existing repository file in the transactional ticket buffer.",
-      parameters: {
-        type: "OBJECT",
-        properties: {
-          path: {
-            type: "STRING",
-            description: "Repository-relative file path"
-          },
-          edits: {
-            type: "ARRAY",
-            description: "Ordered list of surgical string replacements",
-            items: {
-              type: "OBJECT",
-              properties: {
-                old_string: {
-                  type: "STRING",
-                  description: "Exact existing snippet to replace"
-                },
-                new_string: {
-                  type: "STRING",
-                  description: "Replacement snippet"
-                }
-              },
-              required: ["old_string", "new_string"]
-            }
-          }
-        },
-        required: ["path", "edits"]
-      }
-    },
-    {
-      name: "delete_repo_file",
-      description: "Stage the deletion of an obsolete repository file in the transactional ticket buffer.",
-      parameters: {
-        type: "OBJECT",
-        properties: {
-          path: {
-            type: "STRING",
-            description: "Repository-relative file path to delete"
-          }
-        },
-        required: ["path"]
-      }
-    }
-  ] : [];
-  const mutationToolHandlers = params.stagedImplementation ? {
-    write_repo_file: async (args) => {
-      const p = String(args.path ?? "").trim().replace(/^\/+/, "");
-      if (!p || p.includes("..") || isSensitiveTaskBranchPath(p, params.reviewersDir)) {
-        return { error: `Access denied or invalid path: ${p}` };
-      }
-      if (typeof args.content !== "string") {
-        return { error: `Content for '${p}' must be a string.` };
-      }
-      await params.stagedImplementation.ensureBaselineLoaded?.([p]);
-      params.stagedImplementation.files.set(p, args.content);
-      params.stagedImplementation.deletedFiles.delete(p);
-      return {
-        staged: true,
-        path: p,
-        total_lines: args.content.split("\n").length
-      };
-    },
-    patch_repo_file: async (args) => {
-      const p = String(args.path ?? "").trim().replace(/^\/+/, "");
-      if (!p || p.includes("..") || isSensitiveTaskBranchPath(p, params.reviewersDir)) {
-        return { error: `Access denied or invalid path: ${p}` };
-      }
-      const rawEdits = Array.isArray(args.edits) ? args.edits : [];
-      if (rawEdits.length === 0) {
-        return {
-          error: `patch_repo_file requires at least one edit for '${p}'.`
-        };
-      }
-      await params.stagedImplementation.ensureBaselineLoaded?.([p]);
-      const baseContent = await resolveEffectiveFileContent(p);
-      if (baseContent === null) {
-        return { error: `File not found for patching: ${p}` };
-      }
-      let updatedContent = baseContent;
-      for (let idx = 0; idx < rawEdits.length; idx += 1) {
-        const editItem = rawEdits[idx];
-        const editRec = editItem && typeof editItem === "object" ? editItem : {};
-        const oldStr = typeof editRec.old_string === "string" ? editRec.old_string : typeof editRec.search === "string" ? editRec.search : "";
-        const newStr = typeof editRec.new_string === "string" ? editRec.new_string : typeof editRec.replace === "string" ? editRec.replace : "";
-        if (!oldStr) {
-          return {
-            error: `Edit #${idx + 1} in '${p}' has an empty old_string.`
-          };
-        }
-        if (updatedContent.includes(oldStr)) {
-          updatedContent = updatedContent.replace(oldStr, newStr);
-          continue;
-        }
-        const normalizedOld = oldStr.replace(/\r\n/g, "\n").trim();
-        const normalizedDoc = updatedContent.replace(/\r\n/g, "\n");
-        if (normalizedOld && normalizedDoc.includes(normalizedOld)) {
-          updatedContent = normalizedDoc.replace(
-            normalizedOld,
-            newStr.replace(/\r\n/g, "\n").trim()
-          );
-          continue;
-        }
-        return {
-          error: `Edit #${idx + 1} old_string (${oldStr.length} chars) did not match in '${p}'. Read the file first with read_repo_file.`
-        };
-      }
-      params.stagedImplementation.files.set(p, updatedContent);
-      params.stagedImplementation.deletedFiles.delete(p);
-      return {
-        applied: true,
-        path: p,
-        edits_applied: rawEdits.length,
-        total_lines: updatedContent.split("\n").length
-      };
-    },
-    delete_repo_file: async (args) => {
-      const p = String(args.path ?? "").trim().replace(/^\/+/, "");
-      if (!p || p.includes("..") || isSensitiveTaskBranchPath(p, params.reviewersDir)) {
-        return { error: `Access denied or invalid path: ${p}` };
-      }
-      await params.stagedImplementation.ensureBaselineLoaded?.([p]);
-      params.stagedImplementation.files.delete(p);
-      params.stagedImplementation.deletedFiles.add(p);
-      return { deleted: true, path: p };
-    }
-  } : {};
-  return {
-    tools: [
-      {
-        name: "list_repo_files",
-        description: "Search file paths in the repository matching a substring or keyword (e.g. 'router', 'auth', 'config', 'cli').",
-        parameters: {
-          type: "OBJECT",
-          properties: {
-            query: {
-              type: "STRING",
-              description: "Case-insensitive path substring to match"
-            }
-          },
-          required: ["query"]
-        }
-      },
-      {
-        name: "search_in_repo_file",
-        description: "Search for a substring inside a repository file and return matching line numbers with surrounding lines.",
-        parameters: {
-          type: "OBJECT",
-          properties: {
-            path: {
-              type: "STRING",
-              description: "Repository-relative file path"
-            },
-            query: {
-              type: "STRING",
-              description: "Substring or identifier to search for"
-            }
-          },
-          required: ["path", "query"]
-        }
-      },
-      ...params.alwaysEnableRepoTools ? [
-        {
-          name: "search_repo_code",
-          description: "Search for a substring or symbol across repository files (or inside an optional file path) and return matching lines.",
-          parameters: {
-            type: "OBJECT",
-            properties: {
-              query: {
-                type: "STRING",
-                description: "Substring or identifier to search for"
-              },
-              path: {
-                type: "STRING",
-                description: "Optional repository-relative file path to scope the search"
-              }
-            },
-            required: ["query"]
-          }
-        }
-      ] : [],
-      {
-        name: "read_repo_file",
-        description: "Read a file (or line range start_line..end_line) from the repository branch.",
-        parameters: {
-          type: "OBJECT",
-          properties: {
-            path: {
-              type: "STRING",
-              description: "Repository-relative file path"
-            },
-            start_line: {
-              type: "INTEGER",
-              description: "Optional 1-based start line"
-            },
-            end_line: {
-              type: "INTEGER",
-              description: "Optional 1-based end line"
-            }
-          },
-          required: ["path"]
-        }
-      },
-      ...mutationTools,
-      ...webExploration.tools
-    ],
-    toolHandlers: {
-      ...webExploration.toolHandlers,
-      ...mutationToolHandlers,
-      list_repo_files: async (args) => {
-        const rawQuery = String(args.query ?? "").trim().toLowerCase();
-        const q = rawQuery === "*" || rawQuery === "**" || rawQuery === "." || rawQuery === "./" ? "" : rawQuery;
-        const queryTokens = q.split("*").filter(Boolean);
-        let allPaths = await params.gh.listBranchPathHints(params.branch);
-        if (allPaths.length === 0 && params.branch !== params.featureBranch) {
-          allPaths = await params.gh.listBranchPathHints(params.featureBranch);
-        }
-        const pathSet = new Set(
-          allPaths.map((p) => p.trim().replace(/^\/+/, "")).filter(Boolean)
-        );
-        for (const k of params.accumulatedFiles.keys()) {
-          const cleanK = k.trim().replace(/^\/+/, "");
-          if (cleanK) {
-            pathSet.add(cleanK);
-          }
-        }
-        if (params.stagedImplementation) {
-          for (const k of params.stagedImplementation.files.keys()) {
-            const cleanK = k.trim().replace(/^\/+/, "");
-            if (cleanK) {
-              pathSet.add(cleanK);
-            }
-          }
-        }
-        const matches = Array.from(pathSet).filter((cleanP) => {
-          if (isEffectiveDeleted(cleanP)) {
-            return false;
-          }
-          const lower = cleanP.toLowerCase();
-          return queryTokens.length === 0 ? true : queryTokens.every((token) => lower.includes(token));
-        });
-        return {
-          total_matches: matches.length,
-          matches
-        };
-      },
-      search_in_repo_file: searchInRepoHandler,
-      search_repo_code: searchInRepoHandler,
-      read_repo_file: async (args) => {
-        const p = String(args.path ?? "").trim().replace(/^\/+/, "");
-        if (!p || p.includes("..") || isSensitiveTaskBranchPath(p, params.reviewersDir)) {
-          return { error: `Access denied or invalid path: ${p}` };
-        }
-        if (isEffectiveDeleted(p)) {
-          return { error: `File '${p}' was deleted in the current branch.` };
-        }
-        const content = await resolveEffectiveFileContent(p);
-        if (content === null) {
-          return { error: `File not found: ${p}` };
-        }
-        const lines = content.split("\n");
-        const startLine = Math.max(1, Number(args.start_line ?? 1) || 1);
-        const endLine = args.end_line !== void 0 && args.end_line !== null ? Math.min(
-          lines.length,
-          Math.max(startLine, Number(args.end_line) || lines.length)
-        ) : lines.length;
-        return {
-          path: p,
-          total_lines: lines.length,
-          start_line: startLine,
-          end_line: endLine,
-          content: wrapUntrustedContent(
-            "untrusted_workspace_files",
-            lines.slice(startLine - 1, endLine).join("\n")
-          )
-        };
-      }
-    }
-  };
 }
 
 // src/orchestrator/github/branch-sync.ts
@@ -15070,6 +13930,538 @@ function validatePlanningArtifactsAndGraph(bundle) {
   };
 }
 
+// src/orchestrator/workspace/web-tools.ts
+var DEFAULT_WEB_TOOLS_PHASES = [
+  "plan",
+  "spec",
+  "implementation"
+];
+var DEFAULT_MAX_REQUESTS_PER_RUN = 8;
+var DEFAULT_TIMEOUT_MS = 8e3;
+var DEFAULT_MAX_FETCH_BYTES = 16384;
+var MAX_REDIRECTS = 3;
+function isBlockedIpv4(host) {
+  const parts = host.split(".");
+  if (parts.length !== 4) {
+    return false;
+  }
+  const octets = [];
+  for (const part of parts) {
+    if (!/^\d{1,3}$/.test(part)) {
+      return false;
+    }
+    const n = Number(part);
+    if (!Number.isInteger(n) || n < 0 || n > 255) {
+      return true;
+    }
+    octets.push(n);
+  }
+  const [a, b] = octets;
+  if (a === 0) return true;
+  if (a === 10) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  if (a === 127) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a >= 224) return true;
+  return false;
+}
+function isBlockedIpv6(rawHost) {
+  const host = rawHost.replace(/^\[|\]$/g, "").toLowerCase();
+  if (!host.includes(":")) {
+    return false;
+  }
+  if (host === "::1" || host === "::" || host === "0:0:0:0:0:0:0:1" || host === "0:0:0:0:0:0:0:0") {
+    return true;
+  }
+  if (host.startsWith("::ffff:") || host.startsWith("0:0:0:0:0:ffff:")) {
+    const tail = host.slice(host.lastIndexOf(":") + 1);
+    if (tail.includes(".")) {
+      return isBlockedIpv4(tail);
+    }
+    return true;
+  }
+  if (/^f[cd][0-9a-f]{0,2}:/.test(host)) {
+    return true;
+  }
+  if (/^fe[89ab][0-9a-f]?:/.test(host)) {
+    return true;
+  }
+  return false;
+}
+function validatePublicHttpsUrlForWebTool(rawUrl) {
+  let parsed;
+  try {
+    parsed = new URL(rawUrl.trim());
+  } catch {
+    return {
+      valid: false,
+      reason: "SSRF_BLOCKED: Invalid URL syntax."
+    };
+  }
+  if (parsed.protocol !== "https:") {
+    return {
+      valid: false,
+      reason: `SSRF_BLOCKED: Disallowed protocol '${parsed.protocol}'. Only 'https:' is permitted.`
+    };
+  }
+  if (parsed.port !== "" && parsed.port !== "443") {
+    return {
+      valid: false,
+      reason: `SSRF_BLOCKED: Disallowed port '${parsed.port}'. Only default HTTPS port 443 is permitted.`
+    };
+  }
+  if (parsed.username !== "" || parsed.password !== "") {
+    return {
+      valid: false,
+      reason: "SSRF_BLOCKED: URLs containing credentials are not permitted."
+    };
+  }
+  const hostname = parsed.hostname.toLowerCase().replace(/\.$/, "");
+  if (!hostname) {
+    return {
+      valid: false,
+      reason: "SSRF_BLOCKED: Empty hostname."
+    };
+  }
+  if (hostname === "localhost" || hostname.endsWith(".localhost") || hostname.endsWith(".local") || hostname.endsWith(".internal") || hostname.endsWith(".arpa") || hostname === "metadata.google.internal" || hostname === "instance-data" || hostname === "metadata") {
+    return {
+      valid: false,
+      reason: `SSRF_BLOCKED: Internal or local hostname '${hostname}' is forbidden.`
+    };
+  }
+  if (/^\d+$/.test(hostname) || /^0x[0-9a-f]+$/i.test(hostname)) {
+    return {
+      valid: false,
+      reason: `SSRF_BLOCKED: Numeric/hex IP encoding '${hostname}' is forbidden.`
+    };
+  }
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(hostname)) {
+    if (isBlockedIpv4(hostname)) {
+      return {
+        valid: false,
+        reason: `SSRF_BLOCKED: Private, loopback, link-local, or reserved IPv4 address '${hostname}' is forbidden.`
+      };
+    }
+  }
+  if (isBlockedIpv6(hostname)) {
+    return {
+      valid: false,
+      reason: `SSRF_BLOCKED: Loopback, link-local, or private IPv6 address '${hostname}' is forbidden.`
+    };
+  }
+  return {
+    valid: true,
+    normalizedUrl: parsed.toString()
+  };
+}
+function decodeHtmlEntities(input) {
+  return input.replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">").replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'").replace(/&#(\d+);/g, (_m, dec) => {
+    const code = Number(dec);
+    return Number.isFinite(code) && code > 0 && code <= 1114111 ? String.fromCodePoint(code) : "";
+  });
+}
+function cleanHtmlToReadableText(html, maxBytes = DEFAULT_MAX_FETCH_BYTES) {
+  const withoutScripts = html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ").replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ").replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, " ").replace(/<svg\b[^>]*>[\s\S]*?<\/svg>/gi, " ").replace(/<!--[\s\S]*?-->/g, " ");
+  const withLineBreaks = withoutScripts.replace(/<(br|hr)\b[^>]*\/?>/gi, "\n").replace(/<\/(p|div|li|tr|h[1-6]|section|article|blockquote|pre)>/gi, "\n");
+  const strippedTags = withLineBreaks.replace(/<[^>]+>/g, " ");
+  const decoded = decodeHtmlEntities(strippedTags);
+  const normalized = decoded.split("\n").map((line) => line.replace(/\s+/g, " ").trim()).filter(Boolean).join("\n");
+  return truncateUtf8Bytes(normalized, maxBytes);
+}
+function truncateUtf8Bytes(text, maxBytes) {
+  const buf = Buffer.from(text, "utf8");
+  if (buf.byteLength <= maxBytes) {
+    return text;
+  }
+  return buf.subarray(0, maxBytes).toString("utf8") + "\n...[truncated]";
+}
+async function safePublicHttpsFetch(params) {
+  const fetchFn = params.fetchImpl ?? globalThis.fetch;
+  const timeoutMs = params.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  let currentUrl = params.url;
+  for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount += 1) {
+    const check = validatePublicHttpsUrlForWebTool(currentUrl);
+    if (!check.valid || !check.normalizedUrl) {
+      return {
+        ok: false,
+        error: check.reason ?? "SSRF_BLOCKED: URL rejected."
+      };
+    }
+    let response;
+    try {
+      response = await fetchFn(check.normalizedUrl, {
+        method: "GET",
+        redirect: "manual",
+        headers: {
+          "User-Agent": "EPURE-WebExplorer/1.2 (+https://github.com/Giskard-AI/epure)",
+          Accept: "text/html,application/json,text/plain;q=0.9,*/*;q=0.8",
+          ...params.headers ?? {}
+        },
+        signal: AbortSignal.timeout(timeoutMs)
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        ok: false,
+        error: `Fetch error for ${check.normalizedUrl}: ${msg}`
+      };
+    }
+    if (response.status === 301 || response.status === 302 || response.status === 303 || response.status === 307 || response.status === 308) {
+      if (redirectCount === MAX_REDIRECTS) {
+        return {
+          ok: false,
+          error: `SSRF_BLOCKED: Maximum redirects (${MAX_REDIRECTS}) exceeded.`
+        };
+      }
+      const location = response.headers.get("location");
+      if (!location) {
+        return {
+          ok: false,
+          error: `Redirect status ${response.status} without Location header.`
+        };
+      }
+      try {
+        currentUrl = new URL(location, check.normalizedUrl).toString();
+      } catch {
+        return {
+          ok: false,
+          error: `SSRF_BLOCKED: Invalid redirect Location '${location}'.`
+        };
+      }
+      const redirectCheck = validatePublicHttpsUrlForWebTool(currentUrl);
+      if (!redirectCheck.valid) {
+        return {
+          ok: false,
+          error: redirectCheck.reason ?? `SSRF_BLOCKED: Unsafe redirect target '${currentUrl}'.`
+        };
+      }
+      continue;
+    }
+    if (!response.ok) {
+      return {
+        ok: false,
+        error: `HTTP ${response.status} from ${check.normalizedUrl}`
+      };
+    }
+    const body = await response.text();
+    return {
+      ok: true,
+      status: response.status,
+      body,
+      finalUrl: check.normalizedUrl
+    };
+  }
+  return {
+    ok: false,
+    error: "SSRF_BLOCKED: Redirect loop detected."
+  };
+}
+function parseDuckDuckGoLiteResults(html, limit = 5) {
+  const results = [];
+  const linkRegex = /<a\b[^>]*class=["'][^"']*result-link[^"']*["'][^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  const snippetRegex = /<td\b[^>]*class=["'][^"']*result-snippet[^"']*["'][^>]*>([\s\S]*?)<\/td>/gi;
+  const links = [];
+  let match;
+  while ((match = linkRegex.exec(html)) !== null && links.length < limit) {
+    const rawUrl = decodeHtmlEntities(match[1] ?? "").trim();
+    const title = cleanHtmlToReadableText(match[2] ?? "", 512).replace(/\n+/g, " ");
+    if (rawUrl && title) {
+      links.push({ url: rawUrl, title });
+    }
+  }
+  const snippets = [];
+  while ((match = snippetRegex.exec(html)) !== null && snippets.length < limit) {
+    snippets.push(
+      cleanHtmlToReadableText(match[1] ?? "", 1024).replace(/\n+/g, " ")
+    );
+  }
+  for (let i = 0; i < links.length && results.length < limit; i += 1) {
+    results.push({
+      title: links[i].title,
+      url: links[i].url,
+      snippet: snippets[i] ?? ""
+    });
+  }
+  return results;
+}
+async function executeZeroKeyWebSearch(params) {
+  const q = params.query.trim();
+  if (!q) {
+    return { source: "none", error: "Search query must not be empty." };
+  }
+  const source = params.source ?? "auto";
+  if (source === "npm") {
+    const res = await safePublicHttpsFetch({
+      url: `https://registry.npmjs.org/-/v1/search?text=${encodeURIComponent(q)}&size=5`,
+      timeoutMs: params.timeoutMs,
+      fetchImpl: params.fetchImpl,
+      headers: { Accept: "application/json" }
+    });
+    if (!res.ok) {
+      return { source: "npm", error: res.error };
+    }
+    try {
+      const parsed = JSON.parse(res.body);
+      const items2 = (parsed.objects ?? []).slice(0, 5).map((obj) => ({
+        title: `${obj.package?.name ?? "unknown"}@${obj.package?.version ?? "latest"}`,
+        url: obj.package?.links?.npm ?? `https://www.npmjs.com/package/${obj.package?.name ?? ""}`,
+        snippet: obj.package?.description ?? ""
+      }));
+      return {
+        source: "npm",
+        results: items2,
+        content: wrapUntrustedContent(
+          "untrusted_web_content",
+          JSON.stringify(items2, null, 2)
+        )
+      };
+    } catch {
+      return { source: "npm", error: "Failed to parse npm registry response." };
+    }
+  }
+  if (source === "pypi") {
+    const pkgName = q.split(/\s+/)[0] ?? q;
+    const res = await safePublicHttpsFetch({
+      url: `https://pypi.org/pypi/${encodeURIComponent(pkgName)}/json`,
+      timeoutMs: params.timeoutMs,
+      fetchImpl: params.fetchImpl,
+      headers: { Accept: "application/json" }
+    });
+    if (!res.ok) {
+      return { source: "pypi", error: res.error };
+    }
+    try {
+      const parsed = JSON.parse(res.body);
+      const item = {
+        title: `${parsed.info?.name ?? pkgName}==${parsed.info?.version ?? "latest"}`,
+        url: parsed.info?.package_url ?? `https://pypi.org/project/${encodeURIComponent(pkgName)}/`,
+        snippet: parsed.info?.summary ?? ""
+      };
+      return {
+        source: "pypi",
+        results: [item],
+        content: wrapUntrustedContent(
+          "untrusted_web_content",
+          JSON.stringify([item], null, 2)
+        )
+      };
+    } catch {
+      return { source: "pypi", error: "Failed to parse PyPI JSON response." };
+    }
+  }
+  if (source === "crates") {
+    const res = await safePublicHttpsFetch({
+      url: `https://crates.io/api/v1/crates?q=${encodeURIComponent(q)}&per_page=5`,
+      timeoutMs: params.timeoutMs,
+      fetchImpl: params.fetchImpl,
+      headers: { Accept: "application/json" }
+    });
+    if (!res.ok) {
+      return { source: "crates", error: res.error };
+    }
+    try {
+      const parsed = JSON.parse(res.body);
+      const items2 = (parsed.crates ?? []).slice(0, 5).map((c) => ({
+        title: `${c.name ?? "unknown"} v${c.max_version ?? "0.0.0"}`,
+        url: `https://crates.io/crates/${c.name ?? ""}`,
+        snippet: c.description ?? ""
+      }));
+      return {
+        source: "crates",
+        results: items2,
+        content: wrapUntrustedContent(
+          "untrusted_web_content",
+          JSON.stringify(items2, null, 2)
+        )
+      };
+    } catch {
+      return { source: "crates", error: "Failed to parse crates.io response." };
+    }
+  }
+  if (source === "github") {
+    const res = await safePublicHttpsFetch({
+      url: `https://api.github.com/search/repositories?q=${encodeURIComponent(q)}&per_page=5`,
+      timeoutMs: params.timeoutMs,
+      fetchImpl: params.fetchImpl,
+      headers: { Accept: "application/vnd.github+json" }
+    });
+    if (!res.ok) {
+      return { source: "github", error: res.error };
+    }
+    try {
+      const parsed = JSON.parse(res.body);
+      const items2 = (parsed.items ?? []).slice(0, 5).map((repo) => ({
+        title: `${repo.full_name ?? "unknown"} (${repo.stargazers_count ?? 0}\u2605)`,
+        url: repo.html_url ?? "",
+        snippet: repo.description ?? ""
+      }));
+      return {
+        source: "github",
+        results: items2,
+        content: wrapUntrustedContent(
+          "untrusted_web_content",
+          JSON.stringify(items2, null, 2)
+        )
+      };
+    } catch {
+      return { source: "github", error: "Failed to parse GitHub search response." };
+    }
+  }
+  if (source === "wikipedia") {
+    const res = await safePublicHttpsFetch({
+      url: `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(q)}&utf8=1&format=json&srlimit=5`,
+      timeoutMs: params.timeoutMs,
+      fetchImpl: params.fetchImpl,
+      headers: { Accept: "application/json" }
+    });
+    if (!res.ok) {
+      return { source: "wikipedia", error: res.error };
+    }
+    try {
+      const parsed = JSON.parse(res.body);
+      const items2 = (parsed.query?.search ?? []).slice(0, 5).map((item) => ({
+        title: item.title ?? "",
+        url: `https://en.wikipedia.org/wiki/${encodeURIComponent((item.title ?? "").replace(/\s+/g, "_"))}`,
+        snippet: cleanHtmlToReadableText(item.snippet ?? "", 512)
+      }));
+      return {
+        source: "wikipedia",
+        results: items2,
+        content: wrapUntrustedContent(
+          "untrusted_web_content",
+          JSON.stringify(items2, null, 2)
+        )
+      };
+    } catch {
+      return {
+        source: "wikipedia",
+        error: "Failed to parse Wikipedia API response."
+      };
+    }
+  }
+  const ddgRes = await safePublicHttpsFetch({
+    url: `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(q)}`,
+    timeoutMs: params.timeoutMs,
+    fetchImpl: params.fetchImpl
+  });
+  if (!ddgRes.ok) {
+    return { source: "duckduckgo", error: ddgRes.error };
+  }
+  const items = parseDuckDuckGoLiteResults(ddgRes.body, 5);
+  return {
+    source: "duckduckgo",
+    results: items,
+    content: wrapUntrustedContent(
+      "untrusted_web_content",
+      JSON.stringify(items, null, 2)
+    )
+  };
+}
+function isWebToolsEnabledForPhase(phase, config) {
+  if (config?.enabled === false) {
+    return false;
+  }
+  const effectivePhase = phase ?? "implementation";
+  const allowedPhases = config?.phases && config.phases.length > 0 ? config.phases : DEFAULT_WEB_TOOLS_PHASES;
+  return allowedPhases.includes(effectivePhase);
+}
+function buildWebExplorationToolsAndHandlers(params) {
+  if (!isWebToolsEnabledForPhase(params?.phase, params?.webToolsConfig)) {
+    return { tools: [], toolHandlers: {} };
+  }
+  const maxRequests = params?.webToolsConfig?.max_requests_per_run ?? params?.webToolsConfig?.max_requests_per_turn ?? DEFAULT_MAX_REQUESTS_PER_RUN;
+  const timeoutMs = params?.webToolsConfig?.timeout_ms ?? DEFAULT_TIMEOUT_MS;
+  const maxFetchBytes = params?.webToolsConfig?.max_fetch_bytes ?? params?.webToolsConfig?.max_bytes_per_response ?? DEFAULT_MAX_FETCH_BYTES;
+  let requestsUsed = 0;
+  const tools = [
+    {
+      name: "web_search",
+      description: "Search the public web or package registries without API keys (DuckDuckGo Lite, npm, PyPI, crates.io, GitHub, Wikipedia). Returns top 5 results wrapped in <untrusted_web_content>.",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          query: {
+            type: "STRING",
+            description: "Search query or package name"
+          },
+          source: {
+            type: "STRING",
+            description: "Optional source: 'auto' | 'duckduckgo' | 'npm' | 'pypi' | 'crates' | 'github' | 'wikipedia'"
+          }
+        },
+        required: ["query"]
+      }
+    },
+    {
+      name: "web_fetch",
+      description: "Fetch a public HTTPS URL (port 443), strip HTML/scripts into clean text truncated to 16KB, and return it wrapped in <untrusted_web_content>. Blocks private IPs, localhost, and cloud metadata.",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          url: {
+            type: "STRING",
+            description: "Public https:// URL to fetch"
+          }
+        },
+        required: ["url"]
+      }
+    }
+  ];
+  const toolHandlers = {
+    web_search: async (args) => {
+      if (requestsUsed >= maxRequests) {
+        return {
+          error: `Web tool request budget (${maxRequests}) exceeded for this run.`
+        };
+      }
+      requestsUsed += 1;
+      const query = String(args.query ?? "").trim();
+      const rawSource = String(args.source ?? "auto").trim().toLowerCase();
+      const validSources = [
+        "auto",
+        "duckduckgo",
+        "github",
+        "npm",
+        "pypi",
+        "crates",
+        "wikipedia"
+      ];
+      const source = validSources.includes(rawSource) ? rawSource : "auto";
+      return executeZeroKeyWebSearch({
+        query,
+        source,
+        timeoutMs,
+        fetchImpl: params?.fetchImpl
+      });
+    },
+    web_fetch: async (args) => {
+      if (requestsUsed >= maxRequests) {
+        return {
+          error: `Web tool request budget (${maxRequests}) exceeded for this run.`
+        };
+      }
+      requestsUsed += 1;
+      const url = String(args.url ?? "").trim();
+      const fetched = await safePublicHttpsFetch({
+        url,
+        timeoutMs,
+        fetchImpl: params?.fetchImpl
+      });
+      if (!fetched.ok) {
+        return { error: fetched.error };
+      }
+      const cleaned = cleanHtmlToReadableText(fetched.body, maxFetchBytes);
+      return {
+        url: fetched.finalUrl,
+        content: wrapUntrustedContent("untrusted_web_content", cleaned)
+      };
+    }
+  };
+  return { tools, toolHandlers };
+}
+
 // src/orchestrator/phases/grill-and-plan.ts
 function buildParentIssueTicketsTasklistBlock(tickets) {
   const byPhase = /* @__PURE__ */ new Map();
@@ -15503,15 +14895,8 @@ async function runGrillAndPlanPhase(params) {
     await gh.removeIssueLabel?.(issueNumber, "needs-human");
   }
   const grillExplorationCache = /* @__PURE__ */ new Map();
-  const grillRepoTools = buildRepoExplorationToolsAndHandlers({
-    gh,
-    branch: "dev",
-    featureBranch: "main",
-    accumulatedFiles: grillExplorationCache,
-    devBranchPaths: [],
+  const grillRepoTools = buildWebExplorationToolsAndHandlers({
     phase: command === "to-spec" ? "spec" : "plan",
-    alwaysEnableRepoTools: true,
-    reviewersDir,
     fetchImpl
   });
   if (command === "plan") {
@@ -15530,7 +14915,7 @@ async function runGrillAndPlanPhase(params) {
     const grillSystemInstruction = [
       "Tu es l'architecte EPURE conduisant un entretien multi-tours `/grill-with-docs` sur une GitHub Issue.",
       PROMPT_INJECTION_IMMUNITY_CLAUSE,
-      "Si une question peut \xEAtre \xE9clair\xE9e ou r\xE9solue en inspectant le d\xE9p\xF4t (fichiers Markdown, ADRs, GLOSSARY, code source), utilise d'abord les outils d'exploration (`list_repo_files`, `read_repo_file`, `search_in_repo_file`) avant de poser tes questions.",
+      "Si une question peut \xEAtre \xE9clair\xE9e ou r\xE9solue en inspectant le d\xE9p\xF4t (fichiers Markdown, ADRs, GLOSSARY, code source), utilise d'abord les outils d'exploration (lecture et recherche de fichiers dans le d\xE9p\xF4t) avant de poser tes questions.",
       "Parcours l'arbre des d\xE9cisions en rounds successifs (la \xAB fronti\xE8re \xBB des d\xE9cisions dont les pr\xE9requis sont connus).",
       "Pose les 3 \xE0 4 questions de cadrage d\xE9cisives de ce premier round (architecture, invariants m\xE9tiers, gestion d'\xE9tat/persistance, couverture de tests TDD) au format :",
       "\u2753 **Q1** - **<Titre>** : <Question>",
@@ -15628,7 +15013,7 @@ ${c.body}`;
       "Tu es l'architecte EPURE conduisant un entretien multi-tours `/grill-with-docs` (arbre de d\xE9cisions par rounds).",
       PROMPT_INJECTION_IMMUNITY_CLAUSE,
       "Analyse l'issue initiale et l'historique complet de la conversation (questions pos\xE9es par l'Architecte EPURE et r\xE9ponses de l'Humain).",
-      "Utilise si n\xE9cessaire les outils d'exploration (`list_repo_files`, `read_repo_file`, `search_in_repo_file`) pour inspecter les fichiers r\xE9els du d\xE9p\xF4t (docs, ADRs, GLOSSARY, code source) et ancrer tes questions ou ta synth\xE8se dans la r\xE9alit\xE9 du code.",
+      "Utilise si n\xE9cessaire les outils d'exploration (lecture et recherche de fichiers dans le d\xE9p\xF4t) pour inspecter les fichiers r\xE9els du d\xE9p\xF4t (docs, ADRs, GLOSSARY, code source) et ancrer tes questions ou ta synth\xE8se dans la r\xE9alit\xE9 du code.",
       "D\xE9termine si la fronti\xE8re de l'arbre de d\xE9cisions est vide (`frontier_resolved: true`) ou s'il reste des questions non r\xE9pondues, des contre-propositions humaines ouvrant de nouvelles branches techniques/m\xE9tiers, ou des ambigu\xEFt\xE9s concr\xE8tes dans le d\xE9p\xF4t n\xE9cessitant un round suppl\xE9mentaire (`frontier_resolved: false`).",
       "R\xE8gles de d\xE9cision :",
       "- Si l'humain n'a r\xE9pondu que partiellement aux questions du round pr\xE9c\xE9dent, a pos\xE9 une question en retour, a rejet\xE9 une recommandation sans pr\xE9ciser l'alternative, ou si sa r\xE9ponse d\xE9bloque un choix architectural/documentaire aval concret non encore tranch\xE9 -> `frontier_resolved: false` et g\xE9n\xE8re les questions de suivi num\xE9rot\xE9es (`\u2753 **Q...**` + `\u27A1\uFE0F **Recommandation**`).",
@@ -16727,16 +16112,6 @@ function parseConvergenceAuditFromText(text) {
   return null;
 }
 async function runEpicConvergenceAudit(params) {
-  const explorationTools = buildRepoExplorationToolsAndHandlers({
-    gh: params.gh,
-    branch: params.featureBranch,
-    featureBranch: params.featureBranch,
-    accumulatedFiles: params.accumulatedFiles,
-    devBranchPaths: params.devBranchPaths,
-    phase: "review",
-    alwaysEnableRepoTools: true,
-    fetchImpl: params.fetchImpl
-  });
   const changedEntries = params.featureChangedFilesMap.size > 0 ? Array.from(params.featureChangedFilesMap.entries()) : Array.from(params.accumulatedFiles.entries());
   const entrypointSnippets = [];
   for (const ep of params.epicGoalContract.required_entrypoints) {
@@ -16762,7 +16137,7 @@ ${content}`
     "Tu es l'Auditeur de Convergence de Fonctionnalit\xE9 Goldfish Z\xE9ro-Contexte (`runEpicConvergenceAudit`, ADR-0032, Q116).",
     PROMPT_INJECTION_IMMUNITY_CLAUSE,
     "Tu n'as AUCUNE m\xE9moire des discussions ou des tickets pr\xE9c\xE9dents. Tu audites uniquement l'\xE9tat r\xE9el de la branche de fonctionnalit\xE9 (`feature/*`) par rapport \xE0 la sp\xE9cification approuv\xE9e et au `EpicGoalContract`.",
-    "Tu disposes du texte int\xE9gral (non tronqu\xE9) de la sp\xE9cification, du glossaire, des `required_entrypoints` et des fichiers modifi\xE9s, ainsi que des outils d'exploration en lecture seule (`list_repo_files`, `read_repo_file`, `search_repo_code`, `search_in_repo_file`) pour inspecter l'int\xE9gralit\xE9 de tout autre fichier du d\xE9p\xF4t sur demande.",
+    "Tu disposes du texte int\xE9gral (non tronqu\xE9) de la sp\xE9cification, du glossaire, des `required_entrypoints` et des fichiers modifi\xE9s, ainsi que des outils d'exploration en lecture seule du moteur d'agent pour inspecter l'int\xE9gralit\xE9 de tout autre fichier du d\xE9p\xF4t sur demande.",
     "V\xE9rifie rigoureusement trois invariants :",
     "1. C\xE2blage des points d'entr\xE9e (`required_entrypoints`) : chaque module cr\xE9\xE9 est-il effectivement import\xE9, instanci\xE9 et branch\xE9 dans les points d'entr\xE9e applicatifs d\xE9clar\xE9s (ex: routeur, serveur, CLI, store, App) ? Signale tout module isol\xE9 ('island code') dans `unwired_modules`.",
     "2. Absence de simulacres interdits (`forbidden_stubs`) : le code de production est-il exempt des mocks/stubs/adaptateurs en m\xE9moire interdits par `forbidden_stubs` ? Signale toute violation dans `stub_violations`.",
@@ -16852,9 +16227,6 @@ ${content}`
       systemInstruction,
       prompt: userPrompt,
       temperature: 0.1,
-      ...explorationTools.tools ? { tools: explorationTools.tools } : {},
-      ...explorationTools.toolHandlers ? { toolHandlers: explorationTools.toolHandlers } : {},
-      maxToolRounds: 6,
       logLabel: `epic-convergence-audit#${params.issueNumber}`,
       responseSchema: EPIC_CONVERGENCE_AUDIT_SCHEMA,
       fetchImpl: params.fetchImpl
@@ -17808,6 +17180,38 @@ async function runMultiAgentPrReviewPass(input) {
   };
 }
 
+// src/security/audit-trace.ts
+function splitProviderAndModel(modelSpec, explicitProvider) {
+  const trimmed = modelSpec.trim();
+  const slashIdx = trimmed.indexOf("/");
+  if (explicitProvider?.trim()) {
+    const provider = explicitProvider.trim();
+    const prefix = `${provider}/`;
+    return {
+      provider,
+      model: trimmed.startsWith(prefix) ? trimmed.slice(prefix.length) : trimmed
+    };
+  }
+  if (slashIdx > 0 && slashIdx < trimmed.length - 1) {
+    return {
+      provider: trimmed.slice(0, slashIdx),
+      model: trimmed.slice(slashIdx + 1)
+    };
+  }
+  return {
+    provider: "default",
+    model: trimmed
+  };
+}
+function formatAgentProvenanceLine(input) {
+  const engine = input.engine.trim() || "pi";
+  const { provider, model } = splitProviderAndModel(
+    input.model,
+    input.provider
+  );
+  return `- **Agent Provenance**: engine \`${engine}\` | provider \`${provider}\` | model \`${model}\``;
+}
+
 // src/orchestrator/prompts/resume-context.ts
 function formatResumeContextPromptLines(resumeContextMarkdown) {
   return resumeContextMarkdown ? [
@@ -17916,6 +17320,10 @@ async function runFeatureIntegrationPhase(params) {
     fetchImpl: params.fetchImpl
   });
   const existingFeaturePr = params.existingFeaturePrAtStart ?? await params.gh.findOpenPullRequestByHead(params.featureBranch, "dev");
+  const provenanceLine = formatAgentProvenanceLine({
+    engine: params.agentEngine?.name ?? "pi",
+    model: params.phaseModels.implementationModel
+  });
   const featurePrBody = appendEpureCommandsSpoiler(
     [
       "## Summary",
@@ -17937,6 +17345,7 @@ async function runFeatureIntegrationPhase(params) {
       formatPrUsageSection(currentTokenUsage(), pricing),
       "",
       "## Governance",
+      provenanceLine,
       "- Requires human review and squash-merge into `dev` in the GitHub UI (ADR-0001, ADR-0027, Q45, Q91, Q95)."
     ].join("\n"),
     {
@@ -18240,31 +17649,6 @@ async function runFeatureIntegrationPhase(params) {
     try {
       const currentFilesContext = Array.from(params.accumulatedFiles.entries()).map(([p, c]) => `--- FILE: ${p} ---
 ${c}`).join("\n\n");
-      const featureFixSystemInstruction = [
-        "Tu es un ing\xE9nieur TDD EPURE corrigeant les constats bloquants ('must_fix') et/ou \xE9checs CI sur la PR finale de feature.",
-        PROMPT_INJECTION_IMMUNITY_CLAUSE,
-        "Corrige pr\xE9cis\xE9ment chaque anomalie tout en maintenant 100% des cibles Stage 1 au vert.",
-        `Ne modifie JAMAIS ${reviewersDir}/**, .github/workflows/**, .github/agents.yml ou .env*.`,
-        "Utilise les outils `list_repo_files`, `search_in_repo_file` et `read_repo_file` pour inspecter les fichiers pertinents du d\xE9p\xF4t avant de coder.",
-        "",
-        verificationGuideMarkdown,
-        "",
-        "Pour modifier un fichier existant volumineux, utilise de pr\xE9f\xE9rence `patches` (`old_string` -> `new_string` exact). Sinon utilise `files` avec le contenu int\xE9gral du fichier. Pour supprimer un fichier obsol\xE8te, utilise `deleted_files`.",
-        "Renvoie un objet JSON strictement valide :",
-        "{",
-        `  "commit_message": "fix(review): address final feature review findings on #${params.issueNumber}",`,
-        '  "test_summary": "Addressed final feature review findings and verified test suite",',
-        '  "patches": [',
-        '    { "path": "...", "edits": [{ "old_string": "...", "new_string": "..." }] }',
-        "  ],",
-        '  "files": [',
-        '    { "path": "...", "content": "..." }',
-        "  ],",
-        '  "deleted_files": ["..."]',
-        "}",
-        "",
-        EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
-      ].join("\n");
       const featureFixPromptParts = formatResumeContextPromptLines(
         params.resumeContextMarkdown
       );
@@ -18289,211 +17673,135 @@ ${c}`).join("\n\n");
         wrapUntrustedContent("untrusted_workspace_files", currentFilesContext)
       );
       const featureFileModes = /* @__PURE__ */ new Map();
-      const runFeatureFixWithAgentOrLlm = async (promptText, logLabel) => {
-        if (params.agentEngine) {
-          const engine = params.agentEngine;
-          syncWorkspaceFiles(
-            featureSandbox.workDir,
-            params.accumulatedFiles,
-            params.featureDeletedFilesSet,
-            featureFileModes
+      const runFeatureFixWithAgentOrLlm = async (promptText, _logLabel) => {
+        if (!params.agentEngine) {
+          throw new AgentEngineError(
+            "AGENT_ENGINE_UNAVAILABLE",
+            "No agentEngine configured for feature fix session."
           );
-          const trackedPaths = Array.from(params.accumulatedFiles.keys());
-          const outerSnapshot = await snapshotWorktree(featureSandbox.workDir, {
-            trackedPaths,
-            isProtectedPath: (p) => isSensitiveTaskBranchPath(p, reviewersDir)
-          });
-          try {
-            const session = await withUsageAttribution(
-              { phase: "fixes" },
-              () => engine.run({
-                role: "fixer",
-                toolPolicy: "write",
-                instructions: [
-                  "Tu es un ing\xE9nieur TDD EPURE corrigeant les \xE9checs d\xE9crits dans le message (v\xE9rification Stage 1, constats 'must_fix' de revue, CI externe) sur la PR finale de feature en gardant 100% des cibles Stage 1 au vert.",
-                  PROMPT_INJECTION_IMMUNITY_CLAUSE,
-                  "Tu travailles directement dans le checkout du d\xE9p\xF4t (r\xE9pertoire courant) avec tes outils : les fichiers que tu laisses modifi\xE9s, cr\xE9\xE9s ou supprim\xE9s constituent le livrable.",
-                  `Ne modifie JAMAIS ${reviewersDir}/**, .github/workflows/**, .github/agents.yml, .env* ni .git/.`,
-                  "",
-                  verificationGuideMarkdown,
-                  "",
-                  EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
-                ].join("\n"),
-                prompt: promptText,
-                worktree: featureSandbox.workDir,
-                timeoutMs: params.phaseModels.requestTimeoutMs ?? 30 * 60 * 1e3,
-                model: params.phaseModels.implementationModel,
-                providers: params.phaseModels.providers,
-                thinking: "high",
-                trackedPaths,
-                isProtectedPath: (p) => isSensitiveTaskBranchPath(p, reviewersDir),
-                maxLlmRequests: params.parsedDevAgentsConfig?.agent_max_llm_requests ?? 200,
-                secrets: [params.activeToken]
-              })
-            );
-            const outerDiff = await outerSnapshot.collect();
-            const protectedSkipped = [
-              ...outerDiff.skipped,
-              ...session.diff.skipped
-            ].filter((s) => s.reason === "protected").map((s) => s.path.trim().replace(/^\/+/, ""));
-            if (protectedSkipped.length > 0) {
-              return {
-                parsed: {
-                  commit_message: `fix(review): address final feature review findings on #${params.issueNumber}`,
-                  test_summary: "",
-                  files: [],
-                  patches: [],
-                  deleted_files: []
-                },
-                protectedPaths: Array.from(new Set(protectedSkipped))
-              };
-            }
-            const fileMap = /* @__PURE__ */ new Map();
-            for (const f of outerDiff.files) {
-              const p = f.path.trim().replace(/^\/+/, "");
-              fileMap.set(p, f.content);
-              featureFileModes.set(p, f.mode);
-            }
-            for (const f of session.diff.files) {
-              const p = f.path.trim().replace(/^\/+/, "");
-              fileMap.set(p, f.content);
-              featureFileModes.set(p, f.mode);
-            }
-            const deletedFiles = Array.from(
-              /* @__PURE__ */ new Set([
-                ...outerDiff.deleted_files.map(
-                  (p) => p.trim().replace(/^\/+/, "")
-                ),
-                ...session.diff.deleted_files.map(
-                  (p) => p.trim().replace(/^\/+/, "")
-                )
-              ])
-            );
-            const commitMessage = `fix(review): address final feature review findings on #${params.issueNumber}`;
-            const testSummary = session.finalMessage.trim() || "Addressed final feature review findings and verified test suite";
-            if (fileMap.size > 0 || deletedFiles.length > 0) {
-              assertNoSecretMaterial(
-                [
-                  { label: "the commit message", text: commitMessage },
-                  { label: "the test summary", text: testSummary },
-                  ...Array.from(fileMap.entries()).map(([path, content]) => ({
-                    label: path,
-                    text: content
-                  }))
-                ],
-                [
-                  params.activeToken,
-                  params.llmApiKey,
-                  ...collectRunnerSecretValues(process.env)
-                ]
-              );
-              return {
-                parsed: {
-                  commit_message: commitMessage,
-                  test_summary: testSummary,
-                  files: Array.from(fileMap.entries()).map(
-                    ([path, content]) => ({ path, content })
-                  ),
-                  patches: [],
-                  deleted_files: deletedFiles
-                },
-                protectedPaths: []
-              };
-            }
-            let parsedPayload;
-            try {
-              const parsedJson = JSON.parse(
-                session.finalMessage.trim()
-              );
-              if (parsedJson && typeof parsedJson === "object" && (Array.isArray(parsedJson.files) || Array.isArray(parsedJson.patches) || Array.isArray(parsedJson.deleted_files))) {
-                parsedPayload = {
-                  commit_message: parsedJson.commit_message ?? commitMessage,
-                  test_summary: parsedJson.test_summary ?? testSummary,
-                  files: parsedJson.files ?? [],
-                  patches: parsedJson.patches ?? [],
-                  deleted_files: parsedJson.deleted_files ?? []
-                };
-              }
-            } catch {
-            }
-            if (parsedPayload) {
-              assertNoSecretMaterial(
-                [
-                  {
-                    label: "the commit message",
-                    text: parsedPayload.commit_message ?? ""
-                  },
-                  {
-                    label: "the test summary",
-                    text: parsedPayload.test_summary ?? ""
-                  },
-                  ...(parsedPayload.files ?? []).map((f) => ({
-                    label: f.path,
-                    text: f.content
-                  })),
-                  ...(parsedPayload.patches ?? []).flatMap(
-                    (p) => p.edits.map((e) => ({
-                      label: p.path,
-                      text: e.new_string ?? e.replace ?? ""
-                    }))
-                  )
-                ],
-                [
-                  params.activeToken,
-                  params.llmApiKey,
-                  ...collectRunnerSecretValues(process.env)
-                ]
-              );
-              return {
-                parsed: parsedPayload,
-                protectedPaths: []
-              };
-            }
-            if (!params.llmApiKey || !params.llmApiKey.trim()) {
-              return {
-                parsed: {
-                  commit_message: commitMessage,
-                  test_summary: testSummary,
-                  files: [],
-                  patches: [],
-                  deleted_files: []
-                },
-                protectedPaths: []
-              };
-            }
-          } finally {
-            outerSnapshot.dispose();
-          }
         }
-        const parsed = await withUsageAttribution(
-          { phase: "fixes" },
-          () => callLlmJson({
-            apiKey: params.llmApiKey,
-            model: params.phaseModels.implementationModel,
-            providers: params.phaseModels.providers,
-            maxTransientRetries: params.phaseModels.maxTransientRetries,
-            transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
-            requestTimeoutMs: params.phaseModels.requestTimeoutMs,
-            onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
-            thinkingLevel: "HIGH",
-            logLabel,
-            systemInstruction: featureFixSystemInstruction,
-            prompt: promptText,
-            temperature: 0.1,
-            ...buildRepoExplorationToolsAndHandlers({
-              branch: params.featureBranch,
-              featureBranch: params.featureBranch,
-              accumulatedFiles: params.accumulatedFiles,
-              deletedFilesSet: params.featureDeletedFilesSet,
-              devBranchPaths: params.devBranchPaths,
-              reviewersDir,
-              gh: params.gh
-            }),
-            responseSchema: GENERATED_TICKET_IMPLEMENTATION_SCHEMA,
-            fetchImpl: params.fetchImpl
-          })
+        const engine = params.agentEngine;
+        syncWorkspaceFiles(
+          featureSandbox.workDir,
+          params.accumulatedFiles,
+          params.featureDeletedFilesSet,
+          featureFileModes
         );
-        return { parsed, protectedPaths: [] };
+        const trackedPaths = Array.from(params.accumulatedFiles.keys());
+        const outerSnapshot = await snapshotWorktree(featureSandbox.workDir, {
+          trackedPaths,
+          isProtectedPath: (p) => isSensitiveTaskBranchPath(p, reviewersDir)
+        });
+        try {
+          const session = await withUsageAttribution(
+            { phase: "fixes" },
+            () => engine.run({
+              role: "fixer",
+              toolPolicy: "write",
+              instructions: [
+                "Tu es un ing\xE9nieur TDD EPURE corrigeant les \xE9checs d\xE9crits dans le message (v\xE9rification Stage 1, constats 'must_fix' de revue, CI externe) sur la PR finale de feature en gardant 100% des cibles Stage 1 au vert.",
+                PROMPT_INJECTION_IMMUNITY_CLAUSE,
+                "Tu travailles directement dans le checkout du d\xE9p\xF4t (r\xE9pertoire courant) avec tes outils : les fichiers que tu laisses modifi\xE9s, cr\xE9\xE9s ou supprim\xE9s constituent le livrable.",
+                `Ne modifie JAMAIS ${reviewersDir}/**, .github/workflows/**, .github/agents.yml, .env* ni .git/.`,
+                "",
+                verificationGuideMarkdown,
+                "",
+                EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
+              ].join("\n"),
+              prompt: promptText,
+              worktree: featureSandbox.workDir,
+              timeoutMs: params.phaseModels.requestTimeoutMs ?? 30 * 60 * 1e3,
+              model: params.phaseModels.implementationModel,
+              providers: params.phaseModels.providers,
+              thinking: "high",
+              trackedPaths,
+              isProtectedPath: (p) => isSensitiveTaskBranchPath(p, reviewersDir),
+              maxLlmRequests: params.parsedDevAgentsConfig?.agent_max_llm_requests ?? 200,
+              secrets: [params.activeToken]
+            })
+          );
+          const outerDiff = await outerSnapshot.collect();
+          const protectedSkipped = [
+            ...outerDiff.skipped,
+            ...session.diff.skipped
+          ].filter((s) => s.reason === "protected").map((s) => s.path.trim().replace(/^\/+/, ""));
+          if (protectedSkipped.length > 0) {
+            return {
+              parsed: {
+                commit_message: `fix(review): address final feature review findings on #${params.issueNumber}`,
+                test_summary: "",
+                files: [],
+                patches: [],
+                deleted_files: []
+              },
+              protectedPaths: Array.from(new Set(protectedSkipped))
+            };
+          }
+          const fileMap = /* @__PURE__ */ new Map();
+          for (const f of outerDiff.files) {
+            const p = f.path.trim().replace(/^\/+/, "");
+            fileMap.set(p, f.content);
+            featureFileModes.set(p, f.mode);
+          }
+          for (const f of session.diff.files) {
+            const p = f.path.trim().replace(/^\/+/, "");
+            fileMap.set(p, f.content);
+            featureFileModes.set(p, f.mode);
+          }
+          const deletedFiles = Array.from(
+            /* @__PURE__ */ new Set([
+              ...outerDiff.deleted_files.map(
+                (p) => p.trim().replace(/^\/+/, "")
+              ),
+              ...session.diff.deleted_files.map(
+                (p) => p.trim().replace(/^\/+/, "")
+              )
+            ])
+          );
+          const commitMessage = `fix(review): address final feature review findings on #${params.issueNumber}`;
+          const testSummary = session.finalMessage.trim() || "Addressed final feature review findings and verified test suite";
+          if (fileMap.size > 0 || deletedFiles.length > 0) {
+            assertNoSecretMaterial(
+              [
+                { label: "the commit message", text: commitMessage },
+                { label: "the test summary", text: testSummary },
+                ...Array.from(fileMap.entries()).map(([path, content]) => ({
+                  label: path,
+                  text: content
+                }))
+              ],
+              [
+                params.activeToken,
+                params.llmApiKey,
+                ...collectRunnerSecretValues(process.env)
+              ]
+            );
+            return {
+              parsed: {
+                commit_message: commitMessage,
+                test_summary: testSummary,
+                files: Array.from(fileMap.entries()).map(
+                  ([path, content]) => ({ path, content })
+                ),
+                patches: [],
+                deleted_files: deletedFiles
+              },
+              protectedPaths: []
+            };
+          }
+          return {
+            parsed: {
+              commit_message: commitMessage,
+              test_summary: testSummary,
+              files: [],
+              patches: [],
+              deleted_files: []
+            },
+            protectedPaths: []
+          };
+        } finally {
+          outerSnapshot.dispose();
+        }
       };
       const initialFixOutcome = await runFeatureFixWithAgentOrLlm(
         featureFixPromptParts.join("\n"),
@@ -18551,7 +17859,10 @@ ${c}`).join("\n\n");
         gh: params.gh,
         branch: params.featureBranch
       });
-      let featureTestCheck = await runTestsInIsolatedWorkspace({
+      let featureTestCheck = changedFixFilesMap.size === 0 && changedDeletedFilesSet.size === 0 ? {
+        passed: false,
+        output: "no changes left in worktree: la session de correction n'a laiss\xE9 aucun changement dans le d\xE9p\xF4t."
+      } : await runTestsInIsolatedWorkspace({
         workDir: featureSandbox.workDir,
         files: Array.from(params.accumulatedFiles.entries()).map(
           ([path, content]) => ({ path, content })
@@ -18639,17 +17950,30 @@ ${c}`).join("\n\n");
             traversalPaths: retryPreCheck.traversalPaths
           });
         }
+        const retryFixFilesMap = /* @__PURE__ */ new Map();
+        const retryDeletedFilesSet = /* @__PURE__ */ new Set();
         await applyTicketImplementationPayload({
           parsed: retryParsed,
           accumulatedFiles: params.accumulatedFiles,
           featureChangedFilesMap: params.featureChangedFilesMap,
-          ticketChangedFilesMap: changedFixFilesMap,
+          ticketChangedFilesMap: retryFixFilesMap,
           featureDeletedFilesSet: params.featureDeletedFilesSet,
-          ticketDeletedFilesSet: changedDeletedFilesSet,
+          ticketDeletedFilesSet: retryDeletedFilesSet,
           gh: params.gh,
           branch: params.featureBranch
         });
-        featureTestCheck = await runTestsInIsolatedWorkspace({
+        for (const [k, v] of retryFixFilesMap) {
+          changedFixFilesMap.set(k, v);
+          changedDeletedFilesSet.delete(k);
+        }
+        for (const d of retryDeletedFilesSet) {
+          changedDeletedFilesSet.add(d);
+          changedFixFilesMap.delete(d);
+        }
+        featureTestCheck = retryFixFilesMap.size === 0 && retryDeletedFilesSet.size === 0 ? {
+          passed: false,
+          output: "no changes left in worktree: la session de correction n'a laiss\xE9 aucun changement dans le d\xE9p\xF4t."
+        } : await runTestsInIsolatedWorkspace({
           workDir: featureSandbox.workDir,
           files: Array.from(params.accumulatedFiles.entries()).map(
             ([path, content]) => ({ path, content })
@@ -18723,9 +18047,16 @@ ${c}`).join("\n\n");
         base: params.featureBranch,
         title: fixCommitTitle,
         body: appendEpureCommandsSpoiler(
-          `Addresses multi-agent review findings on feature PR #${featurePr.number} (iteration ${featureReviewFixAttempt}).
-
-Refs #${params.issueNumber}`,
+          [
+            `Addresses multi-agent review findings on feature PR #${featurePr.number} (iteration ${featureReviewFixAttempt}).`,
+            "",
+            `Refs #${params.issueNumber}`,
+            "",
+            formatAgentProvenanceLine({
+              engine: params.agentEngine?.name ?? "pi",
+              model: params.phaseModels.implementationModel
+            })
+          ].join("\n"),
           {
             phase: "implementation",
             status: "active",
@@ -18791,9 +18122,9 @@ Refs #${params.issueNumber}`
         });
       }
     } catch (err) {
-      if (err instanceof LLMError) {
+      if (err instanceof LLMError || err instanceof AgentEngineError) {
         return await escalate({
-          reason: resolveLlmEscalationReason(err),
+          reason: err instanceof LLMError ? resolveLlmEscalationReason(err) : resolveAgentEngineEscalationReason(err),
           ticketNumber: params.issueNumber,
           branch: params.featureBranch,
           phase: "implementation",
@@ -19043,11 +18374,6 @@ async function checkMidLoopCancellation(params) {
   }
   return null;
 }
-function isLikelyTestTargetPath(filePath) {
-  const clean = filePath.trim().replace(/^\/+/, "");
-  const baseName = clean.split("/").pop() ?? clean;
-  return /(?:^|\/)(?:__tests__|tests?|specs?)\//i.test(clean) || /(?:\.test|\.spec|_test|_spec)\.[a-z0-9]+$/i.test(baseName) || /^test_[^/]+\.py$/i.test(baseName);
-}
 var TICKET_AGENT_SESSION_TIMEOUT_MS = 30 * 60 * 1e3;
 var AGENT_SESSION_RESERVE_MS = 10 * 60 * 1e3;
 var MIN_AGENT_SESSION_MS = 2 * 60 * 1e3;
@@ -19096,7 +18422,7 @@ function ticketAgentInstructions(role, reviewersDir) {
   return [
     TICKET_AGENT_ROLE_HEADLINES[role],
     PROMPT_INJECTION_IMMUNITY_CLAUSE,
-    "Tu travailles directement dans le checkout du d\xE9p\xF4t (r\xE9pertoire courant) avec tes outils : les fichiers que tu laisses modifi\xE9s, cr\xE9\xE9s ou supprim\xE9s constituent le livrable. Les outils `*_repo_file` et le sch\xE9ma JSON \xE9voqu\xE9s dans le message n'existent pas dans cette session.",
+    "Tu travailles directement dans le checkout du d\xE9p\xF4t (r\xE9pertoire courant) avec tes outils : les fichiers que tu laisses modifi\xE9s, cr\xE9\xE9s ou supprim\xE9s constituent le livrable.",
     "\xC9cris des tests param\xE9tr\xE9s couvrant les crit\xE8res d'acceptation et cas limites, et du code propre qui les fait passer. Lance les commandes de v\xE9rification du guide quand c'est possible ; le r\xE9seau est coup\xE9 (hors LLM), n'installe aucune d\xE9pendance.",
     `Ne modifie JAMAIS ${reviewersDir}/**, .github/workflows/**, .github/agents.yml, .env* ni .git/.`,
     "Termine par un court compte rendu : fichiers chang\xE9s, tests ajout\xE9s et commandes lanc\xE9es avec leur r\xE9sultat.",
@@ -19104,7 +18430,14 @@ function ticketAgentInstructions(role, reviewersDir) {
     EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
   ].join("\n");
 }
-async function runTicketAgentSession(params, session) {
+async function runTicketAgentSession(params) {
+  if (!params.agentSession) {
+    throw new AgentEngineError(
+      "AGENT_ENGINE_UNAVAILABLE",
+      "No agentEngine configured for ticket session."
+    );
+  }
+  const session = params.agentSession;
   const nowMs = Date.now();
   const timeoutMs = agentSessionTimeoutMs(session.jobDeadlineMs, nowMs);
   if (timeoutMs === void 0) {
@@ -19211,174 +18544,6 @@ async function summarizeAgentSession(params, changedPaths, finalMessage, jobDead
       commit_message: `feat(ticket-${params.ticket.ticketIssueNumber}): ${params.ticket.title}`,
       test_summary: "R\xE9sum\xE9 indisponible : l'appel de synth\xE8se de la session a \xE9chou\xE9."
     };
-  }
-}
-async function generateTicketImplementationWithFallback(params) {
-  if (params.agentSession) {
-    return runTicketAgentSession(params, params.agentSession);
-  }
-  const stagedBuffer = createStagedTicketImplementationBuffer(params.ensureBaselineLoaded);
-  const schemaWithStaged = createGeneratedTicketImplementationSchema({
-    hasStagedMutations: () => stagedBuffer.hasMutations()
-  });
-  try {
-    const parsedPrimary = await callLlmJson({
-      apiKey: params.llmApiKey,
-      model: params.phaseModels.implementationModel,
-      providers: params.phaseModels.providers,
-      maxTransientRetries: params.phaseModels.maxTransientRetries,
-      transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
-      requestTimeoutMs: params.phaseModels.requestTimeoutMs,
-      onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
-      thinkingLevel: params.thinkingLevel,
-      logLabel: params.logLabel,
-      systemInstruction: params.systemInstruction,
-      prompt: params.prompt,
-      temperature: 0.1,
-      maxToolRounds: 35,
-      ...buildRepoExplorationToolsAndHandlers({
-        branch: params.branch,
-        featureBranch: params.featureBranch,
-        accumulatedFiles: params.accumulatedFiles,
-        deletedFilesSet: params.deletedFilesSet,
-        stagedImplementation: stagedBuffer,
-        devBranchPaths: params.devBranchPaths,
-        reviewersDir: params.reviewersDir,
-        gh: params.gh
-      }),
-      responseSchema: schemaWithStaged,
-      fetchImpl: params.fetchImpl
-    });
-    return mergeStagedBufferIntoImplementationPayload(
-      stagedBuffer,
-      parsedPrimary
-    );
-  } catch (primaryErr) {
-    if (!(primaryErr instanceof StructuredOutputValidationError)) {
-      stagedBuffer.files.clear();
-      stagedBuffer.deletedFiles.clear();
-      throw primaryErr;
-    }
-    const declaredTargets = params.ticket.filesToTouch.map((f) => f.trim().replace(/^\/+/, "")).filter(Boolean);
-    const untouchedTargets = declaredTargets.filter(
-      (targetPath) => !stagedBuffer.files.has(targetPath) && !stagedBuffer.deletedFiles.has(targetPath)
-    );
-    const hasTestInTargetsOrStaged = declaredTargets.some((t) => isLikelyTestTargetPath(t)) || Array.from(stagedBuffer.files.keys()).some(
-      (t) => isLikelyTestTargetPath(t)
-    );
-    const fallbackBatches = [...untouchedTargets];
-    if (!hasTestInTargetsOrStaged) {
-      fallbackBatches.push("__TEST_SUITE_BATCH__");
-    }
-    if (fallbackBatches.length === 0 && stagedBuffer.hasMutations()) {
-      return mergeStagedBufferIntoImplementationPayload(stagedBuffer, {
-        commit_message: `feat(ticket-${params.ticket.ticketIssueNumber}): ${params.ticket.title}`,
-        test_summary: "Recovered staged incremental mutations after final turn truncation",
-        files: [],
-        patches: [],
-        deleted_files: []
-      });
-    }
-    if (fallbackBatches.length === 0) {
-      stagedBuffer.files.clear();
-      stagedBuffer.deletedFiles.clear();
-      throw primaryErr;
-    }
-    if (process.env.GITHUB_ACTIONS === "true") {
-      process.stdout.write(
-        `[EPURE][Ticket #${params.ticket.ticketIssueNumber}] Primary codegen hit StructuredOutputValidationError; triggering ChunkedTicketImplementationFallback across ${fallbackBatches.length} target(s)
-`
-      );
-    }
-    let lastCommitMessage = `feat(ticket-${params.ticket.ticketIssueNumber}): ${params.ticket.title}`;
-    let lastTestSummary = "Chunked file-by-file implementation verified";
-    const collectedPatches = [];
-    try {
-      for (const batchTarget of fallbackBatches) {
-        const isTestBatch = batchTarget === "__TEST_SUITE_BATCH__";
-        const stagedSummary = stagedBuffer.files.size > 0 ? [
-          "Fichiers d\xE9j\xE0 g\xE9n\xE9r\xE9s dans le tampon transactionnel de ce ticket :",
-          ...Array.from(stagedBuffer.files.entries()).map(
-            ([sp, sc]) => `--- STAGED FILE: ${sp} ---
-${sc}`
-          )
-        ].join("\n\n") : "";
-        const batchPrompt = [
-          params.prompt,
-          "",
-          ...stagedSummary ? [stagedSummary, ""] : [],
-          isTestBatch ? `REPLI SEGMENT\xC9 (Lot de tests unitaires) : G\xE9n\xE8re UNIQUEMENT le(s) fichier(s) de tests param\xE9tr\xE9s couvrant les crit\xE8res d'acceptation du Ticket #${params.ticket.ticketIssueNumber}. Ne r\xE9\xE9cris pas les fichiers d'impl\xE9mentation d\xE9j\xE0 pr\xE9sents dans le tampon.` : `REPLI SEGMENT\xC9 (Fichier cible unique : \`${batchTarget}\`) : G\xE9n\xE8re ou patche UNIQUEMENT le fichier \`${batchTarget}\` requis par le Ticket #${params.ticket.ticketIssueNumber}. Ne g\xE9n\xE8re aucun autre fichier dans cet appel.`
-        ].join("\n");
-        const batchImpl = await callLlmJson({
-          apiKey: params.llmApiKey,
-          model: params.phaseModels.implementationModel,
-          providers: params.phaseModels.providers,
-          maxTransientRetries: params.phaseModels.maxTransientRetries,
-          transientRetryBackoffSeconds: params.phaseModels.transientRetryBackoffSeconds,
-          requestTimeoutMs: params.phaseModels.requestTimeoutMs,
-          onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
-          thinkingLevel: params.thinkingLevel,
-          logLabel: params.logLabel ? `${params.logLabel}/chunk:${batchTarget}` : `chunk:#${params.ticket.ticketIssueNumber}:${batchTarget}`,
-          systemInstruction: params.systemInstruction,
-          prompt: batchPrompt,
-          temperature: 0.1,
-          maxToolRounds: 20,
-          ...buildRepoExplorationToolsAndHandlers({
-            branch: params.branch,
-            featureBranch: params.featureBranch,
-            accumulatedFiles: params.accumulatedFiles,
-            deletedFilesSet: params.deletedFilesSet,
-            stagedImplementation: stagedBuffer,
-            devBranchPaths: params.devBranchPaths,
-            reviewersDir: params.reviewersDir,
-            gh: params.gh
-          }),
-          responseSchema: schemaWithStaged,
-          fetchImpl: params.fetchImpl
-        });
-        if (batchImpl.commit_message?.trim()) {
-          lastCommitMessage = batchImpl.commit_message.trim();
-        }
-        if (batchImpl.test_summary?.trim()) {
-          lastTestSummary = batchImpl.test_summary.trim();
-        }
-        for (const f of batchImpl.files ?? []) {
-          const clean = f.path.trim().replace(/^\/+/, "");
-          if (clean) {
-            await params.ensureBaselineLoaded([clean]);
-            stagedBuffer.files.set(clean, f.content);
-            stagedBuffer.deletedFiles.delete(clean);
-          }
-        }
-        for (const del of batchImpl.deleted_files ?? []) {
-          const clean = del.trim().replace(/^\/+/, "");
-          if (clean) {
-            await params.ensureBaselineLoaded([clean]);
-            stagedBuffer.files.delete(clean);
-            stagedBuffer.deletedFiles.add(clean);
-          }
-        }
-        for (const patch of batchImpl.patches ?? []) {
-          collectedPatches.push(patch);
-        }
-      }
-    } catch (fallbackErr) {
-      stagedBuffer.files.clear();
-      stagedBuffer.deletedFiles.clear();
-      throw fallbackErr;
-    }
-    if (!stagedBuffer.hasMutations() && collectedPatches.length === 0) {
-      stagedBuffer.files.clear();
-      stagedBuffer.deletedFiles.clear();
-      throw primaryErr;
-    }
-    return mergeStagedBufferIntoImplementationPayload(stagedBuffer, {
-      commit_message: lastCommitMessage,
-      test_summary: lastTestSummary,
-      files: [],
-      ...collectedPatches.length > 0 ? { patches: collectedPatches } : {},
-      deleted_files: []
-    });
   }
 }
 async function runTicketExecutionLoop(params) {
@@ -19885,54 +19050,6 @@ ${ticket.acceptanceCriteria.join("\n")}`
             ...params.featureChangedFilesMap.keys()
           ]
         });
-        const isBrownfieldRepo = checkIsExistingRepoWorkspace(
-          params.accumulatedFiles,
-          params.devBranchPaths
-        );
-        const tddSystemInstruction = [
-          "Tu es un ing\xE9nieur TDD EPURE impl\xE9mentant un ticket approuv\xE9.",
-          PROMPT_INJECTION_IMMUNITY_CLAUSE,
-          "R\xE8gles strictes :",
-          "1. \xC9cris des tests couvrant tous les crit\xE8res d'acceptation et cas limites.",
-          "2. Impl\xE9mente le code propre et complet faisant passer 100% des tests.",
-          "3. N'utilise aucune d\xE9pendance externe exotique non d\xE9clar\xE9e.",
-          `4. Ne modifie JAMAIS ${reviewersDir}/**, .github/workflows/**, .github/agents.yml ou .env*.`,
-          "",
-          verificationGuideMarkdown,
-          "",
-          ...isBrownfieldRepo ? [
-            "5. Il s'agit d'un d\xE9p\xF4t existant. Utilise les outils `list_repo_files`, `search_in_repo_file` et `read_repo_file` pour inspecter le contenu int\xE9gral des fichiers pertinents avant de coder.",
-            "6. Tu peux \xE9crire ou modifier les fichiers au fil des tours d'outils avec `write_repo_file`, `patch_repo_file` et `delete_repo_file` (recommand\xE9 pour les tickets multi-fichiers afin d'\xE9viter toute troncature du JSON final), ou les renvoyer dans l'objet JSON final (`patches`, `files`, `deleted_files`). Si tu as d\xE9j\xE0 \xE9crit tous les fichiers via `write_repo_file` / `patch_repo_file`, renvoie simplement `files: []`, `patches: []`, `deleted_files: []` avec `commit_message` et `test_summary`.",
-            "Renvoie un objet JSON strictement valide respectant ce sch\xE9ma :",
-            "{",
-            '  "commit_message": "fix: ...",',
-            '  "test_summary": "Tests and acceptance criteria verified",',
-            '  "patches": [',
-            '    { "path": "src/...", "edits": [{ "old_string": "...", "new_string": "..." }] }',
-            "  ],",
-            '  "files": [',
-            '    { "path": "tests/...", "content": "..." }',
-            "  ],",
-            '  "deleted_files": []',
-            "}"
-          ] : [
-            "5. Tu disposes des fichiers du workspace (int\xE9graux) et des outils (`list_repo_files`, `search_in_repo_file`, `read_repo_file`, `write_repo_file`, `patch_repo_file`, `delete_repo_file`). Tu peux cr\xE9er ou modifier les fichiers au fil des tours d'outils ou les renvoyer dans l'objet JSON final respectant exactement ce sch\xE9ma :",
-            "{",
-            `  "commit_message": "feat(ticket-${ticket.ticketIssueNumber}): ...",`,
-            '  "test_summary": "Parameterized test suite verified",',
-            '  "patches": [',
-            '    { "path": "src/...", "edits": [{ "old_string": "...", "new_string": "..." }] }',
-            "  ],",
-            '  "files": [',
-            '    { "path": "src/...", "content": "..." },',
-            '    { "path": "tests/...", "content": "..." }',
-            "  ],",
-            '  "deleted_files": []',
-            "}"
-          ],
-          "",
-          EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
-        ].join("\n");
         const tddPrompt = [
           `Plan parent (#${params.issueNumber}) et cahier des charges :`,
           wrapUntrustedContent(
@@ -19960,18 +19077,13 @@ ${params.issue.body}`
           existingFilesContext ? `Fichiers d\xE9j\xE0 pr\xE9sents sur la branche feature :
 ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C'est le premier ticket : inclus un package.json complet (avec scripts 'test': 'vitest run' et 'build': 'vite build', dependencies react/react-dom, devDependencies typescript/vite/vitest/@vitejs/plugin-react/@types/react/@types/react-dom) ainsi que tsconfig.json et vite.config.ts."
         ].join("\n");
-        const parsedImpl = await withUsageAttribution({ phase: "implementation", ticket: ticket.ticketIssueNumber }, () => generateTicketImplementationWithFallback({
+        const parsedImpl = await withUsageAttribution({ phase: "implementation", ticket: ticket.ticketIssueNumber }, () => runTicketAgentSession({
           ticket,
-          branch: params.featureBranch,
-          featureBranch: params.featureBranch,
-          systemInstruction: tddSystemInstruction,
           prompt: tddPrompt,
           logLabel: `tdd-init:#${ticket.ticketIssueNumber}`,
           accumulatedFiles: params.accumulatedFiles,
           deletedFilesSet: ticketDeletedFilesSet,
-          devBranchPaths: params.devBranchPaths,
           reviewersDir,
-          ensureBaselineLoaded: ensureBaselineFilesLoaded,
           gh: params.gh,
           llmApiKey: params.llmApiKey,
           phaseModels: params.phaseModels,
@@ -20060,31 +19172,6 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
               ...ticketChangedFilesMap.keys()
             ]
           });
-          const fixSystemInstruction = [
-            "Tu es un ing\xE9nieur TDD EPURE corrigeant un \xE9chec de v\xE9rification Stage 1 en sandbox isol\xE9e.",
-            PROMPT_INJECTION_IMMUNITY_CLAUSE,
-            "Corrige les fichiers en d\xE9faut (code ou assertions de test) pour que 100% des cibles Stage 1 passent.",
-            `Ne modifie JAMAIS ${reviewersDir}/**, .github/workflows/**, .github/agents.yml ou .env*.`,
-            "Tu peux utiliser les outils `list_repo_files`, `search_in_repo_file`, `read_repo_file`, `write_repo_file`, `patch_repo_file` et `delete_repo_file` pour inspecter et modifier les fichiers du d\xE9p\xF4t.",
-            "Pour modifier un fichier existant volumineux, utilise de pr\xE9f\xE9rence `patch_repo_file` ou `patches` (`old_string` -> `new_string` exact). Pour supprimer un fichier obsol\xE8te, utilise `delete_repo_file` ou `deleted_files`.",
-            "",
-            verificationGuideMarkdown,
-            "",
-            "Renvoie un objet JSON strictement valide respectant exactement ce sch\xE9ma :",
-            "{",
-            `  "commit_message": "feat(ticket-${ticket.ticketIssueNumber}): ...",`,
-            '  "test_summary": "Stage 1 verification suite verified",',
-            '  "patches": [',
-            '    { "path": "...", "edits": [{ "old_string": "...", "new_string": "..." }] }',
-            "  ],",
-            '  "files": [',
-            '    { "path": "...", "content": "..." }',
-            "  ],",
-            '  "deleted_files": []',
-            "}",
-            "",
-            EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
-          ].join("\n");
           const fixPrompt = [
             `La v\xE9rification Stage 1 du Ticket #${ticket.ticketIssueNumber} a \xE9chou\xE9 dans la sandbox avec la sortie suivante :`,
             wrapUntrustedContent("untrusted_test_output", testCheck.output),
@@ -20097,18 +19184,13 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
               currentFilesContext
             )
           ].join("\n");
-          const fixedImpl = await withUsageAttribution({ phase: "fixes", ticket: ticket.ticketIssueNumber }, () => generateTicketImplementationWithFallback({
+          const fixedImpl = await withUsageAttribution({ phase: "fixes", ticket: ticket.ticketIssueNumber }, () => runTicketAgentSession({
             ticket,
-            branch: params.featureBranch,
-            featureBranch: params.featureBranch,
-            systemInstruction: fixSystemInstruction,
             prompt: fixPrompt,
             logLabel: `stage1-fix:#${ticket.ticketIssueNumber}/iter-${reviewFixAttempt}`,
             accumulatedFiles: params.accumulatedFiles,
             deletedFilesSet: ticketDeletedFilesSet,
-            devBranchPaths: params.devBranchPaths,
             reviewersDir,
-            ensureBaselineLoaded: ensureBaselineFilesLoaded,
             gh: params.gh,
             llmApiKey: params.llmApiKey,
             phaseModels: params.phaseModels,
@@ -20200,6 +19282,10 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
           files: withFileModes(impl.files),
           deletedFiles: Array.from(ticketDeletedFilesSet)
         });
+        const provenanceLine = formatAgentProvenanceLine({
+          engine: params.agentEngine?.name ?? "pi",
+          model: params.phaseModels.implementationModel
+        });
         const prBody = appendEpureCommandsSpoiler(
           [
             "## Summary",
@@ -20210,6 +19296,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
             "",
             "## TDD & Sandbox Verification",
             `- **Sandbox Test Execution**: \`passed\``,
+            provenanceLine,
             "- **Summary**:",
             "",
             fencedCodeBlock(impl.test_summary)
@@ -20522,31 +19609,6 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
             ...reviewResult.must_fix_findings.map((f) => f.path)
           ]
         });
-        const reviewFixSystemInstruction = [
-          "Tu es un ing\xE9nieur TDD EPURE corrigeant les constats bloquants ('must_fix') de revue multi-agents et/ou les \xE9checs CI externes.",
-          PROMPT_INJECTION_IMMUNITY_CLAUSE,
-          "Corrige pr\xE9cis\xE9ment chaque anomalie tout en maintenant 100% des cibles Stage 1 au vert.",
-          `Ne modifie JAMAIS ${reviewersDir}/**, .github/workflows/**, .github/agents.yml ou .env*.`,
-          "Utilise les outils `list_repo_files`, `search_in_repo_file`, `read_repo_file`, `write_repo_file`, `patch_repo_file` et `delete_repo_file` pour inspecter et modifier les fichiers pertinents du d\xE9p\xF4t.",
-          "",
-          verificationGuideMarkdown,
-          "",
-          "Pour modifier un fichier existant volumineux, utilise de pr\xE9f\xE9rence `patch_repo_file` ou `patches` (`old_string` -> `new_string` exact). Sinon utilise `write_repo_file` ou `files` avec le contenu int\xE9gral du fichier. Pour supprimer un fichier obsol\xE8te, utilise `delete_repo_file` ou `deleted_files`.",
-          "Renvoie un objet JSON strictement valide :",
-          "{",
-          `  "commit_message": "fix(review): address post-PR findings on #${ticket.ticketIssueNumber}",`,
-          '  "test_summary": "Addressed review and CI findings and verified test suite",',
-          '  "patches": [',
-          '    { "path": "...", "edits": [{ "old_string": "...", "new_string": "..." }] }',
-          "  ],",
-          '  "files": [',
-          '    { "path": "...", "content": "..." }',
-          "  ],",
-          '  "deleted_files": ["..."]',
-          "}",
-          "",
-          EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
-        ].join("\n");
         const promptParts = [...resumeContextPromptLines];
         if (reviewResult.must_fix_findings.length > 0) {
           promptParts.push(
@@ -20568,19 +19630,14 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
           "Fichiers actuels du workspace :",
           wrapUntrustedContent("untrusted_workspace_files", currentFilesContext)
         );
-        const reviewFixedImpl = await withUsageAttribution({ phase: "fixes", ticket: ticket.ticketIssueNumber }, () => generateTicketImplementationWithFallback({
+        const reviewFixedImpl = await withUsageAttribution({ phase: "fixes", ticket: ticket.ticketIssueNumber }, () => runTicketAgentSession({
           ticket,
-          branch: taskBranch,
-          featureBranch: params.featureBranch,
           thinkingLevel: "HIGH",
           logLabel: `review-fix:#${ticket.ticketIssueNumber}/iter-${reviewFixAttempt}`,
-          systemInstruction: reviewFixSystemInstruction,
           prompt: promptParts.join("\n"),
           accumulatedFiles: params.accumulatedFiles,
           deletedFilesSet: ticketDeletedFilesSet,
-          devBranchPaths: params.devBranchPaths,
           reviewersDir,
-          ensureBaselineLoaded: ensureBaselineFilesLoaded,
           gh: params.gh,
           llmApiKey: params.llmApiKey,
           phaseModels: params.phaseModels,
@@ -20657,13 +19714,10 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
               ...reviewResult.must_fix_findings.map((f) => f.path)
             ]
           });
-          const retryImpl = await withUsageAttribution({ phase: "fixes", ticket: ticket.ticketIssueNumber }, () => generateTicketImplementationWithFallback({
+          const retryImpl = await withUsageAttribution({ phase: "fixes", ticket: ticket.ticketIssueNumber }, () => runTicketAgentSession({
             ticket,
-            branch: taskBranch,
-            featureBranch: params.featureBranch,
             thinkingLevel: "HIGH",
             logLabel: `review-fix-retry:#${ticket.ticketIssueNumber}/iter-${reviewFixAttempt}`,
-            systemInstruction: reviewFixSystemInstruction,
             prompt: [
               `La correction a fait \xE9chouer la v\xE9rification Stage 1 en sandbox (tentative ${reviewFixAttempt}/${params.maxCodeFixAttempts}) :`,
               wrapUntrustedContent(
@@ -20687,9 +19741,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
             ].join("\n"),
             accumulatedFiles: params.accumulatedFiles,
             deletedFilesSet: ticketDeletedFilesSet,
-            devBranchPaths: params.devBranchPaths,
             reviewersDir,
-            ensureBaselineLoaded: ensureBaselineFilesLoaded,
             gh: params.gh,
             llmApiKey: params.llmApiKey,
             phaseModels: params.phaseModels,
@@ -22576,7 +21628,6 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
               epicGoalContract,
               accumulatedFiles,
               featureChangedFilesMap,
-              devBranchPaths,
               stage1Summary,
               gh,
               llmApiKey: effectiveInput.llmApiKey,

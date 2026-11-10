@@ -30,17 +30,14 @@ export {
   GENERATED_PLANNING_BUNDLE_SCHEMA,
   GENERATED_SPEC_ARTIFACTS_SCHEMA,
   GENERATED_TICKET_DAG_SCHEMA,
-  GENERATED_TICKET_IMPLEMENTATION_SCHEMA,
   GOLDFISH_SPEC_AUDIT_SCHEMA,
   GRILL_ROUND_EVALUATION_SCHEMA,
   REVIEWER_FINDINGS_SCHEMA,
   SQUASH_COMMIT_SCHEMA,
   USER_ADVOCATE_SCHEMA,
-  createGeneratedTicketImplementationSchema,
   parseOptionalEpicGoalContract,
   type AdrCoherenceReconciliationPayload,
   type ConflictResolutionPayload,
-  type CreateGeneratedTicketImplementationSchemaOptions,
   type EpicConvergenceAuditPayload,
   type EpicGoalContract,
   type GeneratedAdrDocument,
@@ -51,7 +48,6 @@ export {
   type GeneratedSpecArtifacts,
   type GeneratedTicketDag,
   type GeneratedTicketFilePatch,
-  type GeneratedTicketImplementation,
   type GeneratedTicketPatchEdit,
   type GeneratedTicketSpec,
   type GoldfishSpecAuditPayload,
@@ -156,7 +152,7 @@ export interface OrchestrateIssueInput {
     | ((input: SandboxExecutionInput) => Promise<SandboxExecutionResult>)
     | undefined;
   readonly asyncCiContinuation?: boolean | undefined;
-  // Runs implementation, Stage 1 fixes and review/CI remediation; without it they use the in-house tool loop.
+  // AgentEngine used by implementation, remediation, review, and planning sessions.
   readonly agentEngine?: AgentEngine | undefined;
   // Epoch ms the job started at (now when absent): agent sessions end before the job's timeout from it.
   readonly jobStartedAtMs?: number | undefined;

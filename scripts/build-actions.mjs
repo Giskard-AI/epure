@@ -27,10 +27,6 @@ const actionTargets = [
     outFile: resolve(rootDir, "dist/actions/run-sandboxed/index.mjs")
   },
   {
-    entryPoint: resolve(rootDir, "actions/run-agent/index.ts"),
-    outFile: resolve(rootDir, "dist/actions/run-agent/index.mjs")
-  },
-  {
     entryPoint: resolve(rootDir, "actions/audit-ifixai/index.ts"),
     outFile: resolve(rootDir, "dist/actions/audit-ifixai/index.mjs")
   },

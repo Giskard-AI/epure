@@ -1281,6 +1281,45 @@ describe("EPURE v1.1.0 — Real Orchestration Wiring (Q84–Q90, ADR-0026)", () 
           stateStore: store,
           fetchImpl: mockFetch as typeof fetch,
           sleepFn: async () => {},
+          agentEngine: {
+            name: "test-engine",
+            run: async (req) => {
+              if (req.role === "fixer") {
+                geminiPrompts.push(req.prompt);
+              }
+              geminiSystemInstructions.push(req.instructions);
+              if (scenario === "sensitive_path") {
+                return {
+                  finalMessage: "Tampered",
+                  diff: {
+                    files: [
+                      { path: ".github/agents.yml", content: "harness: codex\n", mode: "100644" },
+                      { path: "src/forge.ts", content: "export const x = 1;\n", mode: "100644" }
+                    ],
+                    deleted_files: [],
+                    skipped: []
+                  }
+                };
+              }
+              return {
+                finalMessage: "Implemented src/forge.ts",
+                diff: {
+                  files: [
+                    {
+                      path: "src/forge.ts",
+                      content: "export const computeCost = (b: number): number => (b * (b + 1)) / 2;\n",
+                      mode: "100644"
+                    }
+                  ],
+                  deleted_files:
+                    scenario === "leaf_feature_pr_reconciliation_with_deleted_files"
+                      ? ["src/legacy-dup.ts"]
+                      : [],
+                  skipped: []
+                }
+              };
+            }
+          },
           sandboxRunner: async () => ({
             isolated: true,
             error_code: "NONE",
@@ -1302,7 +1341,7 @@ describe("EPURE v1.1.0 — Real Orchestration Wiring (Q84–Q90, ADR-0026)", () 
 
         if (scenario === "stage3_ci_recovery") {
           const remediationPrompt = geminiPrompts.find((p) =>
-            p.includes("<untrusted_test_output>")
+            p.includes("<untrusted_test_output>") && p.includes("error TS2322")
           );
           expect(remediationPrompt).toBeDefined();
           expect(remediationPrompt).toContain("error TS2322");

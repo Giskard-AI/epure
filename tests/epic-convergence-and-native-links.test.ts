@@ -946,7 +946,6 @@ describe("EPURE Graphe GitHub Natif, Garde-fous d'Intégrité Inter-Tickets et C
             ["src/cli.ts", "export function cli() { /* TODO: wire cli */ }"],
             ["src/large.ts", longLineFile]
           ]),
-          devBranchPaths: ["src/cli.ts", "src/large.ts"],
           stage1Summary: "Stage 1 PASSED on feature/50-cli",
           gh: mockGh,
           llmApiKey: "test-key",
@@ -956,9 +955,6 @@ describe("EPURE Graphe GitHub Natif, Garde-fous d'Intégrité Inter-Tickets et C
 
         expect(audit.verdict).toBe(expectedVerdict);
         expect(audit.remediation_tickets).toHaveLength(expectedTicketCount);
-        expect(capturedRequestBody).toContain("read_repo_file");
-        expect(capturedRequestBody).toContain("search_repo_code");
-        expect(capturedRequestBody).toContain("list_repo_files");
         expect(capturedRequestBody).toContain("Stage 1 PASSED on feature/50-cli");
         expect(capturedRequestBody).toContain("export const line_400 =");
       }

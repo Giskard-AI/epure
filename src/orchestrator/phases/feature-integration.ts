@@ -1,4 +1,5 @@
 import {
+  AgentEngineError,
   assertNoSecretMaterial,
   type AgentEngine,
   type FileMode
@@ -12,6 +13,7 @@ import {
 import type { parseAgentsYaml } from "../../bootstrap/setup-repo.js";
 import {
   discoverExpectedExternalWorkflows,
+  resolveAgentEngineEscalationReason,
   resolveLlmEscalationReason,
   waitForExternalCiChecks,
   type WaitForExternalCiChecksResult
@@ -24,6 +26,7 @@ import {
   type ReviewerAgentName
 } from "../../review/reviewer-roster.js";
 import { generateSemanticSquashCommitFromDiff } from "../../review/squash-commit-generator.js";
+import { formatAgentProvenanceLine } from "../../security/audit-trace.js";
 import {
   collectRunnerSecretValues,
   type SandboxExecutionInput,
@@ -50,13 +53,8 @@ import {
 } from "../../state/git-ref-state.js";
 import type { PricingTable } from "../../usage/pricing.js";
 import { currentTokenUsage, withUsageAttribution } from "../../usage/token-usage.js";
-import {
-  formatEpicUsageSection,
-  formatPrUsageSection,
-  replacePrUsageSection
-} from "../../usage/usage-report.js";
+import { formatEpicUsageSection, formatPrUsageSection, replacePrUsageSection } from "../../usage/usage-report.js";
 import { appendEpureCommandsSpoiler } from "../formatting/comments.js";
-import { callLlmJson } from "../llm-helper.js";
 import {
   reconcileAdrsWithLlm,
   syncBranchWithBase,
@@ -77,9 +75,7 @@ export {
 import { EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT } from "../prompts/code-discipline.js";
 import { formatResumeContextPromptLines } from "../prompts/resume-context.js";
 import {
-  GENERATED_TICKET_IMPLEMENTATION_SCHEMA,
   type EscalateToNeedsHumanFn,
-  type GeneratedTicketImplementation,
   type GitHubRestHelper,
   type IssueMetadata,
   type OrchestrateIssueResult,
@@ -88,8 +84,8 @@ import {
 } from "../types.js";
 import {
   applyTicketImplementationPayload,
-  buildRepoExplorationToolsAndHandlers,
-  runTestsInIsolatedWorkspace
+  runTestsInIsolatedWorkspace,
+  type TicketImplementationDiffPayload
 } from "../workspace/repo-tools.js";
 
 export interface RunFeatureIntegrationPhaseParams {
@@ -267,6 +263,10 @@ export async function runFeatureIntegrationPhase(
     params.existingFeaturePrAtStart ??
     (await params.gh.findOpenPullRequestByHead(params.featureBranch, "dev"));
 
+  const provenanceLine = formatAgentProvenanceLine({
+    engine: params.agentEngine?.name ?? "pi",
+    model: params.phaseModels.implementationModel
+  });
   const featurePrBody = appendEpureCommandsSpoiler(
     [
       "## Summary",
@@ -290,6 +290,7 @@ export async function runFeatureIntegrationPhase(
       formatPrUsageSection(currentTokenUsage(), pricing),
       "",
       "## Governance",
+      provenanceLine,
       "- Requires human review and squash-merge into `dev` in the GitHub UI (ADR-0001, ADR-0027, Q45, Q91, Q95)."
     ].join("\n"),
     {
@@ -668,32 +669,6 @@ export async function runFeatureIntegrationPhase(
         .map(([p, c]) => `--- FILE: ${p} ---\n${c}`)
         .join("\n\n");
 
-      const featureFixSystemInstruction = [
-        "Tu es un ingénieur TDD EPURE corrigeant les constats bloquants ('must_fix') et/ou échecs CI sur la PR finale de feature.",
-        PROMPT_INJECTION_IMMUNITY_CLAUSE,
-        "Corrige précisément chaque anomalie tout en maintenant 100% des cibles Stage 1 au vert.",
-        `Ne modifie JAMAIS ${reviewersDir}/**, .github/workflows/**, .github/agents.yml ou .env*.`,
-        "Utilise les outils `list_repo_files`, `search_in_repo_file` et `read_repo_file` pour inspecter les fichiers pertinents du dépôt avant de coder.",
-        "",
-        verificationGuideMarkdown,
-        "",
-        "Pour modifier un fichier existant volumineux, utilise de préférence `patches` (`old_string` -> `new_string` exact). Sinon utilise `files` avec le contenu intégral du fichier. Pour supprimer un fichier obsolète, utilise `deleted_files`.",
-        "Renvoie un objet JSON strictement valide :",
-        "{",
-        `  "commit_message": "fix(review): address final feature review findings on #${params.issueNumber}",`,
-        '  "test_summary": "Addressed final feature review findings and verified test suite",',
-        '  "patches": [',
-        '    { "path": "...", "edits": [{ "old_string": "...", "new_string": "..." }] }',
-        "  ],",
-        '  "files": [',
-        '    { "path": "...", "content": "..." }',
-        "  ],",
-        '  "deleted_files": ["..."]',
-        "}",
-        "",
-        EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
-      ].join("\n");
-
       const featureFixPromptParts: string[] = formatResumeContextPromptLines(
         params.resumeContextMarkdown
       );
@@ -724,230 +699,145 @@ export async function runFeatureIntegrationPhase(
       const featureFileModes = new Map<string, FileMode>();
       const runFeatureFixWithAgentOrLlm = async (
         promptText: string,
-        logLabel: string
+        _logLabel: string
       ): Promise<{
-        parsed: GeneratedTicketImplementation;
+        parsed: TicketImplementationDiffPayload;
         protectedPaths: string[];
       }> => {
-        if (params.agentEngine) {
-          const engine = params.agentEngine;
-          syncWorkspaceFiles(
-            featureSandbox.workDir,
-            params.accumulatedFiles,
-            params.featureDeletedFilesSet,
-            featureFileModes
+        if (!params.agentEngine) {
+          throw new AgentEngineError(
+            "AGENT_ENGINE_UNAVAILABLE",
+            "No agentEngine configured for feature fix session."
           );
-          const trackedPaths = Array.from(params.accumulatedFiles.keys());
-          const outerSnapshot = await snapshotWorktree(featureSandbox.workDir, {
-            trackedPaths,
-            isProtectedPath: (p) => isSensitiveTaskBranchPath(p, reviewersDir)
-          });
-          try {
-            const session = await withUsageAttribution({ phase: "fixes" }, () =>
-              engine.run({
-                role: "fixer",
-                toolPolicy: "write",
-                instructions: [
-                  "Tu es un ingénieur TDD EPURE corrigeant les échecs décrits dans le message (vérification Stage 1, constats 'must_fix' de revue, CI externe) sur la PR finale de feature en gardant 100% des cibles Stage 1 au vert.",
-                  PROMPT_INJECTION_IMMUNITY_CLAUSE,
-                  "Tu travailles directement dans le checkout du dépôt (répertoire courant) avec tes outils : les fichiers que tu laisses modifiés, créés ou supprimés constituent le livrable.",
-                  `Ne modifie JAMAIS ${reviewersDir}/**, .github/workflows/**, .github/agents.yml, .env* ni .git/.`,
-                  "",
-                  verificationGuideMarkdown,
-                  "",
-                  EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
-                ].join("\n"),
-                prompt: promptText,
-                worktree: featureSandbox.workDir,
-                timeoutMs:
-                  params.phaseModels.requestTimeoutMs ?? 30 * 60 * 1000,
-                model: params.phaseModels.implementationModel,
-                providers: params.phaseModels.providers,
-                thinking: "high",
-                trackedPaths,
-                isProtectedPath: (p) =>
-                  isSensitiveTaskBranchPath(p, reviewersDir),
-                maxLlmRequests:
-                  params.parsedDevAgentsConfig?.agent_max_llm_requests ?? 200,
-                secrets: [params.activeToken]
-              })
-            );
-            const outerDiff = await outerSnapshot.collect();
-            const protectedSkipped = [
-              ...outerDiff.skipped,
-              ...session.diff.skipped
-            ]
-              .filter((s) => s.reason === "protected")
-              .map((s) => s.path.trim().replace(/^\/+/, ""));
-            if (protectedSkipped.length > 0) {
-              return {
-                parsed: {
-                  commit_message: `fix(review): address final feature review findings on #${params.issueNumber}`,
-                  test_summary: "",
-                  files: [],
-                  patches: [],
-                  deleted_files: []
-                },
-                protectedPaths: Array.from(new Set(protectedSkipped))
-              };
-            }
-            const fileMap = new Map<string, string>();
-            for (const f of outerDiff.files) {
-              const p = f.path.trim().replace(/^\/+/, "");
-              fileMap.set(p, f.content);
-              featureFileModes.set(p, f.mode);
-            }
-            for (const f of session.diff.files) {
-              const p = f.path.trim().replace(/^\/+/, "");
-              fileMap.set(p, f.content);
-              featureFileModes.set(p, f.mode);
-            }
-            const deletedFiles = Array.from(
-              new Set([
-                ...outerDiff.deleted_files.map((p) =>
-                  p.trim().replace(/^\/+/, "")
-                ),
-                ...session.diff.deleted_files.map((p) =>
-                  p.trim().replace(/^\/+/, "")
-                )
-              ])
-            );
-            const commitMessage = `fix(review): address final feature review findings on #${params.issueNumber}`;
-            const testSummary =
-              session.finalMessage.trim() ||
-              "Addressed final feature review findings and verified test suite";
-            if (fileMap.size > 0 || deletedFiles.length > 0) {
-              assertNoSecretMaterial(
-                [
-                  { label: "the commit message", text: commitMessage },
-                  { label: "the test summary", text: testSummary },
-                  ...Array.from(fileMap.entries()).map(([path, content]) => ({
-                    label: path,
-                    text: content
-                  }))
-                ],
-                [
-                  params.activeToken,
-                  params.llmApiKey,
-                  ...collectRunnerSecretValues(process.env)
-                ]
-              );
-              return {
-                parsed: {
-                  commit_message: commitMessage,
-                  test_summary: testSummary,
-                  files: Array.from(fileMap.entries()).map(
-                    ([path, content]) => ({ path, content })
-                  ),
-                  patches: [],
-                  deleted_files: deletedFiles
-                },
-                protectedPaths: []
-              };
-            }
-            let parsedPayload: GeneratedTicketImplementation | undefined;
-            try {
-              const parsedJson = JSON.parse(
-                session.finalMessage.trim()
-              ) as Partial<GeneratedTicketImplementation>;
-              if (
-                parsedJson &&
-                typeof parsedJson === "object" &&
-                (Array.isArray(parsedJson.files) ||
-                  Array.isArray(parsedJson.patches) ||
-                  Array.isArray(parsedJson.deleted_files))
-              ) {
-                parsedPayload = {
-                  commit_message: parsedJson.commit_message ?? commitMessage,
-                  test_summary: parsedJson.test_summary ?? testSummary,
-                  files: parsedJson.files ?? [],
-                  patches: parsedJson.patches ?? [],
-                  deleted_files: parsedJson.deleted_files ?? []
-                };
-              }
-            } catch {
-              // ignore non-JSON finalMessage
-            }
-            if (parsedPayload) {
-              assertNoSecretMaterial(
-                [
-                  {
-                    label: "the commit message",
-                    text: parsedPayload.commit_message ?? ""
-                  },
-                  {
-                    label: "the test summary",
-                    text: parsedPayload.test_summary ?? ""
-                  },
-                  ...(parsedPayload.files ?? []).map((f) => ({
-                    label: f.path,
-                    text: f.content
-                  })),
-                  ...(parsedPayload.patches ?? []).flatMap((p) =>
-                    p.edits.map((e) => ({
-                      label: p.path,
-                      text: e.new_string ?? e.replace ?? ""
-                    }))
-                  )
-                ],
-                [
-                  params.activeToken,
-                  params.llmApiKey,
-                  ...collectRunnerSecretValues(process.env)
-                ]
-              );
-              return {
-                parsed: parsedPayload,
-                protectedPaths: []
-              };
-            }
-            if (!params.llmApiKey || !params.llmApiKey.trim()) {
-              return {
-                parsed: {
-                  commit_message: commitMessage,
-                  test_summary: testSummary,
-                  files: [],
-                  patches: [],
-                  deleted_files: []
-                },
-                protectedPaths: []
-              };
-            }
-          } finally {
-            outerSnapshot.dispose();
-          }
         }
-
-        const parsed = await withUsageAttribution({ phase: "fixes" }, () =>
-          callLlmJson<GeneratedTicketImplementation>({
-            apiKey: params.llmApiKey,
-            model: params.phaseModels.implementationModel,
-            providers: params.phaseModels.providers,
-            maxTransientRetries: params.phaseModels.maxTransientRetries,
-            transientRetryBackoffSeconds:
-              params.phaseModels.transientRetryBackoffSeconds,
-            requestTimeoutMs: params.phaseModels.requestTimeoutMs,
-            onTransientRetriesUsed: (used) =>
-              params.addTransientRetriesUsed(used),
-            thinkingLevel: "HIGH",
-            logLabel,
-            systemInstruction: featureFixSystemInstruction,
-            prompt: promptText,
-            temperature: 0.1,
-            ...buildRepoExplorationToolsAndHandlers({
-              branch: params.featureBranch,
-              featureBranch: params.featureBranch,
-              accumulatedFiles: params.accumulatedFiles,
-              deletedFilesSet: params.featureDeletedFilesSet,
-              devBranchPaths: params.devBranchPaths,
-              reviewersDir,
-              gh: params.gh
-            }),
-            responseSchema: GENERATED_TICKET_IMPLEMENTATION_SCHEMA,
-            fetchImpl: params.fetchImpl
-          })
+        const engine = params.agentEngine;
+        syncWorkspaceFiles(
+          featureSandbox.workDir,
+          params.accumulatedFiles,
+          params.featureDeletedFilesSet,
+          featureFileModes
         );
-        return { parsed, protectedPaths: [] };
+        const trackedPaths = Array.from(params.accumulatedFiles.keys());
+        const outerSnapshot = await snapshotWorktree(featureSandbox.workDir, {
+          trackedPaths,
+          isProtectedPath: (p) => isSensitiveTaskBranchPath(p, reviewersDir)
+        });
+        try {
+          const session = await withUsageAttribution({ phase: "fixes" }, () =>
+            engine.run({
+              role: "fixer",
+              toolPolicy: "write",
+              instructions: [
+                "Tu es un ingénieur TDD EPURE corrigeant les échecs décrits dans le message (vérification Stage 1, constats 'must_fix' de revue, CI externe) sur la PR finale de feature en gardant 100% des cibles Stage 1 au vert.",
+                PROMPT_INJECTION_IMMUNITY_CLAUSE,
+                "Tu travailles directement dans le checkout du dépôt (répertoire courant) avec tes outils : les fichiers que tu laisses modifiés, créés ou supprimés constituent le livrable.",
+                `Ne modifie JAMAIS ${reviewersDir}/**, .github/workflows/**, .github/agents.yml, .env* ni .git/.`,
+                "",
+                verificationGuideMarkdown,
+                "",
+                EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
+              ].join("\n"),
+              prompt: promptText,
+              worktree: featureSandbox.workDir,
+              timeoutMs:
+                params.phaseModels.requestTimeoutMs ?? 30 * 60 * 1000,
+              model: params.phaseModels.implementationModel,
+              providers: params.phaseModels.providers,
+              thinking: "high",
+              trackedPaths,
+              isProtectedPath: (p) =>
+                isSensitiveTaskBranchPath(p, reviewersDir),
+              maxLlmRequests:
+                params.parsedDevAgentsConfig?.agent_max_llm_requests ?? 200,
+              secrets: [params.activeToken]
+            })
+          );
+          const outerDiff = await outerSnapshot.collect();
+          const protectedSkipped = [
+            ...outerDiff.skipped,
+            ...session.diff.skipped
+          ]
+            .filter((s) => s.reason === "protected")
+            .map((s) => s.path.trim().replace(/^\/+/, ""));
+          if (protectedSkipped.length > 0) {
+            return {
+              parsed: {
+                commit_message: `fix(review): address final feature review findings on #${params.issueNumber}`,
+                test_summary: "",
+                files: [],
+                patches: [],
+                deleted_files: []
+              },
+              protectedPaths: Array.from(new Set(protectedSkipped))
+            };
+          }
+          const fileMap = new Map<string, string>();
+          for (const f of outerDiff.files) {
+            const p = f.path.trim().replace(/^\/+/, "");
+            fileMap.set(p, f.content);
+            featureFileModes.set(p, f.mode);
+          }
+          for (const f of session.diff.files) {
+            const p = f.path.trim().replace(/^\/+/, "");
+            fileMap.set(p, f.content);
+            featureFileModes.set(p, f.mode);
+          }
+          const deletedFiles = Array.from(
+            new Set([
+              ...outerDiff.deleted_files.map((p) =>
+                p.trim().replace(/^\/+/, "")
+              ),
+              ...session.diff.deleted_files.map((p) =>
+                p.trim().replace(/^\/+/, "")
+              )
+            ])
+          );
+          const commitMessage = `fix(review): address final feature review findings on #${params.issueNumber}`;
+          const testSummary =
+            session.finalMessage.trim() ||
+            "Addressed final feature review findings and verified test suite";
+          if (fileMap.size > 0 || deletedFiles.length > 0) {
+            assertNoSecretMaterial(
+              [
+                { label: "the commit message", text: commitMessage },
+                { label: "the test summary", text: testSummary },
+                ...Array.from(fileMap.entries()).map(([path, content]) => ({
+                  label: path,
+                  text: content
+                }))
+              ],
+              [
+                params.activeToken,
+                params.llmApiKey,
+                ...collectRunnerSecretValues(process.env)
+              ]
+            );
+            return {
+              parsed: {
+                commit_message: commitMessage,
+                test_summary: testSummary,
+                files: Array.from(fileMap.entries()).map(
+                  ([path, content]) => ({ path, content })
+                ),
+                patches: [],
+                deleted_files: deletedFiles
+              },
+              protectedPaths: []
+            };
+          }
+          return {
+            parsed: {
+              commit_message: commitMessage,
+              test_summary: testSummary,
+              files: [],
+              patches: [],
+              deleted_files: []
+            },
+            protectedPaths: []
+          };
+        } finally {
+          outerSnapshot.dispose();
+        }
       };
 
       const initialFixOutcome = await runFeatureFixWithAgentOrLlm(
@@ -1009,26 +899,33 @@ export async function runFeatureIntegrationPhase(
         branch: params.featureBranch
       });
 
-      let featureTestCheck = await runTestsInIsolatedWorkspace({
-        workDir: featureSandbox.workDir,
-        files: Array.from(params.accumulatedFiles.entries()).map(
-          ([path, content]) => ({ path, content })
-        ),
-        deleted_files: Array.from(changedDeletedFilesSet),
-        changedPaths: Array.from(
-          new Set([
-            ...Array.from(params.featureChangedFilesMap.keys()),
-            ...Array.from(changedFixFilesMap.keys()),
-            ...Array.from(changedDeletedFilesSet)
-          ])
-        ),
-        isTaskBranch: true,
-        reviewersDir,
-        verificationProfile,
-        sandboxRunner: params.sandboxRunner,
-        llmApiKey: params.llmApiKey,
-        label: `Feature PR #${featurePr.number} review-fix iteration ${featureReviewFixAttempt}/${maxFeatureReviewFixAttempts}`
-      });
+      let featureTestCheck =
+        changedFixFilesMap.size === 0 && changedDeletedFilesSet.size === 0
+          ? {
+              passed: false,
+              output:
+                "no changes left in worktree: la session de correction n'a laissé aucun changement dans le dépôt."
+            }
+          : await runTestsInIsolatedWorkspace({
+              workDir: featureSandbox.workDir,
+              files: Array.from(params.accumulatedFiles.entries()).map(
+                ([path, content]) => ({ path, content })
+              ),
+              deleted_files: Array.from(changedDeletedFilesSet),
+              changedPaths: Array.from(
+                new Set([
+                  ...Array.from(params.featureChangedFilesMap.keys()),
+                  ...Array.from(changedFixFilesMap.keys()),
+                  ...Array.from(changedDeletedFilesSet)
+                ])
+              ),
+              isTaskBranch: true,
+              reviewersDir,
+              verificationProfile,
+              sandboxRunner: params.sandboxRunner,
+              llmApiKey: params.llmApiKey,
+              label: `Feature PR #${featurePr.number} review-fix iteration ${featureReviewFixAttempt}/${maxFeatureReviewFixAttempts}`
+            });
 
       while (
         !featureTestCheck.passed &&
@@ -1106,36 +1003,53 @@ export async function runFeatureIntegrationPhase(
           });
         }
 
+        const retryFixFilesMap = new Map<string, string>();
+        const retryDeletedFilesSet = new Set<string>();
         await applyTicketImplementationPayload({
           parsed: retryParsed,
           accumulatedFiles: params.accumulatedFiles,
           featureChangedFilesMap: params.featureChangedFilesMap,
-          ticketChangedFilesMap: changedFixFilesMap,
+          ticketChangedFilesMap: retryFixFilesMap,
           featureDeletedFilesSet: params.featureDeletedFilesSet,
-          ticketDeletedFilesSet: changedDeletedFilesSet,
+          ticketDeletedFilesSet: retryDeletedFilesSet,
           gh: params.gh,
           branch: params.featureBranch
         });
-        featureTestCheck = await runTestsInIsolatedWorkspace({
-          workDir: featureSandbox.workDir,
-          files: Array.from(params.accumulatedFiles.entries()).map(
-            ([path, content]) => ({ path, content })
-          ),
-          deleted_files: Array.from(changedDeletedFilesSet),
-          changedPaths: Array.from(
-            new Set([
-              ...Array.from(params.featureChangedFilesMap.keys()),
-              ...Array.from(changedFixFilesMap.keys()),
-              ...Array.from(changedDeletedFilesSet)
-            ])
-          ),
-          isTaskBranch: true,
-          reviewersDir,
-          verificationProfile,
-          sandboxRunner: params.sandboxRunner,
-          llmApiKey: params.llmApiKey,
-          label: `Feature PR #${featurePr.number} review-fix test retry ${featureReviewFixAttempt}/${maxFeatureReviewFixAttempts}`
-        });
+        for (const [k, v] of retryFixFilesMap) {
+          changedFixFilesMap.set(k, v);
+          changedDeletedFilesSet.delete(k);
+        }
+        for (const d of retryDeletedFilesSet) {
+          changedDeletedFilesSet.add(d);
+          changedFixFilesMap.delete(d);
+        }
+        featureTestCheck =
+          retryFixFilesMap.size === 0 && retryDeletedFilesSet.size === 0
+            ? {
+                passed: false,
+                output:
+                  "no changes left in worktree: la session de correction n'a laissé aucun changement dans le dépôt."
+              }
+            : await runTestsInIsolatedWorkspace({
+                workDir: featureSandbox.workDir,
+                files: Array.from(params.accumulatedFiles.entries()).map(
+                  ([path, content]) => ({ path, content })
+                ),
+                deleted_files: Array.from(changedDeletedFilesSet),
+                changedPaths: Array.from(
+                  new Set([
+                    ...Array.from(params.featureChangedFilesMap.keys()),
+                    ...Array.from(changedFixFilesMap.keys()),
+                    ...Array.from(changedDeletedFilesSet)
+                  ])
+                ),
+                isTaskBranch: true,
+                reviewersDir,
+                verificationProfile,
+                sandboxRunner: params.sandboxRunner,
+                llmApiKey: params.llmApiKey,
+                label: `Feature PR #${featurePr.number} review-fix test retry ${featureReviewFixAttempt}/${maxFeatureReviewFixAttempts}`
+              });
       }
 
       if (!featureTestCheck.passed) {
@@ -1201,7 +1115,16 @@ export async function runFeatureIntegrationPhase(
         base: params.featureBranch,
         title: fixCommitTitle,
         body: appendEpureCommandsSpoiler(
-          `Addresses multi-agent review findings on feature PR #${featurePr.number} (iteration ${featureReviewFixAttempt}).\n\nRefs #${params.issueNumber}`,
+          [
+            `Addresses multi-agent review findings on feature PR #${featurePr.number} (iteration ${featureReviewFixAttempt}).`,
+            "",
+            `Refs #${params.issueNumber}`,
+            "",
+            formatAgentProvenanceLine({
+              engine: params.agentEngine?.name ?? "pi",
+              model: params.phaseModels.implementationModel
+            })
+          ].join("\n"),
           {
             phase: "implementation",
             status: "active",
@@ -1279,9 +1202,12 @@ export async function runFeatureIntegrationPhase(
         });
       }
     } catch (err) {
-      if (err instanceof LLMError) {
+      if (err instanceof LLMError || err instanceof AgentEngineError) {
         return await escalate({
-          reason: resolveLlmEscalationReason(err),
+          reason:
+            err instanceof LLMError
+              ? resolveLlmEscalationReason(err)
+              : resolveAgentEngineEscalationReason(err),
           ticketNumber: params.issueNumber,
           branch: params.featureBranch,
           phase: "implementation",

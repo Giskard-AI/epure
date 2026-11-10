@@ -1,12 +1,14 @@
 ---
-status: accepted
+status: superseded
 ---
-# ADR-0033 : Outils de mutation incrémentale d'espace de travail, repli segmenté fichier par fichier et catalogue compact de contexte
+# ADR-0033 : Outils de mutation incrémentale d'espace de travail, repli segmenté fichier par fichier et catalogue compact de contexte (superseded)
 
-- **Statut** : Accepté
+- **Statut** : Remplacé par [ADR-0036](0036-moteur-d-agent-pi-en-rpc-dans-la-sandbox-et-sortie-structuree-en-deux-temps.md) (Étape 6 / #100)
 - **Date** : 2026-10-31
 - **Décideurs** : Mainteneurs EPURE
-- **ADR liées** : ADR-0012, ADR-0028, ADR-0029, ADR-0031, ADR-0032
+- **ADR liées** : ADR-0012, ADR-0028, ADR-0029, ADR-0031, ADR-0032, ADR-0036
+
+> Remplacé par [ADR-0036](0036-moteur-d-agent-pi-en-rpc-dans-la-sandbox-et-sortie-structuree-en-deux-temps.md) à l'étape 6 (#100) : le **Port de moteur d'agent** (`AgentEngine`, exécuté par Pi dans la sandbox) et l'instantané Git du répertoire de travail (`snapshotWorktree`) remplacent la boucle d'outils maison, le **Tampon de mutation incrémentale de ticket** (`StagedTicketImplementationBuffer`) et le **Repli segmenté fichier par fichier** (`ChunkedTicketImplementationFallback`).
 
 ## Contexte
 
