@@ -236,7 +236,7 @@ _Éviter_ : « pas de conflit Git » considéré seul comme test d'intégration.
 **Résultat combiné** : arbre Git résultant de l'intégration d'une PR à la révision courante de sa branche cible, utilisé par les tests d'intégration avant fusion.
 _Éviter_ : seuls tests de la branche source avec une cible antérieure.
 
-**Traçabilité d'exécution d'agent** : métadonnées GitHub associant rôle d'agent, modèle, révision de `dev-automation` et lien du run aux opérations effectuées.
+**Traçabilité d'exécution d'agent** : métadonnées GitHub associant rôle d'agent, moteur (`engine`), fournisseur (`provider`), modèle (`model`), révision de `dev-automation` et lien du run aux opérations effectuées.
 _Éviter_ : publication de secrets ou de données sensibles des prompts.
 
 ## Validation GitHub et interventions humaines (ronde 10)
@@ -495,11 +495,13 @@ _Éviter_ : présenter une Pull Request `feature/* -> dev` incomplète comme pr�
 
 ## Mutation incrémentale d'espace de travail et repli segmenté des tickets (ADR-0033 — remplacé par ADR-0036 à l'étape 6 / #100)
 
-> Les mécanismes historiques d'écriture en mémoire (`StagedTicketImplementationBuffer`), de repli segmenté (`ChunkedTicketImplementationFallback`), de catalogue compact (`CompactWorkspaceFilesContext`) ainsi que le harness simulé (`AgentHarnessAdapter`, `runTicketWithHarness`, `actions/run-agent`) ont été supprimés à l'étape 6 (#100) au profit du **Port de moteur d'agent** (`AgentEngine`) et de l'instantané Git du répertoire de travail (`snapshotWorktree`, ADR-0036).
+> Les mécanismes historiques d'écriture en mémoire (`StagedTicketImplementationBuffer`), de repli segmenté (`ChunkedTicketImplementationFallback`) ainsi que le harness simulé (`AgentHarnessAdapter`, `runTicketWithHarness`, `actions/run-agent`) ont été supprimés à l'étape 6 (#100) au profit du **Port de moteur d'agent** (`AgentEngine`) et de l'instantané Git du répertoire de travail (`snapshotWorktree`, ADR-0036).
 
 **Tampon de mutation incrémentale de ticket (`StagedTicketImplementationBuffer`, historique — supprimé en #100)** : ancien espace de travail transactionnel en mémoire de la boucle d'outils maison v2, remplacé en v3 par l'édition directe du répertoire de travail par la **Session d'agent** et son diff Git isolé (`snapshotWorktree`, ADR-0036).
 
 **Repli segmenté fichier par fichier (`ChunkedTicketImplementationFallback`, historique — supprimé en #100)** : ancienne décomposition par fichier de `filesToTouch` sur troncature JSON en v2, remplacée en v3 par la **Sortie structurée en deux temps** (`ticket_session_summary`, ADR-0036).
+
+**Catalogue compact de contexte de dépôt (`CompactWorkspaceFilesContext`)** : index déterministe du dépôt (`buildCompactWorkspaceFilesContext`) injecté dans le prompt initial des tickets afin d'exposer les fichiers pertinents et l'inventaire des chemins sans saturer la fenêtre de contexte.
 
 ## Pipeline événementiel des workflows et cloisonnement des secrets par environnements (v1.7.0)
 

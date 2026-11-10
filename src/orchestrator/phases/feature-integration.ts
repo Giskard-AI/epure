@@ -825,62 +825,6 @@ export async function runFeatureIntegrationPhase(
               protectedPaths: []
             };
           }
-          let parsedPayload: TicketImplementationDiffPayload | undefined;
-          try {
-            const parsedJson = JSON.parse(
-              session.finalMessage.trim()
-            ) as Partial<TicketImplementationDiffPayload>;
-            if (
-              parsedJson &&
-              typeof parsedJson === "object" &&
-              (Array.isArray(parsedJson.files) ||
-                Array.isArray(parsedJson.patches) ||
-                Array.isArray(parsedJson.deleted_files))
-            ) {
-              parsedPayload = {
-                commit_message: parsedJson.commit_message ?? commitMessage,
-                test_summary: parsedJson.test_summary ?? testSummary,
-                files: parsedJson.files ?? [],
-                patches: parsedJson.patches ?? [],
-                deleted_files: parsedJson.deleted_files ?? []
-              };
-            }
-          } catch {
-            // ignore non-JSON finalMessage
-          }
-          if (parsedPayload) {
-            assertNoSecretMaterial(
-              [
-                {
-                  label: "the commit message",
-                  text: parsedPayload.commit_message ?? ""
-                },
-                {
-                  label: "the test summary",
-                  text: parsedPayload.test_summary ?? ""
-                },
-                ...(parsedPayload.files ?? []).map((f) => ({
-                  label: f.path,
-                  text: f.content
-                })),
-                ...(parsedPayload.patches ?? []).flatMap((p) =>
-                  p.edits.map((e) => ({
-                    label: p.path,
-                    text: e.new_string ?? e.replace ?? ""
-                  }))
-                )
-              ],
-              [
-                params.activeToken,
-                params.llmApiKey,
-                ...collectRunnerSecretValues(process.env)
-              ]
-            );
-            return {
-              parsed: parsedPayload,
-              protectedPaths: []
-            };
-          }
           return {
             parsed: {
               commit_message: commitMessage,
@@ -955,26 +899,33 @@ export async function runFeatureIntegrationPhase(
         branch: params.featureBranch
       });
 
-      let featureTestCheck = await runTestsInIsolatedWorkspace({
-        workDir: featureSandbox.workDir,
-        files: Array.from(params.accumulatedFiles.entries()).map(
-          ([path, content]) => ({ path, content })
-        ),
-        deleted_files: Array.from(changedDeletedFilesSet),
-        changedPaths: Array.from(
-          new Set([
-            ...Array.from(params.featureChangedFilesMap.keys()),
-            ...Array.from(changedFixFilesMap.keys()),
-            ...Array.from(changedDeletedFilesSet)
-          ])
-        ),
-        isTaskBranch: true,
-        reviewersDir,
-        verificationProfile,
-        sandboxRunner: params.sandboxRunner,
-        llmApiKey: params.llmApiKey,
-        label: `Feature PR #${featurePr.number} review-fix iteration ${featureReviewFixAttempt}/${maxFeatureReviewFixAttempts}`
-      });
+      let featureTestCheck =
+        changedFixFilesMap.size === 0 && changedDeletedFilesSet.size === 0
+          ? {
+              passed: false,
+              output:
+                "no changes left in worktree: la session de correction n'a laissé aucun changement dans le dépôt."
+            }
+          : await runTestsInIsolatedWorkspace({
+              workDir: featureSandbox.workDir,
+              files: Array.from(params.accumulatedFiles.entries()).map(
+                ([path, content]) => ({ path, content })
+              ),
+              deleted_files: Array.from(changedDeletedFilesSet),
+              changedPaths: Array.from(
+                new Set([
+                  ...Array.from(params.featureChangedFilesMap.keys()),
+                  ...Array.from(changedFixFilesMap.keys()),
+                  ...Array.from(changedDeletedFilesSet)
+                ])
+              ),
+              isTaskBranch: true,
+              reviewersDir,
+              verificationProfile,
+              sandboxRunner: params.sandboxRunner,
+              llmApiKey: params.llmApiKey,
+              label: `Feature PR #${featurePr.number} review-fix iteration ${featureReviewFixAttempt}/${maxFeatureReviewFixAttempts}`
+            });
 
       while (
         !featureTestCheck.passed &&
@@ -1052,36 +1003,53 @@ export async function runFeatureIntegrationPhase(
           });
         }
 
+        const retryFixFilesMap = new Map<string, string>();
+        const retryDeletedFilesSet = new Set<string>();
         await applyTicketImplementationPayload({
           parsed: retryParsed,
           accumulatedFiles: params.accumulatedFiles,
           featureChangedFilesMap: params.featureChangedFilesMap,
-          ticketChangedFilesMap: changedFixFilesMap,
+          ticketChangedFilesMap: retryFixFilesMap,
           featureDeletedFilesSet: params.featureDeletedFilesSet,
-          ticketDeletedFilesSet: changedDeletedFilesSet,
+          ticketDeletedFilesSet: retryDeletedFilesSet,
           gh: params.gh,
           branch: params.featureBranch
         });
-        featureTestCheck = await runTestsInIsolatedWorkspace({
-          workDir: featureSandbox.workDir,
-          files: Array.from(params.accumulatedFiles.entries()).map(
-            ([path, content]) => ({ path, content })
-          ),
-          deleted_files: Array.from(changedDeletedFilesSet),
-          changedPaths: Array.from(
-            new Set([
-              ...Array.from(params.featureChangedFilesMap.keys()),
-              ...Array.from(changedFixFilesMap.keys()),
-              ...Array.from(changedDeletedFilesSet)
-            ])
-          ),
-          isTaskBranch: true,
-          reviewersDir,
-          verificationProfile,
-          sandboxRunner: params.sandboxRunner,
-          llmApiKey: params.llmApiKey,
-          label: `Feature PR #${featurePr.number} review-fix test retry ${featureReviewFixAttempt}/${maxFeatureReviewFixAttempts}`
-        });
+        for (const [k, v] of retryFixFilesMap) {
+          changedFixFilesMap.set(k, v);
+          changedDeletedFilesSet.delete(k);
+        }
+        for (const d of retryDeletedFilesSet) {
+          changedDeletedFilesSet.add(d);
+          changedFixFilesMap.delete(d);
+        }
+        featureTestCheck =
+          retryFixFilesMap.size === 0 && retryDeletedFilesSet.size === 0
+            ? {
+                passed: false,
+                output:
+                  "no changes left in worktree: la session de correction n'a laissé aucun changement dans le dépôt."
+              }
+            : await runTestsInIsolatedWorkspace({
+                workDir: featureSandbox.workDir,
+                files: Array.from(params.accumulatedFiles.entries()).map(
+                  ([path, content]) => ({ path, content })
+                ),
+                deleted_files: Array.from(changedDeletedFilesSet),
+                changedPaths: Array.from(
+                  new Set([
+                    ...Array.from(params.featureChangedFilesMap.keys()),
+                    ...Array.from(changedFixFilesMap.keys()),
+                    ...Array.from(changedDeletedFilesSet)
+                  ])
+                ),
+                isTaskBranch: true,
+                reviewersDir,
+                verificationProfile,
+                sandboxRunner: params.sandboxRunner,
+                llmApiKey: params.llmApiKey,
+                label: `Feature PR #${featurePr.number} review-fix test retry ${featureReviewFixAttempt}/${maxFeatureReviewFixAttempts}`
+              });
       }
 
       if (!featureTestCheck.passed) {
@@ -1147,7 +1115,16 @@ export async function runFeatureIntegrationPhase(
         base: params.featureBranch,
         title: fixCommitTitle,
         body: appendEpureCommandsSpoiler(
-          `Addresses multi-agent review findings on feature PR #${featurePr.number} (iteration ${featureReviewFixAttempt}).\n\nRefs #${params.issueNumber}`,
+          [
+            `Addresses multi-agent review findings on feature PR #${featurePr.number} (iteration ${featureReviewFixAttempt}).`,
+            "",
+            `Refs #${params.issueNumber}`,
+            "",
+            formatAgentProvenanceLine({
+              engine: params.agentEngine?.name ?? "pi",
+              model: params.phaseModels.implementationModel
+            })
+          ].join("\n"),
           {
             phase: "implementation",
             status: "active",

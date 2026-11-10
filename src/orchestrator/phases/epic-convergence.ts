@@ -37,7 +37,6 @@ export interface RunEpicConvergenceAuditParams {
   readonly epicGoalContract: EpicGoalContract;
   readonly accumulatedFiles: Map<string, string>;
   readonly featureChangedFilesMap: ReadonlyMap<string, string>;
-  readonly devBranchPaths: readonly string[];
   readonly stage1Summary?: string | undefined;
   readonly gh: Pick<
     GitHubRestHelper,

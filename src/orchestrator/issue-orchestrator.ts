@@ -2119,7 +2119,6 @@ async function runMeteredIssueCommand(
             epicGoalContract,
             accumulatedFiles,
             featureChangedFilesMap,
-            devBranchPaths,
             stage1Summary,
             gh,
             llmApiKey: effectiveInput.llmApiKey,

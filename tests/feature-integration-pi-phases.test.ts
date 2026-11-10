@@ -218,7 +218,6 @@ describe("Slice 3a-2 — Pi agentEngine wiring for feature integration, reviewer
       },
       accumulatedFiles: new Map([["src/index.ts", "export function bootstrapApp() {}\n"]]),
       featureChangedFilesMap: new Map([["src/index.ts", "export function bootstrapApp() {}\n"]]),
-      devBranchPaths: ["src/index.ts"],
       gh: {
         readSingleBranchFile: async () => "export function bootstrapApp() {}\n",
         listBranchPathHints: async () => ["src/index.ts"]

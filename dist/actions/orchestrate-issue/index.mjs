@@ -17789,55 +17789,6 @@ ${c}`).join("\n\n");
               protectedPaths: []
             };
           }
-          let parsedPayload;
-          try {
-            const parsedJson = JSON.parse(
-              session.finalMessage.trim()
-            );
-            if (parsedJson && typeof parsedJson === "object" && (Array.isArray(parsedJson.files) || Array.isArray(parsedJson.patches) || Array.isArray(parsedJson.deleted_files))) {
-              parsedPayload = {
-                commit_message: parsedJson.commit_message ?? commitMessage,
-                test_summary: parsedJson.test_summary ?? testSummary,
-                files: parsedJson.files ?? [],
-                patches: parsedJson.patches ?? [],
-                deleted_files: parsedJson.deleted_files ?? []
-              };
-            }
-          } catch {
-          }
-          if (parsedPayload) {
-            assertNoSecretMaterial(
-              [
-                {
-                  label: "the commit message",
-                  text: parsedPayload.commit_message ?? ""
-                },
-                {
-                  label: "the test summary",
-                  text: parsedPayload.test_summary ?? ""
-                },
-                ...(parsedPayload.files ?? []).map((f) => ({
-                  label: f.path,
-                  text: f.content
-                })),
-                ...(parsedPayload.patches ?? []).flatMap(
-                  (p) => p.edits.map((e) => ({
-                    label: p.path,
-                    text: e.new_string ?? e.replace ?? ""
-                  }))
-                )
-              ],
-              [
-                params.activeToken,
-                params.llmApiKey,
-                ...collectRunnerSecretValues(process.env)
-              ]
-            );
-            return {
-              parsed: parsedPayload,
-              protectedPaths: []
-            };
-          }
           return {
             parsed: {
               commit_message: commitMessage,
@@ -17908,7 +17859,10 @@ ${c}`).join("\n\n");
         gh: params.gh,
         branch: params.featureBranch
       });
-      let featureTestCheck = await runTestsInIsolatedWorkspace({
+      let featureTestCheck = changedFixFilesMap.size === 0 && changedDeletedFilesSet.size === 0 ? {
+        passed: false,
+        output: "no changes left in worktree: la session de correction n'a laiss\xE9 aucun changement dans le d\xE9p\xF4t."
+      } : await runTestsInIsolatedWorkspace({
         workDir: featureSandbox.workDir,
         files: Array.from(params.accumulatedFiles.entries()).map(
           ([path, content]) => ({ path, content })
@@ -17996,17 +17950,30 @@ ${c}`).join("\n\n");
             traversalPaths: retryPreCheck.traversalPaths
           });
         }
+        const retryFixFilesMap = /* @__PURE__ */ new Map();
+        const retryDeletedFilesSet = /* @__PURE__ */ new Set();
         await applyTicketImplementationPayload({
           parsed: retryParsed,
           accumulatedFiles: params.accumulatedFiles,
           featureChangedFilesMap: params.featureChangedFilesMap,
-          ticketChangedFilesMap: changedFixFilesMap,
+          ticketChangedFilesMap: retryFixFilesMap,
           featureDeletedFilesSet: params.featureDeletedFilesSet,
-          ticketDeletedFilesSet: changedDeletedFilesSet,
+          ticketDeletedFilesSet: retryDeletedFilesSet,
           gh: params.gh,
           branch: params.featureBranch
         });
-        featureTestCheck = await runTestsInIsolatedWorkspace({
+        for (const [k, v] of retryFixFilesMap) {
+          changedFixFilesMap.set(k, v);
+          changedDeletedFilesSet.delete(k);
+        }
+        for (const d of retryDeletedFilesSet) {
+          changedDeletedFilesSet.add(d);
+          changedFixFilesMap.delete(d);
+        }
+        featureTestCheck = retryFixFilesMap.size === 0 && retryDeletedFilesSet.size === 0 ? {
+          passed: false,
+          output: "no changes left in worktree: la session de correction n'a laiss\xE9 aucun changement dans le d\xE9p\xF4t."
+        } : await runTestsInIsolatedWorkspace({
           workDir: featureSandbox.workDir,
           files: Array.from(params.accumulatedFiles.entries()).map(
             ([path, content]) => ({ path, content })
@@ -18080,9 +18047,16 @@ ${c}`).join("\n\n");
         base: params.featureBranch,
         title: fixCommitTitle,
         body: appendEpureCommandsSpoiler(
-          `Addresses multi-agent review findings on feature PR #${featurePr.number} (iteration ${featureReviewFixAttempt}).
-
-Refs #${params.issueNumber}`,
+          [
+            `Addresses multi-agent review findings on feature PR #${featurePr.number} (iteration ${featureReviewFixAttempt}).`,
+            "",
+            `Refs #${params.issueNumber}`,
+            "",
+            formatAgentProvenanceLine({
+              engine: params.agentEngine?.name ?? "pi",
+              model: params.phaseModels.implementationModel
+            })
+          ].join("\n"),
           {
             phase: "implementation",
             status: "active",
@@ -18456,7 +18430,14 @@ function ticketAgentInstructions(role, reviewersDir) {
     EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
   ].join("\n");
 }
-async function runTicketAgentSession(params, session) {
+async function runTicketAgentSession(params) {
+  if (!params.agentSession) {
+    throw new AgentEngineError(
+      "AGENT_ENGINE_UNAVAILABLE",
+      "No agentEngine configured for ticket session."
+    );
+  }
+  const session = params.agentSession;
   const nowMs = Date.now();
   const timeoutMs = agentSessionTimeoutMs(session.jobDeadlineMs, nowMs);
   if (timeoutMs === void 0) {
@@ -18564,15 +18545,6 @@ async function summarizeAgentSession(params, changedPaths, finalMessage, jobDead
       test_summary: "R\xE9sum\xE9 indisponible : l'appel de synth\xE8se de la session a \xE9chou\xE9."
     };
   }
-}
-async function generateTicketImplementationWithFallback(params) {
-  if (!params.agentSession) {
-    throw new AgentEngineError(
-      "AGENT_ENGINE_UNAVAILABLE",
-      "No agentEngine configured for ticket session."
-    );
-  }
-  return runTicketAgentSession(params, params.agentSession);
 }
 async function runTicketExecutionLoop(params) {
   const reviewersDir = params.parsedDevAgentsConfig?.reviewers_dir ?? DEFAULT_REVIEWERS_DIR;
@@ -19078,20 +19050,6 @@ ${ticket.acceptanceCriteria.join("\n")}`
             ...params.featureChangedFilesMap.keys()
           ]
         });
-        const tddSystemInstruction = [
-          "Tu es un ing\xE9nieur TDD EPURE impl\xE9mentant un ticket approuv\xE9.",
-          PROMPT_INJECTION_IMMUNITY_CLAUSE,
-          "R\xE8gles strictes :",
-          "1. \xC9cris des tests couvrant tous les crit\xE8res d'acceptation et cas limites.",
-          "2. Impl\xE9mente le code propre et complet faisant passer 100% des tests.",
-          "3. N'utilise aucune d\xE9pendance externe exotique non d\xE9clar\xE9e.",
-          `4. Ne modifie JAMAIS ${reviewersDir}/**, .github/workflows/**, .github/agents.yml ou .env*.`,
-          "5. \xC9dite directement le r\xE9pertoire de travail (worktree) et v\xE9rifie les cibles de test.",
-          "",
-          verificationGuideMarkdown,
-          "",
-          EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
-        ].join("\n");
         const tddPrompt = [
           `Plan parent (#${params.issueNumber}) et cahier des charges :`,
           wrapUntrustedContent(
@@ -19119,18 +19077,13 @@ ${params.issue.body}`
           existingFilesContext ? `Fichiers d\xE9j\xE0 pr\xE9sents sur la branche feature :
 ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C'est le premier ticket : inclus un package.json complet (avec scripts 'test': 'vitest run' et 'build': 'vite build', dependencies react/react-dom, devDependencies typescript/vite/vitest/@vitejs/plugin-react/@types/react/@types/react-dom) ainsi que tsconfig.json et vite.config.ts."
         ].join("\n");
-        const parsedImpl = await withUsageAttribution({ phase: "implementation", ticket: ticket.ticketIssueNumber }, () => generateTicketImplementationWithFallback({
+        const parsedImpl = await withUsageAttribution({ phase: "implementation", ticket: ticket.ticketIssueNumber }, () => runTicketAgentSession({
           ticket,
-          branch: params.featureBranch,
-          featureBranch: params.featureBranch,
-          systemInstruction: tddSystemInstruction,
           prompt: tddPrompt,
           logLabel: `tdd-init:#${ticket.ticketIssueNumber}`,
           accumulatedFiles: params.accumulatedFiles,
           deletedFilesSet: ticketDeletedFilesSet,
-          devBranchPaths: params.devBranchPaths,
           reviewersDir,
-          ensureBaselineLoaded: ensureBaselineFilesLoaded,
           gh: params.gh,
           llmApiKey: params.llmApiKey,
           phaseModels: params.phaseModels,
@@ -19219,16 +19172,6 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
               ...ticketChangedFilesMap.keys()
             ]
           });
-          const fixSystemInstruction = [
-            "Tu es un ing\xE9nieur TDD EPURE corrigeant un \xE9chec de v\xE9rification Stage 1 en sandbox isol\xE9e.",
-            PROMPT_INJECTION_IMMUNITY_CLAUSE,
-            "Corrige les fichiers en d\xE9faut (code ou assertions de test) dans le r\xE9pertoire de travail pour que 100% des cibles Stage 1 passent.",
-            `Ne modifie JAMAIS ${reviewersDir}/**, .github/workflows/**, .github/agents.yml ou .env*.`,
-            "",
-            verificationGuideMarkdown,
-            "",
-            EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
-          ].join("\n");
           const fixPrompt = [
             `La v\xE9rification Stage 1 du Ticket #${ticket.ticketIssueNumber} a \xE9chou\xE9 dans la sandbox avec la sortie suivante :`,
             wrapUntrustedContent("untrusted_test_output", testCheck.output),
@@ -19241,18 +19184,13 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
               currentFilesContext
             )
           ].join("\n");
-          const fixedImpl = await withUsageAttribution({ phase: "fixes", ticket: ticket.ticketIssueNumber }, () => generateTicketImplementationWithFallback({
+          const fixedImpl = await withUsageAttribution({ phase: "fixes", ticket: ticket.ticketIssueNumber }, () => runTicketAgentSession({
             ticket,
-            branch: params.featureBranch,
-            featureBranch: params.featureBranch,
-            systemInstruction: fixSystemInstruction,
             prompt: fixPrompt,
             logLabel: `stage1-fix:#${ticket.ticketIssueNumber}/iter-${reviewFixAttempt}`,
             accumulatedFiles: params.accumulatedFiles,
             deletedFilesSet: ticketDeletedFilesSet,
-            devBranchPaths: params.devBranchPaths,
             reviewersDir,
-            ensureBaselineLoaded: ensureBaselineFilesLoaded,
             gh: params.gh,
             llmApiKey: params.llmApiKey,
             phaseModels: params.phaseModels,
@@ -19671,16 +19609,6 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
             ...reviewResult.must_fix_findings.map((f) => f.path)
           ]
         });
-        const reviewFixSystemInstruction = [
-          "Tu es un ing\xE9nieur TDD EPURE corrigeant les constats bloquants ('must_fix') de revue multi-agents et/ou les \xE9checs CI externes.",
-          PROMPT_INJECTION_IMMUNITY_CLAUSE,
-          "Corrige pr\xE9cis\xE9ment chaque anomalie dans le r\xE9pertoire de travail tout en maintenant 100% des cibles Stage 1 au vert.",
-          `Ne modifie JAMAIS ${reviewersDir}/**, .github/workflows/**, .github/agents.yml ou .env*.`,
-          "",
-          verificationGuideMarkdown,
-          "",
-          EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
-        ].join("\n");
         const promptParts = [...resumeContextPromptLines];
         if (reviewResult.must_fix_findings.length > 0) {
           promptParts.push(
@@ -19702,19 +19630,14 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
           "Fichiers actuels du workspace :",
           wrapUntrustedContent("untrusted_workspace_files", currentFilesContext)
         );
-        const reviewFixedImpl = await withUsageAttribution({ phase: "fixes", ticket: ticket.ticketIssueNumber }, () => generateTicketImplementationWithFallback({
+        const reviewFixedImpl = await withUsageAttribution({ phase: "fixes", ticket: ticket.ticketIssueNumber }, () => runTicketAgentSession({
           ticket,
-          branch: taskBranch,
-          featureBranch: params.featureBranch,
           thinkingLevel: "HIGH",
           logLabel: `review-fix:#${ticket.ticketIssueNumber}/iter-${reviewFixAttempt}`,
-          systemInstruction: reviewFixSystemInstruction,
           prompt: promptParts.join("\n"),
           accumulatedFiles: params.accumulatedFiles,
           deletedFilesSet: ticketDeletedFilesSet,
-          devBranchPaths: params.devBranchPaths,
           reviewersDir,
-          ensureBaselineLoaded: ensureBaselineFilesLoaded,
           gh: params.gh,
           llmApiKey: params.llmApiKey,
           phaseModels: params.phaseModels,
@@ -19791,13 +19714,10 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
               ...reviewResult.must_fix_findings.map((f) => f.path)
             ]
           });
-          const retryImpl = await withUsageAttribution({ phase: "fixes", ticket: ticket.ticketIssueNumber }, () => generateTicketImplementationWithFallback({
+          const retryImpl = await withUsageAttribution({ phase: "fixes", ticket: ticket.ticketIssueNumber }, () => runTicketAgentSession({
             ticket,
-            branch: taskBranch,
-            featureBranch: params.featureBranch,
             thinkingLevel: "HIGH",
             logLabel: `review-fix-retry:#${ticket.ticketIssueNumber}/iter-${reviewFixAttempt}`,
-            systemInstruction: reviewFixSystemInstruction,
             prompt: [
               `La correction a fait \xE9chouer la v\xE9rification Stage 1 en sandbox (tentative ${reviewFixAttempt}/${params.maxCodeFixAttempts}) :`,
               wrapUntrustedContent(
@@ -19821,9 +19741,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
             ].join("\n"),
             accumulatedFiles: params.accumulatedFiles,
             deletedFilesSet: ticketDeletedFilesSet,
-            devBranchPaths: params.devBranchPaths,
             reviewersDir,
-            ensureBaselineLoaded: ensureBaselineFilesLoaded,
             gh: params.gh,
             llmApiKey: params.llmApiKey,
             phaseModels: params.phaseModels,
@@ -21710,7 +21628,6 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
               epicGoalContract,
               accumulatedFiles,
               featureChangedFilesMap,
-              devBranchPaths,
               stage1Summary,
               gh,
               llmApiKey: effectiveInput.llmApiKey,

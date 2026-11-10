@@ -152,7 +152,7 @@ export interface OrchestrateIssueInput {
     | ((input: SandboxExecutionInput) => Promise<SandboxExecutionResult>)
     | undefined;
   readonly asyncCiContinuation?: boolean | undefined;
-  // Runs implementation, Stage 1 fixes and review/CI remediation; without it they use the in-house tool loop.
+  // AgentEngine used by implementation, remediation, review, and planning sessions.
   readonly agentEngine?: AgentEngine | undefined;
   // Epoch ms the job started at (now when absent): agent sessions end before the job's timeout from it.
   readonly jobStartedAtMs?: number | undefined;

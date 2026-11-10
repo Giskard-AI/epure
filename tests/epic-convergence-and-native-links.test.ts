@@ -946,7 +946,6 @@ describe("EPURE Graphe GitHub Natif, Garde-fous d'Intégrité Inter-Tickets et C
             ["src/cli.ts", "export function cli() { /* TODO: wire cli */ }"],
             ["src/large.ts", longLineFile]
           ]),
-          devBranchPaths: ["src/cli.ts", "src/large.ts"],
           stage1Summary: "Stage 1 PASSED on feature/50-cli",
           gh: mockGh,
           llmApiKey: "test-key",

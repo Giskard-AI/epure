@@ -251,19 +251,14 @@ async function checkMidLoopCancellation(params: {
   return null;
 }
 
-interface GenerateTicketImplementationWithFallbackParams {
+interface RunTicketAgentSessionParams {
   readonly ticket: TrackedTicketCommentMetadata;
-  readonly branch: string;
-  readonly featureBranch: string;
-  readonly systemInstruction: string;
   readonly prompt: string;
   readonly thinkingLevel?: "MINIMAL" | "LOW" | "MEDIUM" | "HIGH" | undefined;
   readonly logLabel?: string | undefined;
   readonly accumulatedFiles: Map<string, string>;
   readonly deletedFilesSet: ReadonlySet<string>;
-  readonly devBranchPaths: readonly string[];
   readonly reviewersDir: string;
-  readonly ensureBaselineLoaded: (paths: readonly string[]) => Promise<void>;
   readonly gh: GitHubRestHelper;
   readonly llmApiKey: string;
   readonly phaseModels: ResolvedPhaseModels;
@@ -379,9 +374,15 @@ function ticketAgentInstructions(role: AgentRole, reviewersDir: string): string 
 
 // Agent session, then a direct structured-output call for the commit message: the diff is the worktree's.
 async function runTicketAgentSession(
-  params: GenerateTicketImplementationWithFallbackParams,
-  session: TicketAgentSession
+  params: RunTicketAgentSessionParams
 ): Promise<TicketImplementationDiffPayload> {
+  if (!params.agentSession) {
+    throw new AgentEngineError(
+      "AGENT_ENGINE_UNAVAILABLE",
+      "No agentEngine configured for ticket session."
+    );
+  }
+  const session = params.agentSession;
   const nowMs = Date.now();
   const timeoutMs = agentSessionTimeoutMs(session.jobDeadlineMs, nowMs);
   if (timeoutMs === undefined) {
@@ -454,13 +455,13 @@ const THINKING_LEVELS = {
   LOW: "low",
   MEDIUM: "medium",
   HIGH: "high"
-} as const satisfies Record<NonNullable<GenerateTicketImplementationWithFallbackParams["thinkingLevel"]>, AgentThinkingLevel>;
+} as const satisfies Record<NonNullable<RunTicketAgentSessionParams["thinkingLevel"]>, AgentThinkingLevel>;
 
 const MAX_SUMMARIZED_FINAL_MESSAGE_CHARS = 16_000;
 
 // A failed summary call (other than auth or quota) falls back to a deterministic message instead of losing the session.
 async function summarizeAgentSession(
-  params: GenerateTicketImplementationWithFallbackParams,
+  params: RunTicketAgentSessionParams,
   changedPaths: readonly string[],
   finalMessage: string,
   jobDeadlineMs: number | undefined
@@ -508,18 +509,6 @@ async function summarizeAgentSession(
       test_summary: "Résumé indisponible : l'appel de synthèse de la session a échoué."
     };
   }
-}
-
-async function generateTicketImplementationWithFallback(
-  params: GenerateTicketImplementationWithFallbackParams
-): Promise<TicketImplementationDiffPayload> {
-  if (!params.agentSession) {
-    throw new AgentEngineError(
-      "AGENT_ENGINE_UNAVAILABLE",
-      "No agentEngine configured for ticket session."
-    );
-  }
-  return runTicketAgentSession(params, params.agentSession);
 }
 
 export async function runTicketExecutionLoop(
@@ -1119,21 +1108,6 @@ export async function runTicketExecutionLoop(
           ]
         });
 
-        const tddSystemInstruction = [
-          "Tu es un ingénieur TDD EPURE implémentant un ticket approuvé.",
-          PROMPT_INJECTION_IMMUNITY_CLAUSE,
-          "Règles strictes :",
-          "1. Écris des tests couvrant tous les critères d'acceptation et cas limites.",
-          "2. Implémente le code propre et complet faisant passer 100% des tests.",
-          "3. N'utilise aucune dépendance externe exotique non déclarée.",
-          `4. Ne modifie JAMAIS ${reviewersDir}/**, .github/workflows/**, .github/agents.yml ou .env*.`,
-          "5. Édite directement le répertoire de travail (worktree) et vérifie les cibles de test.",
-          "",
-          verificationGuideMarkdown,
-          "",
-          EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
-        ].join("\n");
-
         const tddPrompt = [
           `Plan parent (#${params.issueNumber}) et cahier des charges :`,
           wrapUntrustedContent(
@@ -1160,18 +1134,13 @@ export async function runTicketExecutionLoop(
             : "C'est le premier ticket : inclus un package.json complet (avec scripts 'test': 'vitest run' et 'build': 'vite build', dependencies react/react-dom, devDependencies typescript/vite/vitest/@vitejs/plugin-react/@types/react/@types/react-dom) ainsi que tsconfig.json et vite.config.ts."
         ].join("\n");
 
-        const parsedImpl = await withUsageAttribution({ phase: "implementation", ticket: ticket.ticketIssueNumber }, () => generateTicketImplementationWithFallback({
+        const parsedImpl = await withUsageAttribution({ phase: "implementation", ticket: ticket.ticketIssueNumber }, () => runTicketAgentSession({
           ticket,
-          branch: params.featureBranch,
-          featureBranch: params.featureBranch,
-          systemInstruction: tddSystemInstruction,
           prompt: tddPrompt,
           logLabel: `tdd-init:#${ticket.ticketIssueNumber}`,
           accumulatedFiles: params.accumulatedFiles,
           deletedFilesSet: ticketDeletedFilesSet,
-          devBranchPaths: params.devBranchPaths,
           reviewersDir,
-          ensureBaselineLoaded: ensureBaselineFilesLoaded,
           gh: params.gh,
           llmApiKey: params.llmApiKey,
           phaseModels: params.phaseModels,
@@ -1268,17 +1237,6 @@ export async function runTicketExecutionLoop(
             ]
           });
 
-          const fixSystemInstruction = [
-            "Tu es un ingénieur TDD EPURE corrigeant un échec de vérification Stage 1 en sandbox isolée.",
-            PROMPT_INJECTION_IMMUNITY_CLAUSE,
-            "Corrige les fichiers en défaut (code ou assertions de test) dans le répertoire de travail pour que 100% des cibles Stage 1 passent.",
-            `Ne modifie JAMAIS ${reviewersDir}/**, .github/workflows/**, .github/agents.yml ou .env*.`,
-            "",
-            verificationGuideMarkdown,
-            "",
-            EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
-          ].join("\n");
-
           const fixPrompt = [
             `La vérification Stage 1 du Ticket #${ticket.ticketIssueNumber} a échoué dans la sandbox avec la sortie suivante :`,
             wrapUntrustedContent("untrusted_test_output", testCheck.output),
@@ -1292,18 +1250,13 @@ export async function runTicketExecutionLoop(
             )
           ].join("\n");
 
-          const fixedImpl = await withUsageAttribution({ phase: "fixes", ticket: ticket.ticketIssueNumber }, () => generateTicketImplementationWithFallback({
+          const fixedImpl = await withUsageAttribution({ phase: "fixes", ticket: ticket.ticketIssueNumber }, () => runTicketAgentSession({
             ticket,
-            branch: params.featureBranch,
-            featureBranch: params.featureBranch,
-            systemInstruction: fixSystemInstruction,
             prompt: fixPrompt,
             logLabel: `stage1-fix:#${ticket.ticketIssueNumber}/iter-${reviewFixAttempt}`,
             accumulatedFiles: params.accumulatedFiles,
             deletedFilesSet: ticketDeletedFilesSet,
-            devBranchPaths: params.devBranchPaths,
             reviewersDir,
-            ensureBaselineLoaded: ensureBaselineFilesLoaded,
             gh: params.gh,
             llmApiKey: params.llmApiKey,
             phaseModels: params.phaseModels,
@@ -1792,17 +1745,6 @@ export async function runTicketExecutionLoop(
           ]
         });
 
-        const reviewFixSystemInstruction = [
-          "Tu es un ingénieur TDD EPURE corrigeant les constats bloquants ('must_fix') de revue multi-agents et/ou les échecs CI externes.",
-          PROMPT_INJECTION_IMMUNITY_CLAUSE,
-          "Corrige précisément chaque anomalie dans le répertoire de travail tout en maintenant 100% des cibles Stage 1 au vert.",
-          `Ne modifie JAMAIS ${reviewersDir}/**, .github/workflows/**, .github/agents.yml ou .env*.`,
-          "",
-          verificationGuideMarkdown,
-          "",
-          EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT
-        ].join("\n");
-
         const promptParts: string[] = [...resumeContextPromptLines];
         if (reviewResult.must_fix_findings.length > 0) {
           promptParts.push(
@@ -1825,19 +1767,14 @@ export async function runTicketExecutionLoop(
           wrapUntrustedContent("untrusted_workspace_files", currentFilesContext)
         );
 
-        const reviewFixedImpl = await withUsageAttribution({ phase: "fixes", ticket: ticket.ticketIssueNumber }, () => generateTicketImplementationWithFallback({
+        const reviewFixedImpl = await withUsageAttribution({ phase: "fixes", ticket: ticket.ticketIssueNumber }, () => runTicketAgentSession({
           ticket,
-          branch: taskBranch,
-          featureBranch: params.featureBranch,
           thinkingLevel: "HIGH",
           logLabel: `review-fix:#${ticket.ticketIssueNumber}/iter-${reviewFixAttempt}`,
-          systemInstruction: reviewFixSystemInstruction,
           prompt: promptParts.join("\n"),
           accumulatedFiles: params.accumulatedFiles,
           deletedFilesSet: ticketDeletedFilesSet,
-          devBranchPaths: params.devBranchPaths,
           reviewersDir,
-          ensureBaselineLoaded: ensureBaselineFilesLoaded,
           gh: params.gh,
           llmApiKey: params.llmApiKey,
           phaseModels: params.phaseModels,
@@ -1923,13 +1860,10 @@ export async function runTicketExecutionLoop(
               ...reviewResult.must_fix_findings.map((f) => f.path)
             ]
           });
-          const retryImpl = await withUsageAttribution({ phase: "fixes", ticket: ticket.ticketIssueNumber }, () => generateTicketImplementationWithFallback({
+          const retryImpl = await withUsageAttribution({ phase: "fixes", ticket: ticket.ticketIssueNumber }, () => runTicketAgentSession({
             ticket,
-            branch: taskBranch,
-            featureBranch: params.featureBranch,
             thinkingLevel: "HIGH",
             logLabel: `review-fix-retry:#${ticket.ticketIssueNumber}/iter-${reviewFixAttempt}`,
-            systemInstruction: reviewFixSystemInstruction,
             prompt: [
               `La correction a fait échouer la vérification Stage 1 en sandbox (tentative ${reviewFixAttempt}/${params.maxCodeFixAttempts}) :`,
               wrapUntrustedContent(
@@ -1955,9 +1889,7 @@ export async function runTicketExecutionLoop(
             ].join("\n"),
             accumulatedFiles: params.accumulatedFiles,
             deletedFilesSet: ticketDeletedFilesSet,
-            devBranchPaths: params.devBranchPaths,
             reviewersDir,
-            ensureBaselineLoaded: ensureBaselineFilesLoaded,
             gh: params.gh,
             llmApiKey: params.llmApiKey,
             phaseModels: params.phaseModels,
