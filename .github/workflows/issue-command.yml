@@ -82,9 +82,7 @@ on:
         description: "Deterministic error code"
         value: ${{ jobs.authorize-command.outputs.error_code }}
 
-permissions:
-  contents: read
-  issues: write
+permissions: {}
 
 jobs:
   authorize-command:
@@ -92,8 +90,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
-      contents: read
-      issues: write
+      contents: read # checkout and read collaborator permission level
     outputs:
       authorized: ${{ steps.gate.outputs.authorized }}
       decision: ${{ steps.gate.outputs.decision }}
@@ -113,7 +110,7 @@ jobs:
 
       - name: Run pre-bundled EPURE authorization gate
         id: gate
-        uses: ./actions/authorize-command
+        uses: ./actions/authorize-command # zizmor: ignore[self-repository] -- runs from the checked-out Giskard-AI/epure tree; actionlint 1.7.12 rejects $/ syntax (rhysd/actionlint#732)
         with:
           repository: ${{ inputs.repository }}
           issue_number: ${{ inputs.issue_number }}
@@ -137,10 +134,10 @@ jobs:
       group: epure-issue-${{ inputs.issue_number }}
       cancel-in-progress: false
     permissions:
-      contents: write
-      issues: write
-      pull-requests: write
-      checks: write
+      contents: write # push task/feature branches and update refs/epure/state/*
+      issues: write # create child tickets and post state mirror comments
+      pull-requests: write # open, review, and squash-merge task PRs
+      checks: write # publish ai-review, impeccable-gate, and PR title check runs
     steps:
       - name: Record job start
         id: job-start
@@ -175,7 +172,7 @@ jobs:
 
       - name: Run pre-bundled EPURE issue orchestrator
         id: orchestrate
-        uses: ./actions/orchestrate-issue
+        uses: ./actions/orchestrate-issue # zizmor: ignore[self-repository] -- runs from the checked-out Giskard-AI/epure tree; actionlint 1.7.12 rejects $/ syntax (rhysd/actionlint#732)
         env:
           EPURE_JOB_STARTED_AT_MS: ${{ steps.job-start.outputs.ms }}
         with:
