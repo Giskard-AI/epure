@@ -1,9 +1,9 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
+    "github>Giskard-AI/.github",
     "config:best-practices",
     ":dependencyDashboard",
-    "helpers:pinGitHubActionDigests",
     ":pinAllExceptPeerDependencies",
     "docker:pinDigests",
     "security:openssf-scorecard",
@@ -12,40 +12,15 @@
   "baseBranchPatterns": [
     "dev"
   ],
-  "schedule": [
-    "before 6am on monday"
-  ],
-  "timezone": "UTC",
-  "labels": [
-    "dependencies",
-    "renovate"
-  ],
   "semanticCommits": "enabled",
   "commitMessageAction": "bump",
   "rangeStrategy": "pin",
-  "minimumReleaseAge": "3 days",
   "internalChecksFilter": "strict",
   "prCreation": "not-pending",
   "rebaseWhen": "behind-base-branch",
   "automerge": false,
   "platformAutomerge": false,
   "npmrc": "ignore-scripts=true\n",
-  "lockFileMaintenance": {
-    "enabled": true,
-    "schedule": [
-      "before 6am on the first day of the month"
-    ]
-  },
-  "vulnerabilityAlerts": {
-    "enabled": true,
-    "labels": [
-      "security",
-      "dependencies"
-    ],
-    "minimumReleaseAge": "0 days",
-    "automerge": false
-  },
-  "prHourlyLimit": 2,
   "prConcurrentLimit": 5,
   "customManagers": [
     {
