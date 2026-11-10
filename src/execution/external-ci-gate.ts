@@ -1262,7 +1262,7 @@ export function formatNeedsHumanEscalationComment(
   } else if (input.reason === "epic_convergence_exhausted") {
     const usedPhases = input.epicConvergenceDetails?.epicPhase ?? 2;
     const maxPhases = input.epicConvergenceDetails?.maxEpicPhases ?? 2;
-    reasonHeadline = `Non-convergence de la fonctionnalité après \`${usedPhases}/${maxPhases}\` phases de tickets (\`epic_convergence_exhausted\`, ADR-0032)`;
+    reasonHeadline = `Non-convergence de la fonctionnalité après \`${usedPhases}/${maxPhases}\` phases de tickets (\`epic_convergence_exhausted\`, https://giskard-ai.github.io/epure/guides/how-to-drive-an-issue)`;
   } else if (input.reason === "grace_window_timeout") {
     const gw = input.graceWindowSeconds ?? 45;
     reasonHeadline = `${gw}s external CI workflow registration timeout (fail-closed)`;
@@ -1286,7 +1286,7 @@ export function formatNeedsHumanEscalationComment(
       "Transient LLM API retries or unitary request timeout exhausted (`max_transient_api_retries`) — code-fix budget preserved";
   } else if (input.reason === "llm_quota_or_auth_failure") {
     reasonHeadline =
-      "LLM provider quota/billing exhaustion or authentication failure (ADR-0012: no automatic fallback)";
+      "LLM provider quota/billing exhaustion or authentication failure (https://giskard-ai.github.io/epure/configuration: no automatic fallback)";
   } else if (input.reason === "llm_request_invalid") {
     reasonHeadline =
       "LLM request rejected or response invalid after structured-output retry (non-transient) — code-fix budget preserved";
@@ -1458,7 +1458,7 @@ export function formatNeedsHumanEscalationComment(
     `2. Poussez un correctif sur \`${input.branch}\` ou mettez à jour la configuration sur \`dev\`.`,
     input.resumeCommand
       ? `3. Republiez \`${resumeCommand}\` sur cette issue (#${input.issueNumber}) pour reprendre (une réponse libre suffit pendant le grill et la revue de spécification).`
-      : `3. Postez \`/epure continue\` (ou \`/epure approve\`) sur cette issue (#${input.issueNumber}) : l'orchestrateur réconciliera automatiquement la PR existante et reprendra la validation sans dupliquer le travail (ADR-0028, Q110). Une réponse libre ne reprend pas l'exécution ; les commentaires publiés d'ici là par un contributeur \`write\` ou supérieur (hors commandes \`/epure\` et bots, ${RESUME_CONTEXT_MAX_COMMENTS} derniers, ${RESUME_CONTEXT_MAX_CHARS} caractères au plus) sont transmis à la session reprise.`
+      : `3. Postez \`/epure continue\` (ou \`/epure approve\`) sur cette issue (#${input.issueNumber}) : l'orchestrateur réconciliera automatiquement la PR existante et reprendra la validation sans dupliquer le travail (https://giskard-ai.github.io/epure/guides/how-to-drive-an-issue). Une réponse libre ne reprend pas l'exécution ; les commentaires publiés d'ici là par un contributeur \`write\` ou supérieur (hors commandes \`/epure\` et bots, ${RESUME_CONTEXT_MAX_COMMENTS} derniers, ${RESUME_CONTEXT_MAX_CHARS} caractères au plus) sont transmis à la session reprise.`
   );
   if (input.reason === "remediation_exhausted" && !input.resumeCommand) {
     lines.push(

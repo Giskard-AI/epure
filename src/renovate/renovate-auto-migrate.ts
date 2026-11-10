@@ -38,7 +38,7 @@ export function evaluateRenovateMigrationAction(
       privileged_agent_started: false,
       error_code: "RENOVATE_PROVENANCE_UNVERIFIED",
       error_message:
-        "Cannot start privileged migration agent when Renovate PR provenance is unverified (ADR-0015).",
+        "Cannot start privileged migration agent when Renovate PR provenance is unverified (https://giskard-ai.github.io/epure/architecture).",
       auto_merge_to_dev_allowed: false,
       human_approval_required_for_dev_merge: true
     };

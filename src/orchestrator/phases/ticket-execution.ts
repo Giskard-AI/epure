@@ -644,7 +644,7 @@ export async function runTicketExecutionLoop(
             "",
             `- **Ticket dépendant** : #${ticket.ticketIssueNumber} (${ticket.title})`,
             `- **Ticket(s) bloquant(s) non prouvé(s)** : ${unprovenList}`,
-            "- **Raison** : Un ticket bloquant a été fermé avec `state_reason: \"not_planned\"` ou n'est pas résolu de manière prouvée sur la branche `feature/*` (ADR-0003, ADR-0029)."
+            "- **Raison** : Un ticket bloquant a été fermé avec `state_reason: \"not_planned\"` ou n'est pas résolu de manière prouvée sur la branche `feature/*` (https://giskard-ai.github.io/epure/guides/how-to-drive-an-issue)."
           ].join("\n"),
           {
             phase: "suspended",
@@ -1091,7 +1091,7 @@ export async function runTicketExecutionLoop(
             existingTaskPr.title ||
             `feat(ticket-${ticket.ticketIssueNumber}): ${ticket.title}`,
           test_summary:
-            "Reconciled existing open Pull Request on task branch (Q110)",
+            "Reconciled existing open Pull Request on task branch (https://giskard-ai.github.io/epure/guides/how-to-drive-an-issue)",
           files: Array.from(ticketChangedFilesMap.entries()).map(
             ([path, content]) => ({ path, content })
           )

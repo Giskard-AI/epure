@@ -83,6 +83,30 @@ describe('Manual fast-forward promotion dev -> main (Ticket 36 / Issue #37)', ()
       expectedCommand: null,
       expectedTagRef: null,
     },
+    {
+      scenario: 'allows promotion when package.json version matches semver_tag without v prefix',
+      input: {
+        ...baseValidInput,
+        semverTag: 'v3.0.0',
+        packageJsonVersion: '3.0.0',
+      },
+      expectedAllowed: true,
+      expectedReason: 'RELEASE_PROMOTED_FF_ONLY',
+      expectedCommand: 'git push origin dev:main --ff-only',
+      expectedTagRef: 'refs/tags/v3.0.0',
+    },
+    {
+      scenario: 'rejects promotion when package.json version does not match semver_tag',
+      input: {
+        ...baseValidInput,
+        semverTag: 'v3.0.0',
+        packageJsonVersion: '1.5.9',
+      },
+      expectedAllowed: false,
+      expectedReason: 'PACKAGE_JSON_VERSION_MISMATCH',
+      expectedCommand: null,
+      expectedTagRef: null,
+    },
   ])('$scenario', ({ input, expectedAllowed, expectedReason, expectedCommand, expectedTagRef }) => {
     const res = evaluateDevToMainPromotion(input);
     expect(res.allowed).toBe(expectedAllowed);

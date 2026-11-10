@@ -1007,6 +1007,25 @@ describeLive(
           strict_required_status_checks_policy: false,
           required_status_checks: (spec.requiredStatusChecks ?? []).map((context) => ({ context, integration_id: GITHUB_ACTIONS_APP_ID }))
         });
+
+        const disabled = await adminApi("PUT", `${R}/rulesets/${created.data.id}`, {
+          ...buildGitHubRulesetApiPayload(spec, {}),
+          enforcement: "disabled"
+        });
+        const afterDisabled = await plan();
+        const reenabled = await adminApi("PUT", `${R}/rulesets/${created.data.id}`, buildGitHubRulesetApiPayload(spec, {}));
+        const afterReenabled = await plan();
+        expect({
+          disabled: disabled.status,
+          afterDisabled,
+          reenabled: reenabled.status,
+          afterReenabled
+        }).toEqual({
+          disabled: 200,
+          afterDisabled: "update",
+          reenabled: 200,
+          afterReenabled: "noop"
+        });
       });
 
       it("previous-main-and-v-tags-branch-ruleset-is-rejected-with-422", async () => {

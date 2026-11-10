@@ -107,7 +107,7 @@ describe("EPURE v1.2.0 — Repository Rulesets, Multi-Agent Review Roster & Sema
         if (method === "PATCH" && url.endsWith("/repos/Hartorn-Inc/enclume-astrale")) {
           return new Response(JSON.stringify({ id: 1 }), { status: 200 });
         }
-        if (method === "GET" && url.endsWith("/rulesets")) {
+        if (method === "GET" && new URL(url).pathname.endsWith("/rulesets")) {
           return new Response(
             JSON.stringify([{ id: 42, name: "epure-dev-governance" }]),
             { status: 200 }
@@ -502,6 +502,138 @@ describe("EPURE v1.2.0 — Repository Rulesets, Multi-Agent Review Roster & Sema
 
       await expect(dryRun ? planGitHubRulesetChanges(input) : applyGitHubRepositoryGovernance(input)).rejects.toThrow(missing);
       expect(calls).toEqual([]);
+    });
+
+    it.each([
+      {
+        id: "paginates-across-pages-via-link-header-and-filters-out-organization-rulesets",
+        page1: [
+          { id: 101, name: "epure-dev-governance", source_type: "Organization" },
+          { id: 102, name: "other-repo-ruleset", source_type: "Repository" }
+        ],
+        page2: [
+          { id: 202, name: "epure-dev-governance", source_type: "Repository" }
+        ],
+        expectedAction: "noop" as const,
+        expectedUpdatedId: 202
+      },
+      {
+        id: "ignores-org-inherited-ruleset-when-no-repo-scoped-ruleset-matches-and-creates-repo-ruleset",
+        page1: [
+          { id: 101, name: "epure-dev-governance", source_type: "Organization" }
+        ],
+        page2: [],
+        expectedAction: "create" as const,
+        expectedUpdatedId: 999
+      }
+    ])("$id (#131)", async ({ page1, page2, expectedAction, expectedUpdatedId }) => {
+      const devRuleset = buildGovernanceRulesets({ agentAppName: "a", releaseAppName: "r" }).devGovernance;
+      const canonicalPayload = buildGitHubRulesetApiPayload(devRuleset, {});
+      const mockFetch: typeof fetch = async (input, init) => {
+        const parsedUrl = new URL(String(input));
+        const method = init?.method ?? "GET";
+        if (method === "PATCH") {
+          return new Response(JSON.stringify({ id: 1 }), { status: 200 });
+        }
+        if (method === "GET" && parsedUrl.pathname.endsWith("/rulesets")) {
+          const page = parsedUrl.searchParams.get("page") ?? "1";
+          if (page === "1") {
+            const headers = page2.length > 0
+              ? { link: '<https://api.github.com/repos/Hartorn-Inc/trame/rulesets?per_page=100&page=2>; rel="next"' }
+              : undefined;
+            return new Response(JSON.stringify(page1), { status: 200, ...(headers ? { headers } : {}) });
+          }
+          return new Response(JSON.stringify(page2), { status: 200 });
+        }
+        if (method === "GET" && parsedUrl.pathname.endsWith("/rulesets/202")) {
+          return new Response(JSON.stringify(canonicalPayload), { status: 200 });
+        }
+        if (method === "PUT" && parsedUrl.pathname.endsWith("/rulesets/202")) {
+          return new Response(JSON.stringify({ id: 202 }), { status: 200 });
+        }
+        if (method === "POST" && parsedUrl.pathname.endsWith("/rulesets")) {
+          return new Response(JSON.stringify({ id: 999 }), { status: 201 });
+        }
+        return new Response("Not Found", { status: 404 });
+      };
+
+      const plan = await planGitHubRulesetChanges({
+        repository: "Hartorn-Inc/trame",
+        githubToken: "ghs_testToken",
+        governanceRulesets: [devRuleset],
+        fetchImpl: mockFetch
+      });
+      expect(plan).toEqual([{ name: devRuleset.name, action: expectedAction }]);
+
+      const applied = await applyGitHubRepositoryGovernance({
+        repository: "Hartorn-Inc/trame",
+        githubToken: "ghs_testToken",
+        governanceRulesets: [devRuleset],
+        fetchImpl: mockFetch
+      });
+      expect(applied.rulesets_applied[0]?.id).toBe(expectedUpdatedId);
+    });
+
+    it.each([
+      {
+        id: "detects-disabled-enforcement-drift-as-update",
+        mutateRemote: (payload: Record<string, unknown>) => ({ ...payload, enforcement: "disabled" }),
+        expectedAction: "update" as const
+      },
+      {
+        id: "detects-ref-name-exclude-drift-as-update",
+        mutateRemote: (payload: Record<string, unknown>) => ({
+          ...payload,
+          conditions: { ref_name: { include: ["refs/heads/dev"], exclude: ["refs/heads/dev-tmp"] } }
+        }),
+        expectedAction: "update" as const
+      },
+      {
+        id: "detects-pull-request-approving-review-count-drift-as-update",
+        mutateRemote: (payload: Record<string, unknown>) => ({
+          ...payload,
+          rules: (payload.rules as Array<{ type: string; parameters?: Record<string, unknown> }>).map((r) =>
+            r.type === "pull_request"
+              ? { ...r, parameters: { ...r.parameters, required_approving_review_count: 2 } }
+              : r
+          )
+        }),
+        expectedAction: "update" as const
+      },
+      {
+        id: "detects-commit-message-pattern-regex-drift-as-update",
+        mutateRemote: (payload: Record<string, unknown>) => ({
+          ...payload,
+          rules: (payload.rules as Array<{ type: string; parameters?: Record<string, unknown> }>).map((r) =>
+            r.type === "commit_message_pattern"
+              ? { ...r, parameters: { ...r.parameters, pattern: "^fix:" } }
+              : r
+          )
+        }),
+        expectedAction: "update" as const
+      }
+    ])("$id (#127)", async ({ mutateRemote, expectedAction }) => {
+      const devRuleset = buildGovernanceRulesets({ agentAppName: "a", releaseAppName: "r" }).devGovernance;
+      const basePayload = buildGitHubRulesetApiPayload(devRuleset, {});
+      const remotePayload = mutateRemote(basePayload);
+      const mockFetch: typeof fetch = async (input) => {
+        const pathname = new URL(String(input)).pathname;
+        if (pathname.endsWith("/rulesets")) {
+          return new Response(JSON.stringify([{ id: 7, name: devRuleset.name }]), { status: 200 });
+        }
+        if (pathname.endsWith("/rulesets/7")) {
+          return new Response(JSON.stringify(remotePayload), { status: 200 });
+        }
+        return new Response("Not Found", { status: 404 });
+      };
+
+      const plan = await planGitHubRulesetChanges({
+        repository: "Hartorn-Inc/trame",
+        githubToken: "ghs_testToken",
+        governanceRulesets: [devRuleset],
+        fetchImpl: mockFetch
+      });
+      expect(plan).toEqual([{ name: devRuleset.name, action: expectedAction }]);
     });
 
     it.each([

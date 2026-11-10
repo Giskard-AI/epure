@@ -49,7 +49,7 @@ export async function runBoundedCiRepairLoop(
   return {
     status: "escalated_to_human",
     error_code: "MAX_CODE_FIX_ATTEMPTS_EXHAUSTED",
-    error_message: `CI repair exhausted ${maxAttempts} code-fix attempt(s) on issue #${input.ticketIssueNumber}; escalating to human reviewer (ADR-0012, ADR-0017).`,
+    error_message: `CI repair exhausted ${maxAttempts} code-fix attempt(s) on issue #${input.ticketIssueNumber}; escalating to human reviewer (https://giskard-ai.github.io/epure/architecture).`,
     code_fix_attempts_used: attemptsUsed,
     escalated_to_human: true,
     last_failure_summary: lastSummary

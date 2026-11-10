@@ -126,7 +126,7 @@ export async function executeLlmCallWithResilience(
     policy.fallbackProvider.trim().toLowerCase() !==
       policy.primaryProvider.trim().toLowerCase()
   ) {
-    const msg = `Automatic fallback from primary LLM provider '${policy.primaryProvider}' to '${policy.fallbackProvider}' is forbidden (ADR-0012).`;
+    const msg = `Automatic fallback from primary LLM provider '${policy.primaryProvider}' to '${policy.fallbackProvider}' is forbidden (https://giskard-ai.github.io/epure/configuration).`;
     return {
       status: "rejected_fallback_provider",
       error_code: "FALLBACK_PROVIDER_SWITCH_FORBIDDEN",

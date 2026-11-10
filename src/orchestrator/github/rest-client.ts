@@ -46,13 +46,13 @@ export function verifyPublisherMergeBoundary(params: {
 
   if (cleanBase === "main" || cleanBase === "master") {
     throw new Error(
-      `HARDWARE_GUARD: Agent App is strictly forbidden from merging '${cleanHead}' into release branch '${cleanBase}' (ADR-0009, Q91).`
+      `HARDWARE_GUARD: Agent App is strictly forbidden from merging '${cleanHead}' into release branch '${cleanBase}' (https://giskard-ai.github.io/epure/architecture).`
     );
   }
 
   if (cleanBase === "dev" && !cleanHead.startsWith("plan/")) {
     throw new Error(
-      `HARDWARE_GUARD: Agent App is strictly forbidden from auto-merging '${cleanHead}' into 'dev'. Only human maintainers may merge 'feature/* -> dev' in the GitHub UI (ADR-0001, Q45, Q91, Q95).`
+      `HARDWARE_GUARD: Agent App is strictly forbidden from auto-merging '${cleanHead}' into 'dev'. Only human maintainers may merge 'feature/* -> dev' in the GitHub UI (https://giskard-ai.github.io/epure/architecture).`
     );
   }
 }

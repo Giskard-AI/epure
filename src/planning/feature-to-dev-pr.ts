@@ -45,7 +45,7 @@ export function prepareFeatureToDevPullRequest(
       ready_to_open: false,
       error_code: "FEATURE_TO_DEV_AUTO_MERGE_FORBIDDEN",
       error_message:
-        "Automatic merge from feature/* into dev is strictly forbidden; human review and approval are mandatory (ADR-0001, ADR-0002).",
+        "Automatic merge from feature/* into dev is strictly forbidden; human review and approval are mandatory (https://giskard-ai.github.io/epure/architecture).",
       head_branch: input.featureBranch,
       base_branch: "dev",
       auto_merge_allowed: false,

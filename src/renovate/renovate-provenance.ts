@@ -33,7 +33,7 @@ export function verifyRenovatePullRequestProvenance(
       authentic_renovate_pr: false,
       error_code: "SPOOFED_RENOVATE_FORK_FORBIDDEN",
       error_message:
-        "External fork PRs cannot claim Renovate provenance or trigger privileged migration workflows (ADR-0015, ADR-0016).",
+        "External fork PRs cannot claim Renovate provenance or trigger privileged migration workflows (https://giskard-ai.github.io/epure/architecture).",
       human_approval_required_for_dev_merge: true
     };
   }
@@ -52,7 +52,7 @@ export function verifyRenovatePullRequestProvenance(
       authentic_renovate_pr: false,
       error_code: "UNVERIFIED_RENOVATE_APP_IDENTITY",
       error_message:
-        "PR author is not a cryptographically verified Renovate GitHub App installation (ADR-0015).",
+        "PR author is not a cryptographically verified Renovate GitHub App installation (https://giskard-ai.github.io/epure/architecture).",
       human_approval_required_for_dev_merge: true
     };
   }
@@ -62,7 +62,7 @@ export function verifyRenovatePullRequestProvenance(
     return {
       authentic_renovate_pr: false,
       error_code: "RENOVATE_MUST_TARGET_DEV",
-      error_message: `Renovate dependency PRs must target 'dev' rather than '${normalizedBase}' (ADR-0015).`,
+      error_message: `Renovate dependency PRs must target 'dev' rather than '${normalizedBase}' (https://giskard-ai.github.io/epure/architecture).`,
       human_approval_required_for_dev_merge: true
     };
   }

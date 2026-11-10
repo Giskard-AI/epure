@@ -103,3 +103,20 @@ git push origin dev
 
 - **Mainteneur Solo (Défaut `--require-pr-approvals 0`)** : GitHub interdit à l'auteur ou au seul mainteneur d'approuver une PR sans second compte. La valeur `required_approving_review_count: 0` sur `epure-dev-governance` vous permet de cliquer sur **Squash and merge** sur les PRs `feature/* -> dev` tout en interdisant matériellement à l'`Agent App` de les fusionner seule.
 - **Mode Équipe (`--require-pr-approvals 1` ou plus)** : exige au moins une approbation humaine par un pair en plus des checks `verify-contract` et `ai-review` verts avant toute fusion dans `dev`.
+
+---
+
+## 5. Fichiers Gérés vs Fichiers Bootstrappés & Mise à Jour d'un Dépôt Existant
+
+`setup-repo` distingue deux cycles de vie de fichiers afin que les mises à jour n'écrasent jamais les personnalisations propres au projet :
+
+- **Fichiers gérés (`managed`)** (`.github/workflows/epure-issue-command.yml`, `.github/workflows/epure-check.yml`, `.github/workflows/pr-title.yml`, `.github/workflows/release.yml`, `.github/zizmor.yml`) : estampillés avec `# Managed by Giskard-AI/epure@<40-char-sha> # v3.0.0`. Ils sont mis à jour lors des exécutions suivantes de `--apply` tant que l'en-tête est présent ; si un fichier a été écrit ou modifié sans l'en-tête géré, `setup-repo` signale `action: "conflict"` dans la checklist de migration sans l'écraser.
+- **Fichiers bootstrappés (`bootstrapped`)** (`.github/workflows/ci.yml`, `renovate.json`, `<reviewers_dir>/*.md`) : créés une seule fois lors de l'onboarding initial et conservés en `noop` lors des mises à jour ultérieures, sauf si `--force-bootstrap` est explicitement passé.
+- **Fusion 3-voies de `.github/agents.yml`** : conserve vos réglages `models`, `providers`, `verification.targets`, `reviewers_dir` et `llm_environment` tout en migrant les clés dépréciées v1/v2 (`harness: codex` -> `pi`, `model:` -> `models:`).
+
+Pour mettre à jour un dépôt consommateur v1/v2 existant de façon interactive (inspection de la checklist de migration, vérification des checks PR requis avant la mise à jour des Rulesets et fusion de `.github/agents.yml`), lancez l'assistant de mise à niveau :
+
+```bash
+bash scripts/wizards/upgrade-consumer-wizard.sh
+```
+

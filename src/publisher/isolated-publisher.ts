@@ -158,7 +158,7 @@ export function verifyAgentJobIsolation(
       return {
         isolated: false,
         error_code: "AGENT_ENV_PRIVATE_KEY_FORBIDDEN",
-        error_message: `Agent execution environment must never contain GitHub App private key '${key}' (ADR-0004, ADR-0023).`
+        error_message: `Agent execution environment must never contain GitHub App private key '${key}' (https://giskard-ai.github.io/epure/architecture).`
       };
     }
   }
@@ -179,7 +179,7 @@ export function verifyAgentJobIsolation(
       return {
         isolated: false,
         error_code: "AGENT_ENV_WRITE_TOKEN_FORBIDDEN",
-        error_message: `Agent execution environment must not receive write token '${key}' (ADR-0004).`
+        error_message: `Agent execution environment must not receive write token '${key}' (https://giskard-ai.github.io/epure/architecture).`
       };
     }
   }
@@ -334,7 +334,7 @@ export function validateAgentProposal(
       return {
         valid: false,
         error_code: "PROTECTED_BRANCH_FORBIDDEN",
-        error_message: `Direct push to protected branch '${targetBranch}' is forbidden (ADR-0004, ADR-0011).`
+        error_message: `Direct push to protected branch '${targetBranch}' is forbidden (https://giskard-ai.github.io/epure/architecture).`
       };
     }
 

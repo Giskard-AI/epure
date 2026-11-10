@@ -16,6 +16,7 @@ export interface ReleasePromotionInput {
   isMainAncestorOfDev: boolean;
   devRequiredCiGreen: boolean;
   existingTagTargetSha: string | null;
+  packageJsonVersion?: string | null | undefined;
 }
 
 export interface ReleasePromotionResult {
@@ -31,7 +32,8 @@ export interface ReleasePromotionResult {
     | 'DEV_SHA_CHANGED'
     | 'MAIN_NOT_FAST_FORWARDABLE'
     | 'DEV_CI_NOT_GREEN'
-    | 'CONTRADICTORY_EXISTING_TAG';
+    | 'CONTRADICTORY_EXISTING_TAG'
+    | 'PACKAGE_JSON_VERSION_MISMATCH';
 }
 
 export function evaluateDevToMainPromotion(
@@ -129,6 +131,20 @@ export function evaluateDevToMainPromotion(
       fastForwardCommand: null,
       immutableTagRef: null,
       reasonCode: 'CONTRADICTORY_EXISTING_TAG',
+    };
+  }
+
+  if (
+    typeof input.packageJsonVersion === 'string' &&
+    input.packageJsonVersion.trim().length > 0 &&
+    `v${input.packageJsonVersion.trim().replace(/^v/, '')}` !== input.semverTag
+  ) {
+    return {
+      allowed: false,
+      promotedSha: null,
+      fastForwardCommand: null,
+      immutableTagRef: null,
+      reasonCode: 'PACKAGE_JSON_VERSION_MISMATCH',
     };
   }
 

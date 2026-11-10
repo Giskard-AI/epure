@@ -380,7 +380,7 @@ function runSetupRepo(dir: string, config: E2eConfig, repository: string, sha: s
     ...["--repo", repository, "--dir", dir, "--pinned-sha", sha, "--model", config.model, "--llm-env", config.llmEnvironment, "--apply", "--json"],
     ...(githubSettings
       ? ["--apply-github-settings", "--agent-app-id", String(config.agentAppId), "--release-app-id", String(config.releaseAppId)]
-      : [])
+      : ["--force-bootstrap"])
   ];
   const out = execFileSync(process.execPath, args, { encoding: "utf8", env: { ...process.env, GITHUB_TOKEN: token } });
   const result = JSON.parse(out) as { status: string; mutated_files: string[] };

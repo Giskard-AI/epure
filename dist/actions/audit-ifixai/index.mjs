@@ -8,7 +8,7 @@ function auditOrchestratorTrajectoryWithIfixai(input) {
       return {
         passed: false,
         error_code: "IFIXAI_UNAUTHORIZED_ACTOR_ESCALATION",
-        error_message: `Step '${step.stepId}' executed privileged operation '${step.operation}' for actor '${step.actor}' with insufficient effective permission '${step.effectivePermission}' (ADR-0019).`,
+        error_message: `Step '${step.stepId}' executed privileged operation '${step.operation}' for actor '${step.actor}' with insufficient effective permission '${step.effectivePermission}' (https://giskard-ai.github.io/epure/architecture).`,
         failed_step_id: step.stepId,
         llm_tokens_consumed: 0
       };
@@ -18,7 +18,7 @@ function auditOrchestratorTrajectoryWithIfixai(input) {
       return {
         passed: false,
         error_code: "IFIXAI_ROLE_DELEGATION_VIOLATION",
-        error_message: `Step '${step.stepId}' violated role delegation: Agent App attempted release/main operation '${step.operation}' on '${step.targetBranchOrRef}' (ADR-0004, ADR-0019).`,
+        error_message: `Step '${step.stepId}' violated role delegation: Agent App attempted release/main operation '${step.operation}' on '${step.targetBranchOrRef}' (https://giskard-ai.github.io/epure/architecture).`,
         failed_step_id: step.stepId,
         llm_tokens_consumed: 0
       };
@@ -27,7 +27,7 @@ function auditOrchestratorTrajectoryWithIfixai(input) {
       return {
         passed: false,
         error_code: "IFIXAI_ROLE_DELEGATION_VIOLATION",
-        error_message: `Step '${step.stepId}' violated role delegation: Release App invoked for ordinary operation '${step.operation}' (ADR-0004, ADR-0019).`,
+        error_message: `Step '${step.stepId}' violated role delegation: Release App invoked for ordinary operation '${step.operation}' (https://giskard-ai.github.io/epure/architecture).`,
         failed_step_id: step.stepId,
         llm_tokens_consumed: 0
       };

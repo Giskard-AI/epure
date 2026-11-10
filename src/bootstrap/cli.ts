@@ -14,10 +14,13 @@ function parseArgs(argv: readonly string[]): {
   repository: string;
   repoRootDir: string | undefined;
   epurePinnedSha: string | undefined;
+  epureVersionTag: string | undefined;
   requirePrApprovalsOnDev: number | undefined;
   includeFrontendReviewers: boolean | undefined;
   customDomainSpecialists: readonly CustomDomainReviewerSpec[] | undefined;
   agentsOverrides: AgentsConfigOverrides;
+  forceBootstrap: boolean;
+  allowMissingRequiredChecks: boolean;
   applyGithubSettings: boolean;
   githubToken: string | undefined;
   agentAppIntegrationId: number | undefined;
@@ -28,6 +31,7 @@ function parseArgs(argv: readonly string[]): {
   let repository = "";
   let repoRootDir: string | undefined;
   let epurePinnedSha: string | undefined;
+  let epureVersionTag: string | undefined;
   let requirePrApprovalsOnDev: number | undefined;
   let includeFrontendReviewers: boolean | undefined;
   let customDomainSpecialists: CustomDomainReviewerSpec[] | undefined;
@@ -38,6 +42,8 @@ function parseArgs(argv: readonly string[]): {
   let planningModel: string | undefined;
   let implementationModel: string | undefined;
   let reviewModel: string | undefined;
+  let forceBootstrap = false;
+  let allowMissingRequiredChecks = false;
   let applyGithubSettings = false;
   let githubToken: string | undefined;
   let agentAppIntegrationId: number | undefined;
@@ -56,11 +62,18 @@ function parseArgs(argv: readonly string[]): {
     } else if (arg === "--pinned-sha" && argv[i + 1]) {
       epurePinnedSha = argv[i + 1];
       i += 1;
+    } else if (arg === "--epure-version" && argv[i + 1]) {
+      epureVersionTag = argv[i + 1];
+      i += 1;
     } else if (arg === "--require-pr-approvals" && argv[i + 1]) {
       requirePrApprovalsOnDev = Number.parseInt(argv[i + 1] ?? "0", 10);
       i += 1;
     } else if (arg === "--no-frontend-reviewers") {
       includeFrontendReviewers = false;
+    } else if (arg === "--force-bootstrap") {
+      forceBootstrap = true;
+    } else if (arg === "--allow-missing-required-checks") {
+      allowMissingRequiredChecks = true;
     } else if (arg === "--domain-reviewers" && argv[i + 1]) {
       const rawCsv = argv[i + 1] ?? "";
       i += 1;
@@ -134,6 +147,7 @@ function parseArgs(argv: readonly string[]): {
     repository,
     repoRootDir,
     epurePinnedSha,
+    epureVersionTag,
     requirePrApprovalsOnDev,
     includeFrontendReviewers,
     customDomainSpecialists,
@@ -145,6 +159,8 @@ function parseArgs(argv: readonly string[]): {
         : {}),
       ...(Object.keys(models).length > 0 ? { models } : {})
     },
+    forceBootstrap,
+    allowMissingRequiredChecks,
     applyGithubSettings,
     githubToken,
     agentAppIntegrationId,
@@ -189,6 +205,8 @@ async function main(): Promise<void> {
     repository: args.repository,
     repoRootDir: args.repoRootDir,
     epurePinnedSha: args.epurePinnedSha,
+    epureVersionTag: args.epureVersionTag,
+    forceBootstrap: args.forceBootstrap,
     requirePrApprovalsOnDev: args.requirePrApprovalsOnDev,
     includeFrontendReviewers: args.includeFrontendReviewers,
     customDomainSpecialists: args.customDomainSpecialists,
@@ -198,6 +216,11 @@ async function main(): Promise<void> {
 
   if (result.status !== "error" && result.agents_config.harness === "cursor") {
     process.stderr.write(`setup-repo: warning: ${CURSOR_ISOLATION_WARNING}\n`);
+  }
+  if (result.status !== "error") {
+    for (const warning of result.warnings) {
+      process.stderr.write(`setup-repo: warning: ${warning}\n`);
+    }
   }
 
   let githubRulesetsPlan:
@@ -215,7 +238,10 @@ async function main(): Promise<void> {
       githubToken: token,
       governanceRulesets: result.governance_rulesets,
       agentAppIntegrationId: args.agentAppIntegrationId,
-      releaseAppIntegrationId: args.releaseAppIntegrationId
+      releaseAppIntegrationId: args.releaseAppIntegrationId,
+      repoRootDir: args.repoRootDir,
+      missingRequiredChecks: result.missing_required_checks,
+      allowMissingRequiredChecks: args.allowMissingRequiredChecks
     };
     if (args.dryRun) {
       githubRulesetsPlan = await planGitHubRulesetChanges(governanceInput);

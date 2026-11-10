@@ -74,7 +74,7 @@ function verifyAppRoleBoundary(input) {
     };
   }
   if (agentAppId && releaseAppId && agentAppId === releaseAppId) {
-    const msg = `Agent App ID ('${agentAppId}') and Release App ID ('${releaseAppId}') must be two distinct GitHub Apps (ADR-0009, ADR-0010).`;
+    const msg = `Agent App ID ('${agentAppId}') and Release App ID ('${releaseAppId}') must be two distinct GitHub Apps (https://giskard-ai.github.io/epure/architecture).`;
     return {
       allowed: false,
       app_role: role,

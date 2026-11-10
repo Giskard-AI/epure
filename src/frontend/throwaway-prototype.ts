@@ -42,7 +42,7 @@ export function evaluateThrowawayPrototypeIsolation(
       production_branch_clean: false,
       error_code: "EXPLORATORY_PROTOTYPE_CODE_REUSE_FORBIDDEN",
       error_message:
-        "Throwaway prototype code must never be merged or copied into production branches; only documented design conclusions may be re-injected into the spec (ADR-0021)."
+        "Throwaway prototype code must never be merged or copied into production branches; only documented design conclusions may be re-injected into the spec (https://giskard-ai.github.io/epure/architecture)."
     };
   }
 

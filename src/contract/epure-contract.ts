@@ -1,4 +1,6 @@
-export const EPURE_PUBLIC_VERSION = "1.0.0";
+import pkg from "../../package.json" with { type: "json" };
+
+export const EPURE_PUBLIC_VERSION: string = pkg.version;
 
 export type ContractErrorCode =
   | "NONE"
@@ -69,7 +71,7 @@ export function verifyPublicContract(
       version: EPURE_PUBLIC_VERSION,
       contract_valid: "false",
       error_code: "MUTABLE_FLOATING_TAG_FORBIDDEN",
-      error_message: `Floating tag reference '${pinnedRef}' is forbidden by ADR-0025; pin a 40-char Git SHA or immutable vMAJOR.MINOR.PATCH tag.`
+      error_message: `Floating tag reference '${pinnedRef}' is forbidden (https://giskard-ai.github.io/epure/architecture); pin a 40-char Git SHA or immutable vMAJOR.MINOR.PATCH tag.`
     };
   }
 

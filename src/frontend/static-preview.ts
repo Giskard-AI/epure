@@ -65,7 +65,7 @@ export function evaluateStaticPreviewPublication(
       retention_days: retentionDays,
       error_code: "UNSAFE_PREVIEW_ORIGIN_OR_SENSITIVE_DATA",
       error_message:
-        "Preview publication refused: preview must use an origin isolated from production and must not expose secrets or sensitive data (ADR-0022)."
+        "Preview publication refused: preview must use an origin isolated from production and must not expose secrets or sensitive data (https://giskard-ai.github.io/epure/configuration)."
     };
   }
 

@@ -39,7 +39,7 @@ export function evaluateReviewFeedbackTrigger(
       should_process: false,
       error_code: "BOT_COMMENT_IGNORED",
       error_message:
-        "Ordinary bot comments are ignored as review triggers to prevent self-reply loops (ADR-0017).",
+        "Ordinary bot comments are ignored as review triggers to prevent self-reply loops (https://giskard-ai.github.io/epure/architecture).",
       escalate_to_human: false,
       updated_reviewed_commit_shas: input.alreadyReviewedCommitShas
     };
@@ -68,7 +68,7 @@ export function evaluateReviewFeedbackTrigger(
     return {
       should_process: false,
       error_code: "COMMIT_SHA_ALREADY_REVIEWED",
-      error_message: `Commit SHA '${input.commitSha}' has already undergone its automated review pass (ADR-0017).`,
+      error_message: `Commit SHA '${input.commitSha}' has already undergone its automated review pass (https://giskard-ai.github.io/epure/architecture).`,
       escalate_to_human: false,
       updated_reviewed_commit_shas: input.alreadyReviewedCommitShas
     };
