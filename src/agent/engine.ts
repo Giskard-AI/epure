@@ -68,6 +68,12 @@ export interface AgentEngine {
   run(request: AgentSessionRequest): Promise<AgentSessionResult>;
 }
 
+export function resolveLifecycleAgentEngine(
+  engine: AgentEngine | undefined
+): AgentEngine | undefined {
+  return engine?.name === "pi" || engine?.name === "cursor" ? engine : undefined;
+}
+
 export type AgentEngineErrorCode =
   | "AGENT_ENGINE_UNAVAILABLE"
   | "AGENT_ISOLATION_UNAVAILABLE"

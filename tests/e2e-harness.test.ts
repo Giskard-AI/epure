@@ -1241,8 +1241,8 @@ describe("deriveEngine", () => {
     {
       id: "issue-command-uses-the-configured-harness",
       workflow: `        uses: Giskard-AI/epure/actions/orchestrate-issue@${sha}`,
-      agents: "harness: codex\n",
-      expected: { executed: "codex", workflow_actions: ["orchestrate-issue"], agents_yml_harness: "codex" }
+      agents: "harness: cursor\n",
+      expected: { executed: "cursor", workflow_actions: ["orchestrate-issue"], agents_yml_harness: "cursor" }
     },
     {
       id: "no-epure-action",

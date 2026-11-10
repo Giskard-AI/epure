@@ -1,6 +1,7 @@
 import {
   AgentEngineError,
   assertNoSecretMaterial,
+  resolveLifecycleAgentEngine,
   type AgentEngine,
   type FileMode
 } from "../../agent/engine.js";
@@ -435,8 +436,7 @@ export async function runFeatureIntegrationPhase(
       requestTimeoutMs: params.phaseModels.requestTimeoutMs,
       onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
       fetchImpl: params.fetchImpl,
-      agentEngine:
-        params.agentEngine?.name === "pi" ? params.agentEngine : undefined,
+      agentEngine: resolveLifecycleAgentEngine(params.agentEngine),
       githubToken: params.activeToken,
       maxLlmRequests:
         params.parsedDevAgentsConfig?.agent_max_llm_requests ?? 200

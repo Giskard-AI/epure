@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
   assertNoSecretMaterial,
+  resolveLifecycleAgentEngine,
   type AgentEngine
 } from "../../agent/engine.js";
 import { snapshotWorktree } from "../../agent/worktree-snapshot.js";
@@ -1592,8 +1593,7 @@ export async function syncBranchWithBase(
           model: input.model,
           ...pickLlmRequestTuning(input),
           fetchImpl: input.fetchImpl,
-          agentEngine:
-            input.agentEngine?.name === "pi" ? input.agentEngine : undefined
+          agentEngine: resolveLifecycleAgentEngine(input.agentEngine)
         });
         if (adrFilesToUpdate.length > 0 || adrDeletedPaths.length > 0) {
           const reconciledSha = await input.gh.commitFilesToBranch({

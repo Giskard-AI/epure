@@ -415,7 +415,7 @@ describe("2. .github/agents.yml defaults (Q78) and non-weakenable security invar
       "    output_per_mtok: 3.75",
       "    source: https://ai.google.dev/gemini-api/docs/pricing#gemini-3.8-flash",
       "    read_on: 2026-11-08",
-      "harness: codex",
+      "harness: cursor",
       ""
     ].join("\n");
 
@@ -423,7 +423,7 @@ describe("2. .github/agents.yml defaults (Q78) and non-weakenable security invar
       const parsed = parseAgentsYaml(yaml);
 
       expect(parsed.pricing).toEqual({ "google/gemini-3.8-flash": GEMINI_PRICE });
-      expect(parsed.harness).toBe("codex");
+      expect(parsed.harness).toBe("cursor");
       expect(writes).toHaveLength(1);
       expect(writes[0]).toMatch(/^::warning title=EPURE pricing::[^\n]*\n$/);
       expect(writes[0]).toContain(error);
@@ -434,14 +434,22 @@ describe("2. .github/agents.yml defaults (Q78) and non-weakenable security invar
 
   it.each([
     {
-      id: "allows-valid-custom-harness-codex-and-relaxed-merge-policy",
+      id: "allows-valid-custom-harness-cursor-and-relaxed-merge-policy",
       overrides: {
-        harness: "codex" as const,
+        harness: "cursor" as const,
         merge_policy: "relaxed" as const,
         max_concurrent_tasks_per_feature: 2
       },
       expectedValid: true,
       expectedErrorCode: "NONE"
+    },
+    {
+      id: "rejects-unknown-harness-in-agents-config",
+      overrides: {
+        harness: "codex" as unknown as "pi"
+      },
+      expectedValid: false,
+      expectedErrorCode: "SECURITY_INVARIANT_VIOLATION"
     },
     {
       id: "rejects-disabling-effective-write-permission-check",

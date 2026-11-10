@@ -46,6 +46,10 @@ inputs:
     description: "LLM provider API key (LLM_API_KEY)"
     required: false
     default: ""
+  cursor_api_key:
+    description: "Cursor service-account API key (CURSOR_API_KEY) when harness is 'cursor'"
+    required: false
+    default: ""
   model:
     description: "Optional '<provider>/<model>' override for all phases; when empty, models.planning, models.implementation and models.review from .github/agents.yml are required (no fallback model)"
     required: false

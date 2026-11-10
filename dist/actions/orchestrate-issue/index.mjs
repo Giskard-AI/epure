@@ -1,12 +1,106 @@
 // actions/orchestrate-issue/index.ts
 import { appendFileSync } from "node:fs";
 
-// src/agent/pi-engine.ts
-import { existsSync as existsSync2, mkdirSync as mkdirSync3, mkdtempSync as mkdtempSync3, rmSync as rmSync3, symlinkSync, writeFileSync as writeFileSync3 } from "node:fs";
-import { tmpdir as tmpdir2 } from "node:os";
-import { dirname as dirname2, join as join2, resolve as resolve2 } from "node:path";
-import { createInterface } from "node:readline";
-import { fileURLToPath } from "node:url";
+// src/agent/cursor-engine.ts
+import { mkdtempSync as mkdtempSync4, rmSync as rmSync4 } from "node:fs";
+import { tmpdir as tmpdir3 } from "node:os";
+import { join as join4 } from "node:path";
+
+// src/auth/issue-command-gate.ts
+var SUPPORTED_COMMANDS = /* @__PURE__ */ new Set([
+  "status",
+  "plan",
+  "to-spec",
+  "to-tickets",
+  "approve",
+  "sync",
+  "rebase",
+  "continue",
+  "cancel",
+  "reply"
+]);
+var DEFAULT_KNOWN_BOT_ACTORS = [
+  "github-actions",
+  "epure-agent",
+  "epure-release",
+  "renovate",
+  "dependabot"
+];
+var SECRET_PATTERNS = [
+  /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g,
+  /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{16,255}\b/g,
+  /\bgithub_pat_[A-Za-z0-9_]{20,255}\b/g,
+  /\bsk-(?:ant-)?[A-Za-z0-9_-]{16,255}\b/g,
+  /\bAIza[0-9A-Za-z_-]{35}\b/g,
+  /\bAuthorization:\s*(?:Bearer|Basic|token)\s+[A-Za-z0-9._~+/=-]+/gi,
+  /\bBearer\s+[A-Za-z0-9._~+/=-]{12,512}\b/gi
+];
+function redactSecrets(text, extraSecrets = []) {
+  let result = text;
+  for (const secret of extraSecrets) {
+    const trimmed = secret.trim();
+    if (trimmed.length >= 4) {
+      result = result.split(trimmed).join("[REDACTED]");
+    }
+  }
+  for (const pattern of SECRET_PATTERNS) {
+    result = result.replace(pattern, (match) => {
+      const authHeaderMatch = /^(Authorization:\s*(?:Bearer|Basic|token))\s+/i.exec(match);
+      if (authHeaderMatch) {
+        return `${authHeaderMatch[1]} [REDACTED]`;
+      }
+      if (/^bearer\s+/i.test(match)) {
+        return "Bearer [REDACTED]";
+      }
+      return "[REDACTED]";
+    });
+  }
+  return result;
+}
+function stripFencedCodeBlocks(body) {
+  return body.replace(/```[\s\S]*?```/g, "");
+}
+function extractRawSlashEpureLine(commentBody) {
+  const cleaned = stripFencedCodeBlocks(commentBody);
+  for (const rawLine of cleaned.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    const match = /^\/epure(?:\s+([A-Za-z0-9_-]+))?(?:\s+(.*))?$/.exec(line);
+    if (match) {
+      return {
+        subcommand: (match[1] ?? "").toLowerCase(),
+        args: (match[2] ?? "").trim()
+      };
+    }
+  }
+  return null;
+}
+function parseEpureCommand(commentBody) {
+  const extracted = extractRawSlashEpureLine(commentBody);
+  if (!extracted) {
+    return null;
+  }
+  if (!SUPPORTED_COMMANDS.has(extracted.subcommand)) {
+    return null;
+  }
+  const normalizedCommand = extracted.subcommand === "rebase" ? "sync" : extracted.subcommand;
+  return {
+    command: normalizedCommand,
+    args: extracted.args
+  };
+}
+function isBotActor(actor, knownBotActors = DEFAULT_KNOWN_BOT_ACTORS) {
+  const loginLower = actor.login.trim().toLowerCase();
+  const typeLower = (actor.type ?? "").trim().toLowerCase();
+  if (typeLower === "bot" || loginLower.endsWith("[bot]")) {
+    return true;
+  }
+  const normalizedBotSet = new Set(
+    [...DEFAULT_KNOWN_BOT_ACTORS, ...knownBotActors].map(
+      (name) => name.trim().toLowerCase().replace(/\[bot\]$/, "")
+    )
+  );
+  return normalizedBotSet.has(loginLower);
+}
 
 // src/llm/errors.ts
 var LLMError = class extends Error {
@@ -342,6 +436,26 @@ function parseAndValidateStructuredOutput(rawText, schemaSpec) {
       { provider: "unknown", rawText, cause: err }
     );
   }
+}
+
+// src/sandbox/llm-sandbox.ts
+import { randomBytes, timingSafeEqual } from "node:crypto";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  Agent as HttpAgent,
+  createServer,
+  request as httpRequest
+} from "node:http";
+import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
+import { spawn, spawnSync } from "node:child_process";
+import { dirname, resolve } from "node:path";
+import { pipeline, Transform, Writable } from "node:stream";
+
+// src/auth/github-apps.ts
+var GITHUB_ACTIONS_APP_ID = 15368;
+var PRIVATE_KEY_DETECTION_PATTERN = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|EPURE_(?:AGENT|RELEASE)_APP_PRIVATE_KEY\s*=\s*\S+/i;
+function containsPrivateKeyMaterial(text) {
+  return PRIVATE_KEY_DETECTION_PATTERN.test(text);
 }
 
 // src/security/prompt-injection-guard.ts
@@ -2096,122 +2210,6 @@ var LLMClient = class {
   }
 };
 
-// src/sandbox/llm-sandbox.ts
-import { randomBytes, timingSafeEqual } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import {
-  Agent as HttpAgent,
-  createServer,
-  request as httpRequest
-} from "node:http";
-import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
-import { spawn, spawnSync } from "node:child_process";
-import { dirname, resolve } from "node:path";
-import { pipeline, Transform, Writable } from "node:stream";
-
-// src/auth/issue-command-gate.ts
-var SUPPORTED_COMMANDS = /* @__PURE__ */ new Set([
-  "status",
-  "plan",
-  "to-spec",
-  "to-tickets",
-  "approve",
-  "sync",
-  "rebase",
-  "continue",
-  "cancel",
-  "reply"
-]);
-var DEFAULT_KNOWN_BOT_ACTORS = [
-  "github-actions",
-  "epure-agent",
-  "epure-release",
-  "renovate",
-  "dependabot"
-];
-var SECRET_PATTERNS = [
-  /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g,
-  /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{16,255}\b/g,
-  /\bgithub_pat_[A-Za-z0-9_]{20,255}\b/g,
-  /\bsk-(?:ant-)?[A-Za-z0-9_-]{16,255}\b/g,
-  /\bAIza[0-9A-Za-z_-]{35}\b/g,
-  /\bAuthorization:\s*(?:Bearer|Basic|token)\s+[A-Za-z0-9._~+/=-]+/gi,
-  /\bBearer\s+[A-Za-z0-9._~+/=-]{12,512}\b/gi
-];
-function redactSecrets(text, extraSecrets = []) {
-  let result = text;
-  for (const secret of extraSecrets) {
-    const trimmed = secret.trim();
-    if (trimmed.length >= 4) {
-      result = result.split(trimmed).join("[REDACTED]");
-    }
-  }
-  for (const pattern of SECRET_PATTERNS) {
-    result = result.replace(pattern, (match) => {
-      const authHeaderMatch = /^(Authorization:\s*(?:Bearer|Basic|token))\s+/i.exec(match);
-      if (authHeaderMatch) {
-        return `${authHeaderMatch[1]} [REDACTED]`;
-      }
-      if (/^bearer\s+/i.test(match)) {
-        return "Bearer [REDACTED]";
-      }
-      return "[REDACTED]";
-    });
-  }
-  return result;
-}
-function stripFencedCodeBlocks(body) {
-  return body.replace(/```[\s\S]*?```/g, "");
-}
-function extractRawSlashEpureLine(commentBody) {
-  const cleaned = stripFencedCodeBlocks(commentBody);
-  for (const rawLine of cleaned.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    const match = /^\/epure(?:\s+([A-Za-z0-9_-]+))?(?:\s+(.*))?$/.exec(line);
-    if (match) {
-      return {
-        subcommand: (match[1] ?? "").toLowerCase(),
-        args: (match[2] ?? "").trim()
-      };
-    }
-  }
-  return null;
-}
-function parseEpureCommand(commentBody) {
-  const extracted = extractRawSlashEpureLine(commentBody);
-  if (!extracted) {
-    return null;
-  }
-  if (!SUPPORTED_COMMANDS.has(extracted.subcommand)) {
-    return null;
-  }
-  const normalizedCommand = extracted.subcommand === "rebase" ? "sync" : extracted.subcommand;
-  return {
-    command: normalizedCommand,
-    args: extracted.args
-  };
-}
-function isBotActor(actor, knownBotActors = DEFAULT_KNOWN_BOT_ACTORS) {
-  const loginLower = actor.login.trim().toLowerCase();
-  const typeLower = (actor.type ?? "").trim().toLowerCase();
-  if (typeLower === "bot" || loginLower.endsWith("[bot]")) {
-    return true;
-  }
-  const normalizedBotSet = new Set(
-    [...DEFAULT_KNOWN_BOT_ACTORS, ...knownBotActors].map(
-      (name) => name.trim().toLowerCase().replace(/\[bot\]$/, "")
-    )
-  );
-  return normalizedBotSet.has(loginLower);
-}
-
-// src/auth/github-apps.ts
-var GITHUB_ACTIONS_APP_ID = 15368;
-var PRIVATE_KEY_DETECTION_PATTERN = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|EPURE_(?:AGENT|RELEASE)_APP_PRIVATE_KEY\s*=\s*\S+/i;
-function containsPrivateKeyMaterial(text) {
-  return PRIVATE_KEY_DETECTION_PATTERN.test(text);
-}
-
 // src/sandbox/llm-proxy-usage.ts
 import { brotliDecompressSync, gunzipSync, inflateSync } from "node:zlib";
 function decodeBody(body, contentEncoding) {
@@ -3219,776 +3217,116 @@ function spawnCaptured(command, args, cwd, env, timeoutMs, interact, onSpawn) {
   });
 }
 
-// src/agent/engine.ts
-var AgentEngineError = class extends Error {
-  code;
-  constructor(code, message) {
-    super(message);
-    this.name = "AgentEngineError";
-    this.code = code;
-  }
-};
-function assertNoSecretMaterial(sources, secrets) {
-  const values = secrets.map((s) => s.trim()).filter((s) => s.length >= 8);
-  const leaking = sources.filter((s) => containsPrivateKeyMaterial(s.text) || values.some((v) => s.text.includes(v))).map((s) => redactSecrets(s.label, values));
-  if (leaking.length > 0) {
-    throw new AgentEngineError(
-      "AGENT_SECRET_IN_DIFF",
-      `Secret material (a runner secret, the installation token, the proxy nonce or a private key) was found in ${[...new Set(leaking)].join(", ")}; nothing was committed.`
-    );
-  }
-}
-
-// src/agent/pi-models.ts
-var NONCE_REFERENCE = "$EPURE_LLM_PROXY_NONCE";
-var CUSTOM_PROVIDER_ID = "epure";
-var ROUTES = {
-  anthropic: { builtIn: "anthropic", path: "" },
-  openai: { builtIn: "openai", path: "" },
-  google: { builtIn: "google", path: "/v1beta" },
-  openrouter: { api: "openai-completions", path: "" },
-  azure_ai: { api: "openai-completions", path: "" },
-  azure: { api: "openai-completions", path: "/openai/v1" },
-  vertex: { api: "google-generative-ai", path: "/v1/publishers/google" }
-};
-function translateModelForPi(model, providers, env) {
-  const parsed = parseModelIdentifier(model, providers, env);
-  const route = ROUTES[parsed.provider];
-  if ("builtIn" in route) {
-    return {
-      provider: route.builtIn,
-      modelId: parsed.model,
-      modelsJson: (proxyUrl) => JSON.stringify({
-        providers: {
-          [route.builtIn]: { baseUrl: `${proxyUrl}${route.path}`, apiKey: NONCE_REFERENCE }
-        }
-      })
-    };
-  }
-  return {
-    provider: CUSTOM_PROVIDER_ID,
-    modelId: parsed.model,
-    modelsJson: (proxyUrl) => JSON.stringify({
-      providers: {
-        [CUSTOM_PROVIDER_ID]: {
-          baseUrl: `${proxyUrl}${route.path}`,
-          api: route.api,
-          apiKey: NONCE_REFERENCE,
-          models: [
-            {
-              id: parsed.model,
-              name: parsed.model,
-              reasoning: false,
-              input: ["text"],
-              contextWindow: 128e3,
-              maxTokens: 16384
-            }
-          ]
-        }
-      }
-    })
-  };
-}
-
-// src/agent/worktree-snapshot.ts
-import { spawn as spawn2 } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync as mkdirSync2, mkdtempSync as mkdtempSync2, rmSync as rmSync2, writeFileSync as writeFileSync2 } from "node:fs";
+// src/sandbox/polyglot-workspace-runner.ts
+import { execFileSync } from "node:child_process";
+import {
+  chmodSync,
+  cpSync,
+  existsSync as existsSync2,
+  lstatSync,
+  mkdirSync as mkdirSync2,
+  mkdtempSync as mkdtempSync2,
+  readFileSync as readFileSync2,
+  realpathSync,
+  rmSync as rmSync2,
+  unlinkSync,
+  writeFileSync as writeFileSync2
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-var DEFAULT_WORKTREE_DIFF_LIMITS = {
-  maxFiles: 500,
-  maxFileBytes: 1024 * 1024,
-  maxTotalBytes: 10 * 1024 * 1024
-};
-var DEFAULT_UNTRACKED_EXCLUDES = [
-  "node_modules/",
-  ".venv/",
-  "__pycache__/",
-  "*.tsbuildinfo",
-  "/dist/",
-  "/build/",
-  "/coverage/",
-  "/target/"
-];
-function untrackedExcludes(trackedPaths) {
-  return DEFAULT_UNTRACKED_EXCLUDES.filter((pattern) => {
-    if (!pattern.endsWith("/")) {
-      return true;
-    }
-    const name = pattern.replace(/^\/|\/$/g, "");
-    return !trackedPaths.some(
-      (p) => pattern.startsWith("/") ? p.startsWith(`${name}/`) : p.split("/").slice(0, -1).includes(name)
-    );
-  });
-}
-var GIT_TIMEOUT_MS = 12e4;
-var MAX_GIT_OUTPUT_BYTES = 256 * 1024 * 1024;
-var GIT_STDERR_TAIL_CHARS = 2e3;
-function gitRunner(gitDir, worktree, extraEnv = {}) {
-  return (args, input = "") => new Promise((resolvePromise, reject) => {
-    const fail = (why) => reject(new AgentEngineError("AGENT_SNAPSHOT_FAILED", `Worktree snapshot: git ${args[0] ?? ""} ${why}`));
-    const child = spawn2(
-      "git",
-      [
-        "-c",
-        "core.hooksPath=/dev/null",
-        "-c",
-        "core.fsmonitor=false",
-        "-c",
-        "protocol.file.allow=never",
-        "-c",
-        "core.autocrlf=false",
-        "-c",
-        "core.symlinks=true",
-        `--git-dir=${gitDir}`,
-        `--work-tree=${worktree}`,
-        ...args
-      ],
-      {
-        cwd: worktree,
-        env: {
-          PATH: process.env.PATH ?? "/usr/bin:/bin",
-          HOME: gitDir,
-          GIT_CONFIG_NOSYSTEM: "1",
-          GIT_CONFIG_GLOBAL: "/dev/null",
-          GIT_ATTR_NOSYSTEM: "1",
-          GIT_LITERAL_PATHSPECS: "1",
-          ...extraEnv
-        },
-        stdio: ["pipe", "pipe", "pipe"]
-      }
-    );
-    const out = [];
-    let outBytes = 0;
-    let stderr = "";
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      fail(`timed out after ${GIT_TIMEOUT_MS} ms`);
-    }, GIT_TIMEOUT_MS);
-    child.stdout.on("data", (chunk) => {
-      outBytes += chunk.length;
-      if (outBytes > MAX_GIT_OUTPUT_BYTES) {
-        child.kill("SIGKILL");
-        fail("output exceeded its cap");
-        return;
-      }
-      out.push(chunk);
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr = (stderr + chunk.toString("utf8")).slice(-GIT_STDERR_TAIL_CHARS);
-    });
-    child.stdin.on("error", () => {
-    });
-    child.on("error", (err) => {
-      clearTimeout(timer);
-      fail(`could not run: ${err.message}`);
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      if (code === 0) {
-        resolvePromise(Buffer.concat(out));
-      } else {
-        fail(`exited with code ${code ?? "?"}: ${stderr.trim()}`);
-      }
-    });
-    child.stdin.end(input);
-  });
-}
-async function listTrackedPaths(worktree) {
-  const index = join(worktree, ".git", "index");
-  if (!existsSync(index)) {
-    return [];
-  }
-  const gitDir = mkdtempSync2(join(tmpdir(), "epure-tracked-"));
+import { dirname as dirname2, join as join2, resolve as resolve2, sep } from "node:path";
+
+// src/orchestrator/llm-helper.ts
+async function callLlmText(options) {
+  const client = new LLMClient(options.providers);
   try {
-    const git = gitRunner(gitDir, worktree, { GIT_INDEX_FILE: index });
-    await git(["init", "--quiet"]);
-    return splitNul(await git(["ls-files", "-z"]));
-  } finally {
-    rmSync2(gitDir, { recursive: true, force: true });
-  }
-}
-async function snapshotWorktree(worktree, options = {}) {
-  const gitDir = mkdtempSync2(join(tmpdir(), "epure-snapshot-"));
-  const git = gitRunner(gitDir, worktree);
-  const limits = options.limits ?? DEFAULT_WORKTREE_DIFF_LIMITS;
-  const isProtected = options.isProtectedPath ?? (() => false);
-  const listIgnored = async () => new Set(splitNul(await git(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory"])));
-  let before = "";
-  let ignoredBefore = /* @__PURE__ */ new Set();
-  try {
-    await git(["init", "--quiet"]);
-    mkdirSync2(join(gitDir, "info"), { recursive: true });
-    writeFileSync2(join(gitDir, "info", "exclude"), `${untrackedExcludes(options.trackedPaths ?? []).join("\n")}
-`);
-    await git(["add", "--all"]);
-    const tracked = (options.trackedPaths ?? []).filter((p) => isFileOrSymlink(join(worktree, p)));
-    if (tracked.length > 0) {
-      await git(["add", "--force", "--pathspec-from-file=-", "--pathspec-file-nul"], tracked.join("\0"));
+    const res = await client.complete({
+      apiKey: options.apiKey,
+      model: options.model,
+      systemInstruction: options.systemInstruction ?? "",
+      userPrompt: options.userPrompt ?? options.prompt ?? "",
+      temperature: options.temperature,
+      responseMimeType: options.responseMimeType,
+      responseSchema: options.responseSchema,
+      tools: options.tools,
+      toolHandlers: options.toolHandlers,
+      maxToolRounds: options.maxToolRounds,
+      thinkingLevel: options.thinkingLevel,
+      maxTransientRetries: options.maxTransientRetries,
+      transientRetryBackoffSeconds: options.transientRetryBackoffSeconds,
+      requestTimeoutMs: options.requestTimeoutMs,
+      maxRateLimitWaits: options.maxRateLimitWaits,
+      fetchImpl: options.fetchImpl,
+      sleepMs: options.sleepMs,
+      logLabel: options.logLabel,
+      providers: options.providers
+    });
+    const used = res.transientRetriesUsed ?? 0;
+    if (used > 0 && options.onTransientRetriesUsed) {
+      options.onTransientRetriesUsed(used);
     }
-    before = (await git(["write-tree"])).toString("utf8").trim();
-    ignoredBefore = await listIgnored();
+    return res.text;
   } catch (err) {
-    rmSync2(gitDir, { recursive: true, force: true });
+    const used = err && typeof err === "object" ? err.transientRetriesUsed ?? 0 : 0;
+    if (used > 0 && options.onTransientRetriesUsed) {
+      options.onTransientRetriesUsed(used);
+    }
     throw err;
   }
-  return {
-    async collect() {
-      await git(["add", "--all"]);
-      const after = (await git(["write-tree"])).toString("utf8").trim();
-      const entries = parseDiffTree(await git(["diff-tree", "-r", "-z", "--no-renames", before, after]));
-      const protectedKnown = [
-        ...splitNul(await git(["ls-tree", "-r", "-z", "--name-only", before])),
-        ...entries.map((e) => e.path)
-      ].filter(isProtected);
-      const isProtectedEntry = (path) => {
-        const segments = path.split("/");
-        return segments.some((_, i) => isProtected(segments.slice(0, i + 1).join("/"))) || protectedKnown.some((p) => p.startsWith(`${path}/`));
-      };
-      const skipped = [];
-      const deleted = [];
-      const candidates = [];
-      for (const entry of entries) {
-        const existedBefore = entry.status !== "A";
-        if (isProtectedEntry(entry.path)) {
-          skipped.push({ path: entry.path, reason: "protected", existedBefore });
-        } else if (entry.status === "D") {
-          deleted.push(entry.path);
-        } else if (entry.newMode === "120000") {
-          skipped.push({ path: entry.path, reason: "symlink", existedBefore });
-        } else if (entry.newMode === "160000") {
-          skipped.push({ path: entry.path, reason: "submodule", existedBefore });
-        } else {
-          candidates.push(entry);
-        }
-      }
-      if (candidates.length + deleted.length > limits.maxFiles) {
-        throw new AgentEngineError(
-          "AGENT_DIFF_TOO_LARGE",
-          `The session changed ${candidates.length + deleted.length} files; at most ${limits.maxFiles} are accepted.`
-        );
-      }
-      const sizes = await blobSizes(git, candidates.map((c) => c.newSha));
-      let totalBytes = 0;
-      for (const [i, entry] of candidates.entries()) {
-        const size = sizes[i] ?? 0;
-        if (size > limits.maxFileBytes) {
-          throw new AgentEngineError(
-            "AGENT_DIFF_TOO_LARGE",
-            `The session left ${entry.path} at ${size} bytes; at most ${limits.maxFileBytes} bytes per file are accepted.`
-          );
-        }
-        totalBytes += size;
-      }
-      if (totalBytes > limits.maxTotalBytes) {
-        throw new AgentEngineError(
-          "AGENT_DIFF_TOO_LARGE",
-          `The session changed ${totalBytes} bytes; at most ${limits.maxTotalBytes} bytes are accepted.`
-        );
-      }
-      const files = [];
-      const blobs = await blobContents(git, candidates.map((c) => c.newSha));
-      for (const [i, entry] of candidates.entries()) {
-        const text = decodeText(blobs[i] ?? Buffer.alloc(0));
-        if (text === void 0) {
-          skipped.push({ path: entry.path, reason: "binary", existedBefore: entry.status !== "A" });
-        } else {
-          files.push({ path: entry.path, content: text, mode: entry.newMode === "100755" ? "100755" : "100644" });
-        }
-      }
-      const earlier = [...ignoredBefore].map((p) => p.replace(/\/$/, ""));
-      const related = (a, b) => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
-      const newlyIgnored = [];
-      for (const listed of [...await listIgnored()].sort()) {
-        const path = listed.replace(/\/$/, "");
-        if (!earlier.some((b) => related(path, b)) && !newlyIgnored.some((n) => related(path, n))) {
-          newlyIgnored.push(path);
-          skipped.push({ path, reason: "ignored", existedBefore: false });
-        }
-      }
-      for (const s of skipped) {
-        removeInsideWorktree(worktree, s.path);
-      }
-      const restore = skipped.filter((s) => s.existedBefore).map((s) => s.path);
-      if (restore.length > 0) {
-        await git(["checkout", before, "--pathspec-from-file=-", "--pathspec-file-nul"], restore.join("\0"));
-      }
-      return {
-        files,
-        deleted_files: deleted,
-        skipped: skipped.map(({ path, reason }) => ({ path, reason }))
-      };
-    },
-    dispose() {
-      rmSync2(gitDir, { recursive: true, force: true });
-    }
-  };
 }
-function parseDiffTree(raw) {
-  const fields = splitNul(raw);
-  const entries = [];
-  for (let i = 0; i + 1 < fields.length; i += 2) {
-    const [, newMode = "", , newSha = "", status = ""] = (fields[i] ?? "").split(" ");
-    entries.push({ newMode, newSha, status, path: fields[i + 1] ?? "" });
-  }
-  return entries;
-}
-async function blobSizes(git, shas) {
-  if (shas.length === 0) {
-    return [];
-  }
-  const out = (await git(["cat-file", "--batch-check=%(objectsize)"], `${shas.join("\n")}
-`)).toString("utf8");
-  return out.split("\n").slice(0, shas.length).map((line) => Number.parseInt(line, 10));
-}
-async function blobContents(git, shas) {
-  if (shas.length === 0) {
-    return [];
-  }
-  const out = await git(["cat-file", "--batch"], `${shas.join("\n")}
-`);
-  const blobs = [];
-  let offset = 0;
-  for (let i = 0; i < shas.length; i += 1) {
-    const headerEnd = out.indexOf(10, offset);
-    const size = Number.parseInt(out.subarray(offset, headerEnd).toString("utf8").split(" ")[2] ?? "0", 10);
-    blobs.push(out.subarray(headerEnd + 1, headerEnd + 1 + size));
-    offset = headerEnd + 1 + size + 1;
-  }
-  return blobs;
-}
-function decodeText(blob) {
-  if (blob.includes(0)) {
-    return void 0;
-  }
-  try {
-    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(blob);
-  } catch {
-    return void 0;
-  }
-}
-function splitNul(raw) {
-  return raw.toString("utf8").split("\0").filter((field) => field.length > 0);
-}
-function isFileOrSymlink(path) {
-  try {
-    const stat = lstatSync(path);
-    return stat.isFile() || stat.isSymbolicLink();
-  } catch {
-    return false;
-  }
-}
-function removeInsideWorktree(worktree, relPath) {
-  const segments = relPath.split("/");
-  let current = worktree;
-  for (const segment of segments.slice(0, -1)) {
-    current = join(current, segment);
+async function callLlmJson(options) {
+  const client = new LLMClient(options.providers);
+  if (options.responseSchema) {
     try {
-      if (lstatSync(current).isSymbolicLink()) {
-        return;
+      const res = await client.complete({
+        apiKey: options.apiKey,
+        model: options.model,
+        systemInstruction: options.systemInstruction ?? "",
+        userPrompt: options.userPrompt ?? options.prompt ?? "",
+        temperature: options.temperature,
+        responseMimeType: "application/json",
+        responseSchema: options.responseSchema,
+        tools: options.tools,
+        toolHandlers: options.toolHandlers,
+        maxToolRounds: options.maxToolRounds,
+        thinkingLevel: options.thinkingLevel,
+        maxTransientRetries: options.maxTransientRetries,
+        transientRetryBackoffSeconds: options.transientRetryBackoffSeconds,
+        requestTimeoutMs: options.requestTimeoutMs,
+        maxRateLimitWaits: options.maxRateLimitWaits,
+        fetchImpl: options.fetchImpl,
+        sleepMs: options.sleepMs,
+        logLabel: options.logLabel,
+        providers: options.providers
+      });
+      const used = res.transientRetriesUsed ?? 0;
+      if (used > 0 && options.onTransientRetriesUsed) {
+        options.onTransientRetriesUsed(used);
       }
-    } catch {
-      return;
+      return res.data;
+    } catch (err) {
+      const used = err && typeof err === "object" ? err.transientRetriesUsed ?? 0 : 0;
+      if (used > 0 && options.onTransientRetriesUsed) {
+        options.onTransientRetriesUsed(used);
+      }
+      throw err;
     }
   }
-  rmSync2(join(worktree, relPath), { recursive: true, force: true });
-}
-
-// src/agent/pi-engine.ts
-var PI_TOOLS = {
-  write: "read,bash,edit,write,grep,find,ls",
-  read_only: "read,grep,find,ls"
-};
-var PI_SETTINGS = JSON.stringify({
-  enableInstallTelemetry: false,
-  enableAnalytics: false,
-  defaultProjectTrust: "never"
-});
-var SHUTDOWN_GRACE_MS = 3e4;
-var MAX_ERROR_BODY_CHARS = 16 * 1024;
-var STDERR_TAIL_CHARS = 2e3;
-var MAX_RPC_LINE_BYTES = 8 * 1024 * 1024;
-function resolveVendoredPiDir() {
-  const here = dirname2(fileURLToPath(import.meta.url));
-  const found = ["../vendor/pi", "../../vendor/pi", "../../dist/vendor/pi"].map((rel) => resolve2(here, rel)).find((dir) => existsSync2(join2(dir, "rpc-entry.js")));
-  if (!found) {
-    throw new AgentEngineError(
-      "AGENT_ENGINE_UNAVAILABLE",
-      "The vendored Pi bundle (dist/vendor/pi) is missing; run npm run build."
-    );
-  }
-  return found;
-}
-function createPiAgentEngine(options) {
-  const sandboxRunner = options.sandboxRunner ?? runInUntrustedCodeSandbox;
-  return {
-    name: "pi",
-    async run(request) {
-      const piDir = options.piDir ?? resolveVendoredPiDir();
-      const route = translateModelForPi(request.model, request.providers, options.runnerEnv);
-      const sessionDir = mkdtempSync3(join2(tmpdir2(), "epure-pi-session-"));
-      const instructionsPath = join2(sessionDir, "instructions.md");
-      writeFileSync3(instructionsPath, request.instructions, "utf8");
-      const fdPath = options.fdPath ?? "/usr/bin/fd";
-      const fdfindPath = options.fdfindPath ?? "/usr/bin/fdfind";
-      let sessionBinDir;
-      if (!existsSync2(fdPath) && existsSync2(fdfindPath)) {
-        sessionBinDir = join2(sessionDir, "bin");
-        mkdirSync3(sessionBinDir, { recursive: true });
-        symlinkSync(fdfindPath, join2(sessionBinDir, "fd"));
-      }
-      const basePath = options.runnerEnv.PATH ?? process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
-      const sessionPath = sessionBinDir ? basePath ? `${sessionBinDir}:${basePath}` : sessionBinDir : void 0;
-      const readOnlyCwd = request.toolPolicy === "read_only";
-      const outcome = { settled: false, timedOut: false, lineTooLong: false, finalMessage: "" };
-      let upstreamError;
-      let proxyNonce = "";
-      let snapshot;
-      try {
-        snapshot = await snapshotWorktree(request.worktree, {
-          trackedPaths: request.trackedPaths,
-          isProtectedPath: request.isProtectedPath
-        });
-        const capabilities = options.kernelCapabilities ?? probeKernelSandboxCapabilities(options.runnerEnv);
-        const backend = selectKernelBackend("proxy_only", capabilities);
-        console.info(
-          `[pi-engine] session starting (role=${request.role}, policy=${request.toolPolicy}, sandbox=${backend})`
-        );
-        const result = await sandboxRunner({
-          isolationAvailable: true,
-          runnerEnv: sessionPath ? { ...options.runnerEnv, PATH: sessionPath } : options.runnerEnv,
-          enforceKernelSandbox: options.enforceKernelSandbox ?? true,
-          ...options.kernelCapabilities ? { kernelCapabilities: options.kernelCapabilities } : {},
-          command: process.execPath,
-          args: [
-            join2(piDir, "rpc-entry.js"),
-            "--no-session",
-            "--no-extensions",
-            "--no-mcp",
-            "--no-skills",
-            "--no-prompt-templates",
-            "--no-themes",
-            "--no-context-files",
-            "--no-approve",
-            "--offline",
-            "--provider",
-            route.provider,
-            "--model",
-            route.modelId,
-            ...request.thinking ? ["--thinking", request.thinking] : [],
-            "--tools",
-            PI_TOOLS[request.toolPolicy],
-            "--append-system-prompt",
-            instructionsPath
-          ],
-          cwd: request.worktree,
-          readOnlyCwd,
-          networkPolicy: "proxy_only",
-          timeoutMs: request.timeoutMs + SHUTDOWN_GRACE_MS,
-          llm: { model: request.model, providers: request.providers },
-          maxLlmRequests: request.maxLlmRequests,
-          readOnlyPaths: [piDir, sessionDir],
-          agentSession: {
-            readOnlyCwd,
-            homeFiles: (proxy) => {
-              proxyNonce = proxy?.proxyNonce ?? "";
-              return proxy ? {
-                ".pi/agent/models.json": route.modelsJson(proxy.proxyUrl),
-                ".pi/agent/settings.json": PI_SETTINGS
-              } : {};
-            },
-            env: (home) => ({
-              ...sessionPath ? { PATH: sessionPath } : {},
-              PI_CODING_AGENT_DIR: `${home}/.pi/agent`,
-              PI_OFFLINE: "1",
-              PI_TELEMETRY: "0",
-              PI_SKIP_VERSION_CHECK: "1"
-            })
-          },
-          observeLlmResponse: (exchange) => {
-            if (exchange.status < 400) {
-              upstreamError = void 0;
-              return void 0;
-            }
-            return collectErrorBody(exchange, (error) => {
-              upstreamError = error;
-            });
-          },
-          interact: (io) => driveRpcSession(io, request.prompt, request.timeoutMs, outcome)
-        });
-        if (result.error_code === "SANDBOX_ISOLATION_UNAVAILABLE") {
-          throw new AgentEngineError("AGENT_ISOLATION_UNAVAILABLE", result.error_message);
-        }
-        if (!result.isolated) {
-          throw new AgentEngineError("AGENT_SANDBOX_FAILED", result.error_message);
-        }
-        if (result.error_code === "LLM_REQUEST_CAP_REACHED") {
-          throw new AgentEngineError(
-            "AGENT_REQUEST_CAP_REACHED",
-            `Agent session (${request.role}) was aborted after ${request.maxLlmRequests ?? 0} LLM requests.`
-          );
-        }
-        if (outcome.timedOut) {
-          throw new AgentEngineError(
-            "AGENT_TIMEOUT",
-            `Agent session (${request.role}) exceeded ${request.timeoutMs} ms and was aborted.`
-          );
-        }
-        if (outcome.lineTooLong) {
-          throw new AgentEngineError(
-            "AGENT_PROTOCOL_ERROR",
-            `Pi wrote an RPC line over ${MAX_RPC_LINE_BYTES} bytes; the session was killed.`
-          );
-        }
-        if (outcome.rejected !== void 0) {
-          throw new AgentEngineError("AGENT_PROTOCOL_ERROR", `Pi rejected the prompt: ${outcome.rejected}`);
-        }
-        if (!outcome.settled) {
-          throw new AgentEngineError(
-            "AGENT_PROTOCOL_ERROR",
-            `Pi exited with code ${result.exit_code} before the session settled: ${result.stderr.slice(-STDERR_TAIL_CHARS)}`
-          );
-        }
-        if (outcome.lastStopReason === "error" || outcome.lastStopReason === "aborted") {
-          throw sessionProviderError(request, upstreamError, outcome.lastErrorMessage, options.runnerEnv);
-        }
-        const diff = await snapshot.collect();
-        assertNoSecretMaterial(
-          [
-            ...diff.files.map((f) => ({ label: f.path, text: f.content })),
-            ...[...diff.files, ...diff.skipped].map((f) => ({ label: "a file path", text: f.path })),
-            { label: "the final message", text: outcome.finalMessage }
-          ],
-          [
-            ...collectRunnerSecretValues(options.runnerEnv),
-            ...providerKeys(request, options.runnerEnv),
-            ...options.extraSecrets ?? [],
-            ...request.secrets ?? [],
-            proxyNonce
-          ]
-        );
-        return { finalMessage: outcome.finalMessage, diff };
-      } finally {
-        snapshot?.dispose();
-        rmSync3(sessionDir, { recursive: true, force: true });
-      }
-    }
-  };
-}
-function providerKeys(request, env) {
-  const { providerConfig } = parseModelIdentifier(request.model, request.providers, env);
-  return providerConfig?.apiKey ? [providerConfig.apiKey] : [];
-}
-function collectErrorBody(exchange, record) {
-  let body = "";
-  const decoder = new TextDecoder();
-  return {
-    onChunk(chunk) {
-      if (body.length < MAX_ERROR_BODY_CHARS) {
-        body += decoder.decode(chunk, { stream: true });
-      }
-    },
-    onEnd() {
-      record({ status: exchange.status, body: body.slice(0, MAX_ERROR_BODY_CHARS) });
-    }
-  };
-}
-function sessionProviderError(request, upstreamError, errorMessage, env) {
-  const { provider, model } = parseModelIdentifier(request.model, request.providers, env);
-  if (upstreamError) {
-    return classifyHttpError({ status: upstreamError.status, bodyText: upstreamError.body, provider, model });
-  }
-  return new LLMError(
-    `Agent session (${request.role}) failed on ${request.model}: ${errorMessage ?? "no error message"}`,
-    { provider }
-  );
-}
-async function driveRpcSession(io, prompt, timeoutMs, outcome) {
-  const send = (command) => {
-    io.stdin.write(`${JSON.stringify(command)}
-`);
-  };
-  let bytesSinceNewline = 0;
-  const watchLineLength = (chunk) => {
-    const lastNewline = chunk.lastIndexOf(10);
-    bytesSinceNewline = lastNewline >= 0 ? chunk.length - lastNewline - 1 : bytesSinceNewline + chunk.length;
-    if (bytesSinceNewline > MAX_RPC_LINE_BYTES && !outcome.lineTooLong) {
-      outcome.lineTooLong = true;
-      io.kill();
-    }
-  };
-  io.stdout.on("data", watchLineLength);
-  const lines = createInterface({ input: io.stdout, crlfDelay: Infinity });
-  const timer = setTimeout(() => {
-    outcome.timedOut = true;
-    send({ type: "abort" });
-  }, timeoutMs);
-  try {
-    send({ id: "prompt", type: "prompt", message: prompt });
-    for await (const line of lines) {
-      if (outcome.lineTooLong) {
-        return;
-      }
-      const record = parseRecord(line);
-      if (record?.type === "response" && record.id === "prompt") {
-        if (record.success !== true) {
-          outcome.rejected = String(record.error ?? "unknown error");
-          return;
-        }
-        if (record.data?.disposition === "handled") {
-          send({ id: "final", type: "get_last_assistant_text" });
-        }
-      } else if (record?.type === "response" && record.id === "final") {
-        const data = record.data;
-        outcome.finalMessage = typeof data?.text === "string" ? data.text : "";
-        outcome.settled = true;
-        return;
-      } else if (record?.type === "message_end") {
-        const message = record.message;
-        if (message?.role === "assistant") {
-          outcome.lastStopReason = String(message.stopReason ?? "");
-          outcome.lastErrorMessage = typeof message.errorMessage === "string" ? message.errorMessage : void 0;
-        }
-      } else if (record?.type === "agent_settled") {
-        send({ id: "final", type: "get_last_assistant_text" });
-      }
-    }
-  } finally {
-    clearTimeout(timer);
-    io.stdout.off("data", watchLineLength);
-    lines.close();
-    io.stdout.resume();
-  }
-}
-function parseRecord(line) {
-  try {
-    const parsed = JSON.parse(line);
-    return parsed !== null && typeof parsed === "object" ? parsed : void 0;
-  } catch {
-    return void 0;
-  }
-}
-
-// src/orchestrator/issue-orchestrator.ts
-import { randomUUID } from "node:crypto";
-
-// src/auth/github-app-jwt.ts
-import { createSign } from "node:crypto";
-function base64UrlEncode(input) {
-  const buf = typeof input === "string" ? Buffer.from(input, "utf8") : input;
-  return buf.toString("base64").replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
-}
-function normalizePemKey(rawKey) {
-  const trimmed = rawKey.trim().replace(/\\n/g, "\n");
-  return trimmed;
-}
-function createGitHubAppJwt(credentials, nowEpochSeconds = Math.floor(Date.now() / 1e3)) {
-  const header = { alg: "RS256", typ: "JWT" };
-  const payload = {
-    iat: nowEpochSeconds - 60,
-    exp: nowEpochSeconds + 9 * 60,
-    iss: credentials.appId.trim()
-  };
-  const encodedHeader = base64UrlEncode(JSON.stringify(header));
-  const encodedPayload = base64UrlEncode(JSON.stringify(payload));
-  const signingInput = `${encodedHeader}.${encodedPayload}`;
-  const signer = createSign("RSA-SHA256");
-  signer.update(signingInput);
-  signer.end();
-  const signature = signer.sign(normalizePemKey(credentials.privateKeyPem));
-  return `${signingInput}.${base64UrlEncode(signature)}`;
-}
-async function mintRepositoryInstallationToken(params) {
-  const [owner, repo] = params.repository.trim().split("/");
-  if (!owner || !repo) {
-    throw new Error(`Invalid repository slug '${params.repository}'.`);
-  }
-  const baseUrl = (params.apiBaseUrl ?? "https://api.github.com").replace(
-    /\/+$/,
-    ""
-  );
-  const fetchFn = params.fetchImpl ?? fetch;
-  const appJwt = createGitHubAppJwt({
-    appId: params.appId,
-    privateKeyPem: params.privateKeyPem
+  const rawText = await callLlmText({
+    ...options,
+    responseMimeType: options.responseMimeType ?? "application/json"
   });
-  const installResp = await fetchFn(
-    `${baseUrl}/repos/${owner}/${repo}/installation`,
-    {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${appJwt}`,
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28"
-      }
-    }
-  );
-  if (!installResp.ok) {
-    const bodyText = await installResp.text();
-    throw new Error(
-      `Failed to resolve GitHub App installation for '${params.repository}' (HTTP ${installResp.status}): ${bodyText}`
-    );
-  }
-  const installData = await installResp.json();
-  if (typeof installData.id !== "number") {
-    throw new Error(
-      `GitHub App installation response for '${params.repository}' did not contain an installation ID.`
-    );
-  }
-  const tokenBody = {
-    repositories: [repo]
-  };
-  if (params.permissions && Object.keys(params.permissions).length > 0) {
-    tokenBody.permissions = params.permissions;
-  }
-  const tokenResp = await fetchFn(
-    `${baseUrl}/app/installations/${installData.id}/access_tokens`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${appJwt}`,
-        Accept: "application/vnd.github+json",
-        "Content-Type": "application/json",
-        "X-GitHub-Api-Version": "2022-11-28"
-      },
-      body: JSON.stringify(tokenBody)
-    }
-  );
-  if (!tokenResp.ok) {
-    const errText = await tokenResp.text();
-    throw new Error(
-      `Failed to mint installation token for installation ${installData.id} (HTTP ${tokenResp.status}): ${errText}`
-    );
-  }
-  const tokenData = await tokenResp.json();
-  if (typeof tokenData.token !== "string" || !tokenData.token) {
-    throw new Error("GitHub installation token response was empty.");
-  }
-  return {
-    token: tokenData.token,
-    expiresAt: tokenData.expires_at ?? new Date(Date.now() + 36e5).toISOString(),
-    installationId: installData.id
-  };
+  return extractJsonObject2(rawText);
 }
-async function revokeGitHubInstallationToken(params) {
-  const baseUrl = (params.apiBaseUrl ?? "https://api.github.com").replace(
-    /\/+$/,
-    ""
-  );
-  const fetchFn = params.fetchImpl ?? fetch;
-  await fetchFn(`${baseUrl}/installation/token`, {
-    method: "DELETE",
-    headers: {
-      Authorization: `Bearer ${params.token}`,
-      Accept: "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28"
-    }
-  });
+function extractJsonObject2(rawText, schemaSpec) {
+  return parseAndValidateStructuredOutput(rawText, schemaSpec);
 }
+
+// src/review/reviewers-dir.ts
+var DEFAULT_REVIEWERS_DIR = ".agents/reviewers";
 
 // src/bootstrap/ci-and-renovate.ts
-import { existsSync as existsSync3, readdirSync, readFileSync } from "node:fs";
-import { basename, join as join3 } from "node:path";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { basename, join } from "node:path";
 var PINNED_ACTIONS_CHECKOUT_SHA = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1";
 var PINNED_ACTIONS_SETUP_NODE_SHA = "actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0";
 var PINNED_ACTIONS_SETUP_PYTHON_SHA = "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0";
@@ -4368,16 +3706,16 @@ function createRepoFileReader(root, targetFilesHint) {
     if (hints.includes(clean)) {
       return true;
     }
-    if (root && existsSync3(join3(root, clean))) {
+    if (root && existsSync(join(root, clean))) {
       return true;
     }
     return false;
   };
   const readFileSafe = (relPath) => {
     const clean = relPath.replace(/^\.\/+/, "");
-    if (root && existsSync3(join3(root, clean))) {
+    if (root && existsSync(join(root, clean))) {
       try {
-        return readFileSync(join3(root, clean), "utf8");
+        return readFileSync(join(root, clean), "utf8");
       } catch {
         return void 0;
       }
@@ -4399,9 +3737,9 @@ function discoverVerificationProfile(params) {
       workflowMap.set(normalizedPath, content);
     }
   }
-  if (root && existsSync3(join3(root, ".github", "workflows"))) {
+  if (root && existsSync(join(root, ".github", "workflows"))) {
     try {
-      const entries = readdirSync(join3(root, ".github", "workflows")).sort();
+      const entries = readdirSync(join(root, ".github", "workflows")).sort();
       for (const entry of entries) {
         if (!/\.ya?ml$/i.test(entry)) {
           continue;
@@ -4435,9 +3773,9 @@ function discoverVerificationProfile(params) {
   }
   const secondLevelParents = ["packages", "services", "apps", "crates", "cmd"];
   for (const parent of secondLevelParents) {
-    if (root && existsSync3(join3(root, parent))) {
+    if (root && existsSync(join(root, parent))) {
       try {
-        const subEntries = readdirSync(join3(root, parent), {
+        const subEntries = readdirSync(join(root, parent), {
           withFileTypes: true
         }).filter((d) => d.isDirectory()).map((d) => d.name).sort();
         for (const sub of subEntries) {
@@ -4627,9 +3965,9 @@ function discoverVerificationProfile(params) {
         scriptFiles.add(h);
       }
     }
-    if (root && existsSync3(join3(root, "scripts"))) {
+    if (root && existsSync(join(root, "scripts"))) {
       try {
-        for (const entry of readdirSync(join3(root, "scripts")).sort()) {
+        for (const entry of readdirSync(join(root, "scripts")).sort()) {
           if (entry.endsWith(".py")) {
             scriptFiles.add(`scripts/${entry}`);
           }
@@ -5101,90 +4439,832 @@ function buildStackAwareCiWorkflowYaml(params) {
   };
 }
 
-// src/orchestrator/llm-helper.ts
-async function callLlmText(options) {
-  const client = new LLMClient(options.providers);
-  try {
-    const res = await client.complete({
-      apiKey: options.apiKey,
-      model: options.model,
-      systemInstruction: options.systemInstruction ?? "",
-      userPrompt: options.userPrompt ?? options.prompt ?? "",
-      temperature: options.temperature,
-      responseMimeType: options.responseMimeType,
-      responseSchema: options.responseSchema,
-      tools: options.tools,
-      toolHandlers: options.toolHandlers,
-      maxToolRounds: options.maxToolRounds,
-      thinkingLevel: options.thinkingLevel,
-      maxTransientRetries: options.maxTransientRetries,
-      transientRetryBackoffSeconds: options.transientRetryBackoffSeconds,
-      requestTimeoutMs: options.requestTimeoutMs,
-      maxRateLimitWaits: options.maxRateLimitWaits,
-      fetchImpl: options.fetchImpl,
-      sleepMs: options.sleepMs,
-      logLabel: options.logLabel,
-      providers: options.providers
-    });
-    const used = res.transientRetriesUsed ?? 0;
-    if (used > 0 && options.onTransientRetriesUsed) {
-      options.onTransientRetriesUsed(used);
-    }
-    return res.text;
-  } catch (err) {
-    const used = err && typeof err === "object" ? err.transientRetriesUsed ?? 0 : 0;
-    if (used > 0 && options.onTransientRetriesUsed) {
-      options.onTransientRetriesUsed(used);
-    }
-    throw err;
-  }
+// src/bootstrap/setup-repo.ts
+var CONVENTIONAL_COMMIT_PATTERN_REGEX = "^(feat|fix|docs|style|refactor|perf|test|chore|ci|build|revert)(\\([a-z0-9/-]+\\))?(!)?: .+";
+var DEFAULT_VERIFICATION_PROFILE = {
+  wait_for_external_ci: true,
+  external_ci_timeout_minutes: 15,
+  grace_window_seconds: 45,
+  targets: []
+};
+var DEFAULT_AGENTS_CONFIG = {
+  harness: "pi",
+  models: {
+    planning: "anthropic/claude-sonnet-4-20250514",
+    implementation: "anthropic/claude-sonnet-4-20250514",
+    review: "openai/gpt-4.1"
+  },
+  reviewers_dir: DEFAULT_REVIEWERS_DIR,
+  llm_environment: "epure-agent",
+  merge_policy: "strict",
+  max_code_fix_attempts: 3,
+  max_transient_api_retries: 4,
+  transient_retry_backoff_seconds: [5, 15, 45, 120],
+  llm_request_timeout_seconds: 900,
+  job_timeout_minutes: 60,
+  review_timeout_minutes: 30,
+  max_concurrent_tasks_per_feature: 3,
+  trace_retention_days: 30,
+  preview_retention_days: 14,
+  github_pages_previews: false,
+  verification: DEFAULT_VERIFICATION_PROFILE
+};
+var LLM_ENVIRONMENT_NAME_PATTERN = /^[A-Za-z0-9._-]+$/;
+function isUnsafeReviewersDir(dir) {
+  return dir === "" || dir === "." || /^(?:[\\/]|[A-Za-z]:)/.test(dir) || dir.split(/[\\/]/).includes("..") || /^src(?:[\\/]|$)/i.test(dir);
 }
-async function callLlmJson(options) {
-  const client = new LLMClient(options.providers);
-  if (options.responseSchema) {
-    try {
-      const res = await client.complete({
-        apiKey: options.apiKey,
-        model: options.model,
-        systemInstruction: options.systemInstruction ?? "",
-        userPrompt: options.userPrompt ?? options.prompt ?? "",
-        temperature: options.temperature,
-        responseMimeType: "application/json",
-        responseSchema: options.responseSchema,
-        tools: options.tools,
-        toolHandlers: options.toolHandlers,
-        maxToolRounds: options.maxToolRounds,
-        thinkingLevel: options.thinkingLevel,
-        maxTransientRetries: options.maxTransientRetries,
-        transientRetryBackoffSeconds: options.transientRetryBackoffSeconds,
-        requestTimeoutMs: options.requestTimeoutMs,
-        maxRateLimitWaits: options.maxRateLimitWaits,
-        fetchImpl: options.fetchImpl,
-        sleepMs: options.sleepMs,
-        logLabel: options.logLabel,
-        providers: options.providers
+function normalizeVerificationTarget(target) {
+  return {
+    name: target.name,
+    working_directory: target.working_directory,
+    kind: target.kind,
+    path_patterns: [...target.path_patterns],
+    ...target.install_command ? { install_command: target.install_command } : {},
+    ...target.codegen_command ? { codegen_command: target.codegen_command } : {},
+    ...target.typecheck_command ? { typecheck_command: target.typecheck_command } : {},
+    ...target.lint_command ? { lint_command: target.lint_command } : {},
+    ...target.test_command ? { test_command: target.test_command } : {},
+    ...target.build_command ? { build_command: target.build_command } : {}
+  };
+}
+function attachDualProviderConfigGetters(entry) {
+  const definePair = (snakeKey, camelKey) => {
+    const hasSnake = Object.prototype.hasOwnProperty.call(entry, snakeKey);
+    const hasCamel = Object.prototype.hasOwnProperty.call(entry, camelKey);
+    if (hasSnake && !hasCamel) {
+      Object.defineProperty(entry, camelKey, {
+        get() {
+          return entry[snakeKey];
+        },
+        enumerable: false,
+        configurable: true
       });
-      const used = res.transientRetriesUsed ?? 0;
-      if (used > 0 && options.onTransientRetriesUsed) {
-        options.onTransientRetriesUsed(used);
-      }
-      return res.data;
-    } catch (err) {
-      const used = err && typeof err === "object" ? err.transientRetriesUsed ?? 0 : 0;
-      if (used > 0 && options.onTransientRetriesUsed) {
-        options.onTransientRetriesUsed(used);
-      }
-      throw err;
+    } else if (hasCamel && !hasSnake) {
+      Object.defineProperty(entry, snakeKey, {
+        get() {
+          return entry[camelKey];
+        },
+        enumerable: false,
+        configurable: true
+      });
+    }
+  };
+  definePair("api_key", "apiKey");
+  definePair("base_url", "baseUrl");
+  definePair("api_version", "apiVersion");
+  definePair("default_headers", "defaultHeaders");
+  return entry;
+}
+function normalizeAgentsProvidersMap(providers, preferSnakeCase = false) {
+  if (!providers) {
+    return void 0;
+  }
+  const keys = Object.keys(providers);
+  if (keys.length === 0) {
+    return void 0;
+  }
+  const out = {};
+  for (const [alias, raw] of Object.entries(providers)) {
+    const cleanAlias = alias.trim();
+    if (!cleanAlias || !raw) {
+      continue;
+    }
+    const entry = {};
+    if (raw.provider) {
+      entry.provider = raw.provider;
+    }
+    const apiKeyVal = raw.api_key ?? raw.apiKey;
+    const baseUrlVal = raw.base_url ?? raw.baseUrl;
+    const apiVersionVal = raw.api_version ?? raw.apiVersion;
+    const defaultHeadersVal = raw.default_headers ?? raw.defaultHeaders;
+    const useSnake = preferSnakeCase || raw.api_key !== void 0 || raw.base_url !== void 0 || raw.api_version !== void 0 || raw.default_headers !== void 0;
+    if (apiKeyVal !== void 0) {
+      entry[useSnake ? "api_key" : "apiKey"] = apiKeyVal;
+    }
+    if (baseUrlVal !== void 0) {
+      entry[useSnake ? "base_url" : "baseUrl"] = baseUrlVal;
+    }
+    if (apiVersionVal !== void 0) {
+      entry[useSnake ? "api_version" : "apiVersion"] = apiVersionVal;
+    }
+    if (defaultHeadersVal !== void 0) {
+      entry[useSnake ? "default_headers" : "defaultHeaders"] = {
+        ...defaultHeadersVal
+      };
+    }
+    if (raw.effort !== void 0) {
+      entry.effort = raw.effort;
+    }
+    out[cleanAlias] = attachDualProviderConfigGetters(entry);
+  }
+  return Object.keys(out).length > 0 ? out : void 0;
+}
+function resolveAgentsConfig(overrides = {}) {
+  const sec = overrides.security_overrides;
+  if (sec) {
+    if (sec.require_write_permission === false) {
+      return {
+        valid: false,
+        error_code: "SECURITY_INVARIANT_VIOLATION",
+        error_message: "Local .github/agents.yml cannot disable effective write permission verification (ADR-0004, ADR-0010).",
+        config: DEFAULT_AGENTS_CONFIG
+      };
+    }
+    if (sec.sandbox_isolation === false) {
+      return {
+        valid: false,
+        error_code: "SECURITY_INVARIANT_VIOLATION",
+        error_message: "Local .github/agents.yml cannot disable untrusted code sandbox isolation (ADR-0011, ADR-0023).",
+        config: DEFAULT_AGENTS_CONFIG
+      };
+    }
+    if (sec.allow_agent_release === true) {
+      return {
+        valid: false,
+        error_code: "SECURITY_INVARIANT_VIOLATION",
+        error_message: "Local .github/agents.yml cannot grant release authority to the Agent App (ADR-0009, ADR-0010).",
+        config: DEFAULT_AGENTS_CONFIG
+      };
+    }
+    if (sec.auto_merge_dev === true || sec.auto_merge_main === true) {
+      return {
+        valid: false,
+        error_code: "SECURITY_INVARIANT_VIOLATION",
+        error_message: "Local .github/agents.yml cannot enable automatic merging into 'dev' or 'main' (ADR-0011).",
+        config: DEFAULT_AGENTS_CONFIG
+      };
     }
   }
-  const rawText = await callLlmText({
-    ...options,
-    responseMimeType: options.responseMimeType ?? "application/json"
-  });
-  return extractJsonObject2(rawText);
+  if (overrides.harness !== void 0 && overrides.harness !== "pi" && overrides.harness !== "cursor") {
+    return {
+      valid: false,
+      error_code: "SECURITY_INVARIANT_VIOLATION",
+      error_message: `Local .github/agents.yml harness '${String(overrides.harness)}' is not supported; expected 'pi' or 'cursor'.`,
+      config: DEFAULT_AGENTS_CONFIG
+    };
+  }
+  const reviewersDir = (overrides.reviewers_dir ?? DEFAULT_AGENTS_CONFIG.reviewers_dir).trim().replace(/^(?:\.\/)+/, "").replace(/\/+$/, "");
+  if (isUnsafeReviewersDir(reviewersDir)) {
+    return {
+      valid: false,
+      error_code: "SECURITY_INVARIANT_VIOLATION",
+      error_message: `Local .github/agents.yml reviewers_dir '${overrides.reviewers_dir ?? ""}' must be a relative directory outside 'src/' without '..' segments.`,
+      config: DEFAULT_AGENTS_CONFIG
+    };
+  }
+  const llmEnvironment = (overrides.llm_environment ?? DEFAULT_AGENTS_CONFIG.llm_environment).trim();
+  if (!LLM_ENVIRONMENT_NAME_PATTERN.test(llmEnvironment)) {
+    return {
+      valid: false,
+      error_code: "SECURITY_INVARIANT_VIOLATION",
+      error_message: `Local .github/agents.yml llm_environment '${overrides.llm_environment ?? ""}' must match ${LLM_ENVIRONMENT_NAME_PATTERN.source}.`,
+      config: DEFAULT_AGENTS_CONFIG
+    };
+  }
+  const pagesPreviews = overrides.github_pages_previews ?? DEFAULT_AGENTS_CONFIG.github_pages_previews;
+  if (pagesPreviews) {
+    if (overrides.github_pages_human_consent !== true || overrides.preview_separate_origin !== true) {
+      return {
+        valid: false,
+        error_code: "PAGES_PREVIEW_CONSENT_OR_ORIGIN_REQUIRED",
+        error_message: "GitHub Pages previews require explicit human consent (github_pages_human_consent: true) and an isolated non-production origin (preview_separate_origin: true) per Q70/Q73.",
+        config: DEFAULT_AGENTS_CONFIG
+      };
+    }
+  }
+  const verification = overrides.verification ? {
+    wait_for_external_ci: overrides.verification.wait_for_external_ci ?? DEFAULT_VERIFICATION_PROFILE.wait_for_external_ci,
+    external_ci_timeout_minutes: overrides.verification.external_ci_timeout_minutes ?? DEFAULT_VERIFICATION_PROFILE.external_ci_timeout_minutes,
+    grace_window_seconds: overrides.verification.grace_window_seconds ?? DEFAULT_VERIFICATION_PROFILE.grace_window_seconds,
+    ...overrides.verification.deferred_external_workflows && overrides.verification.deferred_external_workflows.length > 0 ? {
+      deferred_external_workflows: [
+        ...overrides.verification.deferred_external_workflows
+      ]
+    } : {},
+    targets: overrides.verification.targets ? overrides.verification.targets.map(normalizeVerificationTarget) : DEFAULT_VERIFICATION_PROFILE.targets
+  } : DEFAULT_VERIFICATION_PROFILE;
+  const normalizedProviders = normalizeAgentsProvidersMap(overrides.providers);
+  const webTools = overrides.web_tools ? {
+    enabled: overrides.web_tools.enabled ?? true,
+    phases: overrides.web_tools.phases ? [...overrides.web_tools.phases] : ["plan", "spec", "implementation"],
+    ...overrides.web_tools.max_requests_per_turn !== void 0 ? { max_requests_per_turn: overrides.web_tools.max_requests_per_turn } : {},
+    ...overrides.web_tools.max_requests_per_run !== void 0 ? { max_requests_per_run: overrides.web_tools.max_requests_per_run } : {},
+    ...overrides.web_tools.max_bytes_per_response !== void 0 ? {
+      max_bytes_per_response: overrides.web_tools.max_bytes_per_response
+    } : {},
+    ...overrides.web_tools.max_fetch_bytes !== void 0 ? { max_fetch_bytes: overrides.web_tools.max_fetch_bytes } : {},
+    ...overrides.web_tools.timeout_ms !== void 0 ? { timeout_ms: overrides.web_tools.timeout_ms } : {}
+  } : void 0;
+  const config = {
+    harness: overrides.harness ?? DEFAULT_AGENTS_CONFIG.harness,
+    models: {
+      planning: overrides.models?.planning ?? DEFAULT_AGENTS_CONFIG.models.planning,
+      implementation: overrides.models?.implementation ?? DEFAULT_AGENTS_CONFIG.models.implementation,
+      review: overrides.models?.review ?? DEFAULT_AGENTS_CONFIG.models.review
+    },
+    ...normalizedProviders ? { providers: normalizedProviders } : {},
+    reviewers_dir: reviewersDir,
+    llm_environment: llmEnvironment,
+    merge_policy: overrides.merge_policy ?? DEFAULT_AGENTS_CONFIG.merge_policy,
+    max_code_fix_attempts: overrides.max_code_fix_attempts ?? DEFAULT_AGENTS_CONFIG.max_code_fix_attempts,
+    ...overrides.agent_max_llm_requests !== void 0 ? { agent_max_llm_requests: Math.max(1, Math.floor(overrides.agent_max_llm_requests)) } : {},
+    ...overrides.max_epic_phases !== void 0 ? {
+      max_epic_phases: Math.min(
+        3,
+        Math.max(1, Math.floor(overrides.max_epic_phases))
+      )
+    } : {},
+    max_transient_api_retries: overrides.max_transient_api_retries ?? DEFAULT_AGENTS_CONFIG.max_transient_api_retries,
+    transient_retry_backoff_seconds: overrides.transient_retry_backoff_seconds ?? DEFAULT_AGENTS_CONFIG.transient_retry_backoff_seconds,
+    llm_request_timeout_seconds: overrides.llm_request_timeout_seconds !== void 0 && overrides.llm_request_timeout_seconds > 0 ? overrides.llm_request_timeout_seconds : DEFAULT_AGENTS_CONFIG.llm_request_timeout_seconds,
+    job_timeout_minutes: overrides.job_timeout_minutes ?? DEFAULT_AGENTS_CONFIG.job_timeout_minutes,
+    review_timeout_minutes: overrides.review_timeout_minutes ?? DEFAULT_AGENTS_CONFIG.review_timeout_minutes,
+    max_concurrent_tasks_per_feature: overrides.max_concurrent_tasks_per_feature ?? DEFAULT_AGENTS_CONFIG.max_concurrent_tasks_per_feature,
+    trace_retention_days: overrides.trace_retention_days ?? DEFAULT_AGENTS_CONFIG.trace_retention_days,
+    preview_retention_days: overrides.preview_retention_days ?? DEFAULT_AGENTS_CONFIG.preview_retention_days,
+    github_pages_previews: pagesPreviews,
+    verification,
+    ...webTools ? { web_tools: webTools } : {},
+    ...overrides.pricing ? { pricing: overrides.pricing } : {}
+  };
+  return {
+    valid: true,
+    error_code: "NONE",
+    error_message: "",
+    config
+  };
 }
-function extractJsonObject2(rawText, schemaSpec) {
-  return parseAndValidateStructuredOutput(rawText, schemaSpec);
+function unquoteYamlScalar(raw) {
+  const trimmed = raw.trim();
+  if (trimmed.startsWith('"') && trimmed.endsWith('"') || trimmed.startsWith("'") && trimmed.endsWith("'")) {
+    if (trimmed.startsWith('"')) {
+      try {
+        return JSON.parse(trimmed);
+      } catch {
+        return trimmed.slice(1, -1);
+      }
+    }
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+function parseYamlStringArrayInline(raw) {
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) {
+    return [];
+  }
+  const inner = trimmed.slice(1, -1).trim();
+  if (!inner) {
+    return [];
+  }
+  const items = [];
+  let current = "";
+  let inQuote = null;
+  let escaped = false;
+  for (let i = 0; i < inner.length; i += 1) {
+    const ch = inner[i] ?? "";
+    if (escaped) {
+      current += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\" && inQuote === '"') {
+      current += ch;
+      escaped = true;
+      continue;
+    }
+    if ((ch === '"' || ch === "'") && !inQuote) {
+      inQuote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === inQuote) {
+      inQuote = null;
+      current += ch;
+      continue;
+    }
+    if (ch === "," && !inQuote) {
+      items.push(unquoteYamlScalar(current));
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  if (current.trim().length > 0) {
+    items.push(unquoteYamlScalar(current));
+  }
+  return items;
+}
+function parsePricingEntry(model, fields) {
+  const dollars = (key) => {
+    const raw = fields[key]?.trim();
+    const value = raw ? Number(raw) : Number.NaN;
+    if (!Number.isFinite(value) || value < 0) {
+      throw new Error(
+        `pricing.${model}.${key} must be a non-negative number of dollars per million tokens.`
+      );
+    }
+    return value;
+  };
+  const text = (key) => {
+    const value = fields[key]?.trim();
+    if (!value) {
+      throw new Error(`pricing.${model}.${key} is required.`);
+    }
+    return value;
+  };
+  return {
+    input_per_mtok: dollars("input_per_mtok"),
+    ...fields.cached_input_per_mtok !== void 0 ? { cached_input_per_mtok: dollars("cached_input_per_mtok") } : {},
+    output_per_mtok: dollars("output_per_mtok"),
+    source: text("source"),
+    read_on: text("read_on")
+  };
+}
+function parseAgentsYaml(yamlContent) {
+  let harness;
+  let reviewers_dir;
+  let llm_environment;
+  const models = {};
+  const providers = {};
+  let currentProviderAlias = null;
+  let inProviderDefaultHeaders = false;
+  let merge_policy;
+  let task_auto_merge_enabled;
+  let max_code_fix_attempts;
+  let max_epic_phases;
+  let max_transient_api_retries;
+  let transient_retry_backoff_seconds;
+  let llm_request_timeout_seconds;
+  let job_timeout_minutes;
+  let review_timeout_minutes;
+  let agent_max_llm_requests;
+  let max_concurrent_tasks_per_feature;
+  let trace_retention_days;
+  let preview_retention_days;
+  let github_pages_previews;
+  let github_pages_human_consent;
+  let preview_separate_origin;
+  let wait_for_external_ci;
+  let external_ci_timeout_minutes;
+  let grace_window_seconds;
+  let deferred_external_workflows;
+  let hasTargetsKey = false;
+  const targets = [];
+  const securityOverrides = {};
+  const webToolsOverrides = {};
+  const pricingFields = {};
+  let currentPricingModel = null;
+  const lines = yamlContent.split(/\r?\n/);
+  let section = "root";
+  let inTargets = false;
+  let inDeferredWorkflows = false;
+  let inCurrentTargetPathPatterns = false;
+  let currentTarget = null;
+  const parseBool = (raw) => {
+    const v = unquoteYamlScalar(raw).toLowerCase();
+    if (v === "true") return true;
+    if (v === "false") return false;
+    return void 0;
+  };
+  const parseNum = (raw) => {
+    const n = Number.parseInt(unquoteYamlScalar(raw), 10);
+    return Number.isFinite(n) ? n : void 0;
+  };
+  const assignTargetField = (targetObj, key, rawVal) => {
+    const val = unquoteYamlScalar(rawVal);
+    if (key === "name") {
+      targetObj.name = val;
+    } else if (key === "working_directory") {
+      targetObj.working_directory = val;
+    } else if (key === "kind") {
+      targetObj.kind = val;
+    } else if (key === "path_patterns") {
+      if (rawVal.trim().startsWith("[")) {
+        targetObj.path_patterns = parseYamlStringArrayInline(rawVal);
+        inCurrentTargetPathPatterns = false;
+      } else {
+        targetObj.path_patterns = [];
+        inCurrentTargetPathPatterns = true;
+      }
+    } else if (key === "install_command") {
+      targetObj.install_command = val;
+    } else if (key === "codegen_command") {
+      targetObj.codegen_command = val;
+    } else if (key === "typecheck_command") {
+      targetObj.typecheck_command = val;
+    } else if (key === "lint_command") {
+      targetObj.lint_command = val;
+    } else if (key === "test_command") {
+      targetObj.test_command = val;
+    } else if (key === "build_command") {
+      targetObj.build_command = val;
+    }
+  };
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+    const indent = /^(\s*)/.exec(rawLine)?.[1]?.length ?? 0;
+    if (indent === 0) {
+      inTargets = false;
+      inDeferredWorkflows = false;
+      inCurrentTargetPathPatterns = false;
+      currentTarget = null;
+      currentProviderAlias = null;
+      inProviderDefaultHeaders = false;
+      currentPricingModel = null;
+      const kv = /^([a-zA-Z0-9_]+):\s*(.*)$/.exec(trimmed);
+      if (!kv || !kv[1]) {
+        continue;
+      }
+      const key = kv[1];
+      const val = (kv[2] ?? "").replace(/\s+#.*$/, "").trim();
+      if (key === "models" && !val) {
+        section = "models";
+        continue;
+      }
+      if (key === "providers" && !val) {
+        section = "providers";
+        continue;
+      }
+      if (key === "verification" && !val) {
+        section = "verification";
+        continue;
+      }
+      if (key === "web_tools" && !val) {
+        section = "web_tools";
+        continue;
+      }
+      if (key === "pricing" && !val) {
+        section = "pricing";
+        continue;
+      }
+      if ((key === "security_invariants" || key === "security_overrides") && !val) {
+        section = "security";
+        continue;
+      }
+      section = "root";
+      if (key === "harness") {
+        const h = unquoteYamlScalar(val);
+        if (h === "pi" || h === "cursor") {
+          harness = h;
+        } else if (h.length > 0) {
+          throw new Error(
+            `Invalid .github/agents.yml harness '${h}'; expected 'pi' or 'cursor'.`
+          );
+        }
+      } else if (key === "reviewers_dir") {
+        reviewers_dir = unquoteYamlScalar(val);
+      } else if (key === "llm_environment") {
+        llm_environment = unquoteYamlScalar(val);
+      } else if (key === "merge_policy") {
+        const mp = unquoteYamlScalar(val);
+        if (mp === "strict" || mp === "relaxed") {
+          merge_policy = mp;
+        }
+      } else if (key === "task_auto_merge_enabled") {
+        task_auto_merge_enabled = parseBool(val);
+      } else if (key === "max_code_fix_attempts") {
+        max_code_fix_attempts = parseNum(val);
+      } else if (key === "max_epic_phases") {
+        max_epic_phases = parseNum(val);
+      } else if (key === "max_transient_api_retries") {
+        max_transient_api_retries = parseNum(val);
+      } else if (key === "transient_retry_backoff_seconds") {
+        const nums = parseYamlStringArrayInline(val).map((s) => Number.parseInt(s, 10)).filter((n) => Number.isFinite(n));
+        if (nums.length === 4) {
+          transient_retry_backoff_seconds = [
+            nums[0],
+            nums[1],
+            nums[2],
+            nums[3]
+          ];
+        }
+      } else if (key === "llm_request_timeout_seconds") {
+        llm_request_timeout_seconds = parseNum(val);
+      } else if (key === "job_timeout_minutes") {
+        job_timeout_minutes = parseNum(val);
+      } else if (key === "review_timeout_minutes") {
+        review_timeout_minutes = parseNum(val);
+      } else if (key === "agent_max_llm_requests") {
+        const parsed = parseNum(val);
+        agent_max_llm_requests = parsed === void 0 ? void 0 : Math.max(1, parsed);
+      } else if (key === "max_concurrent_tasks_per_feature") {
+        max_concurrent_tasks_per_feature = parseNum(val);
+      } else if (key === "trace_retention_days") {
+        trace_retention_days = parseNum(val);
+      } else if (key === "preview_retention_days") {
+        preview_retention_days = parseNum(val);
+      } else if (key === "github_pages_previews") {
+        github_pages_previews = parseBool(val);
+      } else if (key === "github_pages_human_consent") {
+        github_pages_human_consent = parseBool(val);
+      } else if (key === "preview_separate_origin") {
+        preview_separate_origin = parseBool(val);
+      }
+      continue;
+    }
+    if (section === "models") {
+      const kv = /^([a-zA-Z0-9_]+):\s*(.+)$/.exec(trimmed);
+      if (kv && kv[1] && kv[2]) {
+        const k = kv[1];
+        const v = unquoteYamlScalar(kv[2].replace(/\s+#.*$/, ""));
+        if (k === "planning" || k === "implementation" || k === "review") {
+          models[k] = v;
+        }
+      }
+      continue;
+    }
+    if (section === "providers") {
+      if (indent === 2) {
+        inProviderDefaultHeaders = false;
+        const kv = /^([a-zA-Z0-9_.-]+):\s*(.*)$/.exec(trimmed);
+        if (kv && kv[1]) {
+          currentProviderAlias = kv[1];
+          providers[currentProviderAlias] = attachDualProviderConfigGetters({});
+        }
+        continue;
+      }
+      if (indent === 4 && currentProviderAlias) {
+        const kv = /^([a-zA-Z0-9_.-]+):\s*(.*)$/.exec(trimmed);
+        if (kv && kv[1]) {
+          const k = kv[1];
+          const rawV = (kv[2] ?? "").replace(/\s+#.*$/, "").trim();
+          const currentObj = providers[currentProviderAlias] ?? {};
+          if (k === "default_headers" || k === "defaultHeaders") {
+            if (rawV === "{}") {
+              currentObj.default_headers = {};
+              inProviderDefaultHeaders = false;
+            } else {
+              currentObj.default_headers = {};
+              inProviderDefaultHeaders = true;
+            }
+          } else {
+            inProviderDefaultHeaders = false;
+            const v = unquoteYamlScalar(rawV);
+            if (k === "provider") {
+              currentObj.provider = v;
+            } else if (k === "api_key" || k === "apiKey") {
+              currentObj.api_key = v;
+            } else if (k === "base_url" || k === "baseUrl") {
+              currentObj.base_url = v;
+            } else if (k === "api_version" || k === "apiVersion") {
+              currentObj.api_version = v;
+            } else if (k === "effort") {
+              const effort = PROVIDER_EFFORTS.find((e) => e === v);
+              if (!effort) {
+                throw new Error(
+                  `providers.${currentProviderAlias}.effort '${v}' must be one of: ${PROVIDER_EFFORTS.join(", ")}.`
+                );
+              }
+              currentObj.effort = effort;
+            }
+          }
+          providers[currentProviderAlias] = attachDualProviderConfigGetters(currentObj);
+        }
+        continue;
+      }
+      if (indent >= 6 && currentProviderAlias && inProviderDefaultHeaders) {
+        const kv = /^([a-zA-Z0-9_.-]+|"[^"]+"|'[^']+'):\s*(.+)$/.exec(trimmed);
+        if (kv && kv[1] && kv[2]) {
+          const hKey = unquoteYamlScalar(kv[1]);
+          const hVal = unquoteYamlScalar(kv[2].replace(/\s+#.*$/, ""));
+          const currentObj = providers[currentProviderAlias] ?? {};
+          const headersMap = {
+            ...currentObj.default_headers ?? {},
+            [hKey]: hVal
+          };
+          currentObj.default_headers = headersMap;
+          providers[currentProviderAlias] = attachDualProviderConfigGetters(currentObj);
+        }
+        continue;
+      }
+      continue;
+    }
+    if (section === "web_tools") {
+      const kv = /^([a-zA-Z0-9_]+):\s*(.+)$/.exec(trimmed);
+      if (kv && kv[1] && kv[2]) {
+        const k = kv[1];
+        const rawV = kv[2].replace(/\s+#.*$/, "").trim();
+        if (k === "enabled") {
+          const b = parseBool(rawV);
+          if (b !== void 0) webToolsOverrides.enabled = b;
+        } else if (k === "phases") {
+          const arr = parseYamlStringArrayInline(rawV).filter(
+            (p) => p === "plan" || p === "spec" || p === "implementation" || p === "review"
+          );
+          webToolsOverrides.phases = arr;
+        } else if (k === "max_requests_per_turn") {
+          const n = parseNum(rawV);
+          if (n !== void 0) webToolsOverrides.max_requests_per_turn = n;
+        } else if (k === "max_requests_per_run") {
+          const n = parseNum(rawV);
+          if (n !== void 0) webToolsOverrides.max_requests_per_run = n;
+        } else if (k === "max_bytes_per_response") {
+          const n = parseNum(rawV);
+          if (n !== void 0) webToolsOverrides.max_bytes_per_response = n;
+        } else if (k === "max_fetch_bytes") {
+          const n = parseNum(rawV);
+          if (n !== void 0) webToolsOverrides.max_fetch_bytes = n;
+        } else if (k === "timeout_ms") {
+          const n = parseNum(rawV);
+          if (n !== void 0) webToolsOverrides.timeout_ms = n;
+        }
+      }
+      continue;
+    }
+    if (section === "pricing") {
+      if (indent === 2) {
+        const kv = /^("[^"]+"|'[^']+'|\S+?):(?:\s+.*)?$/.exec(trimmed);
+        currentPricingModel = kv?.[1] ? unquoteYamlScalar(kv[1]) : null;
+        if (currentPricingModel) {
+          pricingFields[currentPricingModel] = {};
+        }
+      } else if (currentPricingModel) {
+        const kv = /^([a-zA-Z0-9_]+):\s*(.+)$/.exec(trimmed);
+        if (kv && kv[1] && kv[2]) {
+          pricingFields[currentPricingModel][kv[1]] = unquoteYamlScalar(
+            kv[2].replace(/\s+#.*$/, "")
+          );
+        }
+      }
+      continue;
+    }
+    if (section === "security") {
+      const kv = /^([a-zA-Z0-9_]+):\s*(.+)$/.exec(trimmed);
+      if (kv && kv[1] && kv[2]) {
+        const k = kv[1];
+        const b = parseBool(kv[2].replace(/\s+#.*$/, ""));
+        if (b !== void 0) {
+          if (k === "require_write_permission") {
+            securityOverrides.require_write_permission = b;
+          } else if (k === "sandbox_isolation") {
+            securityOverrides.sandbox_isolation = b;
+          } else if (k === "allow_agent_release") {
+            securityOverrides.allow_agent_release = b;
+          } else if (k === "auto_merge_dev") {
+            securityOverrides.auto_merge_dev = b;
+          } else if (k === "auto_merge_main") {
+            securityOverrides.auto_merge_main = b;
+          }
+        }
+      }
+      continue;
+    }
+    if (section === "verification") {
+      if (indent === 2) {
+        inTargets = false;
+        inDeferredWorkflows = false;
+        inCurrentTargetPathPatterns = false;
+        currentTarget = null;
+        const kv = /^([a-zA-Z0-9_]+):\s*(.*)$/.exec(trimmed);
+        if (!kv || !kv[1]) {
+          continue;
+        }
+        const k = kv[1];
+        const v = (kv[2] ?? "").replace(/\s+#.*$/, "").trim();
+        if (k === "wait_for_external_ci") {
+          wait_for_external_ci = parseBool(v);
+        } else if (k === "external_ci_timeout_minutes") {
+          external_ci_timeout_minutes = parseNum(v);
+        } else if (k === "grace_window_seconds") {
+          grace_window_seconds = parseNum(v);
+        } else if (k === "deferred_external_workflows") {
+          if (v.startsWith("[")) {
+            deferred_external_workflows = parseYamlStringArrayInline(v);
+          } else {
+            deferred_external_workflows = [];
+            inDeferredWorkflows = true;
+          }
+        } else if (k === "targets") {
+          hasTargetsKey = true;
+          if (v === "[]") {
+            inTargets = false;
+          } else {
+            inTargets = true;
+          }
+        }
+        continue;
+      }
+      if (inDeferredWorkflows && trimmed.startsWith("-")) {
+        const item = unquoteYamlScalar(trimmed.replace(/^-\s*/, ""));
+        if (item) {
+          deferred_external_workflows = deferred_external_workflows ?? [];
+          deferred_external_workflows.push(item);
+        }
+        continue;
+      }
+      if (inTargets) {
+        if (indent === 4 && trimmed.startsWith("-")) {
+          inCurrentTargetPathPatterns = false;
+          currentTarget = {};
+          targets.push(currentTarget);
+          const afterDash = trimmed.replace(/^-\s*/, "");
+          const kv = /^([a-zA-Z0-9_]+):\s*(.*)$/.exec(afterDash);
+          if (kv && kv[1]) {
+            assignTargetField(
+              currentTarget,
+              kv[1],
+              (kv[2] ?? "").replace(/\s+#.*$/, "").trim()
+            );
+          }
+          continue;
+        }
+        if (currentTarget) {
+          if (inCurrentTargetPathPatterns && trimmed.startsWith("-")) {
+            const pat = unquoteYamlScalar(trimmed.replace(/^-\s*/, ""));
+            currentTarget.path_patterns = currentTarget.path_patterns ?? [];
+            currentTarget.path_patterns.push(pat);
+            continue;
+          }
+          const kv = /^([a-zA-Z0-9_]+):\s*(.*)$/.exec(trimmed);
+          if (kv && kv[1]) {
+            inCurrentTargetPathPatterns = false;
+            assignTargetField(
+              currentTarget,
+              kv[1],
+              (kv[2] ?? "").replace(/\s+#.*$/, "").trim()
+            );
+          }
+        }
+      }
+    }
+  }
+  const parsedTargets = targets.filter((t) => Boolean(t.name)).map((t) => ({
+    name: t.name ?? "root",
+    working_directory: t.working_directory ?? ".",
+    kind: t.kind ?? "node",
+    path_patterns: t.path_patterns && t.path_patterns.length > 0 ? t.path_patterns : ["**"],
+    ...t.install_command ? { install_command: t.install_command } : {},
+    ...t.codegen_command ? { codegen_command: t.codegen_command } : {},
+    ...t.typecheck_command ? { typecheck_command: t.typecheck_command } : {},
+    ...t.lint_command ? { lint_command: t.lint_command } : {},
+    ...t.test_command ? { test_command: t.test_command } : {},
+    ...t.build_command ? { build_command: t.build_command } : {}
+  }));
+  const hasVerificationOverrides = wait_for_external_ci !== void 0 || external_ci_timeout_minutes !== void 0 || grace_window_seconds !== void 0 || deferred_external_workflows !== void 0 || hasTargetsKey || parsedTargets.length > 0;
+  const pricing = {};
+  for (const [model, fields] of Object.entries(pricingFields)) {
+    try {
+      pricing[model] = parsePricingEntry(model, fields);
+    } catch (err) {
+      process.stdout.write(
+        `::warning title=EPURE pricing::${err.message} This price is ignored: costs of ${model} are not shown.
+`
+      );
+    }
+  }
+  if (reviewers_dir !== void 0 && reviewers_dir.split(/[\\/]/).some((s) => s === "." || s === "..")) {
+    throw new Error(
+      `reviewers_dir '${reviewers_dir}' must not contain '.' or '..' path segments.`
+    );
+  }
+  const overrides = {
+    ...harness ? { harness } : {},
+    ...Object.keys(models).length > 0 ? { models } : {},
+    ...Object.keys(providers).length > 0 ? { providers } : {},
+    ...reviewers_dir !== void 0 ? { reviewers_dir } : {},
+    ...llm_environment !== void 0 ? { llm_environment } : {},
+    ...merge_policy ? { merge_policy } : {},
+    ...max_code_fix_attempts !== void 0 ? { max_code_fix_attempts } : {},
+    ...max_epic_phases !== void 0 ? { max_epic_phases } : {},
+    ...max_transient_api_retries !== void 0 ? { max_transient_api_retries } : {},
+    ...transient_retry_backoff_seconds ? { transient_retry_backoff_seconds } : {},
+    ...llm_request_timeout_seconds !== void 0 ? { llm_request_timeout_seconds } : {},
+    ...job_timeout_minutes !== void 0 ? { job_timeout_minutes } : {},
+    ...review_timeout_minutes !== void 0 ? { review_timeout_minutes } : {},
+    ...agent_max_llm_requests !== void 0 ? { agent_max_llm_requests } : {},
+    ...max_concurrent_tasks_per_feature !== void 0 ? { max_concurrent_tasks_per_feature } : {},
+    ...trace_retention_days !== void 0 ? { trace_retention_days } : {},
+    ...preview_retention_days !== void 0 ? { preview_retention_days } : {},
+    ...github_pages_previews !== void 0 ? { github_pages_previews } : {},
+    ...github_pages_human_consent !== void 0 ? { github_pages_human_consent } : {},
+    ...preview_separate_origin !== void 0 ? { preview_separate_origin } : {},
+    ...hasVerificationOverrides ? {
+      verification: {
+        ...wait_for_external_ci !== void 0 ? { wait_for_external_ci } : {},
+        ...external_ci_timeout_minutes !== void 0 ? { external_ci_timeout_minutes } : {},
+        ...grace_window_seconds !== void 0 ? { grace_window_seconds } : {},
+        ...deferred_external_workflows !== void 0 ? { deferred_external_workflows } : {},
+        ...hasTargetsKey || parsedTargets.length > 0 ? { targets: parsedTargets } : {}
+      }
+    } : {},
+    ...Object.keys(webToolsOverrides).length > 0 ? { web_tools: webToolsOverrides } : {},
+    ...Object.keys(pricing).length > 0 ? { pricing } : {},
+    ...Object.keys(securityOverrides).length > 0 ? { security_overrides: securityOverrides } : {}
+  };
+  const resolved = resolveAgentsConfig(overrides);
+  return {
+    ...resolved.config,
+    models,
+    max_epic_phases: resolved.config.max_epic_phases ?? 2,
+    ...task_auto_merge_enabled !== void 0 ? { task_auto_merge_enabled } : {},
+    ...github_pages_human_consent !== void 0 ? { github_pages_human_consent } : {},
+    ...preview_separate_origin !== void 0 ? { preview_separate_origin } : {},
+    ...Object.keys(securityOverrides).length > 0 ? { security_overrides: securityOverrides } : {}
+  };
 }
 
 // src/state/git-ref-state.ts
@@ -7676,9 +7756,6 @@ var EPIC_CONVERGENCE_AUDIT_SCHEMA = {
   }
 };
 
-// src/review/reviewers-dir.ts
-var DEFAULT_REVIEWERS_DIR = ".agents/reviewers";
-
 // src/review/reviewer-roster.ts
 var ALL_REVIEWER_AGENT_NAMES = [
   "domain-backend-reviewer",
@@ -8322,915 +8399,7 @@ function resolveTrustedReviewerPrompt(params) {
   };
 }
 
-// src/bootstrap/setup-repo.ts
-var CONVENTIONAL_COMMIT_PATTERN_REGEX = "^(feat|fix|docs|style|refactor|perf|test|chore|ci|build|revert)(\\([a-z0-9/-]+\\))?(!)?: .+";
-var DEFAULT_VERIFICATION_PROFILE = {
-  wait_for_external_ci: true,
-  external_ci_timeout_minutes: 15,
-  grace_window_seconds: 45,
-  targets: []
-};
-var DEFAULT_AGENTS_CONFIG = {
-  harness: "pi",
-  models: {
-    planning: "anthropic/claude-sonnet-4-20250514",
-    implementation: "anthropic/claude-sonnet-4-20250514",
-    review: "openai/gpt-4.1"
-  },
-  reviewers_dir: DEFAULT_REVIEWERS_DIR,
-  llm_environment: "epure-agent",
-  merge_policy: "strict",
-  max_code_fix_attempts: 3,
-  max_transient_api_retries: 4,
-  transient_retry_backoff_seconds: [5, 15, 45, 120],
-  llm_request_timeout_seconds: 900,
-  job_timeout_minutes: 60,
-  review_timeout_minutes: 30,
-  max_concurrent_tasks_per_feature: 3,
-  trace_retention_days: 30,
-  preview_retention_days: 14,
-  github_pages_previews: false,
-  verification: DEFAULT_VERIFICATION_PROFILE
-};
-var LLM_ENVIRONMENT_NAME_PATTERN = /^[A-Za-z0-9._-]+$/;
-function isUnsafeReviewersDir(dir) {
-  return dir === "" || dir === "." || /^(?:[\\/]|[A-Za-z]:)/.test(dir) || dir.split(/[\\/]/).includes("..") || /^src(?:[\\/]|$)/i.test(dir);
-}
-function normalizeVerificationTarget(target) {
-  return {
-    name: target.name,
-    working_directory: target.working_directory,
-    kind: target.kind,
-    path_patterns: [...target.path_patterns],
-    ...target.install_command ? { install_command: target.install_command } : {},
-    ...target.codegen_command ? { codegen_command: target.codegen_command } : {},
-    ...target.typecheck_command ? { typecheck_command: target.typecheck_command } : {},
-    ...target.lint_command ? { lint_command: target.lint_command } : {},
-    ...target.test_command ? { test_command: target.test_command } : {},
-    ...target.build_command ? { build_command: target.build_command } : {}
-  };
-}
-function attachDualProviderConfigGetters(entry) {
-  const definePair = (snakeKey, camelKey) => {
-    const hasSnake = Object.prototype.hasOwnProperty.call(entry, snakeKey);
-    const hasCamel = Object.prototype.hasOwnProperty.call(entry, camelKey);
-    if (hasSnake && !hasCamel) {
-      Object.defineProperty(entry, camelKey, {
-        get() {
-          return entry[snakeKey];
-        },
-        enumerable: false,
-        configurable: true
-      });
-    } else if (hasCamel && !hasSnake) {
-      Object.defineProperty(entry, snakeKey, {
-        get() {
-          return entry[camelKey];
-        },
-        enumerable: false,
-        configurable: true
-      });
-    }
-  };
-  definePair("api_key", "apiKey");
-  definePair("base_url", "baseUrl");
-  definePair("api_version", "apiVersion");
-  definePair("default_headers", "defaultHeaders");
-  return entry;
-}
-function normalizeAgentsProvidersMap(providers, preferSnakeCase = false) {
-  if (!providers) {
-    return void 0;
-  }
-  const keys = Object.keys(providers);
-  if (keys.length === 0) {
-    return void 0;
-  }
-  const out = {};
-  for (const [alias, raw] of Object.entries(providers)) {
-    const cleanAlias = alias.trim();
-    if (!cleanAlias || !raw) {
-      continue;
-    }
-    const entry = {};
-    if (raw.provider) {
-      entry.provider = raw.provider;
-    }
-    const apiKeyVal = raw.api_key ?? raw.apiKey;
-    const baseUrlVal = raw.base_url ?? raw.baseUrl;
-    const apiVersionVal = raw.api_version ?? raw.apiVersion;
-    const defaultHeadersVal = raw.default_headers ?? raw.defaultHeaders;
-    const useSnake = preferSnakeCase || raw.api_key !== void 0 || raw.base_url !== void 0 || raw.api_version !== void 0 || raw.default_headers !== void 0;
-    if (apiKeyVal !== void 0) {
-      entry[useSnake ? "api_key" : "apiKey"] = apiKeyVal;
-    }
-    if (baseUrlVal !== void 0) {
-      entry[useSnake ? "base_url" : "baseUrl"] = baseUrlVal;
-    }
-    if (apiVersionVal !== void 0) {
-      entry[useSnake ? "api_version" : "apiVersion"] = apiVersionVal;
-    }
-    if (defaultHeadersVal !== void 0) {
-      entry[useSnake ? "default_headers" : "defaultHeaders"] = {
-        ...defaultHeadersVal
-      };
-    }
-    if (raw.effort !== void 0) {
-      entry.effort = raw.effort;
-    }
-    out[cleanAlias] = attachDualProviderConfigGetters(entry);
-  }
-  return Object.keys(out).length > 0 ? out : void 0;
-}
-function resolveAgentsConfig(overrides = {}) {
-  const sec = overrides.security_overrides;
-  if (sec) {
-    if (sec.require_write_permission === false) {
-      return {
-        valid: false,
-        error_code: "SECURITY_INVARIANT_VIOLATION",
-        error_message: "Local .github/agents.yml cannot disable effective write permission verification (ADR-0004, ADR-0010).",
-        config: DEFAULT_AGENTS_CONFIG
-      };
-    }
-    if (sec.sandbox_isolation === false) {
-      return {
-        valid: false,
-        error_code: "SECURITY_INVARIANT_VIOLATION",
-        error_message: "Local .github/agents.yml cannot disable untrusted code sandbox isolation (ADR-0011, ADR-0023).",
-        config: DEFAULT_AGENTS_CONFIG
-      };
-    }
-    if (sec.allow_agent_release === true) {
-      return {
-        valid: false,
-        error_code: "SECURITY_INVARIANT_VIOLATION",
-        error_message: "Local .github/agents.yml cannot grant release authority to the Agent App (ADR-0009, ADR-0010).",
-        config: DEFAULT_AGENTS_CONFIG
-      };
-    }
-    if (sec.auto_merge_dev === true || sec.auto_merge_main === true) {
-      return {
-        valid: false,
-        error_code: "SECURITY_INVARIANT_VIOLATION",
-        error_message: "Local .github/agents.yml cannot enable automatic merging into 'dev' or 'main' (ADR-0011).",
-        config: DEFAULT_AGENTS_CONFIG
-      };
-    }
-  }
-  const reviewersDir = (overrides.reviewers_dir ?? DEFAULT_AGENTS_CONFIG.reviewers_dir).trim().replace(/^(?:\.\/)+/, "").replace(/\/+$/, "");
-  if (isUnsafeReviewersDir(reviewersDir)) {
-    return {
-      valid: false,
-      error_code: "SECURITY_INVARIANT_VIOLATION",
-      error_message: `Local .github/agents.yml reviewers_dir '${overrides.reviewers_dir ?? ""}' must be a relative directory outside 'src/' without '..' segments.`,
-      config: DEFAULT_AGENTS_CONFIG
-    };
-  }
-  const llmEnvironment = (overrides.llm_environment ?? DEFAULT_AGENTS_CONFIG.llm_environment).trim();
-  if (!LLM_ENVIRONMENT_NAME_PATTERN.test(llmEnvironment)) {
-    return {
-      valid: false,
-      error_code: "SECURITY_INVARIANT_VIOLATION",
-      error_message: `Local .github/agents.yml llm_environment '${overrides.llm_environment ?? ""}' must match ${LLM_ENVIRONMENT_NAME_PATTERN.source}.`,
-      config: DEFAULT_AGENTS_CONFIG
-    };
-  }
-  const pagesPreviews = overrides.github_pages_previews ?? DEFAULT_AGENTS_CONFIG.github_pages_previews;
-  if (pagesPreviews) {
-    if (overrides.github_pages_human_consent !== true || overrides.preview_separate_origin !== true) {
-      return {
-        valid: false,
-        error_code: "PAGES_PREVIEW_CONSENT_OR_ORIGIN_REQUIRED",
-        error_message: "GitHub Pages previews require explicit human consent (github_pages_human_consent: true) and an isolated non-production origin (preview_separate_origin: true) per Q70/Q73.",
-        config: DEFAULT_AGENTS_CONFIG
-      };
-    }
-  }
-  const verification = overrides.verification ? {
-    wait_for_external_ci: overrides.verification.wait_for_external_ci ?? DEFAULT_VERIFICATION_PROFILE.wait_for_external_ci,
-    external_ci_timeout_minutes: overrides.verification.external_ci_timeout_minutes ?? DEFAULT_VERIFICATION_PROFILE.external_ci_timeout_minutes,
-    grace_window_seconds: overrides.verification.grace_window_seconds ?? DEFAULT_VERIFICATION_PROFILE.grace_window_seconds,
-    ...overrides.verification.deferred_external_workflows && overrides.verification.deferred_external_workflows.length > 0 ? {
-      deferred_external_workflows: [
-        ...overrides.verification.deferred_external_workflows
-      ]
-    } : {},
-    targets: overrides.verification.targets ? overrides.verification.targets.map(normalizeVerificationTarget) : DEFAULT_VERIFICATION_PROFILE.targets
-  } : DEFAULT_VERIFICATION_PROFILE;
-  const normalizedProviders = normalizeAgentsProvidersMap(overrides.providers);
-  const webTools = overrides.web_tools ? {
-    enabled: overrides.web_tools.enabled ?? true,
-    phases: overrides.web_tools.phases ? [...overrides.web_tools.phases] : ["plan", "spec", "implementation"],
-    ...overrides.web_tools.max_requests_per_turn !== void 0 ? { max_requests_per_turn: overrides.web_tools.max_requests_per_turn } : {},
-    ...overrides.web_tools.max_requests_per_run !== void 0 ? { max_requests_per_run: overrides.web_tools.max_requests_per_run } : {},
-    ...overrides.web_tools.max_bytes_per_response !== void 0 ? {
-      max_bytes_per_response: overrides.web_tools.max_bytes_per_response
-    } : {},
-    ...overrides.web_tools.max_fetch_bytes !== void 0 ? { max_fetch_bytes: overrides.web_tools.max_fetch_bytes } : {},
-    ...overrides.web_tools.timeout_ms !== void 0 ? { timeout_ms: overrides.web_tools.timeout_ms } : {}
-  } : void 0;
-  const config = {
-    harness: overrides.harness ?? DEFAULT_AGENTS_CONFIG.harness,
-    models: {
-      planning: overrides.models?.planning ?? DEFAULT_AGENTS_CONFIG.models.planning,
-      implementation: overrides.models?.implementation ?? DEFAULT_AGENTS_CONFIG.models.implementation,
-      review: overrides.models?.review ?? DEFAULT_AGENTS_CONFIG.models.review
-    },
-    ...normalizedProviders ? { providers: normalizedProviders } : {},
-    reviewers_dir: reviewersDir,
-    llm_environment: llmEnvironment,
-    merge_policy: overrides.merge_policy ?? DEFAULT_AGENTS_CONFIG.merge_policy,
-    max_code_fix_attempts: overrides.max_code_fix_attempts ?? DEFAULT_AGENTS_CONFIG.max_code_fix_attempts,
-    ...overrides.agent_max_llm_requests !== void 0 ? { agent_max_llm_requests: Math.max(1, Math.floor(overrides.agent_max_llm_requests)) } : {},
-    ...overrides.max_epic_phases !== void 0 ? {
-      max_epic_phases: Math.min(
-        3,
-        Math.max(1, Math.floor(overrides.max_epic_phases))
-      )
-    } : {},
-    max_transient_api_retries: overrides.max_transient_api_retries ?? DEFAULT_AGENTS_CONFIG.max_transient_api_retries,
-    transient_retry_backoff_seconds: overrides.transient_retry_backoff_seconds ?? DEFAULT_AGENTS_CONFIG.transient_retry_backoff_seconds,
-    llm_request_timeout_seconds: overrides.llm_request_timeout_seconds !== void 0 && overrides.llm_request_timeout_seconds > 0 ? overrides.llm_request_timeout_seconds : DEFAULT_AGENTS_CONFIG.llm_request_timeout_seconds,
-    job_timeout_minutes: overrides.job_timeout_minutes ?? DEFAULT_AGENTS_CONFIG.job_timeout_minutes,
-    review_timeout_minutes: overrides.review_timeout_minutes ?? DEFAULT_AGENTS_CONFIG.review_timeout_minutes,
-    max_concurrent_tasks_per_feature: overrides.max_concurrent_tasks_per_feature ?? DEFAULT_AGENTS_CONFIG.max_concurrent_tasks_per_feature,
-    trace_retention_days: overrides.trace_retention_days ?? DEFAULT_AGENTS_CONFIG.trace_retention_days,
-    preview_retention_days: overrides.preview_retention_days ?? DEFAULT_AGENTS_CONFIG.preview_retention_days,
-    github_pages_previews: pagesPreviews,
-    verification,
-    ...webTools ? { web_tools: webTools } : {},
-    ...overrides.pricing ? { pricing: overrides.pricing } : {}
-  };
-  return {
-    valid: true,
-    error_code: "NONE",
-    error_message: "",
-    config
-  };
-}
-function unquoteYamlScalar(raw) {
-  const trimmed = raw.trim();
-  if (trimmed.startsWith('"') && trimmed.endsWith('"') || trimmed.startsWith("'") && trimmed.endsWith("'")) {
-    if (trimmed.startsWith('"')) {
-      try {
-        return JSON.parse(trimmed);
-      } catch {
-        return trimmed.slice(1, -1);
-      }
-    }
-    return trimmed.slice(1, -1);
-  }
-  return trimmed;
-}
-function parseYamlStringArrayInline(raw) {
-  const trimmed = raw.trim();
-  if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) {
-    return [];
-  }
-  const inner = trimmed.slice(1, -1).trim();
-  if (!inner) {
-    return [];
-  }
-  const items = [];
-  let current = "";
-  let inQuote = null;
-  let escaped = false;
-  for (let i = 0; i < inner.length; i += 1) {
-    const ch = inner[i] ?? "";
-    if (escaped) {
-      current += ch;
-      escaped = false;
-      continue;
-    }
-    if (ch === "\\" && inQuote === '"') {
-      current += ch;
-      escaped = true;
-      continue;
-    }
-    if ((ch === '"' || ch === "'") && !inQuote) {
-      inQuote = ch;
-      current += ch;
-      continue;
-    }
-    if (ch === inQuote) {
-      inQuote = null;
-      current += ch;
-      continue;
-    }
-    if (ch === "," && !inQuote) {
-      items.push(unquoteYamlScalar(current));
-      current = "";
-      continue;
-    }
-    current += ch;
-  }
-  if (current.trim().length > 0) {
-    items.push(unquoteYamlScalar(current));
-  }
-  return items;
-}
-function parsePricingEntry(model, fields) {
-  const dollars = (key) => {
-    const raw = fields[key]?.trim();
-    const value = raw ? Number(raw) : Number.NaN;
-    if (!Number.isFinite(value) || value < 0) {
-      throw new Error(
-        `pricing.${model}.${key} must be a non-negative number of dollars per million tokens.`
-      );
-    }
-    return value;
-  };
-  const text = (key) => {
-    const value = fields[key]?.trim();
-    if (!value) {
-      throw new Error(`pricing.${model}.${key} is required.`);
-    }
-    return value;
-  };
-  return {
-    input_per_mtok: dollars("input_per_mtok"),
-    ...fields.cached_input_per_mtok !== void 0 ? { cached_input_per_mtok: dollars("cached_input_per_mtok") } : {},
-    output_per_mtok: dollars("output_per_mtok"),
-    source: text("source"),
-    read_on: text("read_on")
-  };
-}
-function parseAgentsYaml(yamlContent) {
-  let harness;
-  let reviewers_dir;
-  let llm_environment;
-  const models = {};
-  const providers = {};
-  let currentProviderAlias = null;
-  let inProviderDefaultHeaders = false;
-  let merge_policy;
-  let task_auto_merge_enabled;
-  let max_code_fix_attempts;
-  let max_epic_phases;
-  let max_transient_api_retries;
-  let transient_retry_backoff_seconds;
-  let llm_request_timeout_seconds;
-  let job_timeout_minutes;
-  let review_timeout_minutes;
-  let agent_max_llm_requests;
-  let max_concurrent_tasks_per_feature;
-  let trace_retention_days;
-  let preview_retention_days;
-  let github_pages_previews;
-  let github_pages_human_consent;
-  let preview_separate_origin;
-  let wait_for_external_ci;
-  let external_ci_timeout_minutes;
-  let grace_window_seconds;
-  let deferred_external_workflows;
-  let hasTargetsKey = false;
-  const targets = [];
-  const securityOverrides = {};
-  const webToolsOverrides = {};
-  const pricingFields = {};
-  let currentPricingModel = null;
-  const lines = yamlContent.split(/\r?\n/);
-  let section = "root";
-  let inTargets = false;
-  let inDeferredWorkflows = false;
-  let inCurrentTargetPathPatterns = false;
-  let currentTarget = null;
-  const parseBool = (raw) => {
-    const v = unquoteYamlScalar(raw).toLowerCase();
-    if (v === "true") return true;
-    if (v === "false") return false;
-    return void 0;
-  };
-  const parseNum = (raw) => {
-    const n = Number.parseInt(unquoteYamlScalar(raw), 10);
-    return Number.isFinite(n) ? n : void 0;
-  };
-  const assignTargetField = (targetObj, key, rawVal) => {
-    const val = unquoteYamlScalar(rawVal);
-    if (key === "name") {
-      targetObj.name = val;
-    } else if (key === "working_directory") {
-      targetObj.working_directory = val;
-    } else if (key === "kind") {
-      targetObj.kind = val;
-    } else if (key === "path_patterns") {
-      if (rawVal.trim().startsWith("[")) {
-        targetObj.path_patterns = parseYamlStringArrayInline(rawVal);
-        inCurrentTargetPathPatterns = false;
-      } else {
-        targetObj.path_patterns = [];
-        inCurrentTargetPathPatterns = true;
-      }
-    } else if (key === "install_command") {
-      targetObj.install_command = val;
-    } else if (key === "codegen_command") {
-      targetObj.codegen_command = val;
-    } else if (key === "typecheck_command") {
-      targetObj.typecheck_command = val;
-    } else if (key === "lint_command") {
-      targetObj.lint_command = val;
-    } else if (key === "test_command") {
-      targetObj.test_command = val;
-    } else if (key === "build_command") {
-      targetObj.build_command = val;
-    }
-  };
-  for (const rawLine of lines) {
-    const trimmed = rawLine.trim();
-    if (!trimmed || trimmed.startsWith("#")) {
-      continue;
-    }
-    const indent = /^(\s*)/.exec(rawLine)?.[1]?.length ?? 0;
-    if (indent === 0) {
-      inTargets = false;
-      inDeferredWorkflows = false;
-      inCurrentTargetPathPatterns = false;
-      currentTarget = null;
-      currentProviderAlias = null;
-      inProviderDefaultHeaders = false;
-      currentPricingModel = null;
-      const kv = /^([a-zA-Z0-9_]+):\s*(.*)$/.exec(trimmed);
-      if (!kv || !kv[1]) {
-        continue;
-      }
-      const key = kv[1];
-      const val = (kv[2] ?? "").replace(/\s+#.*$/, "").trim();
-      if (key === "models" && !val) {
-        section = "models";
-        continue;
-      }
-      if (key === "providers" && !val) {
-        section = "providers";
-        continue;
-      }
-      if (key === "verification" && !val) {
-        section = "verification";
-        continue;
-      }
-      if (key === "web_tools" && !val) {
-        section = "web_tools";
-        continue;
-      }
-      if (key === "pricing" && !val) {
-        section = "pricing";
-        continue;
-      }
-      if ((key === "security_invariants" || key === "security_overrides") && !val) {
-        section = "security";
-        continue;
-      }
-      section = "root";
-      if (key === "harness") {
-        const h = unquoteYamlScalar(val);
-        if (h === "pi" || h === "codex") {
-          harness = h;
-        }
-      } else if (key === "reviewers_dir") {
-        reviewers_dir = unquoteYamlScalar(val);
-      } else if (key === "llm_environment") {
-        llm_environment = unquoteYamlScalar(val);
-      } else if (key === "merge_policy") {
-        const mp = unquoteYamlScalar(val);
-        if (mp === "strict" || mp === "relaxed") {
-          merge_policy = mp;
-        }
-      } else if (key === "task_auto_merge_enabled") {
-        task_auto_merge_enabled = parseBool(val);
-      } else if (key === "max_code_fix_attempts") {
-        max_code_fix_attempts = parseNum(val);
-      } else if (key === "max_epic_phases") {
-        max_epic_phases = parseNum(val);
-      } else if (key === "max_transient_api_retries") {
-        max_transient_api_retries = parseNum(val);
-      } else if (key === "transient_retry_backoff_seconds") {
-        const nums = parseYamlStringArrayInline(val).map((s) => Number.parseInt(s, 10)).filter((n) => Number.isFinite(n));
-        if (nums.length === 4) {
-          transient_retry_backoff_seconds = [
-            nums[0],
-            nums[1],
-            nums[2],
-            nums[3]
-          ];
-        }
-      } else if (key === "llm_request_timeout_seconds") {
-        llm_request_timeout_seconds = parseNum(val);
-      } else if (key === "job_timeout_minutes") {
-        job_timeout_minutes = parseNum(val);
-      } else if (key === "review_timeout_minutes") {
-        review_timeout_minutes = parseNum(val);
-      } else if (key === "agent_max_llm_requests") {
-        const parsed = parseNum(val);
-        agent_max_llm_requests = parsed === void 0 ? void 0 : Math.max(1, parsed);
-      } else if (key === "max_concurrent_tasks_per_feature") {
-        max_concurrent_tasks_per_feature = parseNum(val);
-      } else if (key === "trace_retention_days") {
-        trace_retention_days = parseNum(val);
-      } else if (key === "preview_retention_days") {
-        preview_retention_days = parseNum(val);
-      } else if (key === "github_pages_previews") {
-        github_pages_previews = parseBool(val);
-      } else if (key === "github_pages_human_consent") {
-        github_pages_human_consent = parseBool(val);
-      } else if (key === "preview_separate_origin") {
-        preview_separate_origin = parseBool(val);
-      }
-      continue;
-    }
-    if (section === "models") {
-      const kv = /^([a-zA-Z0-9_]+):\s*(.+)$/.exec(trimmed);
-      if (kv && kv[1] && kv[2]) {
-        const k = kv[1];
-        const v = unquoteYamlScalar(kv[2].replace(/\s+#.*$/, ""));
-        if (k === "planning" || k === "implementation" || k === "review") {
-          models[k] = v;
-        }
-      }
-      continue;
-    }
-    if (section === "providers") {
-      if (indent === 2) {
-        inProviderDefaultHeaders = false;
-        const kv = /^([a-zA-Z0-9_.-]+):\s*(.*)$/.exec(trimmed);
-        if (kv && kv[1]) {
-          currentProviderAlias = kv[1];
-          providers[currentProviderAlias] = attachDualProviderConfigGetters({});
-        }
-        continue;
-      }
-      if (indent === 4 && currentProviderAlias) {
-        const kv = /^([a-zA-Z0-9_.-]+):\s*(.*)$/.exec(trimmed);
-        if (kv && kv[1]) {
-          const k = kv[1];
-          const rawV = (kv[2] ?? "").replace(/\s+#.*$/, "").trim();
-          const currentObj = providers[currentProviderAlias] ?? {};
-          if (k === "default_headers" || k === "defaultHeaders") {
-            if (rawV === "{}") {
-              currentObj.default_headers = {};
-              inProviderDefaultHeaders = false;
-            } else {
-              currentObj.default_headers = {};
-              inProviderDefaultHeaders = true;
-            }
-          } else {
-            inProviderDefaultHeaders = false;
-            const v = unquoteYamlScalar(rawV);
-            if (k === "provider") {
-              currentObj.provider = v;
-            } else if (k === "api_key" || k === "apiKey") {
-              currentObj.api_key = v;
-            } else if (k === "base_url" || k === "baseUrl") {
-              currentObj.base_url = v;
-            } else if (k === "api_version" || k === "apiVersion") {
-              currentObj.api_version = v;
-            } else if (k === "effort") {
-              const effort = PROVIDER_EFFORTS.find((e) => e === v);
-              if (!effort) {
-                throw new Error(
-                  `providers.${currentProviderAlias}.effort '${v}' must be one of: ${PROVIDER_EFFORTS.join(", ")}.`
-                );
-              }
-              currentObj.effort = effort;
-            }
-          }
-          providers[currentProviderAlias] = attachDualProviderConfigGetters(currentObj);
-        }
-        continue;
-      }
-      if (indent >= 6 && currentProviderAlias && inProviderDefaultHeaders) {
-        const kv = /^([a-zA-Z0-9_.-]+|"[^"]+"|'[^']+'):\s*(.+)$/.exec(trimmed);
-        if (kv && kv[1] && kv[2]) {
-          const hKey = unquoteYamlScalar(kv[1]);
-          const hVal = unquoteYamlScalar(kv[2].replace(/\s+#.*$/, ""));
-          const currentObj = providers[currentProviderAlias] ?? {};
-          const headersMap = {
-            ...currentObj.default_headers ?? {},
-            [hKey]: hVal
-          };
-          currentObj.default_headers = headersMap;
-          providers[currentProviderAlias] = attachDualProviderConfigGetters(currentObj);
-        }
-        continue;
-      }
-      continue;
-    }
-    if (section === "web_tools") {
-      const kv = /^([a-zA-Z0-9_]+):\s*(.+)$/.exec(trimmed);
-      if (kv && kv[1] && kv[2]) {
-        const k = kv[1];
-        const rawV = kv[2].replace(/\s+#.*$/, "").trim();
-        if (k === "enabled") {
-          const b = parseBool(rawV);
-          if (b !== void 0) webToolsOverrides.enabled = b;
-        } else if (k === "phases") {
-          const arr = parseYamlStringArrayInline(rawV).filter(
-            (p) => p === "plan" || p === "spec" || p === "implementation" || p === "review"
-          );
-          webToolsOverrides.phases = arr;
-        } else if (k === "max_requests_per_turn") {
-          const n = parseNum(rawV);
-          if (n !== void 0) webToolsOverrides.max_requests_per_turn = n;
-        } else if (k === "max_requests_per_run") {
-          const n = parseNum(rawV);
-          if (n !== void 0) webToolsOverrides.max_requests_per_run = n;
-        } else if (k === "max_bytes_per_response") {
-          const n = parseNum(rawV);
-          if (n !== void 0) webToolsOverrides.max_bytes_per_response = n;
-        } else if (k === "max_fetch_bytes") {
-          const n = parseNum(rawV);
-          if (n !== void 0) webToolsOverrides.max_fetch_bytes = n;
-        } else if (k === "timeout_ms") {
-          const n = parseNum(rawV);
-          if (n !== void 0) webToolsOverrides.timeout_ms = n;
-        }
-      }
-      continue;
-    }
-    if (section === "pricing") {
-      if (indent === 2) {
-        const kv = /^("[^"]+"|'[^']+'|\S+?):(?:\s+.*)?$/.exec(trimmed);
-        currentPricingModel = kv?.[1] ? unquoteYamlScalar(kv[1]) : null;
-        if (currentPricingModel) {
-          pricingFields[currentPricingModel] = {};
-        }
-      } else if (currentPricingModel) {
-        const kv = /^([a-zA-Z0-9_]+):\s*(.+)$/.exec(trimmed);
-        if (kv && kv[1] && kv[2]) {
-          pricingFields[currentPricingModel][kv[1]] = unquoteYamlScalar(
-            kv[2].replace(/\s+#.*$/, "")
-          );
-        }
-      }
-      continue;
-    }
-    if (section === "security") {
-      const kv = /^([a-zA-Z0-9_]+):\s*(.+)$/.exec(trimmed);
-      if (kv && kv[1] && kv[2]) {
-        const k = kv[1];
-        const b = parseBool(kv[2].replace(/\s+#.*$/, ""));
-        if (b !== void 0) {
-          if (k === "require_write_permission") {
-            securityOverrides.require_write_permission = b;
-          } else if (k === "sandbox_isolation") {
-            securityOverrides.sandbox_isolation = b;
-          } else if (k === "allow_agent_release") {
-            securityOverrides.allow_agent_release = b;
-          } else if (k === "auto_merge_dev") {
-            securityOverrides.auto_merge_dev = b;
-          } else if (k === "auto_merge_main") {
-            securityOverrides.auto_merge_main = b;
-          }
-        }
-      }
-      continue;
-    }
-    if (section === "verification") {
-      if (indent === 2) {
-        inTargets = false;
-        inDeferredWorkflows = false;
-        inCurrentTargetPathPatterns = false;
-        currentTarget = null;
-        const kv = /^([a-zA-Z0-9_]+):\s*(.*)$/.exec(trimmed);
-        if (!kv || !kv[1]) {
-          continue;
-        }
-        const k = kv[1];
-        const v = (kv[2] ?? "").replace(/\s+#.*$/, "").trim();
-        if (k === "wait_for_external_ci") {
-          wait_for_external_ci = parseBool(v);
-        } else if (k === "external_ci_timeout_minutes") {
-          external_ci_timeout_minutes = parseNum(v);
-        } else if (k === "grace_window_seconds") {
-          grace_window_seconds = parseNum(v);
-        } else if (k === "deferred_external_workflows") {
-          if (v.startsWith("[")) {
-            deferred_external_workflows = parseYamlStringArrayInline(v);
-          } else {
-            deferred_external_workflows = [];
-            inDeferredWorkflows = true;
-          }
-        } else if (k === "targets") {
-          hasTargetsKey = true;
-          if (v === "[]") {
-            inTargets = false;
-          } else {
-            inTargets = true;
-          }
-        }
-        continue;
-      }
-      if (inDeferredWorkflows && trimmed.startsWith("-")) {
-        const item = unquoteYamlScalar(trimmed.replace(/^-\s*/, ""));
-        if (item) {
-          deferred_external_workflows = deferred_external_workflows ?? [];
-          deferred_external_workflows.push(item);
-        }
-        continue;
-      }
-      if (inTargets) {
-        if (indent === 4 && trimmed.startsWith("-")) {
-          inCurrentTargetPathPatterns = false;
-          currentTarget = {};
-          targets.push(currentTarget);
-          const afterDash = trimmed.replace(/^-\s*/, "");
-          const kv = /^([a-zA-Z0-9_]+):\s*(.*)$/.exec(afterDash);
-          if (kv && kv[1]) {
-            assignTargetField(
-              currentTarget,
-              kv[1],
-              (kv[2] ?? "").replace(/\s+#.*$/, "").trim()
-            );
-          }
-          continue;
-        }
-        if (currentTarget) {
-          if (inCurrentTargetPathPatterns && trimmed.startsWith("-")) {
-            const pat = unquoteYamlScalar(trimmed.replace(/^-\s*/, ""));
-            currentTarget.path_patterns = currentTarget.path_patterns ?? [];
-            currentTarget.path_patterns.push(pat);
-            continue;
-          }
-          const kv = /^([a-zA-Z0-9_]+):\s*(.*)$/.exec(trimmed);
-          if (kv && kv[1]) {
-            inCurrentTargetPathPatterns = false;
-            assignTargetField(
-              currentTarget,
-              kv[1],
-              (kv[2] ?? "").replace(/\s+#.*$/, "").trim()
-            );
-          }
-        }
-      }
-    }
-  }
-  const parsedTargets = targets.filter((t) => Boolean(t.name)).map((t) => ({
-    name: t.name ?? "root",
-    working_directory: t.working_directory ?? ".",
-    kind: t.kind ?? "node",
-    path_patterns: t.path_patterns && t.path_patterns.length > 0 ? t.path_patterns : ["**"],
-    ...t.install_command ? { install_command: t.install_command } : {},
-    ...t.codegen_command ? { codegen_command: t.codegen_command } : {},
-    ...t.typecheck_command ? { typecheck_command: t.typecheck_command } : {},
-    ...t.lint_command ? { lint_command: t.lint_command } : {},
-    ...t.test_command ? { test_command: t.test_command } : {},
-    ...t.build_command ? { build_command: t.build_command } : {}
-  }));
-  const hasVerificationOverrides = wait_for_external_ci !== void 0 || external_ci_timeout_minutes !== void 0 || grace_window_seconds !== void 0 || deferred_external_workflows !== void 0 || hasTargetsKey || parsedTargets.length > 0;
-  const pricing = {};
-  for (const [model, fields] of Object.entries(pricingFields)) {
-    try {
-      pricing[model] = parsePricingEntry(model, fields);
-    } catch (err) {
-      process.stdout.write(
-        `::warning title=EPURE pricing::${err.message} This price is ignored: costs of ${model} are not shown.
-`
-      );
-    }
-  }
-  if (reviewers_dir !== void 0 && reviewers_dir.split(/[\\/]/).some((s) => s === "." || s === "..")) {
-    throw new Error(
-      `reviewers_dir '${reviewers_dir}' must not contain '.' or '..' path segments.`
-    );
-  }
-  const overrides = {
-    ...harness ? { harness } : {},
-    ...Object.keys(models).length > 0 ? { models } : {},
-    ...Object.keys(providers).length > 0 ? { providers } : {},
-    ...reviewers_dir !== void 0 ? { reviewers_dir } : {},
-    ...llm_environment !== void 0 ? { llm_environment } : {},
-    ...merge_policy ? { merge_policy } : {},
-    ...max_code_fix_attempts !== void 0 ? { max_code_fix_attempts } : {},
-    ...max_epic_phases !== void 0 ? { max_epic_phases } : {},
-    ...max_transient_api_retries !== void 0 ? { max_transient_api_retries } : {},
-    ...transient_retry_backoff_seconds ? { transient_retry_backoff_seconds } : {},
-    ...llm_request_timeout_seconds !== void 0 ? { llm_request_timeout_seconds } : {},
-    ...job_timeout_minutes !== void 0 ? { job_timeout_minutes } : {},
-    ...review_timeout_minutes !== void 0 ? { review_timeout_minutes } : {},
-    ...agent_max_llm_requests !== void 0 ? { agent_max_llm_requests } : {},
-    ...max_concurrent_tasks_per_feature !== void 0 ? { max_concurrent_tasks_per_feature } : {},
-    ...trace_retention_days !== void 0 ? { trace_retention_days } : {},
-    ...preview_retention_days !== void 0 ? { preview_retention_days } : {},
-    ...github_pages_previews !== void 0 ? { github_pages_previews } : {},
-    ...github_pages_human_consent !== void 0 ? { github_pages_human_consent } : {},
-    ...preview_separate_origin !== void 0 ? { preview_separate_origin } : {},
-    ...hasVerificationOverrides ? {
-      verification: {
-        ...wait_for_external_ci !== void 0 ? { wait_for_external_ci } : {},
-        ...external_ci_timeout_minutes !== void 0 ? { external_ci_timeout_minutes } : {},
-        ...grace_window_seconds !== void 0 ? { grace_window_seconds } : {},
-        ...deferred_external_workflows !== void 0 ? { deferred_external_workflows } : {},
-        ...hasTargetsKey || parsedTargets.length > 0 ? { targets: parsedTargets } : {}
-      }
-    } : {},
-    ...Object.keys(webToolsOverrides).length > 0 ? { web_tools: webToolsOverrides } : {},
-    ...Object.keys(pricing).length > 0 ? { pricing } : {},
-    ...Object.keys(securityOverrides).length > 0 ? { security_overrides: securityOverrides } : {}
-  };
-  const resolved = resolveAgentsConfig(overrides);
-  return {
-    ...resolved.config,
-    models,
-    max_epic_phases: resolved.config.max_epic_phases ?? 2,
-    ...task_auto_merge_enabled !== void 0 ? { task_auto_merge_enabled } : {},
-    ...github_pages_human_consent !== void 0 ? { github_pages_human_consent } : {},
-    ...preview_separate_origin !== void 0 ? { preview_separate_origin } : {},
-    ...Object.keys(securityOverrides).length > 0 ? { security_overrides: securityOverrides } : {}
-  };
-}
-
-// src/execution/external-ci-gate.ts
-import { basename as basename2 } from "node:path";
-
-// src/orchestrator/formatting/comments.ts
-var EPURE_COMMANDS_SPOILER_SUMMARY = "<summary>\u2328\uFE0F <b>Commandes <code>/epure</code> disponibles</b> (cliquer pour d\xE9rouler)</summary>";
-function buildContextualActionHint(context) {
-  const phase = (context?.phase ?? "").trim().toLowerCase();
-  const status = (context?.status ?? "").trim().toLowerCase();
-  const issueRef = typeof context?.issueNumber === "number" && context.issueNumber > 0 ? ` sur l'issue #${context.issueNumber}` : "";
-  if (status === "suspended" || phase === "suspended") {
-    return `Inspectez le diagnostic ci-dessus, poussez un correctif si n\xE9cessaire, puis postez \`/epure continue\` (ou \`/epure approve\`, ou \`/epure sync\` / \`/epure rebase\` en cas de conflit Git)${issueRef} pour reprendre l'ex\xE9cution (ou \`/epure cancel\` pour l'arr\xEAter).`;
-  }
-  if (status === "cancelled" || phase === "cancelled") {
-    return `L'orchestration est suspendue suite \xE0 une annulation. Postez \`/epure plan\`${issueRef} pour relancer un cadrage ou \`/epure continue\` (ou \`/epure approve\`) pour reprendre.`;
-  }
-  if (phase === "grilling") {
-    if (status === "awaiting-human" || status === "awaiting_human_approval") {
-      return `La fronti\xE8re de d\xE9cisions du cadrage est compl\xE8te. Postez \`/epure to-spec\`${issueRef} pour valider le cadrage et g\xE9n\xE9rer la sp\xE9cification sur \`plan/*\` (ou r\xE9pondez en commentaire pour ajuster un point).`;
-    }
-    return `R\xE9pondez directement en commentaire${issueRef} aux questions ci-dessus (sans pr\xE9fixe \`/epure\`), ou postez \`/epure to-spec\` pour g\xE9n\xE9rer imm\xE9diatement la sp\xE9cification sur \`plan/*\`.`;
-  }
-  if (phase === "spec") {
-    return `V\xE9rifiez la sp\xE9cification, le \`GLOSSARY.md\` et les ADRs g\xE9n\xE9r\xE9s sur \`plan/*\`. Postez \`/epure to-tickets\`${issueRef} pour valider la sp\xE9cification et g\xE9n\xE9rer le graphe de tickets (ou r\xE9pondez en commentaire pour demander une modification de la spec).`;
-  }
-  if (phase === "tickets" || status === "awaiting-human" || status === "awaiting_human_approval") {
-    return `V\xE9rifiez la sp\xE9cification et le graphe de tickets g\xE9n\xE9r\xE9s, puis postez \`/epure approve\`${issueRef} pour lancer l'impl\xE9mentation TDD autonome (int\xE9gration directe \`plan/* -> feature/*\`).`;
-  }
-  if (phase === "implementation") {
-    return `L'impl\xE9mentation autonome est en cours. Postez \`/epure status\`${issueRef} pour suivre l'avancement, \`/epure continue\` pour reprendre apr\xE8s la CI externe, \`/epure sync\` (\`/epure rebase\`) pour rattraper \`dev\`, ou \`/epure cancel\` pour interrompre l'orchestration.`;
-  }
-  if (phase === "completed" || status === "completed" || status === "done") {
-    return `V\xE9rifiez et fusionnez (Squash & Merge) la Pull Request finale \`feature/* \u2192 dev\` dans l'interface GitHub.`;
-  }
-  return `Postez \`/epure plan\`${issueRef} pour d\xE9marrer le cadrage ou \`/epure status\` pour consulter l'\xE9tat courant.`;
-}
-function formatEpureCommandsSpoiler(context) {
-  const hint = buildContextualActionHint(context);
-  return [
-    "<details>",
-    EPURE_COMMANDS_SPOILER_SUMMARY,
-    "",
-    "| Commande | Action |",
-    "| :--- | :--- |",
-    "| `/epure plan` | D\xE9marrer ou relancer le cadrage (`/grill-with-docs`) sur l'issue |",
-    "| *R\xE9ponse libre en commentaire* | R\xE9pondre aux questions du Grill ou demander un ajustement de la sp\xE9cification (sans pr\xE9fixe `/epure`) |",
-    "| `/epure to-spec` | Valider la fronti\xE8re du Grill et g\xE9n\xE9rer `GLOSSARY.md`, les ADRs et la sp\xE9cification sur `plan/*` |",
-    "| `/epure to-tickets` | Valider la sp\xE9cification sur `plan/*` et g\xE9n\xE9rer le graphe de tickets GitHub (`blocked_by`) |",
-    "| `/epure approve` | Approuver le plan (`plan/* -> feature/*`), verrouiller `spec_sha` et lancer l'impl\xE9mentation |",
-    "| `/epure continue` | Reprendre l'orchestration apr\xE8s une suspension `needs-human` ou une attente de CI externe |",
-    "| `/epure sync` (ou `/epure rebase`) | Synchroniser `dev -> feature/*` (et `feature/* -> task/*`) avec r\xE9solution 3-way assist\xE9e + Stage 1 |",
-    "| `/epure status` | Afficher l'\xE9tat d'avancement de l'issue et des tickets |",
-    "| `/epure cancel` (ou `/epure stop`) | Suspendre imm\xE9diatement l'orchestration et emp\xEAcher tout auto-merge |",
-    "",
-    `> \u{1F4A1} **Action recommand\xE9e** : ${hint}`,
-    "",
-    "</details>"
-  ].join("\n");
-}
-function fencedCodeBlock(text, language = "text") {
-  const longestRun = Math.max(0, ...Array.from(text.matchAll(/`+/g), (m) => m[0].length));
-  const fence = "`".repeat(Math.max(3, longestRun + 1));
-  return `${fence}${language}
-${text}
-${fence}`;
-}
-function appendEpureCommandsSpoiler(markdown, context) {
-  const trimmed = markdown.trimEnd();
-  if (trimmed.includes(EPURE_COMMANDS_SPOILER_SUMMARY)) {
-    return trimmed;
-  }
-  const spoiler = formatEpureCommandsSpoiler(context);
-  return trimmed.length > 0 ? `${trimmed}
-
-${spoiler}` : spoiler;
-}
-
 // src/sandbox/polyglot-workspace-runner.ts
-import { execFileSync } from "node:child_process";
-import {
-  chmodSync,
-  cpSync,
-  existsSync as existsSync4,
-  lstatSync as lstatSync2,
-  mkdirSync as mkdirSync4,
-  mkdtempSync as mkdtempSync4,
-  readFileSync as readFileSync2,
-  realpathSync,
-  rmSync as rmSync4,
-  unlinkSync,
-  writeFileSync as writeFileSync4
-} from "node:fs";
-import { tmpdir as tmpdir3 } from "node:os";
-import { dirname as dirname3, join as join4, resolve as resolve3, sep } from "node:path";
 var SENSITIVE_TASK_BRANCH_PATH_PATTERNS = [
   /^\.github\/agents\.ya?ml$/i,
   /^\.github\/workflows(?:\/|$)/i,
@@ -9333,7 +8502,7 @@ function isSensitiveTaskBranchPath(rawPath, reviewersDir = DEFAULT_REVIEWERS_DIR
   );
 }
 function hasSymlinkEscapeAlongPath(resolvedRoot, rawRelPath) {
-  if (!existsSync4(resolvedRoot)) {
+  if (!existsSync2(resolvedRoot)) {
     return false;
   }
   let realRoot = resolvedRoot;
@@ -9345,12 +8514,12 @@ function hasSymlinkEscapeAlongPath(resolvedRoot, rawRelPath) {
   const segments = rawRelPath.replace(/\\/g, "/").split("/").filter((s) => s.length > 0 && s !== ".");
   let current = resolvedRoot;
   for (const seg of segments) {
-    current = join4(current, seg);
-    if (!existsSync4(current)) {
+    current = join2(current, seg);
+    if (!existsSync2(current)) {
       break;
     }
     try {
-      const stat = lstatSync2(current);
+      const stat = lstatSync(current);
       if (stat.isSymbolicLink()) {
         const realTarget = realpathSync(current);
         if (realTarget !== realRoot && !realTarget.startsWith(realRoot + sep)) {
@@ -9384,7 +8553,7 @@ function isContainedRelativePath(resolvedRoot, rawPath, allowRootDot) {
       return false;
     }
   }
-  const resolvedTarget = resolve3(resolvedRoot, trimmed);
+  const resolvedTarget = resolve2(resolvedRoot, trimmed);
   if (allowRootDot && resolvedTarget === resolvedRoot) {
     return true;
   }
@@ -9397,7 +8566,7 @@ function isContainedRelativePath(resolvedRoot, rawPath, allowRootDot) {
   return true;
 }
 function validateWorkspaceFileOperations(input) {
-  const resolvedRoot = resolve3(input.workDir);
+  const resolvedRoot = resolve2(input.workDir);
   const sensitiveSet = /* @__PURE__ */ new Set();
   const traversalSet = /* @__PURE__ */ new Set();
   const filePaths = [];
@@ -9444,14 +8613,14 @@ function validateWorkspaceFileOperations(input) {
   };
 }
 function sanitizeGitConfigFile(workDir, cleanRemoteUrl) {
-  const gitDir = join4(workDir, ".git");
-  const gitConfigPath = join4(gitDir, "config");
-  if (!existsSync4(gitDir)) {
+  const gitDir = join2(workDir, ".git");
+  const gitConfigPath = join2(gitDir, "config");
+  if (!existsSync2(gitDir)) {
     return;
   }
-  if (!existsSync4(gitConfigPath)) {
+  if (!existsSync2(gitConfigPath)) {
     if (cleanRemoteUrl) {
-      writeFileSync4(
+      writeFileSync2(
         gitConfigPath,
         [
           "[core]",
@@ -9487,7 +8656,7 @@ function sanitizeGitConfigFile(workDir, cleanRemoteUrl) {
     if (!replacedUrl && cleanRemoteUrl) {
       cleanedLines.push('[remote "origin"]', `	url = ${cleanRemoteUrl}`);
     }
-    writeFileSync4(gitConfigPath, `${cleanedLines.join("\n").trim()}
+    writeFileSync2(gitConfigPath, `${cleanedLines.join("\n").trim()}
 `, "utf8");
   } catch {
   }
@@ -9496,7 +8665,7 @@ function materializeSeedFilesIntoWorkspace(workDir, seedFiles) {
   if (!seedFiles) {
     return;
   }
-  const resolvedRoot = resolve3(workDir);
+  const resolvedRoot = resolve2(workDir);
   const entries = [];
   if (Array.isArray(seedFiles)) {
     for (const item of seedFiles) {
@@ -9518,36 +8687,36 @@ function materializeSeedFilesIntoWorkspace(workDir, seedFiles) {
     if (!isContainedRelativePath(resolvedRoot, cleanRel, false)) {
       continue;
     }
-    const targetPath = resolve3(resolvedRoot, cleanRel);
-    mkdirSync4(dirname3(targetPath), { recursive: true });
-    writeFileSync4(targetPath, content, "utf8");
+    const targetPath = resolve2(resolvedRoot, cleanRel);
+    mkdirSync2(dirname2(targetPath), { recursive: true });
+    writeFileSync2(targetPath, content, "utf8");
   }
 }
 function syncWorkspaceFiles(workDir, files, deletedFiles, fileModes = /* @__PURE__ */ new Map()) {
   materializeSeedFilesIntoWorkspace(workDir, files);
-  const resolvedRoot = resolve3(workDir);
+  const resolvedRoot = resolve2(workDir);
   for (const [rawPath, mode] of fileModes) {
     const cleanRel = rawPath.replace(/^\/+/, "");
     if (files.has(rawPath) && isContainedRelativePath(resolvedRoot, cleanRel, false)) {
-      chmodSync(resolve3(resolvedRoot, cleanRel), mode === "100755" ? 493 : 420);
+      chmodSync(resolve2(resolvedRoot, cleanRel), mode === "100755" ? 493 : 420);
     }
   }
   for (const rawPath of deletedFiles) {
     const cleanRel = rawPath.replace(/^\/+/, "");
     if (isContainedRelativePath(resolvedRoot, cleanRel, false)) {
-      rmSync4(resolve3(resolvedRoot, cleanRel), { force: true });
+      rmSync2(resolve2(resolvedRoot, cleanRel), { force: true });
     }
   }
 }
 function prepareRepositorySandboxWorkspace(input) {
-  const workDir = input.workDir ?? mkdtempSync4(join4(tmpdir3(), "epure-polyglot-sandbox-"));
-  mkdirSync4(workDir, { recursive: true });
+  const workDir = input.workDir ?? mkdtempSync2(join2(tmpdir(), "epure-polyglot-sandbox-"));
+  mkdirSync2(workDir, { recursive: true });
   const repoSlug = (input.repository ?? "").trim();
   const [owner, repo] = repoSlug.split("/");
   const cleanRemoteUrl = owner && repo ? `https://github.com/${owner}/${repo}.git` : "";
   let clonedFromRemote = false;
   try {
-    if (input.localSourceRepoDir && existsSync4(input.localSourceRepoDir)) {
+    if (input.localSourceRepoDir && existsSync2(input.localSourceRepoDir)) {
       cpSync(input.localSourceRepoDir, workDir, { recursive: true });
     }
     const shouldAttemptClone = Boolean(cleanRemoteUrl && input.branch && input.githubToken) && (input.enableRemoteClone === true || Boolean(input.execGitImpl));
@@ -9588,8 +8757,8 @@ function prepareRepositorySandboxWorkspace(input) {
     }
   } finally {
     if (cleanRemoteUrl) {
-      if (clonedFromRemote && !existsSync4(join4(workDir, ".git"))) {
-        mkdirSync4(join4(workDir, ".git"), { recursive: true });
+      if (clonedFromRemote && !existsSync2(join2(workDir, ".git"))) {
+        mkdirSync2(join2(workDir, ".git"), { recursive: true });
       }
       sanitizeGitConfigFile(workDir, cleanRemoteUrl);
     }
@@ -9599,7 +8768,7 @@ function prepareRepositorySandboxWorkspace(input) {
     clonedFromRemote,
     sanitizedGitConfigUrl: cleanRemoteUrl,
     cleanup: () => {
-      rmSync4(workDir, { recursive: true, force: true });
+      rmSync2(workDir, { recursive: true, force: true });
     }
   };
 }
@@ -9808,8 +8977,8 @@ function shouldSkipDefaultNodeStepInOfflineTempDir(params) {
   if (params.hasCustomSandboxRunner) {
     return { skip: false, skipEntireTarget: false };
   }
-  const pkgJsonPath = join4(params.targetCwd, "package.json");
-  if (!existsSync4(pkgJsonPath)) {
+  const pkgJsonPath = join2(params.targetCwd, "package.json");
+  if (!existsSync2(pkgJsonPath)) {
     return { skip: true, skipEntireTarget: true };
   }
   let scripts = {};
@@ -9821,15 +8990,15 @@ function shouldSkipDefaultNodeStepInOfflineTempDir(params) {
   } catch {
     return { skip: false, skipEntireTarget: false };
   }
-  const hasLockfile = existsSync4(join4(params.targetCwd, "package-lock.json")) || existsSync4(join4(params.targetCwd, "pnpm-lock.yaml")) || existsSync4(join4(params.targetCwd, "yarn.lock"));
-  const hasNodeModules = existsSync4(join4(params.targetCwd, "node_modules"));
+  const hasLockfile = existsSync2(join2(params.targetCwd, "package-lock.json")) || existsSync2(join2(params.targetCwd, "pnpm-lock.yaml")) || existsSync2(join2(params.targetCwd, "yarn.lock"));
+  const hasNodeModules = existsSync2(join2(params.targetCwd, "node_modules"));
   if (params.step === "install") {
     if (depCount === 0 && !hasLockfile || hasNodeModules) {
       return { skip: true, skipEntireTarget: false };
     }
   }
   if (params.step === "typecheck") {
-    const hasTsconfig = existsSync4(join4(params.targetCwd, "tsconfig.json"));
+    const hasTsconfig = existsSync2(join2(params.targetCwd, "tsconfig.json"));
     if (!hasTsconfig && !scripts.typecheck) {
       return { skip: true, skipEntireTarget: false };
     }
@@ -9848,8 +9017,8 @@ function shouldSkipDefaultNodeStepInOfflineTempDir(params) {
 }
 async function runPolyglotStage1Verification(input) {
   const ownsTempWorkDir = !input.workDir;
-  const workDir = input.workDir ?? mkdtempSync4(join4(tmpdir3(), "epure-stage1-sandbox-"));
-  mkdirSync4(workDir, { recursive: true });
+  const workDir = input.workDir ?? mkdtempSync2(join2(tmpdir(), "epure-stage1-sandbox-"));
+  mkdirSync2(workDir, { recursive: true });
   const hasCustomSandboxRunner = Boolean(input.sandboxRunner);
   const sandboxRunner = input.sandboxRunner ?? runInUntrustedCodeSandbox;
   const bootstrapped = input.bootstrappedTargets ?? /* @__PURE__ */ new Set();
@@ -9886,17 +9055,17 @@ async function runPolyglotStage1Verification(input) {
         output: validation.reason || fullContainment.reason
       };
     }
-    const resolvedRoot = resolve3(workDir);
+    const resolvedRoot = resolve2(workDir);
     for (const file of input.files ?? []) {
       const cleanRel = file.path.replace(/^\/+/, "");
-      const fullPath = resolve3(resolvedRoot, cleanRel);
-      mkdirSync4(dirname3(fullPath), { recursive: true });
-      writeFileSync4(fullPath, file.content, "utf8");
+      const fullPath = resolve2(resolvedRoot, cleanRel);
+      mkdirSync2(dirname2(fullPath), { recursive: true });
+      writeFileSync2(fullPath, file.content, "utf8");
     }
     for (const del of input.deleted_files ?? []) {
       const cleanRel = del.replace(/^\/+/, "");
-      const fullPath = resolve3(resolvedRoot, cleanRel);
-      if (existsSync4(fullPath)) {
+      const fullPath = resolve2(resolvedRoot, cleanRel);
+      if (existsSync2(fullPath)) {
         unlinkSync(fullPath);
       }
     }
@@ -9917,8 +9086,8 @@ async function runPolyglotStage1Verification(input) {
       LLM_API_KEY: input.llmApiKey
     };
     for (const target of affectedTargets) {
-      const targetCwd = target.working_directory === "." ? resolvedRoot : resolve3(resolvedRoot, target.working_directory);
-      if (!existsSync4(targetCwd)) {
+      const targetCwd = target.working_directory === "." ? resolvedRoot : resolve2(resolvedRoot, target.working_directory);
+      if (!existsSync2(targetCwd)) {
         if (!hasCustomSandboxRunner) {
           targetResults.push({
             target_name: target.name,
@@ -9931,7 +9100,7 @@ async function runPolyglotStage1Verification(input) {
           });
           continue;
         }
-        mkdirSync4(targetCwd, { recursive: true });
+        mkdirSync2(targetCwd, { recursive: true });
       }
       if (target.kind === "node") {
         const nodeCheck = shouldSkipDefaultNodeStepInOfflineTempDir({
@@ -10136,9 +9305,1201 @@ ${formattedOutput}`;
     };
   } finally {
     if (ownsTempWorkDir) {
-      rmSync4(workDir, { recursive: true, force: true });
+      rmSync2(workDir, { recursive: true, force: true });
     }
   }
+}
+
+// src/agent/engine.ts
+function resolveLifecycleAgentEngine(engine) {
+  return engine?.name === "pi" || engine?.name === "cursor" ? engine : void 0;
+}
+var AgentEngineError = class extends Error {
+  code;
+  constructor(code, message) {
+    super(message);
+    this.name = "AgentEngineError";
+    this.code = code;
+  }
+};
+function assertNoSecretMaterial(sources, secrets) {
+  const values = secrets.map((s) => s.trim()).filter((s) => s.length >= 8);
+  const leaking = sources.filter((s) => containsPrivateKeyMaterial(s.text) || values.some((v) => s.text.includes(v))).map((s) => redactSecrets(s.label, values));
+  if (leaking.length > 0) {
+    throw new AgentEngineError(
+      "AGENT_SECRET_IN_DIFF",
+      `Secret material (a runner secret, the installation token, the proxy nonce or a private key) was found in ${[...new Set(leaking)].join(", ")}; nothing was committed.`
+    );
+  }
+}
+
+// src/agent/worktree-snapshot.ts
+import { spawn as spawn2 } from "node:child_process";
+import { existsSync as existsSync3, lstatSync as lstatSync2, mkdirSync as mkdirSync3, mkdtempSync as mkdtempSync3, rmSync as rmSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { tmpdir as tmpdir2 } from "node:os";
+import { join as join3 } from "node:path";
+var DEFAULT_WORKTREE_DIFF_LIMITS = {
+  maxFiles: 500,
+  maxFileBytes: 1024 * 1024,
+  maxTotalBytes: 10 * 1024 * 1024
+};
+var DEFAULT_UNTRACKED_EXCLUDES = [
+  "node_modules/",
+  ".venv/",
+  "__pycache__/",
+  "*.tsbuildinfo",
+  "/dist/",
+  "/build/",
+  "/coverage/",
+  "/target/"
+];
+function untrackedExcludes(trackedPaths) {
+  return DEFAULT_UNTRACKED_EXCLUDES.filter((pattern) => {
+    if (!pattern.endsWith("/")) {
+      return true;
+    }
+    const name = pattern.replace(/^\/|\/$/g, "");
+    return !trackedPaths.some(
+      (p) => pattern.startsWith("/") ? p.startsWith(`${name}/`) : p.split("/").slice(0, -1).includes(name)
+    );
+  });
+}
+var GIT_TIMEOUT_MS = 12e4;
+var MAX_GIT_OUTPUT_BYTES = 256 * 1024 * 1024;
+var GIT_STDERR_TAIL_CHARS = 2e3;
+function gitRunner(gitDir, worktree, extraEnv = {}) {
+  return (args, input = "") => new Promise((resolvePromise, reject) => {
+    const fail = (why) => reject(new AgentEngineError("AGENT_SNAPSHOT_FAILED", `Worktree snapshot: git ${args[0] ?? ""} ${why}`));
+    const child = spawn2(
+      "git",
+      [
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "protocol.file.allow=never",
+        "-c",
+        "core.autocrlf=false",
+        "-c",
+        "core.symlinks=true",
+        `--git-dir=${gitDir}`,
+        `--work-tree=${worktree}`,
+        ...args
+      ],
+      {
+        cwd: worktree,
+        env: {
+          PATH: process.env.PATH ?? "/usr/bin:/bin",
+          HOME: gitDir,
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_CONFIG_GLOBAL: "/dev/null",
+          GIT_ATTR_NOSYSTEM: "1",
+          GIT_LITERAL_PATHSPECS: "1",
+          ...extraEnv
+        },
+        stdio: ["pipe", "pipe", "pipe"]
+      }
+    );
+    const out = [];
+    let outBytes = 0;
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      fail(`timed out after ${GIT_TIMEOUT_MS} ms`);
+    }, GIT_TIMEOUT_MS);
+    child.stdout.on("data", (chunk) => {
+      outBytes += chunk.length;
+      if (outBytes > MAX_GIT_OUTPUT_BYTES) {
+        child.kill("SIGKILL");
+        fail("output exceeded its cap");
+        return;
+      }
+      out.push(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr = (stderr + chunk.toString("utf8")).slice(-GIT_STDERR_TAIL_CHARS);
+    });
+    child.stdin.on("error", () => {
+    });
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      fail(`could not run: ${err.message}`);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) {
+        resolvePromise(Buffer.concat(out));
+      } else {
+        fail(`exited with code ${code ?? "?"}: ${stderr.trim()}`);
+      }
+    });
+    child.stdin.end(input);
+  });
+}
+async function listTrackedPaths(worktree) {
+  const index = join3(worktree, ".git", "index");
+  if (!existsSync3(index)) {
+    return [];
+  }
+  const gitDir = mkdtempSync3(join3(tmpdir2(), "epure-tracked-"));
+  try {
+    const git = gitRunner(gitDir, worktree, { GIT_INDEX_FILE: index });
+    await git(["init", "--quiet"]);
+    return splitNul(await git(["ls-files", "-z"]));
+  } finally {
+    rmSync3(gitDir, { recursive: true, force: true });
+  }
+}
+async function snapshotWorktree(worktree, options = {}) {
+  const gitDir = mkdtempSync3(join3(tmpdir2(), "epure-snapshot-"));
+  const git = gitRunner(gitDir, worktree);
+  const limits = options.limits ?? DEFAULT_WORKTREE_DIFF_LIMITS;
+  const isProtected = options.isProtectedPath ?? (() => false);
+  const listIgnored = async () => new Set(splitNul(await git(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory"])));
+  let before = "";
+  let ignoredBefore = /* @__PURE__ */ new Set();
+  try {
+    await git(["init", "--quiet"]);
+    mkdirSync3(join3(gitDir, "info"), { recursive: true });
+    writeFileSync3(join3(gitDir, "info", "exclude"), `${untrackedExcludes(options.trackedPaths ?? []).join("\n")}
+`);
+    await git(["add", "--all"]);
+    const tracked = (options.trackedPaths ?? []).filter((p) => isFileOrSymlink(join3(worktree, p)));
+    if (tracked.length > 0) {
+      await git(["add", "--force", "--pathspec-from-file=-", "--pathspec-file-nul"], tracked.join("\0"));
+    }
+    before = (await git(["write-tree"])).toString("utf8").trim();
+    ignoredBefore = await listIgnored();
+  } catch (err) {
+    rmSync3(gitDir, { recursive: true, force: true });
+    throw err;
+  }
+  return {
+    async collect() {
+      await git(["add", "--all"]);
+      const after = (await git(["write-tree"])).toString("utf8").trim();
+      const entries = parseDiffTree(await git(["diff-tree", "-r", "-z", "--no-renames", before, after]));
+      const protectedKnown = [
+        ...splitNul(await git(["ls-tree", "-r", "-z", "--name-only", before])),
+        ...entries.map((e) => e.path)
+      ].filter(isProtected);
+      const isProtectedEntry = (path) => {
+        const segments = path.split("/");
+        return segments.some((_, i) => isProtected(segments.slice(0, i + 1).join("/"))) || protectedKnown.some((p) => p.startsWith(`${path}/`));
+      };
+      const skipped = [];
+      const deleted = [];
+      const candidates = [];
+      for (const entry of entries) {
+        const existedBefore = entry.status !== "A";
+        if (isProtectedEntry(entry.path)) {
+          skipped.push({ path: entry.path, reason: "protected", existedBefore });
+        } else if (entry.status === "D") {
+          deleted.push(entry.path);
+        } else if (entry.newMode === "120000") {
+          skipped.push({ path: entry.path, reason: "symlink", existedBefore });
+        } else if (entry.newMode === "160000") {
+          skipped.push({ path: entry.path, reason: "submodule", existedBefore });
+        } else {
+          candidates.push(entry);
+        }
+      }
+      if (candidates.length + deleted.length > limits.maxFiles) {
+        throw new AgentEngineError(
+          "AGENT_DIFF_TOO_LARGE",
+          `The session changed ${candidates.length + deleted.length} files; at most ${limits.maxFiles} are accepted.`
+        );
+      }
+      const sizes = await blobSizes(git, candidates.map((c) => c.newSha));
+      let totalBytes = 0;
+      for (const [i, entry] of candidates.entries()) {
+        const size = sizes[i] ?? 0;
+        if (size > limits.maxFileBytes) {
+          throw new AgentEngineError(
+            "AGENT_DIFF_TOO_LARGE",
+            `The session left ${entry.path} at ${size} bytes; at most ${limits.maxFileBytes} bytes per file are accepted.`
+          );
+        }
+        totalBytes += size;
+      }
+      if (totalBytes > limits.maxTotalBytes) {
+        throw new AgentEngineError(
+          "AGENT_DIFF_TOO_LARGE",
+          `The session changed ${totalBytes} bytes; at most ${limits.maxTotalBytes} bytes are accepted.`
+        );
+      }
+      const files = [];
+      const blobs = await blobContents(git, candidates.map((c) => c.newSha));
+      for (const [i, entry] of candidates.entries()) {
+        const text = decodeText(blobs[i] ?? Buffer.alloc(0));
+        if (text === void 0) {
+          skipped.push({ path: entry.path, reason: "binary", existedBefore: entry.status !== "A" });
+        } else {
+          files.push({ path: entry.path, content: text, mode: entry.newMode === "100755" ? "100755" : "100644" });
+        }
+      }
+      const earlier = [...ignoredBefore].map((p) => p.replace(/\/$/, ""));
+      const related = (a, b) => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+      const newlyIgnored = [];
+      for (const listed of [...await listIgnored()].sort()) {
+        const path = listed.replace(/\/$/, "");
+        if (!earlier.some((b) => related(path, b)) && !newlyIgnored.some((n) => related(path, n))) {
+          newlyIgnored.push(path);
+          skipped.push({ path, reason: "ignored", existedBefore: false });
+        }
+      }
+      for (const s of skipped) {
+        removeInsideWorktree(worktree, s.path);
+      }
+      const restore = skipped.filter((s) => s.existedBefore).map((s) => s.path);
+      if (restore.length > 0) {
+        await git(["checkout", before, "--pathspec-from-file=-", "--pathspec-file-nul"], restore.join("\0"));
+      }
+      return {
+        files,
+        deleted_files: deleted,
+        skipped: skipped.map(({ path, reason }) => ({ path, reason }))
+      };
+    },
+    dispose() {
+      rmSync3(gitDir, { recursive: true, force: true });
+    }
+  };
+}
+function parseDiffTree(raw) {
+  const fields = splitNul(raw);
+  const entries = [];
+  for (let i = 0; i + 1 < fields.length; i += 2) {
+    const [, newMode = "", , newSha = "", status = ""] = (fields[i] ?? "").split(" ");
+    entries.push({ newMode, newSha, status, path: fields[i + 1] ?? "" });
+  }
+  return entries;
+}
+async function blobSizes(git, shas) {
+  if (shas.length === 0) {
+    return [];
+  }
+  const out = (await git(["cat-file", "--batch-check=%(objectsize)"], `${shas.join("\n")}
+`)).toString("utf8");
+  return out.split("\n").slice(0, shas.length).map((line) => Number.parseInt(line, 10));
+}
+async function blobContents(git, shas) {
+  if (shas.length === 0) {
+    return [];
+  }
+  const out = await git(["cat-file", "--batch"], `${shas.join("\n")}
+`);
+  const blobs = [];
+  let offset = 0;
+  for (let i = 0; i < shas.length; i += 1) {
+    const headerEnd = out.indexOf(10, offset);
+    const size = Number.parseInt(out.subarray(offset, headerEnd).toString("utf8").split(" ")[2] ?? "0", 10);
+    blobs.push(out.subarray(headerEnd + 1, headerEnd + 1 + size));
+    offset = headerEnd + 1 + size + 1;
+  }
+  return blobs;
+}
+function decodeText(blob) {
+  if (blob.includes(0)) {
+    return void 0;
+  }
+  try {
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(blob);
+  } catch {
+    return void 0;
+  }
+}
+function splitNul(raw) {
+  return raw.toString("utf8").split("\0").filter((field) => field.length > 0);
+}
+function isFileOrSymlink(path) {
+  try {
+    const stat = lstatSync2(path);
+    return stat.isFile() || stat.isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+function removeInsideWorktree(worktree, relPath) {
+  const segments = relPath.split("/");
+  let current = worktree;
+  for (const segment of segments.slice(0, -1)) {
+    current = join3(current, segment);
+    try {
+      if (lstatSync2(current).isSymbolicLink()) {
+        return;
+      }
+    } catch {
+      return;
+    }
+  }
+  rmSync3(join3(worktree, relPath), { recursive: true, force: true });
+}
+
+// src/agent/cursor-engine.ts
+var CURSOR_SDK_SPECIFIER = "@cursor/sdk";
+var DEFAULT_MAX_LLM_REQUESTS = 100;
+var SECRET_ENV_NAME_RE = /(?:TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL|PRIVATE)/i;
+var CURSOR_ISOLATION_WARNING = "harness 'cursor' runs local tools via @cursor/sdk without EPURE's kernel sandbox (Landlock/bubblewrap/Seatbelt) or localhost credential-brokering proxy; CURSOR_API_KEY is held by the in-process SDK session.";
+var READ_ONLY_TOOLS = ["read", "glob", "grep", "ls", "semSearch"];
+var READ_ONLY_DISALLOWED_TOOLS = ["edit", "delete", "shell", "task", "mcp"];
+var WRITE_TOOLS = ["read", "edit", "delete", "glob", "grep", "ls", "shell", "semSearch"];
+var WRITE_DISALLOWED_TOOLS = ["task", "mcp"];
+function translateModelForCursor(model, thinking) {
+  const trimmed = model.trim();
+  if (!trimmed) {
+    throw new BadRequestError("Model identifier must not be empty.", {
+      provider: "cursor",
+      status: 400
+    });
+  }
+  const segments = trimmed.split("/").filter((segment) => segment.length > 0);
+  let providerPrefix = null;
+  let modelId;
+  if (segments.length <= 1) {
+    modelId = segments[0] ?? "";
+  } else if (segments[0] === "openrouter" && segments.length >= 3) {
+    providerPrefix = "openrouter";
+    modelId = segments.slice(2).join("/");
+  } else {
+    providerPrefix = segments[0] ?? null;
+    modelId = segments.slice(1).join("/");
+  }
+  if (!modelId) {
+    throw new BadRequestError(`Invalid model identifier '${model}'.`, {
+      provider: "cursor",
+      status: 400
+    });
+  }
+  const params = thinking ? [{ id: "thinking", value: thinking }] : void 0;
+  return {
+    modelId,
+    providerPrefix,
+    ...params ? { params } : {}
+  };
+}
+function resolveCursorToolsForPolicy(toolPolicy) {
+  if (toolPolicy === "read_only") {
+    return {
+      tools: [...READ_ONLY_TOOLS],
+      disallowedTools: [...READ_ONLY_DISALLOWED_TOOLS],
+      suppressDefaultShellExecutor: true
+    };
+  }
+  return {
+    tools: [...WRITE_TOOLS],
+    disallowedTools: [...WRITE_DISALLOWED_TOOLS],
+    suppressDefaultShellExecutor: false
+  };
+}
+function buildCursorPrompt(instructions, prompt) {
+  const trimmedInstructions = instructions.trim();
+  if (!trimmedInstructions) {
+    return prompt;
+  }
+  return `<system_instructions>
+${trimmedInstructions}
+</system_instructions>
+
+${prompt}`;
+}
+async function defaultCursorSdkLoader() {
+  try {
+    return await import(CURSOR_SDK_SPECIFIER);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new AgentEngineError(
+      "AGENT_ENGINE_UNAVAILABLE",
+      `Failed to load ${CURSOR_SDK_SPECIFIER}: ${detail}`
+    );
+  }
+}
+function collectSecretsToRedact(apiKey, runnerEnv, request, extraSecrets) {
+  const secrets = new Set(collectRunnerSecretValues(runnerEnv));
+  if (apiKey.length >= 8) {
+    secrets.add(apiKey);
+  }
+  for (const [key, value] of Object.entries(runnerEnv)) {
+    if (typeof value === "string" && value.trim().length >= 8 && SECRET_ENV_NAME_RE.test(key)) {
+      secrets.add(value.trim());
+    }
+  }
+  for (const provider of Object.values(request.providers ?? {})) {
+    if (provider.api_key && provider.api_key.trim().length >= 8) {
+      secrets.add(provider.api_key.trim());
+    }
+  }
+  for (const secret of [...extraSecrets ?? [], ...request.secrets ?? []]) {
+    if (secret && secret.trim().length >= 8) {
+      secrets.add(secret.trim());
+    }
+  }
+  return [...secrets];
+}
+function redactSecretsFromText(text, secrets) {
+  return redactSecrets(text, secrets);
+}
+function mapCursorError(err, secrets) {
+  if (err instanceof AgentEngineError) {
+    throw new AgentEngineError(err.code, redactSecretsFromText(err.message, secrets));
+  }
+  if (err instanceof AuthenticationError) {
+    throw new AuthenticationError(redactSecretsFromText(err.message, secrets), {
+      provider: err.provider ?? "cursor",
+      status: err.status ?? 401
+    });
+  }
+  if (err instanceof RateLimitError) {
+    throw new RateLimitError(redactSecretsFromText(err.message, secrets), {
+      provider: err.provider ?? "cursor",
+      status: err.status ?? 429
+    });
+  }
+  if (err instanceof BadRequestError) {
+    throw new BadRequestError(redactSecretsFromText(err.message, secrets), {
+      provider: err.provider ?? "cursor",
+      status: err.status ?? 400
+    });
+  }
+  const rawMessage = err instanceof Error ? err.message : typeof err === "object" && err !== null && "message" in err && typeof err.message === "string" ? err.message : String(err);
+  const safeMessage = redactSecretsFromText(rawMessage, secrets);
+  const errorName = err instanceof Error ? err.name : "";
+  if (errorName === "AuthenticationError" || /\b(401|403|unauthenticated|unauthorized|invalid[_ -]?api[_ -]?key|authentication failed|not authenticated)\b/i.test(
+    safeMessage
+  )) {
+    throw new AuthenticationError(safeMessage, {
+      provider: "cursor",
+      status: 401
+    });
+  }
+  if (errorName === "RateLimitError" || /\b(429|rate[_ -]?limit|too many requests|resource_exhausted|quota exceeded)\b/i.test(
+    safeMessage
+  )) {
+    throw new RateLimitError(safeMessage, {
+      provider: "cursor",
+      status: 429
+    });
+  }
+  if (errorName === "ConfigurationError" || /\b(400|invalid_argument|bad request|context length|prompt is too long|system prompt override)\b/i.test(
+    safeMessage
+  )) {
+    throw new BadRequestError(safeMessage, {
+      provider: "cursor",
+      status: 400
+    });
+  }
+  throw new AgentEngineError("AGENT_PROTOCOL_ERROR", safeMessage);
+}
+function createCursorAgentEngine(options = {}) {
+  const runnerEnv = options.runnerEnv ?? process.env;
+  const loadSdk = options.sdkLoader ?? defaultCursorSdkLoader;
+  return {
+    name: "cursor",
+    async run(request) {
+      const runInUsageContext = bindToUsageContext();
+      const apiKey = (options.apiKey ?? runnerEnv.CURSOR_API_KEY ?? "").trim();
+      if (!apiKey) {
+        throw new AuthenticationError(
+          "Missing CURSOR_API_KEY for the Cursor agent engine. Configure CURSOR_API_KEY in repository Actions secrets.",
+          { provider: "cursor", status: 401 }
+        );
+      }
+      const translation = translateModelForCursor(request.model, request.thinking);
+      const toolConfig = resolveCursorToolsForPolicy(request.toolPolicy);
+      const secrets = collectSecretsToRedact(apiKey, runnerEnv, request, options.extraSecrets);
+      const maxLlmRequests = request.maxLlmRequests ?? DEFAULT_MAX_LLM_REQUESTS;
+      const readOnly = request.toolPolicy === "read_only";
+      console.info(
+        `[cursor-engine] session starting (role=${request.role}, policy=${request.toolPolicy}, model=${translation.modelId})`
+      );
+      console.warn(`[cursor-engine] ${CURSOR_ISOLATION_WARNING}`);
+      const sdk = await loadSdk();
+      const trackedPaths = request.trackedPaths ?? await listTrackedPaths(request.worktree).catch(() => void 0);
+      const snapshot = await snapshotWorktree(request.worktree, {
+        trackedPaths,
+        isProtectedPath: readOnly ? () => true : request.isProtectedPath ?? ((path) => isSensitiveTaskBranchPath(path))
+      });
+      const sessionDir = mkdtempSync4(join4(tmpdir3(), "epure-cursor-session-"));
+      let agent;
+      try {
+        const store = sdk.JsonlLocalAgentStore ? new sdk.JsonlLocalAgentStore(join4(sessionDir, "store")) : void 0;
+        agent = await sdk.Agent.create({
+          apiKey,
+          ...options.baseUrl ? { baseUrl: options.baseUrl } : {},
+          model: {
+            id: translation.modelId,
+            ...translation.params ? { params: [...translation.params] } : {}
+          },
+          tools: [...toolConfig.tools],
+          disallowedTools: [...toolConfig.disallowedTools],
+          mcpServers: {},
+          local: {
+            cwd: request.worktree,
+            settingSources: [],
+            ...store ? { store } : {},
+            sandboxOptions: {
+              enabled: options.sandboxEnabled ?? false
+            },
+            ...toolConfig.suppressDefaultShellExecutor ? { resourceProviderOptions: { suppressDefaultShellExecutor: true } } : {}
+          }
+        });
+        let stepCount = 0;
+        let capExceeded = false;
+        let timedOut = false;
+        let lastAssistantMessage = "";
+        let activeRunHandle;
+        const fullPrompt = buildCursorPrompt(request.instructions, request.prompt);
+        const runHandle = await agent.send(fullPrompt, {
+          mode: "agent",
+          onStep: ({ step }) => {
+            if (step.type === "assistantMessage") {
+              lastAssistantMessage = step.message.text;
+            }
+            if (step.type === "assistantMessage" || step.type === "toolCall") {
+              stepCount += 1;
+              if (stepCount > maxLlmRequests && !capExceeded) {
+                capExceeded = true;
+                void activeRunHandle?.cancel().catch(() => void 0);
+              }
+            }
+          }
+        });
+        activeRunHandle = runHandle;
+        if (capExceeded) {
+          await runHandle.cancel().catch(() => void 0);
+        }
+        let timeoutHandle;
+        const timeoutPromise = new Promise((_resolve, reject) => {
+          timeoutHandle = setTimeout(() => {
+            timedOut = true;
+            void runHandle.cancel().catch(() => void 0);
+            reject(
+              new AgentEngineError(
+                "AGENT_TIMEOUT",
+                `Agent session (${request.role}) exceeded ${request.timeoutMs} ms and was aborted.`
+              )
+            );
+          }, request.timeoutMs);
+        });
+        let runResult;
+        try {
+          runResult = await Promise.race([runHandle.wait(), timeoutPromise]);
+        } finally {
+          if (timeoutHandle !== void 0) {
+            clearTimeout(timeoutHandle);
+          }
+        }
+        if (timedOut) {
+          throw new AgentEngineError(
+            "AGENT_TIMEOUT",
+            `Agent session (${request.role}) exceeded ${request.timeoutMs} ms and was aborted.`
+          );
+        }
+        if (capExceeded) {
+          throw new AgentEngineError(
+            "AGENT_REQUEST_CAP_REACHED",
+            `Agent session (${request.role}) was aborted after ${maxLlmRequests} LLM requests.`
+          );
+        }
+        const usage = runResult.usage ?? await agent.getUsage().then((u) => u.usage).catch(() => void 0);
+        const usageProvider = translation.providerPrefix ?? "cursor";
+        const cachedInputTokens = usage?.cacheReadTokens ?? 0;
+        const inputTokens = (usage?.inputTokens ?? 0) + (usage?.cacheWriteTokens ?? 0) + cachedInputTokens;
+        const outputTokens = usage?.outputTokens ?? 0;
+        const thinkingTokens = usage?.reasoningTokens ?? 0;
+        if (runResult.error) {
+          mapCursorError(runResult.error, secrets);
+        }
+        if (runResult.status === "error") {
+          mapCursorError(new Error("Cursor agent run failed without a detailed error."), secrets);
+        }
+        if (runResult.status === "cancelled") {
+          throw new AgentEngineError("AGENT_PROTOCOL_ERROR", "Cursor agent run was cancelled.");
+        }
+        runInUsageContext(() => {
+          if (usage && (inputTokens > 0 || outputTokens > 0)) {
+            recordTokenUsage({
+              provider: usageProvider,
+              model: translation.modelId,
+              input_tokens: inputTokens,
+              cached_input_tokens: cachedInputTokens,
+              output_tokens: outputTokens,
+              thinking_tokens: thinkingTokens
+            });
+          } else {
+            recordTokenUsage({
+              provider: usageProvider,
+              model: translation.modelId,
+              unavailable: true
+            });
+          }
+        });
+        const finalMessage = runResult.result ?? lastAssistantMessage;
+        const collectedDiff = await snapshot.collect();
+        const diff = readOnly ? { files: [], deleted_files: [], skipped: [] } : collectedDiff;
+        assertNoSecretMaterial(
+          [
+            ...diff.files.map((f) => ({ label: f.path, text: f.content })),
+            ...[...diff.files, ...collectedDiff.skipped].map((f) => ({
+              label: "a file path",
+              text: f.path
+            })),
+            ...diff.deleted_files.map((path) => ({
+              label: "a file path",
+              text: path
+            })),
+            { label: "the final message", text: finalMessage }
+          ],
+          secrets
+        );
+        return {
+          finalMessage,
+          diff
+        };
+      } catch (err) {
+        if (readOnly) {
+          await snapshot.collect().catch(() => void 0);
+        }
+        mapCursorError(err, secrets);
+      } finally {
+        if (agent) {
+          try {
+            await agent[Symbol.asyncDispose]();
+          } catch {
+          }
+        }
+        snapshot.dispose();
+        rmSync4(sessionDir, { recursive: true, force: true });
+      }
+    }
+  };
+}
+
+// src/agent/pi-engine.ts
+import { existsSync as existsSync4, mkdirSync as mkdirSync4, mkdtempSync as mkdtempSync5, rmSync as rmSync5, symlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
+import { tmpdir as tmpdir4 } from "node:os";
+import { dirname as dirname3, join as join5, resolve as resolve3 } from "node:path";
+import { createInterface } from "node:readline";
+import { fileURLToPath } from "node:url";
+
+// src/agent/pi-models.ts
+var NONCE_REFERENCE = "$EPURE_LLM_PROXY_NONCE";
+var CUSTOM_PROVIDER_ID = "epure";
+var ROUTES = {
+  anthropic: { builtIn: "anthropic", path: "" },
+  openai: { builtIn: "openai", path: "" },
+  google: { builtIn: "google", path: "/v1beta" },
+  openrouter: { api: "openai-completions", path: "" },
+  azure_ai: { api: "openai-completions", path: "" },
+  azure: { api: "openai-completions", path: "/openai/v1" },
+  vertex: { api: "google-generative-ai", path: "/v1/publishers/google" }
+};
+function translateModelForPi(model, providers, env) {
+  const parsed = parseModelIdentifier(model, providers, env);
+  const route = ROUTES[parsed.provider];
+  if ("builtIn" in route) {
+    return {
+      provider: route.builtIn,
+      modelId: parsed.model,
+      modelsJson: (proxyUrl) => JSON.stringify({
+        providers: {
+          [route.builtIn]: { baseUrl: `${proxyUrl}${route.path}`, apiKey: NONCE_REFERENCE }
+        }
+      })
+    };
+  }
+  return {
+    provider: CUSTOM_PROVIDER_ID,
+    modelId: parsed.model,
+    modelsJson: (proxyUrl) => JSON.stringify({
+      providers: {
+        [CUSTOM_PROVIDER_ID]: {
+          baseUrl: `${proxyUrl}${route.path}`,
+          api: route.api,
+          apiKey: NONCE_REFERENCE,
+          models: [
+            {
+              id: parsed.model,
+              name: parsed.model,
+              reasoning: false,
+              input: ["text"],
+              contextWindow: 128e3,
+              maxTokens: 16384
+            }
+          ]
+        }
+      }
+    })
+  };
+}
+
+// src/agent/pi-engine.ts
+var PI_TOOLS = {
+  write: "read,bash,edit,write,grep,find,ls",
+  read_only: "read,grep,find,ls"
+};
+var PI_SETTINGS = JSON.stringify({
+  enableInstallTelemetry: false,
+  enableAnalytics: false,
+  defaultProjectTrust: "never"
+});
+var SHUTDOWN_GRACE_MS = 3e4;
+var MAX_ERROR_BODY_CHARS = 16 * 1024;
+var STDERR_TAIL_CHARS = 2e3;
+var MAX_RPC_LINE_BYTES = 8 * 1024 * 1024;
+function resolveVendoredPiDir() {
+  const here = dirname3(fileURLToPath(import.meta.url));
+  const found = ["../vendor/pi", "../../vendor/pi", "../../dist/vendor/pi"].map((rel) => resolve3(here, rel)).find((dir) => existsSync4(join5(dir, "rpc-entry.js")));
+  if (!found) {
+    throw new AgentEngineError(
+      "AGENT_ENGINE_UNAVAILABLE",
+      "The vendored Pi bundle (dist/vendor/pi) is missing; run npm run build."
+    );
+  }
+  return found;
+}
+function createPiAgentEngine(options) {
+  const sandboxRunner = options.sandboxRunner ?? runInUntrustedCodeSandbox;
+  return {
+    name: "pi",
+    async run(request) {
+      const piDir = options.piDir ?? resolveVendoredPiDir();
+      const route = translateModelForPi(request.model, request.providers, options.runnerEnv);
+      const sessionDir = mkdtempSync5(join5(tmpdir4(), "epure-pi-session-"));
+      const instructionsPath = join5(sessionDir, "instructions.md");
+      writeFileSync4(instructionsPath, request.instructions, "utf8");
+      const fdPath = options.fdPath ?? "/usr/bin/fd";
+      const fdfindPath = options.fdfindPath ?? "/usr/bin/fdfind";
+      let sessionBinDir;
+      if (!existsSync4(fdPath) && existsSync4(fdfindPath)) {
+        sessionBinDir = join5(sessionDir, "bin");
+        mkdirSync4(sessionBinDir, { recursive: true });
+        symlinkSync(fdfindPath, join5(sessionBinDir, "fd"));
+      }
+      const basePath = options.runnerEnv.PATH ?? process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
+      const sessionPath = sessionBinDir ? basePath ? `${sessionBinDir}:${basePath}` : sessionBinDir : void 0;
+      const readOnlyCwd = request.toolPolicy === "read_only";
+      const outcome = { settled: false, timedOut: false, lineTooLong: false, finalMessage: "" };
+      let upstreamError;
+      let proxyNonce = "";
+      let snapshot;
+      try {
+        snapshot = await snapshotWorktree(request.worktree, {
+          trackedPaths: request.trackedPaths,
+          isProtectedPath: request.isProtectedPath
+        });
+        const capabilities = options.kernelCapabilities ?? probeKernelSandboxCapabilities(options.runnerEnv);
+        const backend = selectKernelBackend("proxy_only", capabilities);
+        console.info(
+          `[pi-engine] session starting (role=${request.role}, policy=${request.toolPolicy}, sandbox=${backend})`
+        );
+        const result = await sandboxRunner({
+          isolationAvailable: true,
+          runnerEnv: sessionPath ? { ...options.runnerEnv, PATH: sessionPath } : options.runnerEnv,
+          enforceKernelSandbox: options.enforceKernelSandbox ?? true,
+          ...options.kernelCapabilities ? { kernelCapabilities: options.kernelCapabilities } : {},
+          command: process.execPath,
+          args: [
+            join5(piDir, "rpc-entry.js"),
+            "--no-session",
+            "--no-extensions",
+            "--no-mcp",
+            "--no-skills",
+            "--no-prompt-templates",
+            "--no-themes",
+            "--no-context-files",
+            "--no-approve",
+            "--offline",
+            "--provider",
+            route.provider,
+            "--model",
+            route.modelId,
+            ...request.thinking ? ["--thinking", request.thinking] : [],
+            "--tools",
+            PI_TOOLS[request.toolPolicy],
+            "--append-system-prompt",
+            instructionsPath
+          ],
+          cwd: request.worktree,
+          readOnlyCwd,
+          networkPolicy: "proxy_only",
+          timeoutMs: request.timeoutMs + SHUTDOWN_GRACE_MS,
+          llm: { model: request.model, providers: request.providers },
+          maxLlmRequests: request.maxLlmRequests,
+          readOnlyPaths: [piDir, sessionDir],
+          agentSession: {
+            readOnlyCwd,
+            homeFiles: (proxy) => {
+              proxyNonce = proxy?.proxyNonce ?? "";
+              return proxy ? {
+                ".pi/agent/models.json": route.modelsJson(proxy.proxyUrl),
+                ".pi/agent/settings.json": PI_SETTINGS
+              } : {};
+            },
+            env: (home) => ({
+              ...sessionPath ? { PATH: sessionPath } : {},
+              PI_CODING_AGENT_DIR: `${home}/.pi/agent`,
+              PI_OFFLINE: "1",
+              PI_TELEMETRY: "0",
+              PI_SKIP_VERSION_CHECK: "1"
+            })
+          },
+          observeLlmResponse: (exchange) => {
+            if (exchange.status < 400) {
+              upstreamError = void 0;
+              return void 0;
+            }
+            return collectErrorBody(exchange, (error) => {
+              upstreamError = error;
+            });
+          },
+          interact: (io) => driveRpcSession(io, request.prompt, request.timeoutMs, outcome)
+        });
+        if (result.error_code === "SANDBOX_ISOLATION_UNAVAILABLE") {
+          throw new AgentEngineError("AGENT_ISOLATION_UNAVAILABLE", result.error_message);
+        }
+        if (!result.isolated) {
+          throw new AgentEngineError("AGENT_SANDBOX_FAILED", result.error_message);
+        }
+        if (result.error_code === "LLM_REQUEST_CAP_REACHED") {
+          throw new AgentEngineError(
+            "AGENT_REQUEST_CAP_REACHED",
+            `Agent session (${request.role}) was aborted after ${request.maxLlmRequests ?? 0} LLM requests.`
+          );
+        }
+        if (outcome.timedOut) {
+          throw new AgentEngineError(
+            "AGENT_TIMEOUT",
+            `Agent session (${request.role}) exceeded ${request.timeoutMs} ms and was aborted.`
+          );
+        }
+        if (outcome.lineTooLong) {
+          throw new AgentEngineError(
+            "AGENT_PROTOCOL_ERROR",
+            `Pi wrote an RPC line over ${MAX_RPC_LINE_BYTES} bytes; the session was killed.`
+          );
+        }
+        if (outcome.rejected !== void 0) {
+          throw new AgentEngineError("AGENT_PROTOCOL_ERROR", `Pi rejected the prompt: ${outcome.rejected}`);
+        }
+        if (!outcome.settled) {
+          throw new AgentEngineError(
+            "AGENT_PROTOCOL_ERROR",
+            `Pi exited with code ${result.exit_code} before the session settled: ${result.stderr.slice(-STDERR_TAIL_CHARS)}`
+          );
+        }
+        if (outcome.lastStopReason === "error" || outcome.lastStopReason === "aborted") {
+          throw sessionProviderError(request, upstreamError, outcome.lastErrorMessage, options.runnerEnv);
+        }
+        const diff = await snapshot.collect();
+        assertNoSecretMaterial(
+          [
+            ...diff.files.map((f) => ({ label: f.path, text: f.content })),
+            ...[...diff.files, ...diff.skipped].map((f) => ({ label: "a file path", text: f.path })),
+            { label: "the final message", text: outcome.finalMessage }
+          ],
+          [
+            ...collectRunnerSecretValues(options.runnerEnv),
+            ...providerKeys(request, options.runnerEnv),
+            ...options.extraSecrets ?? [],
+            ...request.secrets ?? [],
+            proxyNonce
+          ]
+        );
+        return { finalMessage: outcome.finalMessage, diff };
+      } finally {
+        snapshot?.dispose();
+        rmSync5(sessionDir, { recursive: true, force: true });
+      }
+    }
+  };
+}
+function providerKeys(request, env) {
+  const { providerConfig } = parseModelIdentifier(request.model, request.providers, env);
+  return providerConfig?.apiKey ? [providerConfig.apiKey] : [];
+}
+function collectErrorBody(exchange, record) {
+  let body = "";
+  const decoder = new TextDecoder();
+  return {
+    onChunk(chunk) {
+      if (body.length < MAX_ERROR_BODY_CHARS) {
+        body += decoder.decode(chunk, { stream: true });
+      }
+    },
+    onEnd() {
+      record({ status: exchange.status, body: body.slice(0, MAX_ERROR_BODY_CHARS) });
+    }
+  };
+}
+function sessionProviderError(request, upstreamError, errorMessage, env) {
+  const { provider, model } = parseModelIdentifier(request.model, request.providers, env);
+  if (upstreamError) {
+    return classifyHttpError({ status: upstreamError.status, bodyText: upstreamError.body, provider, model });
+  }
+  return new LLMError(
+    `Agent session (${request.role}) failed on ${request.model}: ${errorMessage ?? "no error message"}`,
+    { provider }
+  );
+}
+async function driveRpcSession(io, prompt, timeoutMs, outcome) {
+  const send = (command) => {
+    io.stdin.write(`${JSON.stringify(command)}
+`);
+  };
+  let bytesSinceNewline = 0;
+  const watchLineLength = (chunk) => {
+    const lastNewline = chunk.lastIndexOf(10);
+    bytesSinceNewline = lastNewline >= 0 ? chunk.length - lastNewline - 1 : bytesSinceNewline + chunk.length;
+    if (bytesSinceNewline > MAX_RPC_LINE_BYTES && !outcome.lineTooLong) {
+      outcome.lineTooLong = true;
+      io.kill();
+    }
+  };
+  io.stdout.on("data", watchLineLength);
+  const lines = createInterface({ input: io.stdout, crlfDelay: Infinity });
+  const timer = setTimeout(() => {
+    outcome.timedOut = true;
+    send({ type: "abort" });
+  }, timeoutMs);
+  try {
+    send({ id: "prompt", type: "prompt", message: prompt });
+    for await (const line of lines) {
+      if (outcome.lineTooLong) {
+        return;
+      }
+      const record = parseRecord(line);
+      if (record?.type === "response" && record.id === "prompt") {
+        if (record.success !== true) {
+          outcome.rejected = String(record.error ?? "unknown error");
+          return;
+        }
+        if (record.data?.disposition === "handled") {
+          send({ id: "final", type: "get_last_assistant_text" });
+        }
+      } else if (record?.type === "response" && record.id === "final") {
+        const data = record.data;
+        outcome.finalMessage = typeof data?.text === "string" ? data.text : "";
+        outcome.settled = true;
+        return;
+      } else if (record?.type === "message_end") {
+        const message = record.message;
+        if (message?.role === "assistant") {
+          outcome.lastStopReason = String(message.stopReason ?? "");
+          outcome.lastErrorMessage = typeof message.errorMessage === "string" ? message.errorMessage : void 0;
+        }
+      } else if (record?.type === "agent_settled") {
+        send({ id: "final", type: "get_last_assistant_text" });
+      }
+    }
+  } finally {
+    clearTimeout(timer);
+    io.stdout.off("data", watchLineLength);
+    lines.close();
+    io.stdout.resume();
+  }
+}
+function parseRecord(line) {
+  try {
+    const parsed = JSON.parse(line);
+    return parsed !== null && typeof parsed === "object" ? parsed : void 0;
+  } catch {
+    return void 0;
+  }
+}
+
+// src/orchestrator/issue-orchestrator.ts
+import { randomUUID } from "node:crypto";
+
+// src/auth/github-app-jwt.ts
+import { createSign } from "node:crypto";
+function base64UrlEncode(input) {
+  const buf = typeof input === "string" ? Buffer.from(input, "utf8") : input;
+  return buf.toString("base64").replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+}
+function normalizePemKey(rawKey) {
+  const trimmed = rawKey.trim().replace(/\\n/g, "\n");
+  return trimmed;
+}
+function createGitHubAppJwt(credentials, nowEpochSeconds = Math.floor(Date.now() / 1e3)) {
+  const header = { alg: "RS256", typ: "JWT" };
+  const payload = {
+    iat: nowEpochSeconds - 60,
+    exp: nowEpochSeconds + 9 * 60,
+    iss: credentials.appId.trim()
+  };
+  const encodedHeader = base64UrlEncode(JSON.stringify(header));
+  const encodedPayload = base64UrlEncode(JSON.stringify(payload));
+  const signingInput = `${encodedHeader}.${encodedPayload}`;
+  const signer = createSign("RSA-SHA256");
+  signer.update(signingInput);
+  signer.end();
+  const signature = signer.sign(normalizePemKey(credentials.privateKeyPem));
+  return `${signingInput}.${base64UrlEncode(signature)}`;
+}
+async function mintRepositoryInstallationToken(params) {
+  const [owner, repo] = params.repository.trim().split("/");
+  if (!owner || !repo) {
+    throw new Error(`Invalid repository slug '${params.repository}'.`);
+  }
+  const baseUrl = (params.apiBaseUrl ?? "https://api.github.com").replace(
+    /\/+$/,
+    ""
+  );
+  const fetchFn = params.fetchImpl ?? fetch;
+  const appJwt = createGitHubAppJwt({
+    appId: params.appId,
+    privateKeyPem: params.privateKeyPem
+  });
+  const installResp = await fetchFn(
+    `${baseUrl}/repos/${owner}/${repo}/installation`,
+    {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${appJwt}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28"
+      }
+    }
+  );
+  if (!installResp.ok) {
+    const bodyText = await installResp.text();
+    throw new Error(
+      `Failed to resolve GitHub App installation for '${params.repository}' (HTTP ${installResp.status}): ${bodyText}`
+    );
+  }
+  const installData = await installResp.json();
+  if (typeof installData.id !== "number") {
+    throw new Error(
+      `GitHub App installation response for '${params.repository}' did not contain an installation ID.`
+    );
+  }
+  const tokenBody = {
+    repositories: [repo]
+  };
+  if (params.permissions && Object.keys(params.permissions).length > 0) {
+    tokenBody.permissions = params.permissions;
+  }
+  const tokenResp = await fetchFn(
+    `${baseUrl}/app/installations/${installData.id}/access_tokens`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${appJwt}`,
+        Accept: "application/vnd.github+json",
+        "Content-Type": "application/json",
+        "X-GitHub-Api-Version": "2022-11-28"
+      },
+      body: JSON.stringify(tokenBody)
+    }
+  );
+  if (!tokenResp.ok) {
+    const errText = await tokenResp.text();
+    throw new Error(
+      `Failed to mint installation token for installation ${installData.id} (HTTP ${tokenResp.status}): ${errText}`
+    );
+  }
+  const tokenData = await tokenResp.json();
+  if (typeof tokenData.token !== "string" || !tokenData.token) {
+    throw new Error("GitHub installation token response was empty.");
+  }
+  return {
+    token: tokenData.token,
+    expiresAt: tokenData.expires_at ?? new Date(Date.now() + 36e5).toISOString(),
+    installationId: installData.id
+  };
+}
+async function revokeGitHubInstallationToken(params) {
+  const baseUrl = (params.apiBaseUrl ?? "https://api.github.com").replace(
+    /\/+$/,
+    ""
+  );
+  const fetchFn = params.fetchImpl ?? fetch;
+  await fetchFn(`${baseUrl}/installation/token`, {
+    method: "DELETE",
+    headers: {
+      Authorization: `Bearer ${params.token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28"
+    }
+  });
+}
+
+// src/execution/external-ci-gate.ts
+import { basename as basename2 } from "node:path";
+
+// src/orchestrator/formatting/comments.ts
+var EPURE_COMMANDS_SPOILER_SUMMARY = "<summary>\u2328\uFE0F <b>Commandes <code>/epure</code> disponibles</b> (cliquer pour d\xE9rouler)</summary>";
+function buildContextualActionHint(context) {
+  const phase = (context?.phase ?? "").trim().toLowerCase();
+  const status = (context?.status ?? "").trim().toLowerCase();
+  const issueRef = typeof context?.issueNumber === "number" && context.issueNumber > 0 ? ` sur l'issue #${context.issueNumber}` : "";
+  if (status === "suspended" || phase === "suspended") {
+    return `Inspectez le diagnostic ci-dessus, poussez un correctif si n\xE9cessaire, puis postez \`/epure continue\` (ou \`/epure approve\`, ou \`/epure sync\` / \`/epure rebase\` en cas de conflit Git)${issueRef} pour reprendre l'ex\xE9cution (ou \`/epure cancel\` pour l'arr\xEAter).`;
+  }
+  if (status === "cancelled" || phase === "cancelled") {
+    return `L'orchestration est suspendue suite \xE0 une annulation. Postez \`/epure plan\`${issueRef} pour relancer un cadrage ou \`/epure continue\` (ou \`/epure approve\`) pour reprendre.`;
+  }
+  if (phase === "grilling") {
+    if (status === "awaiting-human" || status === "awaiting_human_approval") {
+      return `La fronti\xE8re de d\xE9cisions du cadrage est compl\xE8te. Postez \`/epure to-spec\`${issueRef} pour valider le cadrage et g\xE9n\xE9rer la sp\xE9cification sur \`plan/*\` (ou r\xE9pondez en commentaire pour ajuster un point).`;
+    }
+    return `R\xE9pondez directement en commentaire${issueRef} aux questions ci-dessus (sans pr\xE9fixe \`/epure\`), ou postez \`/epure to-spec\` pour g\xE9n\xE9rer imm\xE9diatement la sp\xE9cification sur \`plan/*\`.`;
+  }
+  if (phase === "spec") {
+    return `V\xE9rifiez la sp\xE9cification, le \`GLOSSARY.md\` et les ADRs g\xE9n\xE9r\xE9s sur \`plan/*\`. Postez \`/epure to-tickets\`${issueRef} pour valider la sp\xE9cification et g\xE9n\xE9rer le graphe de tickets (ou r\xE9pondez en commentaire pour demander une modification de la spec).`;
+  }
+  if (phase === "tickets" || status === "awaiting-human" || status === "awaiting_human_approval") {
+    return `V\xE9rifiez la sp\xE9cification et le graphe de tickets g\xE9n\xE9r\xE9s, puis postez \`/epure approve\`${issueRef} pour lancer l'impl\xE9mentation TDD autonome (int\xE9gration directe \`plan/* -> feature/*\`).`;
+  }
+  if (phase === "implementation") {
+    return `L'impl\xE9mentation autonome est en cours. Postez \`/epure status\`${issueRef} pour suivre l'avancement, \`/epure continue\` pour reprendre apr\xE8s la CI externe, \`/epure sync\` (\`/epure rebase\`) pour rattraper \`dev\`, ou \`/epure cancel\` pour interrompre l'orchestration.`;
+  }
+  if (phase === "completed" || status === "completed" || status === "done") {
+    return `V\xE9rifiez et fusionnez (Squash & Merge) la Pull Request finale \`feature/* \u2192 dev\` dans l'interface GitHub.`;
+  }
+  return `Postez \`/epure plan\`${issueRef} pour d\xE9marrer le cadrage ou \`/epure status\` pour consulter l'\xE9tat courant.`;
+}
+function formatEpureCommandsSpoiler(context) {
+  const hint = buildContextualActionHint(context);
+  return [
+    "<details>",
+    EPURE_COMMANDS_SPOILER_SUMMARY,
+    "",
+    "| Commande | Action |",
+    "| :--- | :--- |",
+    "| `/epure plan` | D\xE9marrer ou relancer le cadrage (`/grill-with-docs`) sur l'issue |",
+    "| *R\xE9ponse libre en commentaire* | R\xE9pondre aux questions du Grill ou demander un ajustement de la sp\xE9cification (sans pr\xE9fixe `/epure`) |",
+    "| `/epure to-spec` | Valider la fronti\xE8re du Grill et g\xE9n\xE9rer `GLOSSARY.md`, les ADRs et la sp\xE9cification sur `plan/*` |",
+    "| `/epure to-tickets` | Valider la sp\xE9cification sur `plan/*` et g\xE9n\xE9rer le graphe de tickets GitHub (`blocked_by`) |",
+    "| `/epure approve` | Approuver le plan (`plan/* -> feature/*`), verrouiller `spec_sha` et lancer l'impl\xE9mentation |",
+    "| `/epure continue` | Reprendre l'orchestration apr\xE8s une suspension `needs-human` ou une attente de CI externe |",
+    "| `/epure sync` (ou `/epure rebase`) | Synchroniser `dev -> feature/*` (et `feature/* -> task/*`) avec r\xE9solution 3-way assist\xE9e + Stage 1 |",
+    "| `/epure status` | Afficher l'\xE9tat d'avancement de l'issue et des tickets |",
+    "| `/epure cancel` (ou `/epure stop`) | Suspendre imm\xE9diatement l'orchestration et emp\xEAcher tout auto-merge |",
+    "",
+    `> \u{1F4A1} **Action recommand\xE9e** : ${hint}`,
+    "",
+    "</details>"
+  ].join("\n");
+}
+function fencedCodeBlock(text, language = "text") {
+  const longestRun = Math.max(0, ...Array.from(text.matchAll(/`+/g), (m) => m[0].length));
+  const fence = "`".repeat(Math.max(3, longestRun + 1));
+  return `${fence}${language}
+${text}
+${fence}`;
+}
+function appendEpureCommandsSpoiler(markdown, context) {
+  const trimmed = markdown.trimEnd();
+  if (trimmed.includes(EPURE_COMMANDS_SPOILER_SUMMARY)) {
+    return trimmed;
+  }
+  const spoiler = formatEpureCommandsSpoiler(context);
+  return trimmed.length > 0 ? `${trimmed}
+
+${spoiler}` : spoiler;
 }
 
 // src/contract/resume-context.ts
@@ -11423,13 +11784,13 @@ import {
   existsSync as existsSync5,
   lstatSync as lstatSync3,
   mkdirSync as mkdirSync5,
-  mkdtempSync as mkdtempSync5,
+  mkdtempSync as mkdtempSync6,
   readFileSync as readFileSync3,
-  rmSync as rmSync5,
+  rmSync as rmSync6,
   writeFileSync as writeFileSync5
 } from "node:fs";
-import { tmpdir as tmpdir4 } from "node:os";
-import { dirname as dirname4, join as join5, resolve as resolve4 } from "node:path";
+import { tmpdir as tmpdir5 } from "node:os";
+import { dirname as dirname4, join as join6, resolve as resolve4 } from "node:path";
 
 // src/orchestrator/prompts/code-discipline.ts
 var EPURE_CODE_DISCIPLINE_AND_CAVEMAN_LITE_PROMPT = [
@@ -12383,11 +12744,11 @@ ${wrapUntrustedContent("untrusted_workspace_files", s.content)}`
       if (input.glossaryContent !== void 0) {
         seedEntries.set("GLOSSARY.md", input.glossaryContent);
       }
-      const tempWorktreeDir = mkdtempSync5(join5(tmpdir4(), "epure-adr-reconcile-"));
+      const tempWorktreeDir = mkdtempSync6(join6(tmpdir5(), "epure-adr-reconcile-"));
       let outerSnapshot;
       try {
         for (const [relPath, content] of seedEntries.entries()) {
-          const fullPath = join5(tempWorktreeDir, relPath);
+          const fullPath = join6(tempWorktreeDir, relPath);
           mkdirSync5(dirname4(fullPath), { recursive: true });
           writeFileSync5(fullPath, content, "utf8");
         }
@@ -12454,7 +12815,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", s.content)}`
       } finally {
         outerSnapshot?.dispose();
         try {
-          rmSync5(tempWorktreeDir, { recursive: true, force: true });
+          rmSync6(tempWorktreeDir, { recursive: true, force: true });
         } catch {
         }
       }
@@ -12722,7 +13083,7 @@ function verifyNoSymlinkSegments(worktreeDir, relPath) {
   }
   let current = root;
   for (const seg of segments) {
-    current = join5(current, seg);
+    current = join6(current, seg);
     try {
       if (lstatSync3(current).isSymbolicLink()) {
         throw new Error(`Symlink segment detected in worktree path: ${relPath}`);
@@ -12738,7 +13099,7 @@ function verifyNoSymlinkSegments(worktreeDir, relPath) {
 }
 function assertSafeWorktreeTarget(worktreeDir, relPath) {
   const abs = verifyNoSymlinkSegments(worktreeDir, relPath);
-  rmSync5(abs, { force: true });
+  rmSync6(abs, { force: true });
   return abs;
 }
 var LOCAL_GIT_MERGE_TIMEOUT_MS = 6e4;
@@ -12746,7 +13107,7 @@ async function runIsolatedGitThreeWayMerge(params) {
   if (params.files.length === 0) {
     return { autoMergedFiles: [], autoDeletedPaths: [], conflictingFiles: [] };
   }
-  const gitDir = mkdtempSync5(join5(tmpdir4(), "epure-merge-git-"));
+  const gitDir = mkdtempSync6(join6(tmpdir5(), "epure-merge-git-"));
   const runGit = (args, options = {}) => new Promise((resolvePromise, reject) => {
     const allowCodes = options.allowExitCodes ?? [0];
     const child = spawn3(
@@ -12838,9 +13199,9 @@ async function runIsolatedGitThreeWayMerge(params) {
   };
   try {
     await runGit(["init", "--quiet"]);
-    mkdirSync5(join5(gitDir, "info"), { recursive: true });
+    mkdirSync5(join6(gitDir, "info"), { recursive: true });
     writeFileSync5(
-      join5(gitDir, "info", "attributes"),
+      join6(gitDir, "info", "attributes"),
       "* -filter -diff merge=text conflict-marker-size=7\n",
       "utf8"
     );
@@ -12898,7 +13259,7 @@ async function runIsolatedGitThreeWayMerge(params) {
     }
     return { autoMergedFiles, autoDeletedPaths, conflictingFiles };
   } finally {
-    rmSync5(gitDir, { recursive: true, force: true });
+    rmSync6(gitDir, { recursive: true, force: true });
   }
 }
 function createBaseSyncGuard(input) {
@@ -13003,7 +13364,7 @@ async function syncBranchWithBase(input) {
           model: input.model,
           ...pickLlmRequestTuning(input),
           fetchImpl: input.fetchImpl,
-          agentEngine: input.agentEngine?.name === "pi" ? input.agentEngine : void 0
+          agentEngine: resolveLifecycleAgentEngine(input.agentEngine)
         });
         if (adrFilesToUpdate.length > 0 || adrDeletedPaths.length > 0) {
           const reconciledSha = await input.gh.commitFilesToBranch({
@@ -13158,7 +13519,7 @@ async function syncBranchWithBase(input) {
         theirsContent
       });
     }
-    const tempWorktreeDir = input.worktreeDir ? void 0 : mkdtempSync5(join5(tmpdir4(), "epure-merge-worktree-"));
+    const tempWorktreeDir = input.worktreeDir ? void 0 : mkdtempSync6(join6(tmpdir5(), "epure-merge-worktree-"));
     const worktreeDir = input.worktreeDir ?? tempWorktreeDir;
     try {
       const localMerge = await runIsolatedGitThreeWayMerge({
@@ -13416,7 +13777,7 @@ async function syncBranchWithBase(input) {
       }
     } finally {
       if (tempWorktreeDir) {
-        rmSync5(tempWorktreeDir, { recursive: true, force: true });
+        rmSync6(tempWorktreeDir, { recursive: true, force: true });
       }
     }
   }
@@ -13651,9 +14012,9 @@ async function handleEpicClosedByHuman(params) {
 }
 
 // src/orchestrator/phases/epic-convergence.ts
-import { mkdtempSync as mkdtempSync7, rmSync as rmSync7 } from "node:fs";
-import { tmpdir as tmpdir6 } from "node:os";
-import { join as join7 } from "node:path";
+import { mkdtempSync as mkdtempSync8, rmSync as rmSync8 } from "node:fs";
+import { tmpdir as tmpdir7 } from "node:os";
+import { join as join8 } from "node:path";
 
 // src/orchestrator/plan-manifest.ts
 function isEpureAuthored(item, identity) {
@@ -13778,9 +14139,9 @@ function resolvePhaseModels(inputModel, agentsConfig) {
 }
 
 // src/orchestrator/phases/grill-and-plan.ts
-import { mkdirSync as mkdirSync6, mkdtempSync as mkdtempSync6, rmSync as rmSync6, writeFileSync as writeFileSync6 } from "node:fs";
-import { tmpdir as tmpdir5 } from "node:os";
-import { dirname as dirname5, join as join6 } from "node:path";
+import { mkdirSync as mkdirSync6, mkdtempSync as mkdtempSync7, rmSync as rmSync7, writeFileSync as writeFileSync6 } from "node:fs";
+import { tmpdir as tmpdir6 } from "node:os";
+import { dirname as dirname5, join as join7 } from "node:path";
 
 // src/frontend/impeccable-planning.ts
 function planImpeccableDesignSession(input) {
@@ -14739,7 +15100,7 @@ async function runReadOnlyPlanningAgentSession(params) {
   let tempWorktreeDir;
   let effectiveWorktreeDir = params.worktreeDir;
   if (!effectiveWorktreeDir) {
-    tempWorktreeDir = mkdtempSync6(join6(tmpdir5(), `epure-${params.role}-wt-`));
+    tempWorktreeDir = mkdtempSync7(join7(tmpdir6(), `epure-${params.role}-wt-`));
     effectiveWorktreeDir = tempWorktreeDir;
     syncWorkspaceFiles(tempWorktreeDir, params.seedFiles, /* @__PURE__ */ new Set());
   }
@@ -14759,7 +15120,7 @@ async function runReadOnlyPlanningAgentSession(params) {
   } finally {
     if (tempWorktreeDir) {
       try {
-        rmSync6(tempWorktreeDir, { recursive: true, force: true });
+        rmSync7(tempWorktreeDir, { recursive: true, force: true });
       } catch {
       }
     }
@@ -14785,12 +15146,12 @@ async function runSpecWriterAgentSession(params) {
     }
   }
   if (!effectiveWorktreeDir) {
-    tempWorktreeDir = mkdtempSync6(join6(tmpdir5(), "epure-spec-writer-wt-"));
+    tempWorktreeDir = mkdtempSync7(join7(tmpdir6(), "epure-spec-writer-wt-"));
     effectiveWorktreeDir = tempWorktreeDir;
     for (const [relPath, content] of seedEntries.entries()) {
       const normalized = relPath.trim().replace(/^\/+/, "");
       if (!normalized) continue;
-      const fullPath = join6(tempWorktreeDir, normalized);
+      const fullPath = join7(tempWorktreeDir, normalized);
       mkdirSync6(dirname5(fullPath), { recursive: true });
       writeFileSync6(fullPath, content, "utf8");
     }
@@ -14835,7 +15196,7 @@ async function runSpecWriterAgentSession(params) {
     outerSnapshot.dispose();
     if (tempWorktreeDir) {
       try {
-        rmSync6(tempWorktreeDir, { recursive: true, force: true });
+        rmSync7(tempWorktreeDir, { recursive: true, force: true });
       } catch {
       }
     }
@@ -16182,7 +16543,7 @@ ${content}`
       let effectiveWorktreeDir = params.worktreeDir;
       try {
         if (!effectiveWorktreeDir) {
-          tempWorktreeDir = mkdtempSync7(join7(tmpdir6(), "epure-convergence-wt-"));
+          tempWorktreeDir = mkdtempSync8(join8(tmpdir7(), "epure-convergence-wt-"));
           effectiveWorktreeDir = tempWorktreeDir;
           const filesMap = new Map(params.accumulatedFiles);
           for (const [k, v] of params.featureChangedFilesMap.entries()) {
@@ -16210,7 +16571,7 @@ ${content}`
       } finally {
         if (tempWorktreeDir) {
           try {
-            rmSync7(tempWorktreeDir, { recursive: true, force: true });
+            rmSync8(tempWorktreeDir, { recursive: true, force: true });
           } catch {
           }
         }
@@ -16415,9 +16776,9 @@ function prepareFeatureToDevPullRequest(input) {
 }
 
 // src/review/multi-agent-pr-review.ts
-import { mkdtempSync as mkdtempSync8, rmSync as rmSync8 } from "node:fs";
-import { tmpdir as tmpdir7 } from "node:os";
-import { join as join8 } from "node:path";
+import { mkdtempSync as mkdtempSync9, rmSync as rmSync9 } from "node:fs";
+import { tmpdir as tmpdir8 } from "node:os";
+import { join as join9 } from "node:path";
 
 // src/frontend/impeccable-pr-gate.ts
 function evaluateImpeccableFrontendPr(input) {
@@ -17004,7 +17365,7 @@ async function runMultiAgentPrReviewPass(input) {
   let passes;
   try {
     if (input.agentEngine && !effectiveWorktreeDir) {
-      tempWorktreeDir = mkdtempSync8(join8(tmpdir7(), "epure-review-wt-"));
+      tempWorktreeDir = mkdtempSync9(join9(tmpdir8(), "epure-review-wt-"));
       effectiveWorktreeDir = tempWorktreeDir;
       const filesMap = /* @__PURE__ */ new Map();
       if (input.workspaceFiles) {
@@ -17030,7 +17391,7 @@ async function runMultiAgentPrReviewPass(input) {
   } finally {
     if (tempWorktreeDir) {
       try {
-        rmSync8(tempWorktreeDir, { recursive: true, force: true });
+        rmSync9(tempWorktreeDir, { recursive: true, force: true });
       } catch {
       }
     }
@@ -17464,7 +17825,7 @@ async function runFeatureIntegrationPhase(params) {
       requestTimeoutMs: params.phaseModels.requestTimeoutMs,
       onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
       fetchImpl: params.fetchImpl,
-      agentEngine: params.agentEngine?.name === "pi" ? params.agentEngine : void 0,
+      agentEngine: resolveLifecycleAgentEngine(params.agentEngine),
       githubToken: params.activeToken,
       maxLlmRequests: params.parsedDevAgentsConfig?.agent_max_llm_requests ?? 200
     }));
@@ -19415,7 +19776,7 @@ ${wrapUntrustedContent("untrusted_workspace_files", existingFilesContext)}` : "C
           requestTimeoutMs: params.phaseModels.requestTimeoutMs,
           onTransientRetriesUsed: (used) => params.addTransientRetriesUsed(used),
           fetchImpl: params.fetchImpl,
-          agentEngine: params.agentEngine?.name === "pi" ? params.agentEngine : void 0,
+          agentEngine: resolveLifecycleAgentEngine(params.agentEngine),
           worktreeDir: sandboxWorkspace.workDir,
           githubToken: params.activeToken,
           maxLlmRequests: params.parsedDevAgentsConfig?.agent_max_llm_requests ?? DEFAULT_AGENT_MAX_LLM_REQUESTS
@@ -20733,6 +21094,25 @@ async function runMeteredIssueCommand(input, ledger) {
       };
       const resolveJobDeadlineMs = async () => effectiveInput.jobStartedAtMs === void 0 ? void 0 : effectiveInput.jobStartedAtMs + await resolveRunLeaseMs();
       const reviewersDir = parsedDevAgentsConfig?.reviewers_dir ?? DEFAULT_REVIEWERS_DIR;
+      const configuredHarness = parsedDevAgentsConfig?.harness ?? DEFAULT_AGENTS_CONFIG.harness;
+      const runSecrets = [
+        activeToken,
+        effectiveInput.llmApiKey,
+        ...effectiveInput.cursorApiKey ? [effectiveInput.cursorApiKey] : []
+      ];
+      const rawAgentEngine = effectiveInput.agentEngines?.[configuredHarness] ?? (configuredHarness === "cursor" && (!effectiveInput.agentEngine || effectiveInput.agentEngine.name === "pi") && (effectiveInput.cursorApiKey !== void 0 || !effectiveInput.agentEngine) ? createCursorAgentEngine({
+        apiKey: effectiveInput.cursorApiKey,
+        runnerEnv: process.env,
+        extraSecrets: runSecrets
+      }) : effectiveInput.agentEngine);
+      const activeAgentEngine = rawAgentEngine ? {
+        name: rawAgentEngine.name,
+        run: (req) => rawAgentEngine.run({
+          ...req,
+          secrets: [.../* @__PURE__ */ new Set([...req.secrets ?? [], ...runSecrets])]
+        })
+      } : void 0;
+      const lifecycleAgentEngine = resolveLifecycleAgentEngine(activeAgentEngine);
       if (effectiveInput.command === "plan" || effectiveInput.command === "to-spec" || effectiveInput.command === "to-tickets" || effectiveInput.command === "reply" && (currentState?.phase === "grilling" || currentState?.phase === "spec") && currentState?.status !== "cancelled") {
         const phaseModels = requirePhaseModels();
         const planningCommand = effectiveInput.command;
@@ -20761,7 +21141,7 @@ async function runMeteredIssueCommand(input, ledger) {
               totalTransientRetriesUsed += used;
             },
             fetchImpl: effectiveInput.fetchImpl,
-            agentEngine: effectiveInput.agentEngine?.name === "pi" ? effectiveInput.agentEngine : void 0,
+            agentEngine: lifecycleAgentEngine,
             activeToken
           }));
         } catch (err) {
@@ -20771,10 +21151,7 @@ async function runMeteredIssueCommand(input, ledger) {
               ticketNumber: effectiveInput.issueNumber,
               branch: planBranch,
               phase: effectiveInput.command === "to-tickets" ? "tickets" : effectiveInput.command === "to-spec" || currentState?.phase === "spec" ? "spec" : "grilling",
-              diagnosticExcerpt: redactSecrets(err.message, [
-                activeToken,
-                effectiveInput.llmApiKey
-              ])
+              diagnosticExcerpt: redactSecrets(err.message, runSecrets)
             });
           }
           throw err;
@@ -20844,7 +21221,7 @@ async function runMeteredIssueCommand(input, ledger) {
             transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
             requestTimeoutMs: phaseModels.requestTimeoutMs,
             fetchImpl: effectiveInput.fetchImpl,
-            agentEngine: effectiveInput.agentEngine?.name === "pi" ? effectiveInput.agentEngine : void 0
+            agentEngine: lifecycleAgentEngine
           });
         }
         const syncRes = await syncBranchWithBase({
@@ -20861,7 +21238,7 @@ async function runMeteredIssueCommand(input, ledger) {
           requestTimeoutMs: phaseModels.requestTimeoutMs,
           sandboxRunner: effectiveInput.sandboxRunner,
           reviewersDir,
-          agentEngine: effectiveInput.agentEngine
+          agentEngine: activeAgentEngine
         });
         if (syncRes.status === "escalated") {
           return await escalateSuspension({
@@ -20890,7 +21267,7 @@ async function runMeteredIssueCommand(input, ledger) {
               requestTimeoutMs: phaseModels.requestTimeoutMs,
               sandboxRunner: effectiveInput.sandboxRunner,
               reviewersDir,
-              agentEngine: effectiveInput.agentEngine
+              agentEngine: activeAgentEngine
             })
           );
           if (taskSyncRes.status === "escalated") {
@@ -20967,7 +21344,7 @@ async function runMeteredIssueCommand(input, ledger) {
           const snapshot = await evaluateSingleExternalCiSnapshot({
             headSha: activeHeadSha,
             expectedWorkflows: expectedContinueWorkflows,
-            extraSecrets: [activeToken, effectiveInput.llmApiKey],
+            extraSecrets: runSecrets,
             listWorkflowRunsForSha: (sha) => gh.listWorkflowRunsForSha(sha),
             listCheckRunsForRef: (sha) => gh.listCheckRunsForRef(sha),
             listCheckRunAnnotations: (id) => gh.listCheckRunAnnotations(id),
@@ -21184,7 +21561,7 @@ async function runMeteredIssueCommand(input, ledger) {
                     requestTimeoutMs: phaseModels.requestTimeoutMs,
                     sandboxRunner: effectiveInput.sandboxRunner,
                     reviewersDir,
-                    agentEngine: effectiveInput.agentEngine
+                    agentEngine: activeAgentEngine
                   })
                 );
                 if (resync.status === "escalated") {
@@ -21442,7 +21819,7 @@ async function runMeteredIssueCommand(input, ledger) {
             transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
             requestTimeoutMs: phaseModels.requestTimeoutMs,
             fetchImpl: effectiveInput.fetchImpl,
-            agentEngine: effectiveInput.agentEngine?.name === "pi" ? effectiveInput.agentEngine : void 0
+            agentEngine: lifecycleAgentEngine
           });
           await updateIssueStateWithCas({
             issueNumber: effectiveInput.issueNumber,
@@ -21581,7 +21958,7 @@ ${t.filesToTouch.join(" ")}`
           baseSyncGuard,
           resumeContextMarkdown,
           stopIfFeaturePrMerged,
-          agentEngine: effectiveInput.agentEngine,
+          agentEngine: activeAgentEngine,
           jobDeadlineMs: await resolveJobDeadlineMs()
         });
         if (loopOutcome.halted && loopOutcome.result) {
@@ -21636,7 +22013,7 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
                 totalTransientRetriesUsed += used;
               },
               fetchImpl: effectiveInput.fetchImpl,
-              agentEngine: effectiveInput.agentEngine?.name === "pi" ? effectiveInput.agentEngine : void 0,
+              agentEngine: lifecycleAgentEngine,
               activeToken
             });
             if (convergenceAudit.verdict === "CONVERGED") {
@@ -21740,7 +22117,7 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
               baseSyncGuard,
               resumeContextMarkdown,
               stopIfFeaturePrMerged,
-              agentEngine: effectiveInput.agentEngine,
+              agentEngine: activeAgentEngine,
               jobDeadlineMs: await resolveJobDeadlineMs()
             });
             if (loopOutcome.halted && loopOutcome.result) {
@@ -21793,7 +22170,7 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
             baseSyncGuard,
             resumeContextMarkdown,
             stopIfFeaturePrMerged,
-            agentEngine: effectiveInput.agentEngine
+            agentEngine: activeAgentEngine
           }));
         } catch (err) {
           if (err instanceof LLMError || err instanceof AgentEngineError) {
@@ -21802,10 +22179,7 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
               ticketNumber: effectiveInput.issueNumber,
               branch: featureBranch,
               phase: "implementation",
-              diagnosticExcerpt: redactSecrets(err.message, [
-                activeToken,
-                effectiveInput.llmApiKey
-              ])
+              diagnosticExcerpt: redactSecrets(err.message, runSecrets)
             });
           }
           throw err;
@@ -21833,7 +22207,8 @@ ${completedTicketsSummary.join("\n")}` : `Stage 1 PASSED on ${featureBranch}`;
         missingModelKeys: err instanceof MissingModelConfigError ? err.missingKeys : void 0,
         diagnosticExcerpt: redactSecrets(rawErrMessage, [
           activeToken,
-          effectiveInput.llmApiKey
+          effectiveInput.llmApiKey,
+          ...effectiveInput.cursorApiKey ? [effectiveInput.cursorApiKey] : []
         ])
       };
       const rateLimited = err instanceof GitHubRateLimitError;
@@ -21934,6 +22309,7 @@ async function run() {
   const agentAppPrivateKey = (process.env.INPUT_AGENT_APP_PRIVATE_KEY ?? process.env.EPURE_AGENT_APP_PRIVATE_KEY ?? "").trim();
   const fallbackGithubToken = (process.env.INPUT_GITHUB_TOKEN ?? process.env.GITHUB_TOKEN ?? "").trim();
   const llmApiKey = (process.env.INPUT_LLM_API_KEY ?? process.env.LLM_API_KEY ?? "").trim();
+  const cursorApiKey = (process.env.INPUT_CURSOR_API_KEY ?? process.env.CURSOR_API_KEY ?? "").trim();
   const model = (process.env.INPUT_MODEL ?? "").trim();
   const triggerHeadSha = (process.env.INPUT_TRIGGER_HEAD_SHA ?? "").trim();
   const asyncCiContinuation = (process.env.INPUT_ASYNC_CI_CONTINUATION ?? "").trim().toLowerCase() === "true";
@@ -21947,9 +22323,23 @@ async function run() {
     jobId: process.env.GITHUB_JOB
   } : void 0;
   const jobStartedAtMs = Number.parseInt(process.env.EPURE_JOB_STARTED_AT_MS ?? "", 10);
-  const secrets = [agentAppPrivateKey, fallbackGithubToken, llmApiKey].filter(
-    (s) => s.length >= 4
-  );
+  const secrets = [
+    agentAppPrivateKey,
+    fallbackGithubToken,
+    llmApiKey,
+    cursorApiKey
+  ].filter((s) => s.length >= 4);
+  const piEngine = createPiAgentEngine({
+    runnerEnv: { ...process.env, ...llmApiKey ? { LLM_API_KEY: llmApiKey } : {} }
+  });
+  const cursorEngine = createCursorAgentEngine({
+    runnerEnv: {
+      ...process.env,
+      ...cursorApiKey ? { CURSOR_API_KEY: cursorApiKey } : {}
+    },
+    ...cursorApiKey ? { apiKey: cursorApiKey } : {},
+    extraSecrets: secrets
+  });
   try {
     const result = await orchestrateIssueCommand({
       repository,
@@ -21962,15 +22352,18 @@ async function run() {
       agentAppPrivateKey,
       fallbackGithubToken,
       llmApiKey,
+      ...cursorApiKey ? { cursorApiKey } : {},
       model: model || void 0,
       ...triggerHeadSha ? { triggerHeadSha } : {},
       ...asyncCiContinuation ? { asyncCiContinuation } : {},
       runId,
       workflowJob,
       ...Number.isFinite(jobStartedAtMs) ? { jobStartedAtMs } : {},
-      agentEngine: createPiAgentEngine({
-        runnerEnv: { ...process.env, ...llmApiKey ? { LLM_API_KEY: llmApiKey } : {} }
-      })
+      agentEngine: piEngine,
+      agentEngines: {
+        pi: piEngine,
+        cursor: cursorEngine
+      }
     });
     writeGitHubOutputs(
       {
