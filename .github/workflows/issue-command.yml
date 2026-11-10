@@ -110,7 +110,7 @@ jobs:
 
       - name: Run pre-bundled EPURE authorization gate
         id: gate
-        uses: ./actions/authorize-command
+        uses: ./actions/authorize-command # zizmor: ignore[self-repository] -- runs from the checked-out Giskard-AI/epure tree; actionlint 1.7.12 rejects $/ syntax (rhysd/actionlint#732)
         with:
           repository: ${{ inputs.repository }}
           issue_number: ${{ inputs.issue_number }}
@@ -172,7 +172,7 @@ jobs:
 
       - name: Run pre-bundled EPURE issue orchestrator
         id: orchestrate
-        uses: ./actions/orchestrate-issue
+        uses: ./actions/orchestrate-issue # zizmor: ignore[self-repository] -- runs from the checked-out Giskard-AI/epure tree; actionlint 1.7.12 rejects $/ syntax (rhysd/actionlint#732)
         env:
           EPURE_JOB_STARTED_AT_MS: ${{ steps.job-start.outputs.ms }}
         with:

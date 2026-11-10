@@ -72,7 +72,7 @@ jobs:
         run: npm test
 
       - name: Run iFixAi deterministic authorization trajectory audit
-        uses: ./actions/audit-ifixai
+        uses: ./actions/audit-ifixai # zizmor: ignore[self-repository] -- runs from the workspace checkout built by npm run build; actionlint 1.7.12 rejects $/ syntax (rhysd/actionlint#732)
         with:
           mode: "deterministic_ci"
           steps_json: >-

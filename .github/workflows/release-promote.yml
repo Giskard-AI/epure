@@ -124,7 +124,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Verify Release App role separation
-        uses: ./.epure/actions/verify-app-role
+        uses: ./.epure/actions/verify-app-role # zizmor: ignore[self-repository] -- runs from the .epure subdirectory checkout of Giskard-AI/epure; actionlint 1.7.12 rejects $/ syntax (rhysd/actionlint#732)
         with:
           app_role: release
           operation: promote_dev_to_main
@@ -144,7 +144,7 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
           permission-contents: write
-          skip-token-revoke: true
+          skip-token-revoke: true # zizmor: ignore[github-app] -- revoked explicitly in the "Revoke Release App installation token" step (if: always())
 
       - name: Fast-forward main and push annotated tag atomically
         if: ${{ steps.validate.outputs.mode == 'promote' }}

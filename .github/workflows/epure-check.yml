@@ -56,7 +56,7 @@ jobs:
 
       - name: Run pre-bundled EPURE contract action
         id: contract
-        uses: ./actions/epure-contract
+        uses: ./actions/epure-contract # zizmor: ignore[self-repository] -- runs from the checked-out Giskard-AI/epure tree (contract test requires ./); actionlint 1.7.12 rejects $/ syntax (rhysd/actionlint#732)
         with:
           repository: ${{ inputs.repository }}
           pinned_ref: ${{ inputs.pinned_ref }}
