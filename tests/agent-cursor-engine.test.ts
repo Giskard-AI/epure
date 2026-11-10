@@ -24,6 +24,7 @@ import {
 } from "../src/llm/errors.js";
 import { loadRepoAgentsConfig } from "../src/orchestrator/github/rest-client.js";
 import { runWithTokenUsageLedger, TokenUsageLedger } from "../src/usage/token-usage.js";
+import { compareStateUsageWithLogs, parseUsageLines } from "./e2e/report.js";
 
 const CURSOR_KEY = "cur_svc_RealCursorServiceKey1234567890";
 const INSTALLATION_TOKEN = "ghs_installationToken1234567890abcdef";
@@ -303,7 +304,7 @@ describe("createCursorAgentEngine", () => {
         expect(ledger.current()).toEqual({
           "11": {
             implementation: {
-              "anthropic/claude-sonnet-4-5": expectedLedgerCounts
+              "cursor/claude-sonnet-4-5": expectedLedgerCounts
             }
           }
         });
@@ -580,5 +581,75 @@ describe("Harness configuration validation (pi | cursor)", () => {
     };
     const resolved = resolveLifecycleAgentEngine(engine);
     expect(resolved !== undefined).toBe(expectedDefined);
+  });
+
+  it("cross-checks Cursor engine stdout usage lines against the plan-state ledger (compareStateUsageWithLogs)", async () => {
+    const worktree = tempWorktree({ "keep.txt": "keep\n" });
+    const stdoutChunks: string[] = [];
+    const writeSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation((chunk: string | Uint8Array) => {
+        stdoutChunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+        return true;
+      });
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const engine = createCursorAgentEngine({
+      runnerEnv: { CURSOR_API_KEY: CURSOR_KEY },
+      sdkLoader: async () => ({
+        Agent: {
+          create: vi.fn(async () => ({
+            send: async () => ({
+              wait: async () => ({
+                id: "run-cursor-usage",
+                status: "finished" as const,
+                result: "Done.",
+                model: { id: "claude-4.5-sonnet-thinking" },
+                usage: {
+                  inputTokens: 200,
+                  outputTokens: 80,
+                  cacheReadTokens: 50,
+                  cacheWriteTokens: 25,
+                  reasoningTokens: 30,
+                  totalTokens: 355
+                }
+              }),
+              cancel: async () => undefined
+            }),
+            [Symbol.asyncDispose]: async () => undefined
+          }))
+        } as unknown as CursorSdkModule["Agent"]
+      })
+    });
+
+    const ledger = new TokenUsageLedger();
+    try {
+      await runWithTokenUsageLedger(ledger, { phase: "implementation", ticket: 7 }, () =>
+        engine.run(sessionRequest(worktree))
+      );
+      const rawLines = stdoutChunks
+        .join("")
+        .trim()
+        .split("\n")
+        .filter((l) => l.length > 0)
+        .map((l) => `2026-11-10T06:00:00.000Z ${l}`)
+        .join("\n");
+      const parsedLogs = parseUsageLines(rawLines);
+      expect(parsedLogs).toHaveLength(1);
+      expect(parsedLogs[0]).toMatchObject({
+        provider: "cursor",
+        model: "claude-4.5-sonnet-thinking",
+        input_tokens: 275,
+        cached_input_tokens: 50,
+        output_tokens: 80,
+        thinking_tokens: 30
+      });
+      expect(compareStateUsageWithLogs(ledger.current(), parsedLogs)).toEqual([]);
+    } finally {
+      writeSpy.mockRestore();
+      infoSpy.mockRestore();
+      warnSpy.mockRestore();
+    }
   });
 });

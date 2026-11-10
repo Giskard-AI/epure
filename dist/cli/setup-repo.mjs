@@ -3,6 +3,10 @@
 // src/bootstrap/cli.ts
 import { execFileSync } from "node:child_process";
 
+// src/usage/token-usage.ts
+import { AsyncLocalStorage } from "node:async_hooks";
+var usageContext = new AsyncLocalStorage();
+
 // src/auth/github-apps.ts
 var GITHUB_ACTIONS_APP_ID = 15368;
 function buildConsumerAppManifests(params) {
@@ -92,10 +96,6 @@ var PROVIDER_EFFORTS = [
 // src/llm/upstream.ts
 var MODEL = String.raw`[\w.@-]+`;
 var GENERATE = String.raw`:(?:generateContent|streamGenerateContent)`;
-
-// src/usage/token-usage.ts
-import { AsyncLocalStorage } from "node:async_hooks";
-var usageContext = new AsyncLocalStorage();
 
 // src/sandbox/llm-sandbox.ts
 var NONCE_HEADER = "x-epure-proxy-nonce";

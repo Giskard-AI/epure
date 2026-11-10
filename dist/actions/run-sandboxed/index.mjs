@@ -68,6 +68,92 @@ var BadRequestError = class extends LLMError {
   }
 };
 
+// src/usage/token-usage.ts
+import { AsyncLocalStorage } from "node:async_hooks";
+var usageContext = new AsyncLocalStorage();
+function recordTokenUsage(usage, options) {
+  const context = usageContext.getStore();
+  context?.ledger.record(context.attribution, usage, options);
+}
+function bindToUsageContext() {
+  return AsyncLocalStorage.snapshot();
+}
+
+// src/llm/usage.ts
+var LLM_USAGE_LOG_PREFIX = "epure-llm-usage";
+function count(source, key) {
+  const value = source?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+function asCounts(value) {
+  return value && typeof value === "object" ? value : void 0;
+}
+function extractLLMTokenUsage(provider, model, body) {
+  const root = asCounts(body);
+  if (provider === "google" || provider === "vertex") {
+    const u2 = asCounts(root?.usageMetadata);
+    if (!u2) {
+      return null;
+    }
+    const thinking = count(u2, "thoughtsTokenCount");
+    return {
+      provider,
+      model,
+      input_tokens: count(u2, "promptTokenCount") + count(u2, "toolUsePromptTokenCount"),
+      cached_input_tokens: count(u2, "cachedContentTokenCount"),
+      output_tokens: count(u2, "candidatesTokenCount") + thinking,
+      thinking_tokens: thinking
+    };
+  }
+  const u = asCounts(root?.usage);
+  if (!u) {
+    return null;
+  }
+  if (provider === "anthropic") {
+    const cacheRead = count(u, "cache_read_input_tokens");
+    return {
+      provider,
+      model,
+      input_tokens: count(u, "input_tokens") + cacheRead + count(u, "cache_creation_input_tokens"),
+      cached_input_tokens: cacheRead,
+      output_tokens: count(u, "output_tokens"),
+      thinking_tokens: count(asCounts(u.output_tokens_details), "thinking_tokens")
+    };
+  }
+  if ("input_tokens" in u) {
+    return {
+      provider,
+      model,
+      input_tokens: count(u, "input_tokens"),
+      cached_input_tokens: count(asCounts(u.input_tokens_details), "cached_tokens"),
+      output_tokens: count(u, "output_tokens"),
+      thinking_tokens: count(asCounts(u.output_tokens_details), "reasoning_tokens")
+    };
+  }
+  return {
+    provider,
+    model,
+    input_tokens: count(u, "prompt_tokens"),
+    cached_input_tokens: count(asCounts(u.prompt_tokens_details), "cached_tokens"),
+    output_tokens: count(u, "completion_tokens"),
+    thinking_tokens: count(asCounts(u.completion_tokens_details), "reasoning_tokens")
+  };
+}
+function formatLLMUsageLogLine(usage) {
+  return `${LLM_USAGE_LOG_PREFIX} ${JSON.stringify(usage)}`;
+}
+function reportLLMUsage(usage, options) {
+  if (!("unavailable" in usage)) {
+    process.stdout.write(`${formatLLMUsageLogLine(usage)}
+`);
+  }
+  recordTokenUsage(usage, options);
+}
+function usageReporter(options) {
+  const inCallerContext = bindToUsageContext();
+  return (usage) => inCallerContext(() => reportLLMUsage(usage, options));
+}
+
 // src/sandbox/llm-sandbox.ts
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -214,92 +300,6 @@ function resolveProviderUpstream(provider, providerConfig, env = process.env) {
         ]
       };
   }
-}
-
-// src/usage/token-usage.ts
-import { AsyncLocalStorage } from "node:async_hooks";
-var usageContext = new AsyncLocalStorage();
-function recordTokenUsage(usage, options) {
-  const context = usageContext.getStore();
-  context?.ledger.record(context.attribution, usage, options);
-}
-function bindToUsageContext() {
-  return AsyncLocalStorage.snapshot();
-}
-
-// src/llm/usage.ts
-var LLM_USAGE_LOG_PREFIX = "epure-llm-usage";
-function count(source, key) {
-  const value = source?.[key];
-  return typeof value === "number" && Number.isFinite(value) ? value : 0;
-}
-function asCounts(value) {
-  return value && typeof value === "object" ? value : void 0;
-}
-function extractLLMTokenUsage(provider, model, body) {
-  const root = asCounts(body);
-  if (provider === "google" || provider === "vertex") {
-    const u2 = asCounts(root?.usageMetadata);
-    if (!u2) {
-      return null;
-    }
-    const thinking = count(u2, "thoughtsTokenCount");
-    return {
-      provider,
-      model,
-      input_tokens: count(u2, "promptTokenCount") + count(u2, "toolUsePromptTokenCount"),
-      cached_input_tokens: count(u2, "cachedContentTokenCount"),
-      output_tokens: count(u2, "candidatesTokenCount") + thinking,
-      thinking_tokens: thinking
-    };
-  }
-  const u = asCounts(root?.usage);
-  if (!u) {
-    return null;
-  }
-  if (provider === "anthropic") {
-    const cacheRead = count(u, "cache_read_input_tokens");
-    return {
-      provider,
-      model,
-      input_tokens: count(u, "input_tokens") + cacheRead + count(u, "cache_creation_input_tokens"),
-      cached_input_tokens: cacheRead,
-      output_tokens: count(u, "output_tokens"),
-      thinking_tokens: count(asCounts(u.output_tokens_details), "thinking_tokens")
-    };
-  }
-  if ("input_tokens" in u) {
-    return {
-      provider,
-      model,
-      input_tokens: count(u, "input_tokens"),
-      cached_input_tokens: count(asCounts(u.input_tokens_details), "cached_tokens"),
-      output_tokens: count(u, "output_tokens"),
-      thinking_tokens: count(asCounts(u.output_tokens_details), "reasoning_tokens")
-    };
-  }
-  return {
-    provider,
-    model,
-    input_tokens: count(u, "prompt_tokens"),
-    cached_input_tokens: count(asCounts(u.prompt_tokens_details), "cached_tokens"),
-    output_tokens: count(u, "completion_tokens"),
-    thinking_tokens: count(asCounts(u.completion_tokens_details), "reasoning_tokens")
-  };
-}
-function formatLLMUsageLogLine(usage) {
-  return `${LLM_USAGE_LOG_PREFIX} ${JSON.stringify(usage)}`;
-}
-function reportLLMUsage(usage, options) {
-  if (!("unavailable" in usage)) {
-    process.stdout.write(`${formatLLMUsageLogLine(usage)}
-`);
-  }
-  recordTokenUsage(usage, options);
-}
-function usageReporter(options) {
-  const inCallerContext = bindToUsageContext();
-  return (usage) => inCallerContext(() => reportLLMUsage(usage, options));
 }
 
 // src/llm/client.ts

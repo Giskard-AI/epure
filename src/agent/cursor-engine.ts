@@ -8,9 +8,10 @@ import {
   BadRequestError,
   RateLimitError
 } from "../llm/errors.js";
+import { reportLLMUsage } from "../llm/usage.js";
 import { collectRunnerSecretValues } from "../sandbox/llm-sandbox.js";
 import { isSensitiveTaskBranchPath } from "../sandbox/polyglot-workspace-runner.js";
-import { bindToUsageContext, recordTokenUsage } from "../usage/token-usage.js";
+import { bindToUsageContext } from "../usage/token-usage.js";
 import {
   AgentEngineError,
   assertNoSecretMaterial,
@@ -388,7 +389,7 @@ export function createCursorAgentEngine(options: CursorAgentEngineOptions = {}):
             .getUsage()
             .then((u) => u.usage)
             .catch(() => undefined));
-        const usageProvider = translation.providerPrefix ?? "cursor";
+        const usageModel = runResult.model?.id ?? translation.modelId;
         const cachedInputTokens = usage?.cacheReadTokens ?? 0;
         const inputTokens =
           (usage?.inputTokens ?? 0) + (usage?.cacheWriteTokens ?? 0) + cachedInputTokens;
@@ -407,18 +408,18 @@ export function createCursorAgentEngine(options: CursorAgentEngineOptions = {}):
 
         runInUsageContext(() => {
           if (usage && (inputTokens > 0 || outputTokens > 0)) {
-            recordTokenUsage({
-              provider: usageProvider,
-              model: translation.modelId,
+            reportLLMUsage({
+              provider: "cursor",
+              model: usageModel,
               input_tokens: inputTokens,
               cached_input_tokens: cachedInputTokens,
               output_tokens: outputTokens,
               thinking_tokens: thinkingTokens
             });
           } else {
-            recordTokenUsage({
-              provider: usageProvider,
-              model: translation.modelId,
+            reportLLMUsage({
+              provider: "cursor",
+              model: usageModel,
               unavailable: true
             });
           }

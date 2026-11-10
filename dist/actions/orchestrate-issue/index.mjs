@@ -438,6 +438,200 @@ function parseAndValidateStructuredOutput(rawText, schemaSpec) {
   }
 }
 
+// src/usage/token-usage.ts
+import { AsyncLocalStorage } from "node:async_hooks";
+var EPIC_USAGE_SCOPE = "epic";
+var NO_TOKENS = {
+  requests: 0,
+  input_tokens: 0,
+  cached_input_tokens: 0,
+  output_tokens: 0,
+  thinking_tokens: 0
+};
+function addTokenCounts(a, b) {
+  const unavailable = (a.usage_unavailable ?? 0) + (b.usage_unavailable ?? 0);
+  return {
+    requests: a.requests + b.requests,
+    input_tokens: a.input_tokens + b.input_tokens,
+    cached_input_tokens: a.cached_input_tokens + b.cached_input_tokens,
+    output_tokens: a.output_tokens + b.output_tokens,
+    thinking_tokens: a.thinking_tokens + b.thinking_tokens,
+    ...unavailable > 0 ? { usage_unavailable: unavailable } : {}
+  };
+}
+function countsOf(usage) {
+  if ("unavailable" in usage) {
+    return { ...NO_TOKENS, requests: 1, usage_unavailable: 1 };
+  }
+  return {
+    requests: 1,
+    input_tokens: usage.input_tokens,
+    cached_input_tokens: usage.cached_input_tokens,
+    output_tokens: usage.output_tokens,
+    thinking_tokens: usage.thinking_tokens
+  };
+}
+function addRequestUsage(record, attribution, usage) {
+  const scope = attribution.ticket === void 0 ? EPIC_USAGE_SCOPE : String(attribution.ticket);
+  const phases = record[scope] ?? {};
+  const models = phases[attribution.phase] ?? {};
+  const model = `${usage.provider}/${usage.model}`;
+  return {
+    ...record,
+    [scope]: {
+      ...phases,
+      [attribution.phase]: { ...models, [model]: addTokenCounts(models[model] ?? NO_TOKENS, countsOf(usage)) }
+    }
+  };
+}
+function totalTokensByModel(record, scope) {
+  const totals = {};
+  const scopes = scope === void 0 ? Object.values(record) : [record[scope] ?? {}];
+  for (const phases of scopes) {
+    for (const models of Object.values(phases)) {
+      for (const [model, counts] of Object.entries(models ?? {})) {
+        totals[model] = addTokenCounts(totals[model] ?? NO_TOKENS, counts);
+      }
+    }
+  }
+  return totals;
+}
+var MAX_MODELS_PER_RUN = 16;
+var OVERFLOW_MODEL = "other";
+var TokenUsageLedger = class {
+  pending = [];
+  lastKnown = {};
+  models = /* @__PURE__ */ new Set();
+  sandboxModels = 0;
+  record(attribution, usage, options = {}) {
+    const model = `${usage.provider}/${usage.model}`;
+    if (!this.models.has(model)) {
+      if (options.labelledBySandbox && this.sandboxModels >= MAX_MODELS_PER_RUN) {
+        this.pending.push({ attribution, usage: { ...usage, model: OVERFLOW_MODEL } });
+        return;
+      }
+      this.models.add(model);
+      if (options.labelledBySandbox) {
+        this.sandboxModels += 1;
+      }
+    }
+    this.pending.push({ attribution, usage });
+  }
+  /** The state's record plus the usage this run has not written yet. */
+  current() {
+    return this.fold(this.lastKnown, this.pending.length);
+  }
+  observe(record) {
+    this.lastKnown = record ?? {};
+  }
+  pendingCount() {
+    return this.pending.length;
+  }
+  fold(record, count3) {
+    return this.pending.slice(0, count3).reduce((acc, entry) => addRequestUsage(acc, entry.attribution, entry.usage), record ?? {});
+  }
+  written(record, count3) {
+    this.pending = this.pending.slice(count3);
+    this.lastKnown = record;
+  }
+};
+var usageContext = new AsyncLocalStorage();
+function runWithTokenUsageLedger(ledger, attribution, fn) {
+  return usageContext.run({ ledger, attribution }, fn);
+}
+function withUsageAttribution(attribution, fn) {
+  const parent = usageContext.getStore();
+  if (!parent) {
+    return fn();
+  }
+  return usageContext.run({ ledger: parent.ledger, attribution: { ...parent.attribution, ...attribution } }, fn);
+}
+function currentTokenUsage() {
+  return usageContext.getStore()?.ledger.current();
+}
+function recordTokenUsage(usage, options) {
+  const context = usageContext.getStore();
+  context?.ledger.record(context.attribution, usage, options);
+}
+function bindToUsageContext() {
+  return AsyncLocalStorage.snapshot();
+}
+
+// src/llm/usage.ts
+var LLM_USAGE_LOG_PREFIX = "epure-llm-usage";
+function count(source, key) {
+  const value = source?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+function asCounts(value) {
+  return value && typeof value === "object" ? value : void 0;
+}
+function extractLLMTokenUsage(provider, model, body) {
+  const root = asCounts(body);
+  if (provider === "google" || provider === "vertex") {
+    const u2 = asCounts(root?.usageMetadata);
+    if (!u2) {
+      return null;
+    }
+    const thinking = count(u2, "thoughtsTokenCount");
+    return {
+      provider,
+      model,
+      input_tokens: count(u2, "promptTokenCount") + count(u2, "toolUsePromptTokenCount"),
+      cached_input_tokens: count(u2, "cachedContentTokenCount"),
+      output_tokens: count(u2, "candidatesTokenCount") + thinking,
+      thinking_tokens: thinking
+    };
+  }
+  const u = asCounts(root?.usage);
+  if (!u) {
+    return null;
+  }
+  if (provider === "anthropic") {
+    const cacheRead = count(u, "cache_read_input_tokens");
+    return {
+      provider,
+      model,
+      input_tokens: count(u, "input_tokens") + cacheRead + count(u, "cache_creation_input_tokens"),
+      cached_input_tokens: cacheRead,
+      output_tokens: count(u, "output_tokens"),
+      thinking_tokens: count(asCounts(u.output_tokens_details), "thinking_tokens")
+    };
+  }
+  if ("input_tokens" in u) {
+    return {
+      provider,
+      model,
+      input_tokens: count(u, "input_tokens"),
+      cached_input_tokens: count(asCounts(u.input_tokens_details), "cached_tokens"),
+      output_tokens: count(u, "output_tokens"),
+      thinking_tokens: count(asCounts(u.output_tokens_details), "reasoning_tokens")
+    };
+  }
+  return {
+    provider,
+    model,
+    input_tokens: count(u, "prompt_tokens"),
+    cached_input_tokens: count(asCounts(u.prompt_tokens_details), "cached_tokens"),
+    output_tokens: count(u, "completion_tokens"),
+    thinking_tokens: count(asCounts(u.completion_tokens_details), "reasoning_tokens")
+  };
+}
+function formatLLMUsageLogLine(usage) {
+  return `${LLM_USAGE_LOG_PREFIX} ${JSON.stringify(usage)}`;
+}
+function reportLLMUsage(usage, options) {
+  if (!("unavailable" in usage)) {
+    process.stdout.write(`${formatLLMUsageLogLine(usage)}
+`);
+  }
+  recordTokenUsage(usage, options);
+}
+function usageReporter(options) {
+  const inCallerContext = bindToUsageContext();
+  return (usage) => inCallerContext(() => reportLLMUsage(usage, options));
+}
+
 // src/sandbox/llm-sandbox.ts
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -1669,200 +1863,6 @@ Output ONLY a corrected, complete JSON object strictly matching the required sch
     `OpenAI-compatible provider '${provider}' exceeded maximum tool rounds (${maxToolRounds}) for model '${model}'.`,
     { provider }
   );
-}
-
-// src/usage/token-usage.ts
-import { AsyncLocalStorage } from "node:async_hooks";
-var EPIC_USAGE_SCOPE = "epic";
-var NO_TOKENS = {
-  requests: 0,
-  input_tokens: 0,
-  cached_input_tokens: 0,
-  output_tokens: 0,
-  thinking_tokens: 0
-};
-function addTokenCounts(a, b) {
-  const unavailable = (a.usage_unavailable ?? 0) + (b.usage_unavailable ?? 0);
-  return {
-    requests: a.requests + b.requests,
-    input_tokens: a.input_tokens + b.input_tokens,
-    cached_input_tokens: a.cached_input_tokens + b.cached_input_tokens,
-    output_tokens: a.output_tokens + b.output_tokens,
-    thinking_tokens: a.thinking_tokens + b.thinking_tokens,
-    ...unavailable > 0 ? { usage_unavailable: unavailable } : {}
-  };
-}
-function countsOf(usage) {
-  if ("unavailable" in usage) {
-    return { ...NO_TOKENS, requests: 1, usage_unavailable: 1 };
-  }
-  return {
-    requests: 1,
-    input_tokens: usage.input_tokens,
-    cached_input_tokens: usage.cached_input_tokens,
-    output_tokens: usage.output_tokens,
-    thinking_tokens: usage.thinking_tokens
-  };
-}
-function addRequestUsage(record, attribution, usage) {
-  const scope = attribution.ticket === void 0 ? EPIC_USAGE_SCOPE : String(attribution.ticket);
-  const phases = record[scope] ?? {};
-  const models = phases[attribution.phase] ?? {};
-  const model = `${usage.provider}/${usage.model}`;
-  return {
-    ...record,
-    [scope]: {
-      ...phases,
-      [attribution.phase]: { ...models, [model]: addTokenCounts(models[model] ?? NO_TOKENS, countsOf(usage)) }
-    }
-  };
-}
-function totalTokensByModel(record, scope) {
-  const totals = {};
-  const scopes = scope === void 0 ? Object.values(record) : [record[scope] ?? {}];
-  for (const phases of scopes) {
-    for (const models of Object.values(phases)) {
-      for (const [model, counts] of Object.entries(models ?? {})) {
-        totals[model] = addTokenCounts(totals[model] ?? NO_TOKENS, counts);
-      }
-    }
-  }
-  return totals;
-}
-var MAX_MODELS_PER_RUN = 16;
-var OVERFLOW_MODEL = "other";
-var TokenUsageLedger = class {
-  pending = [];
-  lastKnown = {};
-  models = /* @__PURE__ */ new Set();
-  sandboxModels = 0;
-  record(attribution, usage, options = {}) {
-    const model = `${usage.provider}/${usage.model}`;
-    if (!this.models.has(model)) {
-      if (options.labelledBySandbox && this.sandboxModels >= MAX_MODELS_PER_RUN) {
-        this.pending.push({ attribution, usage: { ...usage, model: OVERFLOW_MODEL } });
-        return;
-      }
-      this.models.add(model);
-      if (options.labelledBySandbox) {
-        this.sandboxModels += 1;
-      }
-    }
-    this.pending.push({ attribution, usage });
-  }
-  /** The state's record plus the usage this run has not written yet. */
-  current() {
-    return this.fold(this.lastKnown, this.pending.length);
-  }
-  observe(record) {
-    this.lastKnown = record ?? {};
-  }
-  pendingCount() {
-    return this.pending.length;
-  }
-  fold(record, count3) {
-    return this.pending.slice(0, count3).reduce((acc, entry) => addRequestUsage(acc, entry.attribution, entry.usage), record ?? {});
-  }
-  written(record, count3) {
-    this.pending = this.pending.slice(count3);
-    this.lastKnown = record;
-  }
-};
-var usageContext = new AsyncLocalStorage();
-function runWithTokenUsageLedger(ledger, attribution, fn) {
-  return usageContext.run({ ledger, attribution }, fn);
-}
-function withUsageAttribution(attribution, fn) {
-  const parent = usageContext.getStore();
-  if (!parent) {
-    return fn();
-  }
-  return usageContext.run({ ledger: parent.ledger, attribution: { ...parent.attribution, ...attribution } }, fn);
-}
-function currentTokenUsage() {
-  return usageContext.getStore()?.ledger.current();
-}
-function recordTokenUsage(usage, options) {
-  const context = usageContext.getStore();
-  context?.ledger.record(context.attribution, usage, options);
-}
-function bindToUsageContext() {
-  return AsyncLocalStorage.snapshot();
-}
-
-// src/llm/usage.ts
-var LLM_USAGE_LOG_PREFIX = "epure-llm-usage";
-function count(source, key) {
-  const value = source?.[key];
-  return typeof value === "number" && Number.isFinite(value) ? value : 0;
-}
-function asCounts(value) {
-  return value && typeof value === "object" ? value : void 0;
-}
-function extractLLMTokenUsage(provider, model, body) {
-  const root = asCounts(body);
-  if (provider === "google" || provider === "vertex") {
-    const u2 = asCounts(root?.usageMetadata);
-    if (!u2) {
-      return null;
-    }
-    const thinking = count(u2, "thoughtsTokenCount");
-    return {
-      provider,
-      model,
-      input_tokens: count(u2, "promptTokenCount") + count(u2, "toolUsePromptTokenCount"),
-      cached_input_tokens: count(u2, "cachedContentTokenCount"),
-      output_tokens: count(u2, "candidatesTokenCount") + thinking,
-      thinking_tokens: thinking
-    };
-  }
-  const u = asCounts(root?.usage);
-  if (!u) {
-    return null;
-  }
-  if (provider === "anthropic") {
-    const cacheRead = count(u, "cache_read_input_tokens");
-    return {
-      provider,
-      model,
-      input_tokens: count(u, "input_tokens") + cacheRead + count(u, "cache_creation_input_tokens"),
-      cached_input_tokens: cacheRead,
-      output_tokens: count(u, "output_tokens"),
-      thinking_tokens: count(asCounts(u.output_tokens_details), "thinking_tokens")
-    };
-  }
-  if ("input_tokens" in u) {
-    return {
-      provider,
-      model,
-      input_tokens: count(u, "input_tokens"),
-      cached_input_tokens: count(asCounts(u.input_tokens_details), "cached_tokens"),
-      output_tokens: count(u, "output_tokens"),
-      thinking_tokens: count(asCounts(u.output_tokens_details), "reasoning_tokens")
-    };
-  }
-  return {
-    provider,
-    model,
-    input_tokens: count(u, "prompt_tokens"),
-    cached_input_tokens: count(asCounts(u.prompt_tokens_details), "cached_tokens"),
-    output_tokens: count(u, "completion_tokens"),
-    thinking_tokens: count(asCounts(u.completion_tokens_details), "reasoning_tokens")
-  };
-}
-function formatLLMUsageLogLine(usage) {
-  return `${LLM_USAGE_LOG_PREFIX} ${JSON.stringify(usage)}`;
-}
-function reportLLMUsage(usage, options) {
-  if (!("unavailable" in usage)) {
-    process.stdout.write(`${formatLLMUsageLogLine(usage)}
-`);
-  }
-  recordTokenUsage(usage, options);
-}
-function usageReporter(options) {
-  const inCallerContext = bindToUsageContext();
-  return (usage) => inCallerContext(() => reportLLMUsage(usage, options));
 }
 
 // src/llm/client.ts
@@ -9903,7 +9903,7 @@ function createCursorAgentEngine(options = {}) {
           );
         }
         const usage = runResult.usage ?? await agent.getUsage().then((u) => u.usage).catch(() => void 0);
-        const usageProvider = translation.providerPrefix ?? "cursor";
+        const usageModel = runResult.model?.id ?? translation.modelId;
         const cachedInputTokens = usage?.cacheReadTokens ?? 0;
         const inputTokens = (usage?.inputTokens ?? 0) + (usage?.cacheWriteTokens ?? 0) + cachedInputTokens;
         const outputTokens = usage?.outputTokens ?? 0;
@@ -9919,18 +9919,18 @@ function createCursorAgentEngine(options = {}) {
         }
         runInUsageContext(() => {
           if (usage && (inputTokens > 0 || outputTokens > 0)) {
-            recordTokenUsage({
-              provider: usageProvider,
-              model: translation.modelId,
+            reportLLMUsage({
+              provider: "cursor",
+              model: usageModel,
               input_tokens: inputTokens,
               cached_input_tokens: cachedInputTokens,
               output_tokens: outputTokens,
               thinking_tokens: thinkingTokens
             });
           } else {
-            recordTokenUsage({
-              provider: usageProvider,
-              model: translation.modelId,
+            reportLLMUsage({
+              provider: "cursor",
+              model: usageModel,
               unavailable: true
             });
           }
