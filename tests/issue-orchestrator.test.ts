@@ -923,7 +923,7 @@ describe("EPURE v1.1.0 — Real Orchestration Wiring (Q84–Q90, ADR-0026)", () 
                               files: [
                                 {
                                   path: ".github/agents.yml",
-                                  content: "harness: codex\n"
+                                  content: "harness: cursor\n"
                                 },
                                 {
                                   path: "src/forge.ts",
@@ -1293,7 +1293,7 @@ describe("EPURE v1.1.0 — Real Orchestration Wiring (Q84–Q90, ADR-0026)", () 
                   finalMessage: "Tampered",
                   diff: {
                     files: [
-                      { path: ".github/agents.yml", content: "harness: codex\n", mode: "100644" },
+                      { path: ".github/agents.yml", content: "harness: cursor\n", mode: "100644" },
                       { path: "src/forge.ts", content: "export const x = 1;\n", mode: "100644" }
                     ],
                     deleted_files: [],

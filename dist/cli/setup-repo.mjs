@@ -3,9 +3,9 @@
 // src/bootstrap/cli.ts
 import { execFileSync } from "node:child_process";
 
-// src/bootstrap/setup-repo.ts
-import { existsSync as existsSync2, mkdirSync, readFileSync as readFileSync2, writeFileSync } from "node:fs";
-import { dirname, join as join2 } from "node:path";
+// src/usage/token-usage.ts
+import { AsyncLocalStorage } from "node:async_hooks";
+var usageContext = new AsyncLocalStorage();
 
 // src/auth/github-apps.ts
 var GITHUB_ACTIONS_APP_ID = 15368;
@@ -97,343 +97,42 @@ var PROVIDER_EFFORTS = [
 var MODEL = String.raw`[\w.@-]+`;
 var GENERATE = String.raw`:(?:generateContent|streamGenerateContent)`;
 
-// src/usage/token-usage.ts
-import { AsyncLocalStorage } from "node:async_hooks";
-var usageContext = new AsyncLocalStorage();
+// src/sandbox/llm-sandbox.ts
+var NONCE_HEADER = "x-epure-proxy-nonce";
+var CREDENTIAL_HEADERS = [
+  NONCE_HEADER,
+  "authorization",
+  "x-api-key",
+  "api-key",
+  "x-goog-api-key"
+];
+var HOP_BY_HOP_HEADERS = [
+  "connection",
+  "keep-alive",
+  "proxy-authorization",
+  "proxy-connection",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade"
+];
+var DROPPED_REQUEST_HEADERS = /* @__PURE__ */ new Set([
+  ...CREDENTIAL_HEADERS,
+  ...HOP_BY_HOP_HEADERS,
+  "host",
+  "expect",
+  "accept-encoding"
+]);
+var DROPPED_RESPONSE_HEADERS = new Set(HOP_BY_HOP_HEADERS);
+var MAX_PROXY_REQUEST_BYTES = 20 * 1024 * 1024;
+var MAX_SESSION_STDERR_BYTES = 64 * 1024;
 
-// src/orchestrator/github/rate-limit.ts
-var GITHUB_RATE_LIMIT_MAX_WAIT_MS = 5 * 60 * 1e3;
-var SECONDARY_RATE_LIMIT_DEFAULT_WAIT_MS = 60 * 1e3;
+// src/bootstrap/setup-repo.ts
+import { existsSync as existsSync2, mkdirSync, readFileSync as readFileSync2, writeFileSync } from "node:fs";
+import { dirname, join as join2 } from "node:path";
 
 // src/review/reviewers-dir.ts
 var DEFAULT_REVIEWERS_DIR = ".agents/reviewers";
-
-// src/review/reviewer-roster.ts
-var JSON_OUTPUT_CONTRACT_BLOCK = [
-  PROMPT_INJECTION_IMMUNITY_CLAUSE,
-  "",
-  "## Output Contract (Strict JSON)",
-  "You operate in read-only audit mode. Return a single JSON object matching this schema:",
-  "```json",
-  "{",
-  '  "reviewer": "<agent-name>",',
-  '  "summary": "Concise 1-2 sentence synthesis of the review pass",',
-  '  "findings": [',
-  "    {",
-  '      "category": "must_fix | informational | no_action",',
-  '      "severity": "critical | high | medium | low | info",',
-  '      "path": "src/path/to/file.ts",',
-  '      "line": 1,',
-  '      "title": "Short actionable finding title",',
-  '      "rationale": "Why this violates an invariant, spec requirement, or quality bar",',
-  '      "suggested_action": "Concrete minimal fix required"',
-  "    }",
-  "  ]",
-  "}",
-  "```",
-  "- Use `must_fix` ONLY for objective correctness bugs, broken domain invariants, security flaws, missing spec requirements, or blocking accessibility/UX failures.",
-  "- Use `informational` for non-blocking suggestions."
-].join("\n");
-function buildStackStandardsBullets(stackKind) {
-  const ponytailBullets = [
-    "- Enforce Ponytail 5 Reuse Hierarchy (existing repo code -> stdlib/platform -> installed packages -> minimal readable code) and Caller-Reach (update all callers and tests in the same diff).",
-    "- Enforce Ponytail 5 Safety Floor: never allow trust-boundary validation, critical error handling, security guards, or accessibility to be removed for brevity.",
-    "- Enforce ASD-STE100 Controlled Technical Prompting in prompts, specs, and docs (bijective `GLOSSARY.md` vocabulary, active voice with explicit actor, 1 sentence = 1 action, deterministic `WHEN/IF ... THEN` conditionals)."
-  ];
-  switch (stackKind) {
-    case "python":
-      return [
-        "- Enforce strict Python type annotations (`mypy` / `pyright`) and `ruff` compliance without blanket `# type: ignore`.",
-        "- Verify that tests use parameterized `@pytest.mark.parametrize` tables with descriptive test IDs covering nominal and edge cases.",
-        "- Ensure surgical, minimal code free of dead imports or speculative abstractions.",
-        ...ponytailBullets
-      ];
-    case "rust":
-      return [
-        "- Enforce idiomatic, warning-free Rust (`cargo clippy -- -D warnings`), avoiding `unwrap()` / `expect()` in production paths.",
-        "- Verify that tests use table-driven or parameterized test cases covering nominal and boundary conditions.",
-        "- Ensure surgical, minimal code free of dead code or speculative traits.",
-        ...ponytailBullets
-      ];
-    case "go":
-      return [
-        "- Enforce idiomatic Go error handling and strict `go vet` / `golangci-lint` cleanliness.",
-        "- Verify that tests use table-driven `t.Run` subtests with descriptive case names covering nominal and edge cases.",
-        "- Ensure surgical, minimal code free of unused exports or premature abstractions.",
-        ...ponytailBullets
-      ];
-    case "node":
-    case "generic":
-    default:
-      return [
-        "- Enforce strict TypeScript types (no `any` or unsafe casts without guard).",
-        "- Verify that tests use parameterized `it.each` tables with descriptive test IDs covering nominal and edge cases.",
-        "- Ensure surgical, minimal code free of dead imports or speculative abstractions.",
-        ...ponytailBullets
-      ];
-  }
-}
-function buildDefaultReviewerRosterFiles(params) {
-  const repo = params.repository.trim() || "consumer/repo";
-  const stackKind = params.stackKind ?? "node";
-  const includeUi = params.includeFrontendReviewers !== false;
-  const customSpecialists = params.customDomainSpecialists ?? [];
-  const reviewersDir = params.reviewersDir ?? DEFAULT_REVIEWERS_DIR;
-  const files = [
-    {
-      name: "domain-backend-reviewer",
-      path: `${reviewersDir}/domain-backend-reviewer.md`,
-      category: "specialist",
-      content: [
-        "---",
-        "name: domain-backend-reviewer",
-        `description: Domain logic, mathematical formulas, state transitions, and backend API specialist reviewer for ${repo}.`,
-        "---",
-        "",
-        `# Domain & Backend Specialist Reviewer (\`${repo}\`)`,
-        "",
-        "## Scope & Responsibilities",
-        "- Verify domain calculations, mathematical formulas, boundary conditions, and state machine transitions.",
-        "- Check error handling, input validation, determinism, and absence of silent data corruption.",
-        "- Enforce every domain invariant documented in `GLOSSARY.md` and `docs/adr/*.md`.",
-        "",
-        JSON_OUTPUT_CONTRACT_BLOCK,
-        ""
-      ].join("\n")
-    }
-  ];
-  for (const spec of customSpecialists) {
-    const cleanName = spec.name.trim().toLowerCase().replace(/\.md$/i, "").replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
-    if (!cleanName) continue;
-    const reviewerName = cleanName.endsWith("-reviewer") ? cleanName : `${cleanName}-reviewer`;
-    if (files.some((f) => f.name === reviewerName)) continue;
-    files.push({
-      name: reviewerName,
-      path: `${reviewersDir}/${reviewerName}.md`,
-      category: "specialist",
-      content: [
-        "---",
-        `name: ${reviewerName}`,
-        `description: ${spec.description || `Domain specialist reviewer (${reviewerName}) for ${repo}.`}`,
-        "---",
-        "",
-        `# Specialist Reviewer \u2014 \`${reviewerName}\` (\`${repo}\`)`,
-        "",
-        "## Scope & Responsibilities",
-        ...spec.scopeResponsibilities.length > 0 ? spec.scopeResponsibilities.map((b) => b.startsWith("-") ? b : `- ${b}`) : [
-          `- Verify domain invariants, module boundaries, and edge cases specific to \`${reviewerName}\`.`,
-          "- Enforce alignment with `GLOSSARY.md` and `docs/adr/*.md`."
-        ],
-        "",
-        JSON_OUTPUT_CONTRACT_BLOCK,
-        ""
-      ].join("\n")
-    });
-  }
-  if (includeUi) {
-    files.push({
-      name: "frontend-reviewer",
-      path: `${reviewersDir}/frontend-reviewer.md`,
-      category: "specialist",
-      content: [
-        "---",
-        "name: frontend-reviewer",
-        `description: Frontend component architecture, state hooks, rendering performance, and client persistence reviewer for ${repo}.`,
-        "---",
-        "",
-        `# Frontend Specialist Reviewer (\`${repo}\`)`,
-        "",
-        "## Scope & Responsibilities",
-        "- Inspect UI component boundaries, state synchronization, controlled/uncontrolled inputs, and event handlers.",
-        "- Verify explicit handling of loading, empty, error, and guard states.",
-        "- Prevent state desynchronization, stale closures, unguarded `localStorage` parsing, and broken rendering.",
-        "",
-        JSON_OUTPUT_CONTRACT_BLOCK,
-        ""
-      ].join("\n")
-    });
-  }
-  files.push(
-    {
-      name: "infra-reviewer",
-      path: `${reviewersDir}/infra-reviewer.md`,
-      category: "specialist",
-      content: [
-        "---",
-        "name: infra-reviewer",
-        `description: CI/CD workflows, build scripts, package dependencies, and runtime configuration reviewer for ${repo}.`,
-        "---",
-        "",
-        `# Infrastructure & Build Reviewer (\`${repo}\`)`,
-        "",
-        "## Scope & Responsibilities",
-        "- Audit build manifests (`package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, `Makefile`, `Dockerfile`) and `.github/workflows/*` changes.",
-        "- Ensure deterministic builds, pinned dependencies, and zero secret exposure in scripts or workflows.",
-        "",
-        JSON_OUTPUT_CONTRACT_BLOCK,
-        ""
-      ].join("\n")
-    },
-    {
-      name: "architecture-reviewer",
-      path: `${reviewersDir}/architecture-reviewer.md`,
-      category: "cross-cutting",
-      content: [
-        "---",
-        "name: architecture-reviewer",
-        `description: Module boundaries, deep modules, ADR compliance, and ubiquity of GLOSSARY.md terms for ${repo}.`,
-        "---",
-        "",
-        `# Cross-Cutting Architecture Reviewer (\`${repo}\`)`,
-        "",
-        "## Scope & Responsibilities",
-        "- Verify strict separation between pure domain models (`src/domain/*`) and UI/IO layers.",
-        "- Check compliance with accepted ADRs (`docs/adr/*.md`) and canonical bijective terminology in `GLOSSARY.md` (ASD-STE100: zero `_Avoid_` synonyms).",
-        "- Flag circular dependencies, leaky abstractions, or unnecessary complexity.",
-        "",
-        JSON_OUTPUT_CONTRACT_BLOCK,
-        ""
-      ].join("\n")
-    },
-    {
-      name: "security-reviewer",
-      path: `${reviewersDir}/security-reviewer.md`,
-      category: "cross-cutting",
-      content: [
-        "---",
-        "name: security-reviewer",
-        `description: Application security, injection prevention, secret hygiene, and privilege boundary reviewer for ${repo}.`,
-        "---",
-        "",
-        `# Cross-Cutting Security Reviewer (\`${repo}\`)`,
-        "",
-        "## Scope & Responsibilities",
-        "- Detect XSS (`dangerouslySetInnerHTML`), command injection, prototype pollution, and unsafe deserialization.",
-        "- Ensure no credentials, tokens, or private keys appear in code, tests, or logs.",
-        `- Flag any unauthorized modification of \`.github/workflows/**\`, \`.github/agents.yml\`, or \`${reviewersDir}/**\`.`,
-        "",
-        JSON_OUTPUT_CONTRACT_BLOCK,
-        ""
-      ].join("\n")
-    },
-    {
-      name: "spec-parity-reviewer",
-      path: `${reviewersDir}/spec-parity-reviewer.md`,
-      category: "cross-cutting",
-      content: [
-        "---",
-        "name: spec-parity-reviewer",
-        `description: Strict verification of 1-to-1 parity between the approved spec/ticket acceptance criteria and the PR diff for ${repo}.`,
-        "---",
-        "",
-        `# Specification & Acceptance Parity Reviewer (\`${repo}\`)`,
-        "",
-        "## Scope & Responsibilities",
-        "- Compare every acceptance criterion of the ticket and `docs/specs/*.md` against the implemented code and tests.",
-        "- Flag any omitted requirement, partial implementation, or unrequested scope creep.",
-        "- Verify that parameterized unit/integration tests actually assert the specified domain rules and ASD-STE100 acceptance criteria.",
-        "",
-        JSON_OUTPUT_CONTRACT_BLOCK,
-        ""
-      ].join("\n")
-    },
-    {
-      name: "standards-reviewer",
-      path: `${reviewersDir}/standards-reviewer.md`,
-      category: "cross-cutting",
-      content: [
-        "---",
-        "name: standards-reviewer",
-        `description: Coding standards, strict typing, and parameterized test quality reviewer for ${repo} (stack: ${stackKind}).`,
-        "---",
-        "",
-        `# Coding Standards & Test Quality Reviewer (\`${repo}\`)`,
-        "",
-        "## Scope & Responsibilities",
-        ...buildStackStandardsBullets(stackKind),
-        "",
-        JSON_OUTPUT_CONTRACT_BLOCK,
-        ""
-      ].join("\n")
-    }
-  );
-  if (includeUi) {
-    files.push(
-      {
-        name: "accessibility-reviewer",
-        path: `${reviewersDir}/accessibility-reviewer.md`,
-        category: "cross-cutting",
-        content: [
-          "---",
-          "name: accessibility-reviewer",
-          `description: WCAG 2.1 AA accessibility, semantic HTML, ARIA attributes, keyboard navigation, and focus management reviewer for ${repo}.`,
-          "---",
-          "",
-          `# Accessibility (WCAG 2.1 AA) Reviewer (\`${repo}\`)`,
-          "",
-          "## Scope & Responsibilities",
-          '- Verify semantic landmarks (`main`, `nav`, `section`, `form`), explicit `<label>` associations on all form controls, and `aria-live` / `role="alert"` on dynamic validation errors.',
-          "- Check keyboard operability (`Tab`, `Enter`, `Space`, `Escape`) and visible focus states.",
-          "- Ensure sufficient color contrast and non-color-only status indicators.",
-          "",
-          JSON_OUTPUT_CONTRACT_BLOCK,
-          ""
-        ].join("\n")
-      },
-      {
-        name: "design-reviewer",
-        path: `${reviewersDir}/design-reviewer.md`,
-        category: "cross-cutting",
-        content: [
-          "---",
-          "name: design-reviewer",
-          `description: Impeccable UI/UX quality gate checking DESIGN.md tokens, responsive layout integrity, and interaction states for ${repo}.`,
-          "---",
-          "",
-          `# Impeccable Design & Layout Reviewer (\`${repo}\`)`,
-          "",
-          "## Scope & Responsibilities",
-          "- Verify compliance with `DESIGN.md` visual tokens, typography hierarchy, and spacing scale.",
-          "- Detect responsive layout overflows, broken grid/flex alignments, and missing interaction states (loading, empty, error, disabled).",
-          "- Distinguish objective design/layout violations (`must_fix`) from purely subjective aesthetic preferences (`informational`).",
-          "",
-          JSON_OUTPUT_CONTRACT_BLOCK,
-          ""
-        ].join("\n")
-      }
-    );
-  }
-  files.push({
-    name: "user-advocate",
-    path: `${reviewersDir}/user-advocate.md`,
-    category: "persona",
-    content: [
-      "---",
-      "name: user-advocate",
-      `description: Persona-driven UX advocate for ${repo} operating in design-gate (pre-implementation) and implementation-review (PR) modes.`,
-      "---",
-      "",
-      `# User Advocate \u2014 Persona Journey Reviewer (\`${repo}\`)`,
-      "",
-      "## Operating Modes",
-      "1. **`design-gate` (Pre-implementation on `plan/*`)**:",
-      "   - Walk the proposed specification and ticket graph through the eyes of each target user persona.",
-      "   - Identify missing workflow steps, confusing terminology, unguarded destructive actions, or friction points.",
-      "   - Enrich UI tickets with concrete persona acceptance criteria before `/epure approve`.",
-      "2. **`implementation-review` (Post-implementation on PRs)**:",
-      "   - Walk the implemented UI/API diff as each persona attempting their core task end-to-end.",
-      "   - Flag dead-ends, missing feedback when a rule blocks an action, or unreadable outputs as `must_fix`.",
-      "",
-      "## Default Domain Personas (Adapted during `/epure plan`)",
-      "- **Primary Operator / Power User**: Needs fast, accurate feedback, clear constraint explanations, and reliable state persistence.",
-      "- **First-Time / Casual User**: Needs self-explanatory labels, safe defaults, and immediate visual guidance when an input is invalid.",
-      "",
-      JSON_OUTPUT_CONTRACT_BLOCK,
-      ""
-    ].join("\n")
-  });
-  return files;
-}
 
 // src/bootstrap/ci-and-renovate.ts
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -1739,6 +1438,14 @@ function resolveAgentsConfig(overrides = {}) {
       };
     }
   }
+  if (overrides.harness !== void 0 && overrides.harness !== "pi" && overrides.harness !== "cursor") {
+    return {
+      valid: false,
+      error_code: "SECURITY_INVARIANT_VIOLATION",
+      error_message: `Local .github/agents.yml harness '${String(overrides.harness)}' is not supported; expected 'pi' or 'cursor'.`,
+      config: DEFAULT_AGENTS_CONFIG
+    };
+  }
   const reviewersDir = (overrides.reviewers_dir ?? DEFAULT_AGENTS_CONFIG.reviewers_dir).trim().replace(/^(?:\.\/)+/, "").replace(/\/+$/, "");
   if (isUnsafeReviewersDir(reviewersDir)) {
     return {
@@ -2235,8 +1942,12 @@ function parseAgentsYaml(yamlContent) {
       section = "root";
       if (key === "harness") {
         const h = unquoteYamlScalar(val);
-        if (h === "pi" || h === "codex") {
+        if (h === "pi" || h === "cursor") {
           harness = h;
+        } else if (h.length > 0) {
+          throw new Error(
+            `Invalid .github/agents.yml harness '${h}'; expected 'pi' or 'cursor'.`
+          );
         }
       } else if (key === "reviewers_dir") {
         reviewers_dir = unquoteYamlScalar(val);
@@ -2589,7 +2300,7 @@ function parseAgentsYaml(yamlContent) {
     ...Object.keys(securityOverrides).length > 0 ? { security_overrides: securityOverrides } : {}
   };
 }
-function buildCallerWorkflows(pinnedSha, stack, jobTimeoutMinutes = DEFAULT_AGENTS_CONFIG.job_timeout_minutes, llmEnvironment = DEFAULT_AGENTS_CONFIG.llm_environment) {
+function buildCallerWorkflows(pinnedSha, stack, jobTimeoutMinutes = DEFAULT_AGENTS_CONFIG.job_timeout_minutes, llmEnvironment = DEFAULT_AGENTS_CONFIG.llm_environment, harness = DEFAULT_AGENTS_CONFIG.harness) {
   const ciWorkflow = buildStackAwareCiWorkflowYaml({ pinnedSha, stack });
   return [
     {
@@ -2697,6 +2408,7 @@ function buildCallerWorkflows(pinnedSha, stack, jobTimeoutMinutes = DEFAULT_AGEN
         "          agent_app_private_key: ${{ secrets.EPURE_AGENT_APP_PRIVATE_KEY }}",
         "          github_token: ${{ secrets.GITHUB_TOKEN }}",
         "          llm_api_key: ${{ secrets.LLM_API_KEY }}",
+        ...harness === "cursor" ? ["          cursor_api_key: ${{ secrets.CURSOR_API_KEY }}"] : [],
         ""
       ].join("\n")
     },
@@ -3027,6 +2739,7 @@ function planAndApplyRepoSetup(input) {
   const detectedStack = detectRepositoryStack({
     repoRootDir: input.repoRootDir
   });
+  let existingHarness;
   let existingVerification;
   let existingProviders;
   let existingLlmRequestTimeoutSeconds;
@@ -3041,6 +2754,7 @@ function planAndApplyRepoSetup(input) {
         "utf8"
       );
       const parsedExisting = parseAgentsYaml(existingRaw);
+      existingHarness = parsedExisting.harness;
       existingVerification = parsedExisting.verification;
       existingProviders = parsedExisting.providers;
       existingLlmRequestTimeoutSeconds = parsedExisting.llm_request_timeout_seconds;
@@ -3049,6 +2763,7 @@ function planAndApplyRepoSetup(input) {
       existingModels = parsedExisting.models;
       existingPricing = parsedExisting.pricing;
     } catch {
+      existingHarness = void 0;
       existingVerification = void 0;
       existingProviders = void 0;
       existingLlmRequestTimeoutSeconds = void 0;
@@ -3123,6 +2838,7 @@ function planAndApplyRepoSetup(input) {
   const overrideModels = input.agentsOverrides?.models;
   const effectiveAgentsConfig = {
     ...resolvedConfig.config,
+    harness: input.agentsOverrides?.harness !== void 0 ? resolvedConfig.config.harness : existingHarness ?? resolvedConfig.config.harness,
     models: {
       planning: overrideModels?.planning ?? existingModels?.planning ?? resolvedConfig.config.models.planning,
       implementation: overrideModels?.implementation ?? existingModels?.implementation ?? resolvedConfig.config.models.implementation,
@@ -3160,7 +2876,8 @@ function planAndApplyRepoSetup(input) {
     pinnedSha,
     detectedStack,
     effectiveAgentsConfig.job_timeout_minutes,
-    effectiveAgentsConfig.llm_environment
+    effectiveAgentsConfig.llm_environment,
+    effectiveAgentsConfig.harness
   );
   const plannedWorkflows = workflowTemplates.map((wf) => ({
     path: wf.path,
@@ -3225,6 +2942,14 @@ function planAndApplyRepoSetup(input) {
       }
     }
   }
+  const effectiveExpectedSecrets = effectiveAgentsConfig.harness === "cursor" ? [
+    ...expectedSecrets,
+    {
+      name: "CURSOR_API_KEY",
+      scope: "repository_or_org",
+      description: "Cursor service-account API key for the secondary @cursor/sdk harness"
+    }
+  ] : expectedSecrets;
   const humanInterventions = [
     {
       id: "provision_dual_github_apps",
@@ -3234,8 +2959,15 @@ function planAndApplyRepoSetup(input) {
     {
       id: "configure_repository_or_org_secrets",
       title: "Provision encrypted GitHub Secrets & LLM key locally",
-      details: "Use 'gh secret set' locally for EPURE_AGENT_APP_ID, EPURE_AGENT_APP_PRIVATE_KEY, LLM_API_KEY, and environment-scoped EPURE_RELEASE_APP_ID / EPURE_RELEASE_APP_PRIVATE_KEY."
+      details: effectiveAgentsConfig.harness === "cursor" ? "Use 'gh secret set' locally for EPURE_AGENT_APP_ID, EPURE_AGENT_APP_PRIVATE_KEY, LLM_API_KEY, CURSOR_API_KEY, and environment-scoped EPURE_RELEASE_APP_ID / EPURE_RELEASE_APP_PRIVATE_KEY." : "Use 'gh secret set' locally for EPURE_AGENT_APP_ID, EPURE_AGENT_APP_PRIVATE_KEY, LLM_API_KEY, and environment-scoped EPURE_RELEASE_APP_ID / EPURE_RELEASE_APP_PRIVATE_KEY."
     },
+    ...effectiveAgentsConfig.harness === "cursor" ? [
+      {
+        id: "cursor_harness_isolation_notice",
+        title: "Acknowledge Cursor harness isolation & secret requirements",
+        details: CURSOR_ISOLATION_WARNING
+      }
+    ] : [],
     {
       id: "apply_branch_protections_and_release_ruleset",
       title: `Confirm ${governanceRulesets.length} Repository Rulesets and squash-only merge settings`,
@@ -3260,6 +2992,7 @@ function planAndApplyRepoSetup(input) {
     `- **Repository**: \`${repository}\``,
     `- **Merge Governance**: \`squash-only\` (\`allow_merge_commit=false\`, \`allow_rebase_merge=false\`, \`delete_branch_on_merge=true\`)`,
     `- **Agents Config (\`.github/agents.yml\`)**: \`${agentsConfigAction}\` (harness=\`${effectiveAgentsConfig.harness}\`, merge_policy=\`${effectiveAgentsConfig.merge_policy}\`)`,
+    ...effectiveAgentsConfig.harness === "cursor" ? [`- **Harness Security Notice**: ${CURSOR_ISOLATION_WARNING}`] : [],
     `- **Reviewer Roster (\`${effectiveAgentsConfig.reviewers_dir}/*.md\`)**: \`${plannedReviewerRoster.length}\` agents (specialists + cross-cutting + \`user-advocate\`)`,
     `- **Task Auto-Merge Enabled**: \`${taskAutoMergeEnabled}\` (${autoMergeWarningCode})`,
     `- **Governance Rulesets**: ${governanceRulesets.map((r) => `\`${r.name}\``).join(", ")}`,
@@ -3281,7 +3014,7 @@ function planAndApplyRepoSetup(input) {
     agents_config_action: agentsConfigAction,
     planned_workflows: plannedWorkflows,
     planned_reviewer_roster: plannedReviewerRoster,
-    expected_secrets: expectedSecrets,
+    expected_secrets: effectiveExpectedSecrets,
     repository_merge_settings: DEFAULT_REPOSITORY_MERGE_SETTINGS,
     branch_protections: branchProtections,
     release_rulesets: releaseRulesets,
@@ -3550,6 +3283,348 @@ async function applyGitHubRepositoryGovernance(input) {
   };
 }
 
+// src/orchestrator/github/rate-limit.ts
+var GITHUB_RATE_LIMIT_MAX_WAIT_MS = 5 * 60 * 1e3;
+var SECONDARY_RATE_LIMIT_DEFAULT_WAIT_MS = 60 * 1e3;
+
+// src/review/reviewer-roster.ts
+var JSON_OUTPUT_CONTRACT_BLOCK = [
+  PROMPT_INJECTION_IMMUNITY_CLAUSE,
+  "",
+  "## Output Contract (Strict JSON)",
+  "You operate in read-only audit mode. Return a single JSON object matching this schema:",
+  "```json",
+  "{",
+  '  "reviewer": "<agent-name>",',
+  '  "summary": "Concise 1-2 sentence synthesis of the review pass",',
+  '  "findings": [',
+  "    {",
+  '      "category": "must_fix | informational | no_action",',
+  '      "severity": "critical | high | medium | low | info",',
+  '      "path": "src/path/to/file.ts",',
+  '      "line": 1,',
+  '      "title": "Short actionable finding title",',
+  '      "rationale": "Why this violates an invariant, spec requirement, or quality bar",',
+  '      "suggested_action": "Concrete minimal fix required"',
+  "    }",
+  "  ]",
+  "}",
+  "```",
+  "- Use `must_fix` ONLY for objective correctness bugs, broken domain invariants, security flaws, missing spec requirements, or blocking accessibility/UX failures.",
+  "- Use `informational` for non-blocking suggestions."
+].join("\n");
+function buildStackStandardsBullets(stackKind) {
+  const ponytailBullets = [
+    "- Enforce Ponytail 5 Reuse Hierarchy (existing repo code -> stdlib/platform -> installed packages -> minimal readable code) and Caller-Reach (update all callers and tests in the same diff).",
+    "- Enforce Ponytail 5 Safety Floor: never allow trust-boundary validation, critical error handling, security guards, or accessibility to be removed for brevity.",
+    "- Enforce ASD-STE100 Controlled Technical Prompting in prompts, specs, and docs (bijective `GLOSSARY.md` vocabulary, active voice with explicit actor, 1 sentence = 1 action, deterministic `WHEN/IF ... THEN` conditionals)."
+  ];
+  switch (stackKind) {
+    case "python":
+      return [
+        "- Enforce strict Python type annotations (`mypy` / `pyright`) and `ruff` compliance without blanket `# type: ignore`.",
+        "- Verify that tests use parameterized `@pytest.mark.parametrize` tables with descriptive test IDs covering nominal and edge cases.",
+        "- Ensure surgical, minimal code free of dead imports or speculative abstractions.",
+        ...ponytailBullets
+      ];
+    case "rust":
+      return [
+        "- Enforce idiomatic, warning-free Rust (`cargo clippy -- -D warnings`), avoiding `unwrap()` / `expect()` in production paths.",
+        "- Verify that tests use table-driven or parameterized test cases covering nominal and boundary conditions.",
+        "- Ensure surgical, minimal code free of dead code or speculative traits.",
+        ...ponytailBullets
+      ];
+    case "go":
+      return [
+        "- Enforce idiomatic Go error handling and strict `go vet` / `golangci-lint` cleanliness.",
+        "- Verify that tests use table-driven `t.Run` subtests with descriptive case names covering nominal and edge cases.",
+        "- Ensure surgical, minimal code free of unused exports or premature abstractions.",
+        ...ponytailBullets
+      ];
+    case "node":
+    case "generic":
+    default:
+      return [
+        "- Enforce strict TypeScript types (no `any` or unsafe casts without guard).",
+        "- Verify that tests use parameterized `it.each` tables with descriptive test IDs covering nominal and edge cases.",
+        "- Ensure surgical, minimal code free of dead imports or speculative abstractions.",
+        ...ponytailBullets
+      ];
+  }
+}
+function buildDefaultReviewerRosterFiles(params) {
+  const repo = params.repository.trim() || "consumer/repo";
+  const stackKind = params.stackKind ?? "node";
+  const includeUi = params.includeFrontendReviewers !== false;
+  const customSpecialists = params.customDomainSpecialists ?? [];
+  const reviewersDir = params.reviewersDir ?? DEFAULT_REVIEWERS_DIR;
+  const files = [
+    {
+      name: "domain-backend-reviewer",
+      path: `${reviewersDir}/domain-backend-reviewer.md`,
+      category: "specialist",
+      content: [
+        "---",
+        "name: domain-backend-reviewer",
+        `description: Domain logic, mathematical formulas, state transitions, and backend API specialist reviewer for ${repo}.`,
+        "---",
+        "",
+        `# Domain & Backend Specialist Reviewer (\`${repo}\`)`,
+        "",
+        "## Scope & Responsibilities",
+        "- Verify domain calculations, mathematical formulas, boundary conditions, and state machine transitions.",
+        "- Check error handling, input validation, determinism, and absence of silent data corruption.",
+        "- Enforce every domain invariant documented in `GLOSSARY.md` and `docs/adr/*.md`.",
+        "",
+        JSON_OUTPUT_CONTRACT_BLOCK,
+        ""
+      ].join("\n")
+    }
+  ];
+  for (const spec of customSpecialists) {
+    const cleanName = spec.name.trim().toLowerCase().replace(/\.md$/i, "").replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
+    if (!cleanName) continue;
+    const reviewerName = cleanName.endsWith("-reviewer") ? cleanName : `${cleanName}-reviewer`;
+    if (files.some((f) => f.name === reviewerName)) continue;
+    files.push({
+      name: reviewerName,
+      path: `${reviewersDir}/${reviewerName}.md`,
+      category: "specialist",
+      content: [
+        "---",
+        `name: ${reviewerName}`,
+        `description: ${spec.description || `Domain specialist reviewer (${reviewerName}) for ${repo}.`}`,
+        "---",
+        "",
+        `# Specialist Reviewer \u2014 \`${reviewerName}\` (\`${repo}\`)`,
+        "",
+        "## Scope & Responsibilities",
+        ...spec.scopeResponsibilities.length > 0 ? spec.scopeResponsibilities.map((b) => b.startsWith("-") ? b : `- ${b}`) : [
+          `- Verify domain invariants, module boundaries, and edge cases specific to \`${reviewerName}\`.`,
+          "- Enforce alignment with `GLOSSARY.md` and `docs/adr/*.md`."
+        ],
+        "",
+        JSON_OUTPUT_CONTRACT_BLOCK,
+        ""
+      ].join("\n")
+    });
+  }
+  if (includeUi) {
+    files.push({
+      name: "frontend-reviewer",
+      path: `${reviewersDir}/frontend-reviewer.md`,
+      category: "specialist",
+      content: [
+        "---",
+        "name: frontend-reviewer",
+        `description: Frontend component architecture, state hooks, rendering performance, and client persistence reviewer for ${repo}.`,
+        "---",
+        "",
+        `# Frontend Specialist Reviewer (\`${repo}\`)`,
+        "",
+        "## Scope & Responsibilities",
+        "- Inspect UI component boundaries, state synchronization, controlled/uncontrolled inputs, and event handlers.",
+        "- Verify explicit handling of loading, empty, error, and guard states.",
+        "- Prevent state desynchronization, stale closures, unguarded `localStorage` parsing, and broken rendering.",
+        "",
+        JSON_OUTPUT_CONTRACT_BLOCK,
+        ""
+      ].join("\n")
+    });
+  }
+  files.push(
+    {
+      name: "infra-reviewer",
+      path: `${reviewersDir}/infra-reviewer.md`,
+      category: "specialist",
+      content: [
+        "---",
+        "name: infra-reviewer",
+        `description: CI/CD workflows, build scripts, package dependencies, and runtime configuration reviewer for ${repo}.`,
+        "---",
+        "",
+        `# Infrastructure & Build Reviewer (\`${repo}\`)`,
+        "",
+        "## Scope & Responsibilities",
+        "- Audit build manifests (`package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, `Makefile`, `Dockerfile`) and `.github/workflows/*` changes.",
+        "- Ensure deterministic builds, pinned dependencies, and zero secret exposure in scripts or workflows.",
+        "",
+        JSON_OUTPUT_CONTRACT_BLOCK,
+        ""
+      ].join("\n")
+    },
+    {
+      name: "architecture-reviewer",
+      path: `${reviewersDir}/architecture-reviewer.md`,
+      category: "cross-cutting",
+      content: [
+        "---",
+        "name: architecture-reviewer",
+        `description: Module boundaries, deep modules, ADR compliance, and ubiquity of GLOSSARY.md terms for ${repo}.`,
+        "---",
+        "",
+        `# Cross-Cutting Architecture Reviewer (\`${repo}\`)`,
+        "",
+        "## Scope & Responsibilities",
+        "- Verify strict separation between pure domain models (`src/domain/*`) and UI/IO layers.",
+        "- Check compliance with accepted ADRs (`docs/adr/*.md`) and canonical bijective terminology in `GLOSSARY.md` (ASD-STE100: zero `_Avoid_` synonyms).",
+        "- Flag circular dependencies, leaky abstractions, or unnecessary complexity.",
+        "",
+        JSON_OUTPUT_CONTRACT_BLOCK,
+        ""
+      ].join("\n")
+    },
+    {
+      name: "security-reviewer",
+      path: `${reviewersDir}/security-reviewer.md`,
+      category: "cross-cutting",
+      content: [
+        "---",
+        "name: security-reviewer",
+        `description: Application security, injection prevention, secret hygiene, and privilege boundary reviewer for ${repo}.`,
+        "---",
+        "",
+        `# Cross-Cutting Security Reviewer (\`${repo}\`)`,
+        "",
+        "## Scope & Responsibilities",
+        "- Detect XSS (`dangerouslySetInnerHTML`), command injection, prototype pollution, and unsafe deserialization.",
+        "- Ensure no credentials, tokens, or private keys appear in code, tests, or logs.",
+        `- Flag any unauthorized modification of \`.github/workflows/**\`, \`.github/agents.yml\`, or \`${reviewersDir}/**\`.`,
+        "",
+        JSON_OUTPUT_CONTRACT_BLOCK,
+        ""
+      ].join("\n")
+    },
+    {
+      name: "spec-parity-reviewer",
+      path: `${reviewersDir}/spec-parity-reviewer.md`,
+      category: "cross-cutting",
+      content: [
+        "---",
+        "name: spec-parity-reviewer",
+        `description: Strict verification of 1-to-1 parity between the approved spec/ticket acceptance criteria and the PR diff for ${repo}.`,
+        "---",
+        "",
+        `# Specification & Acceptance Parity Reviewer (\`${repo}\`)`,
+        "",
+        "## Scope & Responsibilities",
+        "- Compare every acceptance criterion of the ticket and `docs/specs/*.md` against the implemented code and tests.",
+        "- Flag any omitted requirement, partial implementation, or unrequested scope creep.",
+        "- Verify that parameterized unit/integration tests actually assert the specified domain rules and ASD-STE100 acceptance criteria.",
+        "",
+        JSON_OUTPUT_CONTRACT_BLOCK,
+        ""
+      ].join("\n")
+    },
+    {
+      name: "standards-reviewer",
+      path: `${reviewersDir}/standards-reviewer.md`,
+      category: "cross-cutting",
+      content: [
+        "---",
+        "name: standards-reviewer",
+        `description: Coding standards, strict typing, and parameterized test quality reviewer for ${repo} (stack: ${stackKind}).`,
+        "---",
+        "",
+        `# Coding Standards & Test Quality Reviewer (\`${repo}\`)`,
+        "",
+        "## Scope & Responsibilities",
+        ...buildStackStandardsBullets(stackKind),
+        "",
+        JSON_OUTPUT_CONTRACT_BLOCK,
+        ""
+      ].join("\n")
+    }
+  );
+  if (includeUi) {
+    files.push(
+      {
+        name: "accessibility-reviewer",
+        path: `${reviewersDir}/accessibility-reviewer.md`,
+        category: "cross-cutting",
+        content: [
+          "---",
+          "name: accessibility-reviewer",
+          `description: WCAG 2.1 AA accessibility, semantic HTML, ARIA attributes, keyboard navigation, and focus management reviewer for ${repo}.`,
+          "---",
+          "",
+          `# Accessibility (WCAG 2.1 AA) Reviewer (\`${repo}\`)`,
+          "",
+          "## Scope & Responsibilities",
+          '- Verify semantic landmarks (`main`, `nav`, `section`, `form`), explicit `<label>` associations on all form controls, and `aria-live` / `role="alert"` on dynamic validation errors.',
+          "- Check keyboard operability (`Tab`, `Enter`, `Space`, `Escape`) and visible focus states.",
+          "- Ensure sufficient color contrast and non-color-only status indicators.",
+          "",
+          JSON_OUTPUT_CONTRACT_BLOCK,
+          ""
+        ].join("\n")
+      },
+      {
+        name: "design-reviewer",
+        path: `${reviewersDir}/design-reviewer.md`,
+        category: "cross-cutting",
+        content: [
+          "---",
+          "name: design-reviewer",
+          `description: Impeccable UI/UX quality gate checking DESIGN.md tokens, responsive layout integrity, and interaction states for ${repo}.`,
+          "---",
+          "",
+          `# Impeccable Design & Layout Reviewer (\`${repo}\`)`,
+          "",
+          "## Scope & Responsibilities",
+          "- Verify compliance with `DESIGN.md` visual tokens, typography hierarchy, and spacing scale.",
+          "- Detect responsive layout overflows, broken grid/flex alignments, and missing interaction states (loading, empty, error, disabled).",
+          "- Distinguish objective design/layout violations (`must_fix`) from purely subjective aesthetic preferences (`informational`).",
+          "",
+          JSON_OUTPUT_CONTRACT_BLOCK,
+          ""
+        ].join("\n")
+      }
+    );
+  }
+  files.push({
+    name: "user-advocate",
+    path: `${reviewersDir}/user-advocate.md`,
+    category: "persona",
+    content: [
+      "---",
+      "name: user-advocate",
+      `description: Persona-driven UX advocate for ${repo} operating in design-gate (pre-implementation) and implementation-review (PR) modes.`,
+      "---",
+      "",
+      `# User Advocate \u2014 Persona Journey Reviewer (\`${repo}\`)`,
+      "",
+      "## Operating Modes",
+      "1. **`design-gate` (Pre-implementation on `plan/*`)**:",
+      "   - Walk the proposed specification and ticket graph through the eyes of each target user persona.",
+      "   - Identify missing workflow steps, confusing terminology, unguarded destructive actions, or friction points.",
+      "   - Enrich UI tickets with concrete persona acceptance criteria before `/epure approve`.",
+      "2. **`implementation-review` (Post-implementation on PRs)**:",
+      "   - Walk the implemented UI/API diff as each persona attempting their core task end-to-end.",
+      "   - Flag dead-ends, missing feedback when a rule blocks an action, or unreadable outputs as `must_fix`.",
+      "",
+      "## Default Domain Personas (Adapted during `/epure plan`)",
+      "- **Primary Operator / Power User**: Needs fast, accurate feedback, clear constraint explanations, and reliable state persistence.",
+      "- **First-Time / Casual User**: Needs self-explanatory labels, safe defaults, and immediate visual guidance when an input is invalid.",
+      "",
+      JSON_OUTPUT_CONTRACT_BLOCK,
+      ""
+    ].join("\n")
+  });
+  return files;
+}
+
+// src/agent/worktree-snapshot.ts
+var DEFAULT_WORKTREE_DIFF_LIMITS = {
+  maxFiles: 500,
+  maxFileBytes: 1024 * 1024,
+  maxTotalBytes: 10 * 1024 * 1024
+};
+var MAX_GIT_OUTPUT_BYTES = 256 * 1024 * 1024;
+
+// src/agent/cursor-engine.ts
+var CURSOR_ISOLATION_WARNING = "harness 'cursor' runs local tools via @cursor/sdk without EPURE's kernel sandbox (Landlock/bubblewrap/Seatbelt) or localhost credential-brokering proxy; CURSOR_API_KEY is held by the in-process SDK session.";
+
 // src/bootstrap/cli.ts
 function parseArgs(argv) {
   let repository = "";
@@ -3560,6 +3635,7 @@ function parseArgs(argv) {
   let customDomainSpecialists;
   let reviewersDir;
   let llmEnvironment;
+  let harness;
   let allPhasesModel;
   let planningModel;
   let implementationModel;
@@ -3602,6 +3678,9 @@ function parseArgs(argv) {
       i += 1;
     } else if (arg === "--llm-env" && argv[i + 1]) {
       llmEnvironment = argv[i + 1];
+      i += 1;
+    } else if (arg === "--harness" && argv[i + 1]) {
+      harness = argv[i + 1] ?? "";
       i += 1;
     } else if (arg === "--model" && argv[i + 1]) {
       allPhasesModel = argv[i + 1];
@@ -3652,6 +3731,7 @@ function parseArgs(argv) {
     includeFrontendReviewers,
     customDomainSpecialists,
     agentsOverrides: {
+      ...harness !== void 0 ? { harness } : {},
       ...reviewersDir !== void 0 ? { reviewers_dir: reviewersDir } : {},
       ...llmEnvironment !== void 0 ? { llm_environment: llmEnvironment } : {},
       ...Object.keys(models).length > 0 ? { models } : {}
@@ -3701,6 +3781,10 @@ async function main() {
     agentsOverrides: args.agentsOverrides,
     dryRun: args.dryRun
   });
+  if (result.status !== "error" && result.agents_config.harness === "cursor") {
+    process.stderr.write(`setup-repo: warning: ${CURSOR_ISOLATION_WARNING}
+`);
+  }
   let githubRulesetsPlan;
   if (result.status !== "error" && args.applyGithubSettings) {
     const token = resolveGitHubToken(args.githubToken);

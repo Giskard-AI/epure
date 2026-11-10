@@ -56,6 +56,44 @@ var GENERATE = String.raw`:(?:generateContent|streamGenerateContent)`;
 import { AsyncLocalStorage } from "node:async_hooks";
 var usageContext = new AsyncLocalStorage();
 
+// src/sandbox/llm-sandbox.ts
+var NONCE_HEADER = "x-epure-proxy-nonce";
+var CREDENTIAL_HEADERS = [
+  NONCE_HEADER,
+  "authorization",
+  "x-api-key",
+  "api-key",
+  "x-goog-api-key"
+];
+var HOP_BY_HOP_HEADERS = [
+  "connection",
+  "keep-alive",
+  "proxy-authorization",
+  "proxy-connection",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade"
+];
+var DROPPED_REQUEST_HEADERS = /* @__PURE__ */ new Set([
+  ...CREDENTIAL_HEADERS,
+  ...HOP_BY_HOP_HEADERS,
+  "host",
+  "expect",
+  "accept-encoding"
+]);
+var DROPPED_RESPONSE_HEADERS = new Set(HOP_BY_HOP_HEADERS);
+var MAX_PROXY_REQUEST_BYTES = 20 * 1024 * 1024;
+var MAX_SESSION_STDERR_BYTES = 64 * 1024;
+
+// src/agent/worktree-snapshot.ts
+var DEFAULT_WORKTREE_DIFF_LIMITS = {
+  maxFiles: 500,
+  maxFileBytes: 1024 * 1024,
+  maxTotalBytes: 10 * 1024 * 1024
+};
+var MAX_GIT_OUTPUT_BYTES = 256 * 1024 * 1024;
+
 // src/review/reviewers-dir.ts
 var DEFAULT_REVIEWERS_DIR = ".agents/reviewers";
 

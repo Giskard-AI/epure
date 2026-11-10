@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
+import { CURSOR_ISOLATION_WARNING } from "../agent/cursor-engine.js";
 import type { CustomDomainReviewerSpec } from "../review/reviewer-roster.js";
 import {
   applyGitHubRepositoryGovernance,
   planAndApplyRepoSetup,
   planGitHubRulesetChanges,
+  type AgentHarness,
   type AgentsConfigOverrides
 } from "./setup-repo.js";
 
@@ -31,6 +33,7 @@ function parseArgs(argv: readonly string[]): {
   let customDomainSpecialists: CustomDomainReviewerSpec[] | undefined;
   let reviewersDir: string | undefined;
   let llmEnvironment: string | undefined;
+  let harness: AgentHarness | undefined;
   let allPhasesModel: string | undefined;
   let planningModel: string | undefined;
   let implementationModel: string | undefined;
@@ -78,6 +81,9 @@ function parseArgs(argv: readonly string[]): {
       i += 1;
     } else if (arg === "--llm-env" && argv[i + 1]) {
       llmEnvironment = argv[i + 1];
+      i += 1;
+    } else if (arg === "--harness" && argv[i + 1]) {
+      harness = (argv[i + 1] ?? "") as AgentHarness;
       i += 1;
     } else if (arg === "--model" && argv[i + 1]) {
       allPhasesModel = argv[i + 1];
@@ -132,6 +138,7 @@ function parseArgs(argv: readonly string[]): {
     includeFrontendReviewers,
     customDomainSpecialists,
     agentsOverrides: {
+      ...(harness !== undefined ? { harness } : {}),
       ...(reviewersDir !== undefined ? { reviewers_dir: reviewersDir } : {}),
       ...(llmEnvironment !== undefined
         ? { llm_environment: llmEnvironment }
@@ -188,6 +195,10 @@ async function main(): Promise<void> {
     agentsOverrides: args.agentsOverrides,
     dryRun: args.dryRun
   });
+
+  if (result.status !== "error" && result.agents_config.harness === "cursor") {
+    process.stderr.write(`setup-repo: warning: ${CURSOR_ISOLATION_WARNING}\n`);
+  }
 
   let githubRulesetsPlan:
     | Awaited<ReturnType<typeof planGitHubRulesetChanges>>

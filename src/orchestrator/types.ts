@@ -1,6 +1,7 @@
 import type { AgentEngine } from "../agent/engine.js";
 import type { EpureCommandName } from "../auth/issue-command-gate.js";
 import type {
+  AgentHarness,
   AgentsConfig,
   AgentsModelsConfig,
   ParsedAgentsConfig
@@ -143,6 +144,7 @@ export interface OrchestrateIssueInput {
   readonly agentAppPrivateKey?: string | undefined;
   readonly fallbackGithubToken?: string | undefined;
   readonly llmApiKey: string;
+  readonly cursorApiKey?: string | undefined;
   readonly model?: string | undefined;
   readonly stateStore?: GitRefStateStore | undefined;
   readonly fetchImpl?: typeof fetch | undefined;
@@ -154,6 +156,7 @@ export interface OrchestrateIssueInput {
   readonly asyncCiContinuation?: boolean | undefined;
   // AgentEngine used by implementation, remediation, review, and planning sessions.
   readonly agentEngine?: AgentEngine | undefined;
+  readonly agentEngines?: Readonly<Partial<Record<AgentHarness, AgentEngine>>> | undefined;
   // Epoch ms the job started at (now when absent): agent sessions end before the job's timeout from it.
   readonly jobStartedAtMs?: number | undefined;
   readonly triggerHeadSha?: string | undefined;

@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { buildConsumerAppManifests, GITHUB_ACTIONS_APP_ID } from "../auth/github-apps.js";
 import { EPURE_PUBLIC_VERSION } from "../contract/epure-contract.js";
+import { CURSOR_ISOLATION_WARNING } from "../agent/cursor-engine.js";
 import {
   PROVIDER_EFFORTS,
   type ProviderConfig,
@@ -44,7 +45,7 @@ export { EPURE_PUBLIC_VERSION };
 export const CONVENTIONAL_COMMIT_PATTERN_REGEX =
   "^(feat|fix|docs|style|refactor|perf|test|chore|ci|build|revert)(\\([a-z0-9/-]+\\))?(!)?: .+";
 
-export type AgentHarness = "pi" | "codex";
+export type AgentHarness = "pi" | "cursor";
 export type StaleBaseMergePolicy = "strict" | "relaxed";
 
 export type SetupRepoErrorCode =
@@ -224,6 +225,7 @@ export interface HumanInterventionStep {
   readonly id:
     | "provision_dual_github_apps"
     | "configure_repository_or_org_secrets"
+    | "cursor_harness_isolation_notice"
     | "apply_branch_protections_and_release_ruleset";
   readonly title: string;
   readonly details: string;
@@ -517,6 +519,19 @@ export function resolveAgentsConfig(
         config: DEFAULT_AGENTS_CONFIG
       };
     }
+  }
+
+  if (
+    overrides.harness !== undefined &&
+    overrides.harness !== "pi" &&
+    overrides.harness !== "cursor"
+  ) {
+    return {
+      valid: false,
+      error_code: "SECURITY_INVARIANT_VIOLATION",
+      error_message: `Local .github/agents.yml harness '${String(overrides.harness)}' is not supported; expected 'pi' or 'cursor'.`,
+      config: DEFAULT_AGENTS_CONFIG
+    };
   }
 
   const reviewersDir = (
@@ -1234,8 +1249,12 @@ export function parseAgentsYaml(yamlContent: string): ParsedAgentsConfig {
 
       if (key === "harness") {
         const h = unquoteYamlScalar(val);
-        if (h === "pi" || h === "codex") {
+        if (h === "pi" || h === "cursor") {
           harness = h;
+        } else if (h.length > 0) {
+          throw new Error(
+            `Invalid .github/agents.yml harness '${h}'; expected 'pi' or 'cursor'.`
+          );
         }
       } else if (key === "reviewers_dir") {
         reviewers_dir = unquoteYamlScalar(val);
@@ -1681,7 +1700,8 @@ function buildCallerWorkflows(
   pinnedSha: string,
   stack: DetectedStackProfile,
   jobTimeoutMinutes: number = DEFAULT_AGENTS_CONFIG.job_timeout_minutes,
-  llmEnvironment: string = DEFAULT_AGENTS_CONFIG.llm_environment
+  llmEnvironment: string = DEFAULT_AGENTS_CONFIG.llm_environment,
+  harness: AgentHarness = DEFAULT_AGENTS_CONFIG.harness
 ): ReadonlyArray<{
   readonly path: string;
   readonly content: string;
@@ -1793,6 +1813,9 @@ function buildCallerWorkflows(
         "          agent_app_private_key: ${{ secrets.EPURE_AGENT_APP_PRIVATE_KEY }}",
         "          github_token: ${{ secrets.GITHUB_TOKEN }}",
         "          llm_api_key: ${{ secrets.LLM_API_KEY }}",
+        ...(harness === "cursor"
+          ? ["          cursor_api_key: ${{ secrets.CURSOR_API_KEY }}"]
+          : []),
         ""
       ].join("\n")
     },
@@ -2166,6 +2189,7 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
   });
 
   // Load existing .github/agents.yml if present to preserve user-customized verification.targets on re-run
+  let existingHarness: AgentHarness | undefined;
   let existingVerification: VerificationProfile | undefined;
   let existingProviders: Readonly<Record<string, ProviderConfig>> | undefined;
   let existingLlmRequestTimeoutSeconds: number | undefined;
@@ -2183,6 +2207,7 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
         "utf8"
       );
       const parsedExisting = parseAgentsYaml(existingRaw);
+      existingHarness = parsedExisting.harness;
       existingVerification = parsedExisting.verification;
       existingProviders = parsedExisting.providers;
       existingLlmRequestTimeoutSeconds =
@@ -2192,6 +2217,7 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
       existingModels = parsedExisting.models;
       existingPricing = parsedExisting.pricing;
     } catch {
+      existingHarness = undefined;
       existingVerification = undefined;
       existingProviders = undefined;
       existingLlmRequestTimeoutSeconds = undefined;
@@ -2297,6 +2323,10 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
   const overrideModels = input.agentsOverrides?.models;
   const effectiveAgentsConfig: AgentsConfig = {
     ...resolvedConfig.config,
+    harness:
+      input.agentsOverrides?.harness !== undefined
+        ? resolvedConfig.config.harness
+        : (existingHarness ?? resolvedConfig.config.harness),
     models: {
       planning:
         overrideModels?.planning ??
@@ -2352,7 +2382,8 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
     pinnedSha,
     detectedStack,
     effectiveAgentsConfig.job_timeout_minutes,
-    effectiveAgentsConfig.llm_environment
+    effectiveAgentsConfig.llm_environment,
+    effectiveAgentsConfig.harness
   );
   const plannedWorkflows: PlannedWorkflowFile[] = workflowTemplates.map((wf) => ({
     path: wf.path,
@@ -2428,6 +2459,19 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
     }
   }
 
+  const effectiveExpectedSecrets: readonly ExpectedSecretSpec[] =
+    effectiveAgentsConfig.harness === "cursor"
+      ? [
+          ...expectedSecrets,
+          {
+            name: "CURSOR_API_KEY",
+            scope: "repository_or_org",
+            description:
+              "Cursor service-account API key for the secondary @cursor/sdk harness"
+          }
+        ]
+      : expectedSecrets;
+
   const humanInterventions: HumanInterventionStep[] = [
     {
       id: "provision_dual_github_apps",
@@ -2438,8 +2482,19 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
       id: "configure_repository_or_org_secrets",
       title: "Provision encrypted GitHub Secrets & LLM key locally",
       details:
-        "Use 'gh secret set' locally for EPURE_AGENT_APP_ID, EPURE_AGENT_APP_PRIVATE_KEY, LLM_API_KEY, and environment-scoped EPURE_RELEASE_APP_ID / EPURE_RELEASE_APP_PRIVATE_KEY."
+        effectiveAgentsConfig.harness === "cursor"
+          ? "Use 'gh secret set' locally for EPURE_AGENT_APP_ID, EPURE_AGENT_APP_PRIVATE_KEY, LLM_API_KEY, CURSOR_API_KEY, and environment-scoped EPURE_RELEASE_APP_ID / EPURE_RELEASE_APP_PRIVATE_KEY."
+          : "Use 'gh secret set' locally for EPURE_AGENT_APP_ID, EPURE_AGENT_APP_PRIVATE_KEY, LLM_API_KEY, and environment-scoped EPURE_RELEASE_APP_ID / EPURE_RELEASE_APP_PRIVATE_KEY."
     },
+    ...(effectiveAgentsConfig.harness === "cursor"
+      ? [
+          {
+            id: "cursor_harness_isolation_notice" as const,
+            title: "Acknowledge Cursor harness isolation & secret requirements",
+            details: CURSOR_ISOLATION_WARNING
+          }
+        ]
+      : []),
     {
       id: "apply_branch_protections_and_release_ruleset",
       title: `Confirm ${governanceRulesets.length} Repository Rulesets and squash-only merge settings`,
@@ -2469,6 +2524,9 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
     `- **Repository**: \`${repository}\``,
     `- **Merge Governance**: \`squash-only\` (\`allow_merge_commit=false\`, \`allow_rebase_merge=false\`, \`delete_branch_on_merge=true\`)`,
     `- **Agents Config (\`.github/agents.yml\`)**: \`${agentsConfigAction}\` (harness=\`${effectiveAgentsConfig.harness}\`, merge_policy=\`${effectiveAgentsConfig.merge_policy}\`)`,
+    ...(effectiveAgentsConfig.harness === "cursor"
+      ? [`- **Harness Security Notice**: ${CURSOR_ISOLATION_WARNING}`]
+      : []),
     `- **Reviewer Roster (\`${effectiveAgentsConfig.reviewers_dir}/*.md\`)**: \`${plannedReviewerRoster.length}\` agents (specialists + cross-cutting + \`user-advocate\`)`,
     `- **Task Auto-Merge Enabled**: \`${taskAutoMergeEnabled}\` (${autoMergeWarningCode})`,
     `- **Governance Rulesets**: ${governanceRulesets.map((r) => `\`${r.name}\``).join(", ")}`,
@@ -2491,7 +2549,7 @@ export function planAndApplyRepoSetup(input: SetupRepoInput): SetupRepoResult {
     agents_config_action: agentsConfigAction,
     planned_workflows: plannedWorkflows,
     planned_reviewer_roster: plannedReviewerRoster,
-    expected_secrets: expectedSecrets,
+    expected_secrets: effectiveExpectedSecrets,
     repository_merge_settings: DEFAULT_REPOSITORY_MERGE_SETTINGS,
     branch_protections: branchProtections,
     release_rulesets: releaseRulesets,

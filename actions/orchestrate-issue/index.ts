@@ -1,4 +1,5 @@
 import { appendFileSync } from "node:fs";
+import { createCursorAgentEngine } from "../../src/agent/cursor-engine.js";
 import { createPiAgentEngine } from "../../src/agent/pi-engine.js";
 import { redactSecrets } from "../../src/auth/issue-command-gate.js";
 import {
@@ -62,6 +63,11 @@ async function run(): Promise<void> {
     process.env.LLM_API_KEY ??
     ""
   ).trim();
+  const cursorApiKey = (
+    process.env.INPUT_CURSOR_API_KEY ??
+    process.env.CURSOR_API_KEY ??
+    ""
+  ).trim();
   const model = (process.env.INPUT_MODEL ?? "").trim();
   const triggerHeadSha = (process.env.INPUT_TRIGGER_HEAD_SHA ?? "").trim();
   const asyncCiContinuation =
@@ -87,9 +93,24 @@ async function run(): Promise<void> {
   // Written by the job's first step, so the budget counts setup time too.
   const jobStartedAtMs = Number.parseInt(process.env.EPURE_JOB_STARTED_AT_MS ?? "", 10);
 
-  const secrets = [agentAppPrivateKey, fallbackGithubToken, llmApiKey].filter(
-    (s) => s.length >= 4
-  );
+  const secrets = [
+    agentAppPrivateKey,
+    fallbackGithubToken,
+    llmApiKey,
+    cursorApiKey
+  ].filter((s) => s.length >= 4);
+
+  const piEngine = createPiAgentEngine({
+    runnerEnv: { ...process.env, ...(llmApiKey ? { LLM_API_KEY: llmApiKey } : {}) }
+  });
+  const cursorEngine = createCursorAgentEngine({
+    runnerEnv: {
+      ...process.env,
+      ...(cursorApiKey ? { CURSOR_API_KEY: cursorApiKey } : {})
+    },
+    ...(cursorApiKey ? { apiKey: cursorApiKey } : {}),
+    extraSecrets: secrets
+  });
 
   try {
     const result = await orchestrateIssueCommand({
@@ -103,15 +124,18 @@ async function run(): Promise<void> {
       agentAppPrivateKey,
       fallbackGithubToken,
       llmApiKey,
+      ...(cursorApiKey ? { cursorApiKey } : {}),
       model: model || undefined,
       ...(triggerHeadSha ? { triggerHeadSha } : {}),
       ...(asyncCiContinuation ? { asyncCiContinuation } : {}),
       runId,
       workflowJob,
       ...(Number.isFinite(jobStartedAtMs) ? { jobStartedAtMs } : {}),
-      agentEngine: createPiAgentEngine({
-        runnerEnv: { ...process.env, ...(llmApiKey ? { LLM_API_KEY: llmApiKey } : {}) }
-      })
+      agentEngine: piEngine,
+      agentEngines: {
+        pi: piEngine,
+        cursor: cursorEngine
+      }
     });
 
     writeGitHubOutputs(

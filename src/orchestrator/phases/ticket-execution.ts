@@ -1,6 +1,7 @@
 import {
   AgentEngineError,
   assertNoSecretMaterial,
+  resolveLifecycleAgentEngine,
   type AgentEngine,
   type AgentRole,
   type AgentThinkingLevel,
@@ -1514,8 +1515,7 @@ export async function runTicketExecutionLoop(
           onTransientRetriesUsed: (used) =>
             params.addTransientRetriesUsed(used),
           fetchImpl: params.fetchImpl,
-          agentEngine:
-            params.agentEngine?.name === "pi" ? params.agentEngine : undefined,
+          agentEngine: resolveLifecycleAgentEngine(params.agentEngine),
           worktreeDir: sandboxWorkspace.workDir,
           githubToken: params.activeToken,
           maxLlmRequests:

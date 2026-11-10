@@ -1,5 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { AgentEngineError } from "../agent/engine.js";
+import { createCursorAgentEngine } from "../agent/cursor-engine.js";
+import {
+  AgentEngineError,
+  resolveLifecycleAgentEngine,
+  type AgentEngine
+} from "../agent/engine.js";
 import {
   mintRepositoryInstallationToken,
   revokeGitHubInstallationToken
@@ -12,6 +17,7 @@ import {
 } from "../bootstrap/ci-and-renovate.js";
 import {
   DEFAULT_AGENTS_CONFIG,
+  type AgentHarness,
   type ParsedAgentsConfig
 } from "../bootstrap/setup-repo.js";
 import {
@@ -1002,6 +1008,37 @@ async function runMeteredIssueCommand(
           : effectiveInput.jobStartedAtMs + (await resolveRunLeaseMs());
       const reviewersDir =
         parsedDevAgentsConfig?.reviewers_dir ?? DEFAULT_REVIEWERS_DIR;
+      const configuredHarness: AgentHarness =
+        parsedDevAgentsConfig?.harness ?? DEFAULT_AGENTS_CONFIG.harness;
+      const runSecrets = [
+        activeToken,
+        effectiveInput.llmApiKey,
+        ...(effectiveInput.cursorApiKey ? [effectiveInput.cursorApiKey] : [])
+      ];
+      const rawAgentEngine: AgentEngine | undefined =
+        effectiveInput.agentEngines?.[configuredHarness] ??
+        (configuredHarness === "cursor" &&
+        (!effectiveInput.agentEngine ||
+          effectiveInput.agentEngine.name === "pi") &&
+        (effectiveInput.cursorApiKey !== undefined || !effectiveInput.agentEngine)
+          ? createCursorAgentEngine({
+              apiKey: effectiveInput.cursorApiKey,
+              runnerEnv: process.env,
+              extraSecrets: runSecrets
+            })
+          : effectiveInput.agentEngine);
+      const activeAgentEngine: AgentEngine | undefined = rawAgentEngine
+        ? {
+            name: rawAgentEngine.name,
+            run: (req) =>
+              rawAgentEngine.run({
+                ...req,
+                secrets: [...new Set([...(req.secrets ?? []), ...runSecrets])]
+              })
+          }
+        : undefined;
+      const lifecycleAgentEngine =
+        resolveLifecycleAgentEngine(activeAgentEngine);
 
     // 3 & 4. Handle /epure plan, human reply during grilling or spec review, /epure to-spec, /epure to-tickets
     if (
@@ -1042,10 +1079,7 @@ async function runMeteredIssueCommand(
             totalTransientRetriesUsed += used;
           },
           fetchImpl: effectiveInput.fetchImpl,
-          agentEngine:
-            effectiveInput.agentEngine?.name === "pi"
-              ? effectiveInput.agentEngine
-              : undefined,
+          agentEngine: lifecycleAgentEngine,
           activeToken
         }));
       } catch (err) {
@@ -1061,10 +1095,7 @@ async function runMeteredIssueCommand(
                     currentState?.phase === "spec"
                   ? "spec"
                   : "grilling",
-            diagnosticExcerpt: redactSecrets(err.message, [
-              activeToken,
-              effectiveInput.llmApiKey
-            ])
+            diagnosticExcerpt: redactSecrets(err.message, runSecrets)
           });
         }
         throw err;
@@ -1150,10 +1181,7 @@ async function runMeteredIssueCommand(
               phaseModels.transientRetryBackoffSeconds,
             requestTimeoutMs: phaseModels.requestTimeoutMs,
             fetchImpl: effectiveInput.fetchImpl,
-            agentEngine:
-              effectiveInput.agentEngine?.name === "pi"
-                ? effectiveInput.agentEngine
-                : undefined
+            agentEngine: lifecycleAgentEngine
           });
         }
 
@@ -1171,7 +1199,7 @@ async function runMeteredIssueCommand(
           requestTimeoutMs: phaseModels.requestTimeoutMs,
           sandboxRunner: effectiveInput.sandboxRunner,
           reviewersDir,
-          agentEngine: effectiveInput.agentEngine
+          agentEngine: activeAgentEngine
         });
 
         if (syncRes.status === "escalated") {
@@ -1204,7 +1232,7 @@ async function runMeteredIssueCommand(
                 requestTimeoutMs: phaseModels.requestTimeoutMs,
                 sandboxRunner: effectiveInput.sandboxRunner,
                 reviewersDir,
-                agentEngine: effectiveInput.agentEngine
+                agentEngine: activeAgentEngine
               })
           );
           if (taskSyncRes.status === "escalated") {
@@ -1306,7 +1334,7 @@ async function runMeteredIssueCommand(
           const snapshot = await evaluateSingleExternalCiSnapshot({
             headSha: activeHeadSha,
             expectedWorkflows: expectedContinueWorkflows,
-            extraSecrets: [activeToken, effectiveInput.llmApiKey],
+            extraSecrets: runSecrets,
             listWorkflowRunsForSha: (sha) => gh.listWorkflowRunsForSha(sha),
             listCheckRunsForRef: (sha) => gh.listCheckRunsForRef(sha),
             listCheckRunAnnotations: (id) => gh.listCheckRunAnnotations(id),
@@ -1569,7 +1597,7 @@ async function runMeteredIssueCommand(
                       requestTimeoutMs: phaseModels.requestTimeoutMs,
                       sandboxRunner: effectiveInput.sandboxRunner,
                       reviewersDir,
-                      agentEngine: effectiveInput.agentEngine
+                      agentEngine: activeAgentEngine
                     })
                 );
                 if (resync.status === "escalated") {
@@ -1906,10 +1934,7 @@ async function runMeteredIssueCommand(
           transientRetryBackoffSeconds: phaseModels.transientRetryBackoffSeconds,
           requestTimeoutMs: phaseModels.requestTimeoutMs,
           fetchImpl: effectiveInput.fetchImpl,
-          agentEngine:
-            effectiveInput.agentEngine?.name === "pi"
-              ? effectiveInput.agentEngine
-              : undefined
+          agentEngine: lifecycleAgentEngine
         });
         await updateIssueStateWithCas({
           issueNumber: effectiveInput.issueNumber,
@@ -2060,7 +2085,7 @@ async function runMeteredIssueCommand(
         baseSyncGuard,
         resumeContextMarkdown,
         stopIfFeaturePrMerged,
-        agentEngine: effectiveInput.agentEngine,
+        agentEngine: activeAgentEngine,
         jobDeadlineMs: await resolveJobDeadlineMs()
       });
 
@@ -2127,10 +2152,7 @@ async function runMeteredIssueCommand(
               totalTransientRetriesUsed += used;
             },
             fetchImpl: effectiveInput.fetchImpl,
-            agentEngine:
-              effectiveInput.agentEngine?.name === "pi"
-                ? effectiveInput.agentEngine
-                : undefined,
+            agentEngine: lifecycleAgentEngine,
             activeToken
           });
 
@@ -2245,7 +2267,7 @@ async function runMeteredIssueCommand(
             baseSyncGuard,
             resumeContextMarkdown,
             stopIfFeaturePrMerged,
-            agentEngine: effectiveInput.agentEngine,
+            agentEngine: activeAgentEngine,
             jobDeadlineMs: await resolveJobDeadlineMs()
           });
 
@@ -2302,7 +2324,7 @@ async function runMeteredIssueCommand(
           baseSyncGuard,
           resumeContextMarkdown,
           stopIfFeaturePrMerged,
-          agentEngine: effectiveInput.agentEngine
+          agentEngine: activeAgentEngine
         }));
       } catch (err) {
         if (err instanceof LLMError || err instanceof AgentEngineError) {
@@ -2314,10 +2336,7 @@ async function runMeteredIssueCommand(
             ticketNumber: effectiveInput.issueNumber,
             branch: featureBranch,
             phase: "implementation",
-            diagnosticExcerpt: redactSecrets(err.message, [
-              activeToken,
-              effectiveInput.llmApiKey
-            ])
+            diagnosticExcerpt: redactSecrets(err.message, runSecrets)
           });
         }
         throw err;
@@ -2360,7 +2379,8 @@ async function runMeteredIssueCommand(
           err instanceof MissingModelConfigError ? err.missingKeys : undefined,
         diagnosticExcerpt: redactSecrets(rawErrMessage, [
           activeToken,
-          effectiveInput.llmApiKey
+          effectiveInput.llmApiKey,
+          ...(effectiveInput.cursorApiKey ? [effectiveInput.cursorApiKey] : [])
         ])
       };
 
