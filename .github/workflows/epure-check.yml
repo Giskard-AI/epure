@@ -30,8 +30,7 @@ on:
         description: "Structured error code ('NONE' when valid)"
         value: ${{ jobs.verify-contract.outputs.error_code }}
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
   verify-contract:
@@ -41,7 +40,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
-      contents: read
+      contents: read # checkout
     outputs:
       status: ${{ steps.contract.outputs.status }}
       version: ${{ steps.contract.outputs.version }}
@@ -53,6 +52,7 @@ jobs:
         with:
           repository: Giskard-AI/epure
           ref: ${{ job.workflow_sha || 'main' }}
+          persist-credentials: false
 
       - name: Run pre-bundled EPURE contract action
         id: contract
