@@ -68,6 +68,12 @@ describe("release-promote.yml hardening invariants", () => {
       holds: (wf: string) => runBlockLines(wf).every((line) => !line.includes("${{"))
     },
     {
+      scenario: "refuses a direct dispatch outside dev while leaving the ref of consumer callers alone",
+      holds: (wf: string) =>
+        /JOB_WORKFLOW_REPOSITORY: \$\{\{ job\.workflow_repository \}\}/.test(wf) &&
+        /\[\[ "\$JOB_WORKFLOW_REPOSITORY" != "\$GITHUB_REPOSITORY" \|\| "\$GITHUB_REF" == refs\/heads\/dev \]\]/.test(wf)
+    },
+    {
       scenario: "serializes promotions without cancelling an in-flight one",
       holds: (wf: string) =>
         /group: epure-release-promote-\$\{\{ github\.repository \}\}\n\s+cancel-in-progress: false/.test(wf)

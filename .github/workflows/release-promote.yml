@@ -70,6 +70,7 @@ jobs:
           SEMVER_TAG: ${{ inputs.semver_tag }}
           EXPECTED_DEV_SHA: ${{ inputs.expected_dev_sha }}
           CI_WORKFLOW: ${{ inputs.ci_workflow }}
+          JOB_WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
           HAS_RELEASE_APP_ID: ${{ secrets.EPURE_RELEASE_APP_ID != '' }}
           HAS_RELEASE_APP_PRIVATE_KEY: ${{ secrets.EPURE_RELEASE_APP_PRIVATE_KEY != '' }}
         run: |
@@ -78,6 +79,10 @@ jobs:
             exit 1
           }
 
+          # Dispatched in this repository, the release must run the reviewed copy on dev, the default branch.
+          # Consumer callers pin this workflow by SHA, and their own release environment restricts the ref.
+          [[ "$JOB_WORKFLOW_REPOSITORY" != "$GITHUB_REPOSITORY" || "$GITHUB_REF" == refs/heads/dev ]] \
+            || fail "Dispatch release-promote.yml from dev (got ${GITHUB_REF})."
           [[ "$SEMVER_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
             || fail "semver_tag must match vMAJOR.MINOR.PATCH without leading zeros (e.g. v1.2.3)."
           [[ "$EXPECTED_DEV_SHA" =~ ^[0-9a-f]{40}$ ]] \
