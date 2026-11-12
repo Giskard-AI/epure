@@ -1109,6 +1109,8 @@ URL: https://giskard-ai.github.io/epure/guides/how-to-release
 
 In EPURE, `dev` is the integration branch and `main` is the **release line**. Neither developers nor the `Agent App` push to `main`: only the **Release App** (`<owner>-epure-release`) does, from the release workflow, inside the protected `release` environment.
 
+`dev` is the default branch, in consumer repositories and in `Giskard-AI/epure` itself: every pull request targets `dev`, and the release workflow runs from `dev`.
+
 Promoting a release is the **4th Mandatory Human Validation Gate** (Q101).
 
 Both entry points run the same implementation, the reusable workflow `Giskard-AI/epure/.github/workflows/release-promote.yml`:
@@ -1116,7 +1118,7 @@ Both entry points run the same implementation, the reusable workflow `Giskard-AI
 | Repository | Workflow to dispatch | Rulesets that must list the Release App as bypass actor |
 | --- | --- | --- |
 | Consumer repository bootstrapped by `/setup-repo` | `.github/workflows/release.yml` (**EPURE Controlled Release (dev -> main)**), a thin caller pinned to an EPURE commit SHA | `epure-release-immutability`, `epure-release-tags` |
-| `Giskard-AI/epure` itself | `.github/workflows/release-promote.yml` (**Promote Dev to Main (Fast-Forward Release)**) | `Main basic protection`, `epure-branch-governance`, `epure-tag-immutability` |
+| `Giskard-AI/epure` itself | `.github/workflows/release-promote.yml` (**Promote Dev to Main (Fast-Forward Release)**) | `Main basic protection`, `epure-release-immutability`, `epure-tag-immutability` |
 
 Inputs: `semver_tag` (`vMAJOR.MINOR.PATCH`), `expected_dev_sha` (the full 40-character SHA of the `dev` head you reviewed) and, on `release-promote.yml`, the optional `ci_workflow` (default `ci.yml`, the workflow file whose run on `dev` must have succeeded).
 
@@ -1182,6 +1184,7 @@ gh workflow run release-promote.yml -R Giskard-AI/epure --ref dev \
 ## 4. What `release-promote.yml` Executes
 
 1. **Validates before any write** and aborts with an `::error::` annotation when:
+   - `release-promote.yml` is dispatched in `Giskard-AI/epure` itself from a ref other than `dev` (a consumer's `release.yml` relies on its `release` environment instead);
    - `semver_tag` does not match `vMAJOR.MINOR.PATCH` (no leading zeros);
    - `expected_dev_sha` is not a 40-character SHA equal to the current `origin/dev` head;
    - the tag already exists;
@@ -2385,6 +2388,8 @@ URL: https://giskard-ai.github.io/epure/fr/guides/how-to-release
 
 Dans EPURE, `dev` est la branche d'intégration et `main` est la **ligne de release**. Ni les développeurs humains ni l'`Agent App` ne poussent sur `main` : seule la **Release App** (`<owner>-epure-release`) le fait, depuis le workflow de release, dans l'environnement protégé `release`.
 
+`dev` est la branche par défaut, dans les dépôts consommateurs comme dans `Giskard-AI/epure` lui-même : toute pull request cible `dev`, et le workflow de release s'exécute depuis `dev`.
+
 La promotion d'une release constitue le **4e Jalon de Validation Humaine Obligatoire** (Q101).
 
 Les deux points d'entrée exécutent la même implémentation, le workflow réutilisable `Giskard-AI/epure/.github/workflows/release-promote.yml` :
@@ -2392,7 +2397,7 @@ Les deux points d'entrée exécutent la même implémentation, le workflow réut
 | Dépôt | Workflow à déclencher | Rulesets où la Release App doit être Bypass Actor |
 | --- | --- | --- |
 | Dépôt consommateur initialisé par `/setup-repo` | `.github/workflows/release.yml` (**EPURE Controlled Release (dev -> main)**), un appelant minimal épinglé sur un SHA d'EPURE | `epure-release-immutability`, `epure-release-tags` |
-| `Giskard-AI/epure` lui-même | `.github/workflows/release-promote.yml` (**Promote Dev to Main (Fast-Forward Release)**) | `Main basic protection`, `epure-branch-governance`, `epure-tag-immutability` |
+| `Giskard-AI/epure` lui-même | `.github/workflows/release-promote.yml` (**Promote Dev to Main (Fast-Forward Release)**) | `Main basic protection`, `epure-release-immutability`, `epure-tag-immutability` |
 
 Entrées : `semver_tag` (`vMAJOR.MINOR.PATCH`), `expected_dev_sha` (le SHA complet de 40 caractères de la tête de `dev` que vous avez relue) et, sur `release-promote.yml`, l'entrée optionnelle `ci_workflow` (par défaut `ci.yml`, le fichier du workflow dont l'exécution sur `dev` doit avoir réussi).
 
@@ -2458,6 +2463,7 @@ gh workflow run release-promote.yml -R Giskard-AI/epure --ref dev \
 ## 4. Ce qu'exécute `release-promote.yml`
 
 1. **Valide tout avant la moindre écriture** et s'arrête avec une annotation `::error::` lorsque :
+   - `release-promote.yml` est déclenché dans `Giskard-AI/epure` lui-même depuis une autre ref que `dev` (le `release.yml` d'un consommateur s'appuie sur son environnement `release`) ;
    - `semver_tag` ne respecte pas `vMAJOR.MINOR.PATCH` (sans zéro initial) ;
    - `expected_dev_sha` n'est pas un SHA de 40 caractères égal à la tête actuelle de `origin/dev` ;
    - le tag existe déjà ;
