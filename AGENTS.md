@@ -1,5 +1,9 @@
 # AGENTS.md — EPURE (`Giskard-AI/epure`)
 
+## Branch model
+
+`dev` is the default branch: open every pull request against `dev`. `main` is the release line: only `release-promote.yml`, dispatched from `dev`, moves it, by fast-forward to a tested `dev` commit (see `docs/guides/how-to-release.md`).
+
 ## Agent skills
 
 ### Issue tracker

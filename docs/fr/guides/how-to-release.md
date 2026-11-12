@@ -2,6 +2,8 @@
 
 Dans EPURE, `dev` est la branche d'intégration et `main` est la **ligne de release**. Ni les développeurs humains ni l'`Agent App` ne poussent sur `main` : seule la **Release App** (`<owner>-epure-release`) le fait, depuis le workflow de release, dans l'environnement protégé `release`.
 
+`dev` est la branche par défaut, dans les dépôts consommateurs comme dans `Giskard-AI/epure` lui-même : toute pull request cible `dev`, et le workflow de release s'exécute depuis `dev`.
+
 La promotion d'une release constitue le **4e Jalon de Validation Humaine Obligatoire** (Q101).
 
 Les deux points d'entrée exécutent la même implémentation, le workflow réutilisable `Giskard-AI/epure/.github/workflows/release-promote.yml` :
@@ -9,7 +11,7 @@ Les deux points d'entrée exécutent la même implémentation, le workflow réut
 | Dépôt | Workflow à déclencher | Rulesets où la Release App doit être Bypass Actor |
 | --- | --- | --- |
 | Dépôt consommateur initialisé par `/setup-repo` | `.github/workflows/release.yml` (**EPURE Controlled Release (dev -> main)**), un appelant minimal épinglé sur un SHA d'EPURE | `epure-release-immutability`, `epure-release-tags` |
-| `Giskard-AI/epure` lui-même | `.github/workflows/release-promote.yml` (**Promote Dev to Main (Fast-Forward Release)**) | `Main basic protection`, `epure-branch-governance`, `epure-tag-immutability` |
+| `Giskard-AI/epure` lui-même | `.github/workflows/release-promote.yml` (**Promote Dev to Main (Fast-Forward Release)**) | `Main basic protection`, `epure-release-immutability`, `epure-tag-immutability` |
 
 Entrées : `semver_tag` (`vMAJOR.MINOR.PATCH`), `expected_dev_sha` (le SHA complet de 40 caractères de la tête de `dev` que vous avez relue) et, sur `release-promote.yml`, l'entrée optionnelle `ci_workflow` (par défaut `ci.yml`, le fichier du workflow dont l'exécution sur `dev` doit avoir réussi).
 
@@ -75,6 +77,7 @@ gh workflow run release-promote.yml -R Giskard-AI/epure --ref dev \
 ## 4. Ce qu'exécute `release-promote.yml`
 
 1. **Valide tout avant la moindre écriture** et s'arrête avec une annotation `::error::` lorsque :
+   - `release-promote.yml` est déclenché dans `Giskard-AI/epure` lui-même depuis une autre ref que `dev` (le `release.yml` d'un consommateur s'appuie sur son environnement `release`) ;
    - `semver_tag` ne respecte pas `vMAJOR.MINOR.PATCH` (sans zéro initial) ;
    - `expected_dev_sha` n'est pas un SHA de 40 caractères égal à la tête actuelle de `origin/dev` ;
    - le tag existe déjà ;

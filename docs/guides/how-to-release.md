@@ -2,6 +2,8 @@
 
 In EPURE, `dev` is the integration branch and `main` is the **release line**. Neither developers nor the `Agent App` push to `main`: only the **Release App** (`<owner>-epure-release`) does, from the release workflow, inside the protected `release` environment.
 
+`dev` is the default branch, in consumer repositories and in `Giskard-AI/epure` itself: every pull request targets `dev`, and the release workflow runs from `dev`.
+
 Promoting a release is the **4th Mandatory Human Validation Gate** (Q101).
 
 Both entry points run the same implementation, the reusable workflow `Giskard-AI/epure/.github/workflows/release-promote.yml`:
@@ -9,7 +11,7 @@ Both entry points run the same implementation, the reusable workflow `Giskard-AI
 | Repository | Workflow to dispatch | Rulesets that must list the Release App as bypass actor |
 | --- | --- | --- |
 | Consumer repository bootstrapped by `/setup-repo` | `.github/workflows/release.yml` (**EPURE Controlled Release (dev -> main)**), a thin caller pinned to an EPURE commit SHA | `epure-release-immutability`, `epure-release-tags` |
-| `Giskard-AI/epure` itself | `.github/workflows/release-promote.yml` (**Promote Dev to Main (Fast-Forward Release)**) | `Main basic protection`, `epure-branch-governance`, `epure-tag-immutability` |
+| `Giskard-AI/epure` itself | `.github/workflows/release-promote.yml` (**Promote Dev to Main (Fast-Forward Release)**) | `Main basic protection`, `epure-release-immutability`, `epure-tag-immutability` |
 
 Inputs: `semver_tag` (`vMAJOR.MINOR.PATCH`), `expected_dev_sha` (the full 40-character SHA of the `dev` head you reviewed) and, on `release-promote.yml`, the optional `ci_workflow` (default `ci.yml`, the workflow file whose run on `dev` must have succeeded).
 
@@ -75,6 +77,7 @@ gh workflow run release-promote.yml -R Giskard-AI/epure --ref dev \
 ## 4. What `release-promote.yml` Executes
 
 1. **Validates before any write** and aborts with an `::error::` annotation when:
+   - `release-promote.yml` is dispatched in `Giskard-AI/epure` itself from a ref other than `dev` (a consumer's `release.yml` relies on its `release` environment instead);
    - `semver_tag` does not match `vMAJOR.MINOR.PATCH` (no leading zeros);
    - `expected_dev_sha` is not a 40-character SHA equal to the current `origin/dev` head;
    - the tag already exists;
